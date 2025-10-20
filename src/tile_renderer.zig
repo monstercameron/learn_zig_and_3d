@@ -407,3 +407,41 @@ pub fn drawLineToTile(
         }
     }
 }
+
+/// Highlight a tile with a semi-transparent overlay color (for visualization)
+/// Draws a filled rectangle over the tile area on the main bitmap
+pub fn highlightTile(tile: *const Tile, bitmap: *Bitmap, color: u32) void {
+    const y_start = tile.y;
+    const y_end = tile.y + tile.height;
+    const x_start = tile.x;
+    const x_end = tile.x + tile.width;
+
+    var y = y_start;
+    while (y < y_end) : (y += 1) {
+        if (y < 0 or y >= bitmap.height) continue;
+
+        var x = x_start;
+        while (x < x_end) : (x += 1) {
+            if (x < 0 or x >= bitmap.width) continue;
+
+            const idx = @as(usize, @intCast(y)) * @as(usize, @intCast(bitmap.width)) + @as(usize, @intCast(x));
+            if (idx < bitmap.pixels.len) {
+                // Blend with existing pixel (50% opacity)
+                const existing = bitmap.pixels[idx];
+                const existing_r = (existing >> 16) & 0xFF;
+                const existing_g = (existing >> 8) & 0xFF;
+                const existing_b = (existing >> 0) & 0xFF;
+
+                const highlight_r = (color >> 16) & 0xFF;
+                const highlight_g = (color >> 8) & 0xFF;
+                const highlight_b = (color >> 0) & 0xFF;
+
+                const blended_r = ((existing_r + highlight_r) / 2) << 16;
+                const blended_g = ((existing_g + highlight_g) / 2) << 8;
+                const blended_b = (existing_b + highlight_b) / 2;
+
+                bitmap.pixels[idx] = 0xFF000000 | blended_r | blended_g | blended_b;
+            }
+        }
+    }
+}

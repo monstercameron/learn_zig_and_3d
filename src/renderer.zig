@@ -96,6 +96,9 @@ const TileRenderer = @import("tile_renderer.zig");
 const TileGrid = TileRenderer.TileGrid;
 const TileBuffer = TileRenderer.TileBuffer;
 const BinningStage = @import("binning_stage.zig");
+const JobSystem = @import("job_system.zig").JobSystem;
+const Job = @import("job_system.zig").Job;
+const JobFn = @import("job_system.zig").JobFn;
 
 // ========== RENDERING CONSTANTS ==========
 /// Initial light direction - will be modified by keyboard input
@@ -130,6 +133,9 @@ pub const Renderer = struct {
     tile_buffers: ?[]TileBuffer, // Per-tile rendering buffers
     show_tile_borders: bool, // Debug: show tile boundaries
     use_tiled_rendering: bool, // Enable tile-based rendering (vs direct to screen)
+    job_system: ?*JobSystem, // Job system for parallel execution
+    previous_frame_jobs: ?[]Job, // Keep previous frame's jobs alive to prevent use-after-free
+    previous_frame_tile_jobs: ?[]TileRenderJob, // Keep tile job contexts alive too
 
     /// Initialize the renderer for a window
     /// Similar to: canvas = document.createElement("canvas"); ctx = canvas.getContext("2d")
@@ -153,16 +159,19 @@ pub const Renderer = struct {
         const bitmap = try Bitmap.init(width, height);
 
         const current_time = std.time.nanoTimestamp();
-        
+
         // Initialize tile grid for tile-based rendering
         const tile_grid = try TileGrid.init(width, height, allocator);
-        
+
         // Allocate tile buffers (one per tile)
         const tile_buffers = try allocator.alloc(TileBuffer, tile_grid.tiles.len);
         for (tile_buffers, tile_grid.tiles) |*buf, *tile| {
             buf.* = try TileBuffer.init(tile.width, tile.height, allocator);
         }
-        
+
+        // Initialize job system for parallel rendering
+        const job_system = try JobSystem.init(allocator);
+
         return Renderer{
             .hwnd = hwnd,
             .bitmap = bitmap,
@@ -188,12 +197,23 @@ pub const Renderer = struct {
             .tile_buffers = tile_buffers,
             .show_tile_borders = true, // Enable by default for visualization
             .use_tiled_rendering = true, // Enable tile-based rendering
+            .job_system = job_system,
+            .previous_frame_jobs = null,
+            .previous_frame_tile_jobs = null,
         };
     }
 
     /// Clean up renderer resources
     /// Called with 'defer renderer.deinit()' in main.zig
     pub fn deinit(self: *Renderer) void {
+        // Shut down job system first
+        if (self.job_system) |js| {
+            js.deinit();
+        }
+        // Free any remaining previous frame jobs
+        if (self.previous_frame_jobs) |jobs| {
+            self.allocator.free(jobs);
+        }
         if (self.tile_buffers) |buffers| {
             for (buffers) |*buf| {
                 buf.deinit();
@@ -211,6 +231,117 @@ pub const Renderer = struct {
         }
         self.bitmap.deinit();
     }
+
+    // ========== TILE RENDER JOB ==========
+
+    /// Job context for rendering a single tile
+    const TileRenderJob = struct {
+        tile_idx: usize,
+        tile: *const TileRenderer.Tile,
+        tile_buffer: *TileBuffer,
+        tri_list: *const BinningStage.TileTriangleList,
+        mesh: *const Mesh,
+        projected: [][2]i32,
+        transformed_vertices: []math.Vec3,
+        transform: math.Mat4,
+        light_dir: math.Vec3,
+
+        /// Job function that renders one tile
+        fn renderTileJob(ctx: *anyopaque) void {
+            const job: *TileRenderJob = @ptrCast(@alignCast(ctx));
+
+            // Render triangles in this tile
+            for (job.tri_list.triangles.items) |tri_idx| {
+                const tri = job.mesh.triangles[tri_idx];
+
+                // Skip if fill is culled
+                if (tri.cull_flags.cull_fill) continue;
+
+                const p0 = job.projected[tri.v0];
+                const p1 = job.projected[tri.v1];
+                const p2 = job.projected[tri.v2];
+
+                // Check if triangle is completely off-screen
+                if (p0[0] < -1000 or p1[0] < -1000 or p2[0] < -1000) continue;
+
+                // Transform the face normal
+                const normal = job.mesh.normals[tri_idx];
+                const normal_transformed_raw = math.Vec3.new(
+                    job.transform.data[0] * normal.x + job.transform.data[1] * normal.y + job.transform.data[2] * normal.z,
+                    job.transform.data[4] * normal.x + job.transform.data[5] * normal.y + job.transform.data[6] * normal.z,
+                    job.transform.data[8] * normal.x + job.transform.data[9] * normal.y + job.transform.data[10] * normal.z,
+                );
+                const normal_transformed = normal_transformed_raw.normalize();
+
+                // Backface culling
+                const p0_cam = job.transformed_vertices[tri.v0];
+                const p1_cam = job.transformed_vertices[tri.v1];
+                const p2_cam = job.transformed_vertices[tri.v2];
+
+                const face_center_unscaled = math.Vec3.add(math.Vec3.add(p0_cam, p1_cam), p2_cam);
+                const face_center = math.Vec3.scale(face_center_unscaled, 1.0 / 3.0);
+
+                const view_length = face_center.length();
+                if (view_length <= 0.0001) continue;
+                const view_vector = math.Vec3.scale(face_center, -1.0 / view_length);
+
+                const camera_facing = normal_transformed.dot(view_vector);
+                if (camera_facing <= 0.0) continue;
+
+                // Calculate lighting
+                var brightness = normal_transformed.dot(job.light_dir);
+                if (brightness < 0.0) brightness = 0.0;
+                if (brightness > 1.0) brightness = 1.0;
+
+                // Convert brightness to color
+                const r = @as(u32, @intFromFloat(brightness * 255)) << 16;
+                const g = @as(u32, @intFromFloat(brightness * 200)) << 8;
+                const b = @as(u32, @intFromFloat(brightness * 50));
+                const shaded_color = 0xFF000000 | r | g | b;
+
+                // Rasterize triangle to tile buffer
+                TileRenderer.rasterizeTriangleToTile(job.tile, job.tile_buffer, p0, p1, p2, shaded_color);
+            }
+
+            // Draw wireframe for triangles in this tile
+            for (job.tri_list.triangles.items) |tri_idx| {
+                const tri = job.mesh.triangles[tri_idx];
+                if (tri.cull_flags.cull_wireframe) continue;
+
+                const p0 = job.projected[tri.v0];
+                const p1 = job.projected[tri.v1];
+                const p2 = job.projected[tri.v2];
+
+                // Apply backface culling (same as filled)
+                const normal = job.mesh.normals[tri_idx];
+                const normal_transformed_raw = math.Vec3.new(
+                    job.transform.data[0] * normal.x + job.transform.data[1] * normal.y + job.transform.data[2] * normal.z,
+                    job.transform.data[4] * normal.x + job.transform.data[5] * normal.y + job.transform.data[6] * normal.z,
+                    job.transform.data[8] * normal.x + job.transform.data[9] * normal.y + job.transform.data[10] * normal.z,
+                );
+                const normal_transformed = normal_transformed_raw.normalize();
+
+                const p0_cam = job.transformed_vertices[tri.v0];
+                const p1_cam = job.transformed_vertices[tri.v1];
+                const p2_cam = job.transformed_vertices[tri.v2];
+
+                const face_center_unscaled = math.Vec3.add(math.Vec3.add(p0_cam, p1_cam), p2_cam);
+                const face_center = math.Vec3.scale(face_center_unscaled, 1.0 / 3.0);
+
+                const view_length = face_center.length();
+                if (view_length <= 0.0001) continue;
+                const view_vector = math.Vec3.scale(face_center, -1.0 / view_length);
+
+                const camera_facing = normal_transformed.dot(view_vector);
+                if (camera_facing <= 0.0) continue;
+
+                // Draw wireframe edges
+                TileRenderer.drawLineToTile(job.tile, job.tile_buffer, p0, p1, 0xFFFFFFFF);
+                TileRenderer.drawLineToTile(job.tile, job.tile_buffer, p1, p2, 0xFFFFFFFF);
+                TileRenderer.drawLineToTile(job.tile, job.tile_buffer, p2, p0, 0xFFFFFFFF);
+            }
+        }
+    };
 
     /// Calculate brightness statistics from the current frame
     fn calculateBrightnessStats(self: *Renderer) void {
@@ -354,6 +485,12 @@ pub const Renderer = struct {
     /// 4. Rasterize filled triangles
     /// 5. Draw wireframe on top
     pub fn render3DMesh(self: *Renderer, mesh: *const Mesh) !void {
+        try self.render3DMeshWithPump(mesh, null);
+    }
+
+    /// Render a 3D mesh with message pump callback for responsive input
+    /// The pump function is called periodically during slow rendering
+    pub fn render3DMeshWithPump(self: *Renderer, mesh: *const Mesh, pump: ?*const fn (*Renderer) bool) !void {
         // ===== STEP 1: Fill all pixels with black color =====
         // Use @memset for much faster clearing (CPU-optimized bulk fill)
         const black: u32 = 0xFF000000;
@@ -426,13 +563,6 @@ pub const Renderer = struct {
         // Light 1 direction: from surface to light (for proper dot product with outward normals)
         const light_dir = light_pos.normalize();
 
-        // DEBUG: Print orbit angles and light positions
-        if (self.frame_count % 60 == 0) {
-            const orbit_x_deg = self.light_orbit_x * 180.0 / 3.14159265359;
-            const orbit_y_deg = self.light_orbit_y * 180.0 / 3.14159265359;
-            std.debug.print("Light: X={d:.2}° Y={d:.2}° Pos:({d:.2}, {d:.2}, {d:.2}) Dir:({d:.2}, {d:.2}, {d:.2})\n", .{ orbit_x_deg, orbit_y_deg, light_pos.x, light_pos.y, light_pos.z, light_dir.x, light_dir.y, light_dir.z });
-        }
-
         // ===== STEP 4: Create transformation matrices for mesh =====
         // Apply both Y-axis rotation (left/right) and X-axis rotation (up/down)
         const transform_y = math.Mat4.rotateY(self.rotation_angle);
@@ -444,6 +574,10 @@ pub const Renderer = struct {
         const should_log_debug = (current_time_ns - self.last_log_time) >= 1_000_000_000; // 1 second in nanoseconds
 
         if (should_log_debug) {
+            const orbit_x_deg = self.light_orbit_x * 180.0 / 3.14159265359;
+            const orbit_y_deg = self.light_orbit_y * 180.0 / 3.14159265359;
+            std.debug.print("Light: X={d:.2}° Y={d:.2}° Pos:({d:.2}, {d:.2}, {d:.2}) Dir:({d:.2}, {d:.2}, {d:.2})\n", .{ orbit_x_deg, orbit_y_deg, light_pos.x, light_pos.y, light_pos.z, light_dir.x, light_dir.y, light_dir.z });
+
             std.debug.print("\n=== TRANSFORM MATRIX ===\n", .{});
             std.debug.print("Rotation Y: {d:.4} rad ({d:.2}°), Rotation X: {d:.4} rad ({d:.2}°)\n", .{ self.rotation_angle, self.rotation_angle * 180.0 / 3.14159265359, self.rotation_x, self.rotation_x * 180.0 / 3.14159265359 });
             std.debug.print("Transform Matrix:\n", .{});
@@ -499,7 +633,7 @@ pub const Renderer = struct {
 
         // Choose rendering path: tiled or direct
         if (self.use_tiled_rendering and self.tile_grid != null and self.tile_buffers != null) {
-            try self.renderTiled(mesh, projected, transformed_vertices, transform, light_dir, should_log_debug);
+            try self.renderTiled(mesh, projected, transformed_vertices, transform, light_dir, should_log_debug, pump);
         } else {
             // Direct rendering to screen buffer (original method)
             try self.renderDirect(mesh, projected, transformed_vertices, transform, light_dir, light_pos, z_offset, center_x, center_y, should_log_debug);
@@ -552,8 +686,8 @@ pub const Renderer = struct {
         const current_time = std.time.nanoTimestamp();
         const elapsed_ns = current_time - self.last_time;
 
-        // Update FPS every 500ms (500_000_000 nanoseconds)
-        if (elapsed_ns >= 500_000_000) {
+        // Update FPS every 1 second (1_000_000_000 nanoseconds)
+        if (elapsed_ns >= 1_000_000_000) {
             // Calculate FPS: frames * 1_000_000_000 ns/s / elapsed nanoseconds
             const elapsed_us = @divTrunc(elapsed_ns, 1000); // Convert to microseconds
             self.current_fps = @as(u32, @intCast((self.frame_count * 1_000_000) / @as(u32, @intCast(elapsed_us))));
@@ -596,6 +730,7 @@ pub const Renderer = struct {
         transform: math.Mat4,
         light_dir: math.Vec3,
         should_log_debug: bool,
+        pump: ?*const fn (*Renderer) bool,
     ) !void {
         // Get tile grid and buffers
         const grid = &(self.tile_grid.?);
@@ -622,107 +757,99 @@ pub const Renderer = struct {
         );
         defer BinningStage.freeTileTriangleLists(tile_lists, self.allocator);
 
-        // Render each tile
+        // Free previous frame's job data now (they're definitely not in use anymore)
+        if (self.previous_frame_jobs) |old_jobs| {
+            self.allocator.free(old_jobs);
+            self.previous_frame_jobs = null;
+        }
+        if (self.previous_frame_tile_jobs) |old_tile_jobs| {
+            self.allocator.free(old_tile_jobs);
+            self.previous_frame_tile_jobs = null;
+        }
+
+        // Create job contexts for each tile
+        const tile_jobs = try self.allocator.alloc(TileRenderJob, grid.tiles.len);
+        // Don't defer free - tile_jobs must survive until next frame
+
+        const jobs = try self.allocator.alloc(Job, grid.tiles.len);
+        // Don't defer free - save for next frame to prevent use-after-free
+
+        // Check if job system is available
+        if (self.job_system) |js| {
+            // Dispatch all tiles as parallel jobs
+            if (should_log_debug) {
+                std.debug.print("Dispatching {} tile jobs to workers...\n", .{grid.tiles.len});
+            }
+            for (grid.tiles, 0..) |*tile, tile_idx| {
+                const tile_buffer = &tile_buffers[tile_idx];
+                const tri_list = &tile_lists[tile_idx];
+
+                // Set up job context for this tile
+                tile_jobs[tile_idx] = TileRenderJob{
+                    .tile_idx = tile_idx,
+                    .tile = tile,
+                    .tile_buffer = tile_buffer,
+                    .tri_list = tri_list,
+                    .mesh = mesh,
+                    .projected = projected,
+                    .transformed_vertices = transformed_vertices,
+                    .transform = transform,
+                    .light_dir = light_dir,
+                };
+
+                // Create job for this tile (no parent job)
+                jobs[tile_idx] = Job.init(
+                    TileRenderJob.renderTileJob,
+                    @ptrCast(&tile_jobs[tile_idx]),
+                    null,
+                );
+
+                // Submit job to worker threads
+                const submitted = js.submitJobAuto(&jobs[tile_idx]);
+                if (!submitted) {
+                    std.debug.print("ERROR: Failed to submit job for tile {}\n", .{tile_idx});
+                }
+            }
+
+            // Wait for all tiles to complete
+            if (should_log_debug) {
+                std.debug.print("Waiting for {} jobs to complete...\n", .{jobs.len});
+            }
+            for (jobs, 0..) |*job, i| {
+                if (should_log_debug and i < 3) {
+                    std.debug.print("Waiting for job {}... (complete={})\n", .{ i, job.isComplete() });
+                }
+                job.wait();
+                if (should_log_debug and i < 3) {
+                    std.debug.print("Job {} completed\n", .{i});
+                }
+            }
+            if (should_log_debug) {
+                std.debug.print("All jobs complete\n", .{});
+            }
+
+            // Save jobs and tile_jobs for next frame - don't free yet to prevent use-after-free
+            // Workers might still have references even after jobs complete
+            self.previous_frame_jobs = jobs;
+            self.previous_frame_tile_jobs = tile_jobs;
+        } else {
+            std.debug.print("ERROR: Job system not initialized!\n", .{});
+            // If no job system, clean up allocated memory immediately
+            self.allocator.free(jobs);
+            self.allocator.free(tile_jobs);
+            return;
+        }
+
+        // Composite all tiles to screen after parallel rendering
         for (grid.tiles, 0..) |*tile, tile_idx| {
             const tile_buffer = &tile_buffers[tile_idx];
-            const tri_list = &tile_lists[tile_idx];
-
-            // Render triangles in this tile
-            for (tri_list.triangles.items) |tri_idx| {
-                const tri = mesh.triangles[tri_idx];
-
-                // Skip if fill is culled
-                if (tri.cull_flags.cull_fill) continue;
-
-                const p0 = projected[tri.v0];
-                const p1 = projected[tri.v1];
-                const p2 = projected[tri.v2];
-
-                // Check if triangle is completely off-screen
-                if (p0[0] < -1000 or p1[0] < -1000 or p2[0] < -1000) continue;
-
-                // Transform the face normal
-                const normal = mesh.normals[tri_idx];
-                const normal_transformed_raw = math.Vec3.new(
-                    transform.data[0] * normal.x + transform.data[1] * normal.y + transform.data[2] * normal.z,
-                    transform.data[4] * normal.x + transform.data[5] * normal.y + transform.data[6] * normal.z,
-                    transform.data[8] * normal.x + transform.data[9] * normal.y + transform.data[10] * normal.z,
-                );
-                const normal_transformed = normal_transformed_raw.normalize();
-
-                // Backface culling
-                const p0_cam = transformed_vertices[tri.v0];
-                const p1_cam = transformed_vertices[tri.v1];
-                const p2_cam = transformed_vertices[tri.v2];
-
-                const face_center_unscaled = math.Vec3.add(math.Vec3.add(p0_cam, p1_cam), p2_cam);
-                const face_center = math.Vec3.scale(face_center_unscaled, 1.0 / 3.0);
-
-                const view_length = face_center.length();
-                if (view_length <= 0.0001) continue;
-                const view_vector = math.Vec3.scale(face_center, -1.0 / view_length);
-
-                const camera_facing = normal_transformed.dot(view_vector);
-                if (camera_facing <= 0.0) continue;
-
-                // Calculate lighting
-                var brightness = normal_transformed.dot(light_dir);
-                if (brightness < 0.0) brightness = 0.0;
-                if (brightness > 1.0) brightness = 1.0;
-
-                // Convert brightness to color
-                const r = @as(u32, @intFromFloat(brightness * 255)) << 16;
-                const g = @as(u32, @intFromFloat(brightness * 200)) << 8;
-                const b = @as(u32, @intFromFloat(brightness * 50));
-                const shaded_color = 0xFF000000 | r | g | b;
-
-                // Rasterize triangle to tile buffer
-                TileRenderer.rasterizeTriangleToTile(tile, tile_buffer, p0, p1, p2, shaded_color);
-            }
-
-            // Draw wireframe for triangles in this tile
-            for (tri_list.triangles.items) |tri_idx| {
-                const tri = mesh.triangles[tri_idx];
-                if (tri.cull_flags.cull_wireframe) continue;
-
-                const p0 = projected[tri.v0];
-                const p1 = projected[tri.v1];
-                const p2 = projected[tri.v2];
-
-                // Apply backface culling (same as filled)
-                const normal = mesh.normals[tri_idx];
-                const normal_transformed_raw = math.Vec3.new(
-                    transform.data[0] * normal.x + transform.data[1] * normal.y + transform.data[2] * normal.z,
-                    transform.data[4] * normal.x + transform.data[5] * normal.y + transform.data[6] * normal.z,
-                    transform.data[8] * normal.x + transform.data[9] * normal.y + transform.data[10] * normal.z,
-                );
-                const normal_transformed = normal_transformed_raw.normalize();
-
-                const p0_cam = transformed_vertices[tri.v0];
-                const p1_cam = transformed_vertices[tri.v1];
-                const p2_cam = transformed_vertices[tri.v2];
-
-                const face_center_unscaled = math.Vec3.add(math.Vec3.add(p0_cam, p1_cam), p2_cam);
-                const face_center = math.Vec3.scale(face_center_unscaled, 1.0 / 3.0);
-
-                const view_length = face_center.length();
-                if (view_length <= 0.0001) continue;
-                const view_vector = math.Vec3.scale(face_center, -1.0 / view_length);
-
-                const camera_facing = normal_transformed.dot(view_vector);
-                if (camera_facing <= 0.0) continue;
-
-                // Draw wireframe edges
-                TileRenderer.drawLineToTile(tile, tile_buffer, p0, p1, 0xFFFFFFFF);
-                TileRenderer.drawLineToTile(tile, tile_buffer, p1, p2, 0xFFFFFFFF);
-                TileRenderer.drawLineToTile(tile, tile_buffer, p2, p0, 0xFFFFFFFF);
-            }
-
-            // Composite tile to screen
             TileRenderer.compositeTileToScreen(tile, tile_buffer, &self.bitmap);
         }
 
-        _ = should_log_debug; // Suppress unused warning for now
+        // Process messages if pump callback provided
+        if (pump) |pump_fn| {
+            _ = pump_fn(self);
+        }
     }
 
     /// Render using direct method (original, for comparison)
@@ -906,8 +1033,8 @@ pub const Renderer = struct {
         const current_time = std.time.nanoTimestamp();
         const elapsed_ns = current_time - self.last_time;
 
-        // Update FPS every 500ms (500_000_000 nanoseconds)
-        if (elapsed_ns >= 500_000_000) {
+        // Update FPS every 1 second (1_000_000_000 nanoseconds)
+        if (elapsed_ns >= 1_000_000_000) {
             // Calculate FPS: frames * 1_000_000_000 ns/s / elapsed nanoseconds
             const elapsed_us = @divTrunc(elapsed_ns, 1000); // Convert to microseconds
             self.current_fps = @as(u32, @intCast((self.frame_count * 1_000_000) / @as(u32, @intCast(elapsed_us))));
@@ -1300,7 +1427,7 @@ pub const Renderer = struct {
                 TileRenderer.drawTileBoundaries(grid, &self.bitmap);
             }
         }
-        
+
         if (self.hdc) |hdc| {
             if (self.hdc_mem) |hdc_mem| {
                 // ===== Select our bitmap into the memory DC =====

@@ -99,38 +99,71 @@ pub fn main() !void {
     // ========== EVENT LOOP PHASE ==========
     // Continuous rendering loop with frame rate limiting
     // Use PeekMessageW for non-blocking message processing
-    // Frame rate limited to 120 FPS with proper pacing
-    var msg: MSG = undefined;
+    // Input handling runs at ~120Hz, rendering is decoupled
     var running = true;
+
+    std.debug.print("Starting main event loop...\n", .{});
+
+    // Message pump function that can be called during rendering
+    const MessagePump = struct {
+        fn pump(r: *Renderer) bool {
+            var m: MSG = undefined;
+            var pumped_any = false;
+            // Process all pending messages without blocking
+            while (PeekMessageW(&m, null, 0, 0, PM_REMOVE) != 0) {
+                pumped_any = true;
+
+                // Check if it's a quit message
+                if (m.message == WM_QUIT) {
+                    std.debug.print("Received WM_QUIT message, exiting\n", .{});
+                    return false; // Signal to exit
+                }
+
+                // Handle keyboard input at full speed
+                if (m.message == WM_KEYDOWN) {
+                    const key_code: u32 = @intCast(m.wParam);
+                    r.handleKeyInput(key_code, true);
+                } else if (m.message == WM_KEYUP) {
+                    const key_code: u32 = @intCast(m.wParam);
+                    r.handleKeyInput(key_code, false);
+                }
+
+                // Process the message
+                _ = TranslateMessage(&m);
+                _ = DispatchMessageW(&m);
+            }
+            return true; // Continue running
+        }
+    };
+
+    var frame_count: u32 = 0;
     while (running) {
-        // Check for messages without blocking (PM_REMOVE = 1 means remove from queue)
-        // PeekMessageW returns non-zero if there was a message to process
-        if (PeekMessageW(&msg, null, 0, 0, PM_REMOVE) != 0) {
-            // Check if it's a quit message
-            if (msg.message == WM_QUIT) {
-                running = false;
-                break;
-            }
-
-            // Handle keyboard input
-            if (msg.message == WM_KEYDOWN) {
-                const key_code: u32 = @intCast(msg.wParam);
-                renderer.handleKeyInput(key_code, true);
-            } else if (msg.message == WM_KEYUP) {
-                const key_code: u32 = @intCast(msg.wParam);
-                renderer.handleKeyInput(key_code, false);
-            }
-
-            // Process the message
-            _ = TranslateMessage(&msg);
-            _ = DispatchMessageW(&msg);
+        // Process messages at high frequency
+        if (!MessagePump.pump(&renderer)) {
+            std.debug.print("MessagePump returned false, exiting main loop\n", .{});
+            running = false;
+            break;
         }
 
         // Check if it's time to render a new frame (frame rate limiting)
         if (renderer.shouldRenderFrame()) {
-            try renderer.render3DMesh(&cube);
+            frame_count += 1;
+            if (frame_count <= 3) {
+                std.debug.print("Rendering frame {}\n", .{frame_count});
+            }
+            renderer.render3DMeshWithPump(&cube, MessagePump.pump) catch |err| {
+                std.debug.print("ERROR during rendering: {}\n", .{err});
+                running = false;
+                break;
+            };
+            if (frame_count <= 3) {
+                std.debug.print("Frame {} complete\n", .{frame_count});
+            }
         }
-        // Note: No sleep - let it spin tight on frame checking
-        // This gives smoother frame pacing than OS sleep granularity
+
+        // Small sleep to prevent 100% CPU usage when idle
+        Sleep(1);
     }
+
+    std.debug.print("Exited main loop after {} frames\n", .{frame_count});
 }

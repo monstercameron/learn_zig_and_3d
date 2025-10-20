@@ -113,6 +113,7 @@ const WM_KEYUP = 0x0101;
 // Virtual key codes
 const VK_LEFT = 0x25;
 const VK_RIGHT = 0x27;
+const VK_ESCAPE = 0x1B;
 
 // ========== WINDOW MESSAGE HANDLER ==========
 /// This is the callback function that receives all window messages
@@ -140,10 +141,12 @@ export fn WindowProc(
         // Keyboard key pressed
         WM_KEYDOWN => {
             const vkey = wParam;
-            if (vkey == VK_LEFT or vkey == VK_RIGHT) {
-                // Let the default handler process key repeats
-                return DefWindowProcW(hwnd, msg, wParam, lParam);
+            // ESC key exits the program
+            if (vkey == VK_ESCAPE) {
+                PostQuitMessage(0);
+                return 0;
             }
+            // Let the default handler process all other keys (will send to main loop)
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         // Any other message - use default handling
