@@ -103,10 +103,10 @@ pub const Renderer = struct {
     allocator: std.mem.Allocator, // Memory allocator
     rotation_angle: f32, // Current rotation angle for animation
     frame_count: u32, // Number of frames rendered
-    last_time: i64, // Last time we calculated FPS (in milliseconds)
-    last_frame_time: i64, // Last time a frame was rendered (for frame pacing)
+    last_time: i128, // Last time we calculated FPS (in nanoseconds)
+    last_frame_time: i128, // Last time a frame was rendered (in nanoseconds)
     current_fps: u32, // Current FPS counter
-    target_frame_time_ms: i64, // Target milliseconds per frame (1000/120 = 8.33ms)
+    target_frame_time_ns: i128, // Target nanoseconds per frame (1_000_000_000 / 120)
 
     /// Initialize the renderer for a window
     /// Similar to: canvas = document.createElement("canvas"); ctx = canvas.getContext("2d")
@@ -121,7 +121,7 @@ pub const Renderer = struct {
         // This allocates a pixel buffer (width × height × 4 bytes)
         const bitmap = try Bitmap.init(width, height);
 
-        const current_time = std.time.milliTimestamp();
+        const current_time = std.time.nanoTimestamp();
         return Renderer{
             .hwnd = hwnd,
             .bitmap = bitmap,
@@ -132,7 +132,7 @@ pub const Renderer = struct {
             .last_time = current_time,
             .last_frame_time = current_time,
             .current_fps = 0,
-            .target_frame_time_ms = 8, // 1000ms / 120fps = 8.33ms, round to 8
+            .target_frame_time_ns = 8_333_333, // 1_000_000_000 / 120 = 8.333ms in nanoseconds
         };
     }
 
@@ -146,14 +146,16 @@ pub const Renderer = struct {
     }
 
     /// Wait until it's time to render the next frame (frame rate limiting)
-    /// Implements frame pacing to hit target FPS
-    /// Returns true if frame should be rendered, false if we should skip it
+    /// Implements frame pacing to hit target FPS with nanosecond precision
+    /// Target: 120 FPS = 8.333333ms per frame = 8_333_333ns per frame
     pub fn shouldRenderFrame(self: *Renderer) bool {
-        const current_time = std.time.milliTimestamp();
-        const elapsed_since_last_frame = current_time - self.last_frame_time;
+        const current_time = std.time.nanoTimestamp();
+        const elapsed = current_time - self.last_frame_time;
 
-        // Only render if enough time has passed for the target frame rate
-        if (elapsed_since_last_frame >= self.target_frame_time_ms) {
+        // Use exact nanosecond timing for precise 120 FPS
+        // 1_000_000_000 ns / 120 fps = 8_333_333.333ns per frame
+        // No need for patterns - nanoseconds give us the fractional timing naturally
+        if (elapsed >= self.target_frame_time_ns) {
             self.last_frame_time = current_time;
             return true;
         }
@@ -165,7 +167,8 @@ pub const Renderer = struct {
     /// 1. Create transformation matrices (rotation)
     /// 2. Transform 3D vertices to world space
     /// 3. Project to 2D screen space
-    /// 4. Draw wireframe
+    /// 4. Rasterize filled triangles
+    /// 5. Draw wireframe on top
     pub fn render3DMesh(self: *Renderer, mesh: *const Mesh) !void {
         // ===== STEP 1: Fill all pixels with black color =====
         const black: u32 = 0xFF000000;
@@ -215,29 +218,42 @@ pub const Renderer = struct {
             projected[i][1] = @as(i32, @intFromFloat(screen_y));
         }
 
-        // ===== STEP 4: Draw all triangles =====
+        // ===== STEP 4: Draw filled triangles (flat shaded) =====
+        // Use a soft green color for the faces
+        const face_color: u32 = 0xFF00AA00;
         for (mesh.triangles) |tri| {
             const p0 = projected[tri.v0];
             const p1 = projected[tri.v1];
             const p2 = projected[tri.v2];
 
-            // Draw three edges of the triangle
-            self.drawLine(p0[0], p0[1], p1[0], p1[1]);
-            self.drawLine(p1[0], p1[1], p2[0], p2[1]);
-            self.drawLine(p2[0], p2[1], p0[0], p0[1]);
+            self.drawFilledTriangle(p0[0], p0[1], p1[0], p1[1], p2[0], p2[1], face_color);
         }
 
-        // ===== STEP 5: Copy bitmap to screen =====
+        // ===== STEP 5: Draw wireframe edges on top (white lines) =====
+        for (mesh.triangles) |tri| {
+            const p0 = projected[tri.v0];
+            const p1 = projected[tri.v1];
+            const p2 = projected[tri.v2];
+
+            // Draw three edges of the triangle with white color
+            self.drawLineColored(p0[0], p0[1], p1[0], p1[1], 0xFFFFFFFF);
+            self.drawLineColored(p1[0], p1[1], p2[0], p2[1], 0xFFFFFFFF);
+            self.drawLineColored(p2[0], p2[1], p0[0], p0[1], 0xFFFFFFFF);
+        }
+
+        // ===== STEP 6: Copy bitmap to screen =====
         self.drawBitmap();
 
-        // ===== STEP 6: Update FPS counter =====
+        // ===== STEP 7: Update FPS counter =====
         self.frame_count += 1;
-        const current_time = std.time.milliTimestamp();
-        const elapsed_ms = current_time - self.last_time;
+        const current_time = std.time.nanoTimestamp();
+        const elapsed_ns = current_time - self.last_time;
 
-        // Update FPS every 500ms
-        if (elapsed_ms >= 500) {
-            self.current_fps = @as(u32, @intCast((self.frame_count * 1000) / @as(u32, @intCast(elapsed_ms))));
+        // Update FPS every 500ms (500_000_000 nanoseconds)
+        if (elapsed_ns >= 500_000_000) {
+            // Calculate FPS: frames * 1_000_000_000 ns/s / elapsed nanoseconds
+            const elapsed_us = @divTrunc(elapsed_ns, 1000); // Convert to microseconds
+            self.current_fps = @as(u32, @intCast((self.frame_count * 1_000_000) / @as(u32, @intCast(elapsed_us))));
             self.frame_count = 0;
             self.last_time = current_time;
 
@@ -301,6 +317,45 @@ pub const Renderer = struct {
         self.drawBitmap();
     }
 
+    /// Draw a line between two points using Bresenham's line algorithm with custom color
+    /// This is the fundamental algorithm for drawing lines on a raster display
+    fn drawLineColored(self: *Renderer, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) void {
+        var x = x0;
+        var y = y0;
+        
+        const dx = if (x0 < x1) x1 - x0 else x0 - x1;
+        const dy = if (y0 < y1) y1 - y0 else y0 - y1;
+        
+        const sx = if (x0 < x1) @as(i32, 1) else @as(i32, -1);
+        const sy = if (y0 < y1) @as(i32, 1) else @as(i32, -1);
+        
+        var err = dx - dy;
+
+        while (true) {
+            // Plot current pixel if within bounds
+            if (x >= 0 and x < self.bitmap.width and y >= 0 and y < self.bitmap.height) {
+                const pixel_index = @as(usize, @intCast(y * self.bitmap.width + x));
+                if (pixel_index < self.bitmap.pixels.len) {
+                    self.bitmap.pixels[pixel_index] = color;
+                }
+            }
+
+            // Check if we've reached the endpoint
+            if (x == x1 and y == y1) break;
+
+            // Bresenham error term stepping
+            const e2 = 2 * err;
+            if (e2 > -dy) {
+                err -= dy;
+                x += sx;
+            }
+            if (e2 < dx) {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
     /// Draw a line between two points using Bresenham's line algorithm
     /// This is the fundamental algorithm for drawing lines on a raster display
     /// 
@@ -329,46 +384,85 @@ pub const Renderer = struct {
     /// }
     /// ```
     fn drawLine(self: *Renderer, x0: i32, y0: i32, x1: i32, y1: i32) void {
-        // White color in BGRA format: 0xFFFFFFFF
-        const white: u32 = 0xFFFFFFFF;
-
-        var x = x0;
-        var y = y0;
-        
-        const dx = if (x0 < x1) x1 - x0 else x0 - x1;
-        const dy = if (y0 < y1) y1 - y0 else y0 - y1;
-        
-        const sx = if (x0 < x1) @as(i32, 1) else @as(i32, -1);
-        const sy = if (y0 < y1) @as(i32, 1) else @as(i32, -1);
-        
-        var err = dx - dy;
-
-        while (true) {
-            // Plot current pixel if within bounds
-            if (x >= 0 and x < self.bitmap.width and y >= 0 and y < self.bitmap.height) {
-                const pixel_index = @as(usize, @intCast(y * self.bitmap.width + x));
-                if (pixel_index < self.bitmap.pixels.len) {
-                    self.bitmap.pixels[pixel_index] = white;
-                }
-            }
-
-            // Check if we've reached the endpoint
-            if (x == x1 and y == y1) break;
-
-            // Bresenham error term stepping
-            const e2 = 2 * err;
-            if (e2 > -dy) {
-                err -= dy;
-                x += sx;
-            }
-            if (e2 < dx) {
-                err += dx;
-                y += sy;
-            }
-        }
+        self.drawLineColored(x0, y0, x1, y1, 0xFFFFFFFF); // White by default
     }
 
     /// Draw a filled triangle using scanline rasterization
+    /// This is a fundamental graphics algorithm
+    fn drawFilledTriangle(self: *Renderer, x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32) void {
+        // Sort vertices by Y coordinate (top to bottom)
+        var v = [3][2]i32{ .{ x1, y1 }, .{ x2, y2 }, .{ x3, y3 } };
+        
+        // Bubble sort by Y
+        if (v[0][1] > v[1][1]) {
+            const temp = v[0];
+            v[0] = v[1];
+            v[1] = temp;
+        }
+        if (v[1][1] > v[2][1]) {
+            const temp = v[1];
+            v[1] = v[2];
+            v[2] = temp;
+        }
+        if (v[0][1] > v[1][1]) {
+            const temp = v[0];
+            v[0] = v[1];
+            v[1] = temp;
+        }
+
+        const top_x = v[0][0];
+        const top_y = v[0][1];
+        const mid_x = v[1][0];
+        const mid_y = v[1][1];
+        const bot_x = v[2][0];
+        const bot_y = v[2][1];
+
+        // Draw upper half (from top to middle)
+        var y = top_y;
+        while (y <= mid_y) : (y += 1) {
+            if (y < 0 or y >= self.bitmap.height) continue;
+
+            const x_left_edge = self.lineIntersectionX(top_x, top_y, mid_x, mid_y, y);
+            const x_right_edge = self.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
+
+            var x_left = minI32(x_left_edge, x_right_edge);
+            var x_right = maxI32(x_left_edge, x_right_edge);
+
+            x_left = maxI32(x_left, 0);
+            x_right = minI32(x_right, self.bitmap.width - 1);
+
+            var x = x_left;
+            while (x <= x_right) : (x += 1) {
+                const pixel_index = @as(usize, @intCast(y * self.bitmap.width + x));
+                if (pixel_index < self.bitmap.pixels.len) {
+                    self.bitmap.pixels[pixel_index] = color;
+                }
+            }
+        }
+
+        // Draw lower half (from middle to bottom)
+        y = mid_y;
+        while (y <= bot_y) : (y += 1) {
+            if (y < 0 or y >= self.bitmap.height) continue;
+
+            const x_left_edge = self.lineIntersectionX(mid_x, mid_y, bot_x, bot_y, y);
+            const x_right_edge = self.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
+
+            var x_left = minI32(x_left_edge, x_right_edge);
+            var x_right = maxI32(x_left_edge, x_right_edge);
+
+            x_left = maxI32(x_left, 0);
+            x_right = minI32(x_right, self.bitmap.width - 1);
+
+            var x = x_left;
+            while (x <= x_right) : (x += 1) {
+                const pixel_index = @as(usize, @intCast(y * self.bitmap.width + x));
+                if (pixel_index < self.bitmap.pixels.len) {
+                    self.bitmap.pixels[pixel_index] = color;
+                }
+            }
+        }
+    }
     /// This is a fundamental graphics algorithm
     /// 
     /// **How it works**:
