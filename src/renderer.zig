@@ -31,6 +31,8 @@
 
 const std = @import("std");
 const windows = std.os.windows;
+const math = @import("math.zig");
+const Mesh = @import("mesh.zig").Mesh;
 
 // ========== TYPES ==========
 /// HGDIOBJ - Handle to a GDI (Graphics Device Interface) object
@@ -81,6 +83,9 @@ extern "gdi32" fn BitBlt(
 /// Delete a device context and free its resources
 extern "gdi32" fn DeleteDC(hdc: windows.HDC) bool;
 
+/// Set window text (title)
+extern "user32" fn SetWindowTextW(hWnd: windows.HWND, lpString: [*:0]const u16) bool;
+
 // ========== MODULE IMPORTS ==========
 /// Import the Bitmap module for pixel buffer management
 const Bitmap = @import("bitmap.zig").Bitmap;
@@ -92,10 +97,15 @@ pub const Renderer = struct {
     hwnd: windows.HWND, // Window handle - where we'll draw
     bitmap: Bitmap, // The pixel buffer we draw to
     hdc: ?windows.HDC, // Device context - the interface for drawing to the window
+    allocator: std.mem.Allocator, // Memory allocator
+    rotation_angle: f32, // Current rotation angle for animation
+    frame_count: u32, // Number of frames rendered
+    last_time: i64, // Last time we calculated FPS (in milliseconds)
+    current_fps: u32, // Current FPS counter
 
     /// Initialize the renderer for a window
     /// Similar to: canvas = document.createElement("canvas"); ctx = canvas.getContext("2d")
-    pub fn init(hwnd: windows.HWND, width: i32, height: i32) !Renderer {
+    pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allocator) !Renderer {
         // ===== STEP 1: Get window's device context =====
         // A DC is a "graphics interface" - like a canvas context
         // We'll use this to copy our bitmap to the screen
@@ -110,6 +120,11 @@ pub const Renderer = struct {
             .hwnd = hwnd,
             .bitmap = bitmap,
             .hdc = hdc,
+            .allocator = allocator,
+            .rotation_angle = 0,
+            .frame_count = 0,
+            .last_time = std.time.milliTimestamp(),
+            .current_fps = 0,
         };
     }
 
@@ -122,7 +137,109 @@ pub const Renderer = struct {
         self.bitmap.deinit();
     }
 
-    /// Render initial "Hello World" - fills screen with blue color
+    /// Render a 3D mesh with rotation and projection
+    /// This demonstrates the full 3D pipeline:
+    /// 1. Create transformation matrices (rotation)
+    /// 2. Transform 3D vertices to world space
+    /// 3. Project to 2D screen space
+    /// 4. Draw wireframe
+    pub fn render3DMesh(self: *Renderer, mesh: *const Mesh) !void {
+        // ===== STEP 1: Fill all pixels with black color =====
+        const black: u32 = 0xFF000000;
+        for (self.bitmap.pixels) |*pixel| {
+            pixel.* = black;
+        }
+
+        // ===== STEP 2: Create transformation matrices =====
+        // Rotation matrices for X, Y, Z axes
+        const rot_x = math.Mat4.rotateX(self.rotation_angle);
+        const rot_y = math.Mat4.rotateY(self.rotation_angle * 1.5);
+        const rot_z = math.Mat4.rotateZ(self.rotation_angle * 0.7);
+
+        // Combine rotations: total = Z * Y * X
+        const rot_xy = math.Mat4.multiply(rot_y, rot_x);
+        const transform = math.Mat4.multiply(rot_z, rot_xy);
+
+        // ===== STEP 3: Transform and project vertices =====
+        const projected = try self.allocator.alloc([2]i32, mesh.vertices.len);
+        defer self.allocator.free(projected);
+
+        const center_x = @as(f32, @floatFromInt(self.bitmap.width)) / 2.0;
+        const center_y = @as(f32, @floatFromInt(self.bitmap.height)) / 2.0;
+
+        for (mesh.vertices, 0..) |vertex, i| {
+            // Transform vertex by rotation
+            const transformed = transform.mulVec3(vertex);
+
+            // Move away from camera (simple z offset for perspective)
+            const z_offset = 4.0; // Distance from camera
+            const camera_z = transformed.z + z_offset;
+
+            // Avoid division by zero or negative z
+            if (camera_z <= 0.1) {
+                // Behind camera or too close - place off screen
+                projected[i][0] = -1000;
+                projected[i][1] = -1000;
+                continue;
+            }
+
+            // Perspective projection: divide by depth for perspective effect
+            const fov = 400.0; // Scale factor for field of view (larger = zoomed out)
+            const screen_x = (transformed.x / camera_z) * fov + center_x;
+            const screen_y = -(transformed.y / camera_z) * fov + center_y; // Negate Y because screen Y increases downward
+
+            projected[i][0] = @as(i32, @intFromFloat(screen_x));
+            projected[i][1] = @as(i32, @intFromFloat(screen_y));
+        }
+
+        // ===== STEP 4: Draw all triangles =====
+        for (mesh.triangles) |tri| {
+            const p0 = projected[tri.v0];
+            const p1 = projected[tri.v1];
+            const p2 = projected[tri.v2];
+
+            // Draw three edges of the triangle
+            self.drawLine(p0[0], p0[1], p1[0], p1[1]);
+            self.drawLine(p1[0], p1[1], p2[0], p2[1]);
+            self.drawLine(p2[0], p2[1], p0[0], p0[1]);
+        }
+
+        // ===== STEP 5: Copy bitmap to screen =====
+        self.drawBitmap();
+
+        // ===== STEP 6: Update FPS counter =====
+        self.frame_count += 1;
+        const current_time = std.time.milliTimestamp();
+        const elapsed_ms = current_time - self.last_time;
+
+        // Update FPS every 500ms
+        if (elapsed_ms >= 500) {
+            self.current_fps = @as(u32, @intCast((self.frame_count * 1000) / @as(u32, @intCast(elapsed_ms))));
+            self.frame_count = 0;
+            self.last_time = current_time;
+
+            // Create title string: "Zig 3D CPU Rasterizer - X FPS"
+            var fps_buf: [64]u8 = undefined;
+            const fps_str = std.fmt.bufPrint(&fps_buf, "Zig 3D CPU Rasterizer - FPS: {d}", .{self.current_fps}) catch "Zig 3D CPU Rasterizer";
+
+            // Convert UTF-8 to UTF-16 for Windows (null-terminated)
+            var wide_title: [128:0]u16 = undefined;
+            var idx: usize = 0;
+            for (fps_str) |ch| {
+                if (idx >= 127) break;
+                wide_title[idx] = ch;
+                idx += 1;
+            }
+            wide_title[idx] = 0; // Null terminator
+
+            _ = SetWindowTextW(self.hwnd, &wide_title);
+        }
+
+        // ===== STEP 7: Update rotation for next frame =====
+        self.rotation_angle += 0.02;
+    }
+
+    /// Render initial "Hello World" - fills screen with black color
     /// This demonstrates both pixel manipulation and blitting to screen
     pub fn renderHelloWorld(self: *Renderer) void {
         // ===== STEP 1: Fill all pixels with black color =====

@@ -45,44 +45,72 @@ extern "user32" fn GetMessageW(
     wMsgFilterMax: u32,
 ) i32;
 
+extern "user32" fn PeekMessageW(
+    lpMsg: *MSG,
+    hWnd: ?windows.HWND,
+    wMsgFilterMin: u32,
+    wMsgFilterMax: u32,
+    wRemoveMsg: u32,
+) i32;
+
 extern "user32" fn TranslateMessage(lpMsg: *const MSG) bool;
 
 extern "user32" fn DispatchMessageW(lpMsg: *const MSG) windows.LRESULT;
 
+// PeekMessageW constants
+const PM_REMOVE = 1;
+
 // Import modules - each handles one specific concern
 const Window = @import("window.zig").Window;
 const Renderer = @import("renderer.zig").Renderer;
+const Mesh = @import("mesh.zig").Mesh;
 
 /// Application entry point
 /// This is where Zig starts execution when the program runs
 pub fn main() !void {
     // ========== INITIALIZATION PHASE ==========
+    // Set up general-purpose allocator for dynamic memory
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
     // Create a window - like document.createElement("canvas") in JavaScript
     // The 'defer' keyword ensures cleanup happens automatically when this scope ends
     // Similar to try/finally in JavaScript: resources are freed even if errors occur
-    var window = try Window.init("Zig Windows Hello World", 800, 600);
+    var window = try Window.init("Zig 3D CPU Rasterizer", 800, 600);
     defer window.deinit();
 
     // Create a renderer - like getting a 2D context: canvas.getContext("2d")
-    var renderer = try Renderer.init(window.hwnd, 800, 600);
+    var renderer = try Renderer.init(window.hwnd, 800, 600, allocator);
     defer renderer.deinit();
 
-    // ========== INITIAL RENDER PHASE ==========
-    // Draw initial content - like drawing to canvas before the loop
-    renderer.renderHelloWorld();
+    // Create a 3D cube mesh
+    var cube = try Mesh.cube(allocator);
+    defer cube.deinit();
 
     // ========== EVENT LOOP PHASE ==========
-    // The main event loop - this is like:
-    // while (applicationRunning) { processUserInput(); render(); }
-    // GetMessageW() blocks until a message arrives (like await)
-    // Returns 0 when WM_QUIT is received, signaling app should exit
+    // Continuous rendering loop - render as fast as CPU can manage
+    // Use PeekMessageW instead of GetMessageW to avoid blocking
+    // PeekMessageW returns immediately whether there's a message or not
+    // This allows us to render continuously between messages
     var msg: MSG = undefined;
-    while (GetMessageW(&msg, null, 0, 0) != 0) {
-        // TranslateMessage handles keyboard input (like converting keycodes)
-        _ = TranslateMessage(&msg);
+    var running = true;
+    while (running) {
+        // Check for messages without blocking (PM_REMOVE = 1 means remove from queue)
+        // PeekMessageW returns non-zero if there was a message to process
+        if (PeekMessageW(&msg, null, 0, 0, PM_REMOVE) != 0) {
+            // Check if it's a quit message
+            if (msg.message == 0x12) { // WM_QUIT = 0x12
+                running = false;
+                break;
+            }
 
-        // DispatchMessageW sends the message to the appropriate window
-        // This calls our WindowProc callback from window.zig
-        _ = DispatchMessageW(&msg);
+            // Process the message
+            _ = TranslateMessage(&msg);
+            _ = DispatchMessageW(&msg);
+        }
+
+        // Render the 3D cube on every iteration (as fast as CPU allows)
+        try renderer.render3DMesh(&cube);
     }
 }
