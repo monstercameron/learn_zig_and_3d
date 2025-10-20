@@ -92,6 +92,10 @@ extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
 // ========== MODULE IMPORTS ==========
 /// Import the Bitmap module for pixel buffer management
 const Bitmap = @import("bitmap.zig").Bitmap;
+const TileRenderer = @import("tile_renderer.zig");
+const TileGrid = TileRenderer.TileGrid;
+const TileBuffer = TileRenderer.TileBuffer;
+const BinningStage = @import("binning_stage.zig");
 
 // ========== RENDERING CONSTANTS ==========
 /// Initial light direction - will be modified by keyboard input
@@ -122,6 +126,10 @@ pub const Renderer = struct {
     last_brightness_min: f32, // Minimum brightness from last frame
     last_brightness_max: f32, // Maximum brightness from last frame
     last_brightness_avg: f32, // Average brightness from last frame
+    tile_grid: ?TileGrid, // Tile grid for tile-based rendering (optional)
+    tile_buffers: ?[]TileBuffer, // Per-tile rendering buffers
+    show_tile_borders: bool, // Debug: show tile boundaries
+    use_tiled_rendering: bool, // Enable tile-based rendering (vs direct to screen)
 
     /// Initialize the renderer for a window
     /// Similar to: canvas = document.createElement("canvas"); ctx = canvas.getContext("2d")
@@ -145,6 +153,16 @@ pub const Renderer = struct {
         const bitmap = try Bitmap.init(width, height);
 
         const current_time = std.time.nanoTimestamp();
+        
+        // Initialize tile grid for tile-based rendering
+        const tile_grid = try TileGrid.init(width, height, allocator);
+        
+        // Allocate tile buffers (one per tile)
+        const tile_buffers = try allocator.alloc(TileBuffer, tile_grid.tiles.len);
+        for (tile_buffers, tile_grid.tiles) |*buf, *tile| {
+            buf.* = try TileBuffer.init(tile.width, tile.height, allocator);
+        }
+        
         return Renderer{
             .hwnd = hwnd,
             .bitmap = bitmap,
@@ -166,12 +184,25 @@ pub const Renderer = struct {
             .last_brightness_min = 0,
             .last_brightness_max = 0,
             .last_brightness_avg = 0,
+            .tile_grid = tile_grid,
+            .tile_buffers = tile_buffers,
+            .show_tile_borders = true, // Enable by default for visualization
+            .use_tiled_rendering = true, // Enable tile-based rendering
         };
     }
 
     /// Clean up renderer resources
     /// Called with 'defer renderer.deinit()' in main.zig
     pub fn deinit(self: *Renderer) void {
+        if (self.tile_buffers) |buffers| {
+            for (buffers) |*buf| {
+                buf.deinit();
+            }
+            self.allocator.free(buffers);
+        }
+        if (self.tile_grid) |*grid| {
+            grid.deinit();
+        }
         if (self.hdc_mem) |hdc_mem| {
             _ = DeleteDC(hdc_mem);
         }
@@ -386,22 +417,20 @@ pub const Renderer = struct {
         const light_orbit_x_mat = math.Mat4.rotateX(self.light_orbit_x);
         const light_orbit_y_mat = math.Mat4.rotateY(self.light_orbit_y);
         const light_orbit = math.Mat4.multiply(light_orbit_y_mat, light_orbit_x_mat);
-        
+
         // Start with light at distance along +Z, then apply orbit transforms
         const light_base_pos = math.Vec3.new(0.0, 0.0, self.light_distance);
         const light_pos_4d = light_orbit.mulVec4(math.Vec4.from3D(light_base_pos));
         const light_pos = light_pos_4d.to3D();
-        
+
         // Light 1 direction: from surface to light (for proper dot product with outward normals)
         const light_dir = light_pos.normalize();
-        
+
         // DEBUG: Print orbit angles and light positions
         if (self.frame_count % 60 == 0) {
             const orbit_x_deg = self.light_orbit_x * 180.0 / 3.14159265359;
             const orbit_y_deg = self.light_orbit_y * 180.0 / 3.14159265359;
-            std.debug.print("Light: X={d:.2}° Y={d:.2}° Pos:({d:.2}, {d:.2}, {d:.2}) Dir:({d:.2}, {d:.2}, {d:.2})\n", .{
-                orbit_x_deg, orbit_y_deg, light_pos.x, light_pos.y, light_pos.z, light_dir.x, light_dir.y, light_dir.z
-            });
+            std.debug.print("Light: X={d:.2}° Y={d:.2}° Pos:({d:.2}, {d:.2}, {d:.2}) Dir:({d:.2}, {d:.2}, {d:.2})\n", .{ orbit_x_deg, orbit_y_deg, light_pos.x, light_pos.y, light_pos.z, light_dir.x, light_dir.y, light_dir.z });
         }
 
         // ===== STEP 4: Create transformation matrices for mesh =====
@@ -413,13 +442,10 @@ pub const Renderer = struct {
         // DEBUG: Print transform matrix and culling info once per second
         const current_time_ns = std.time.nanoTimestamp();
         const should_log_debug = (current_time_ns - self.last_log_time) >= 1_000_000_000; // 1 second in nanoseconds
-        
+
         if (should_log_debug) {
             std.debug.print("\n=== TRANSFORM MATRIX ===\n", .{});
-            std.debug.print("Rotation Y: {d:.4} rad ({d:.2}°), Rotation X: {d:.4} rad ({d:.2}°)\n", .{
-                self.rotation_angle, self.rotation_angle * 180.0 / 3.14159265359,
-                self.rotation_x, self.rotation_x * 180.0 / 3.14159265359
-            });
+            std.debug.print("Rotation Y: {d:.4} rad ({d:.2}°), Rotation X: {d:.4} rad ({d:.2}°)\n", .{ self.rotation_angle, self.rotation_angle * 180.0 / 3.14159265359, self.rotation_x, self.rotation_x * 180.0 / 3.14159265359 });
             std.debug.print("Transform Matrix:\n", .{});
             std.debug.print("  [{d:.4} {d:.4} {d:.4} {d:.4}]\n", .{ transform.data[0], transform.data[1], transform.data[2], transform.data[3] });
             std.debug.print("  [{d:.4} {d:.4} {d:.4} {d:.4}]\n", .{ transform.data[4], transform.data[5], transform.data[6], transform.data[7] });
@@ -471,6 +497,248 @@ pub const Renderer = struct {
             std.debug.print("\n=== TRIANGLE CULLING STATUS ===\n", .{});
         }
 
+        // Choose rendering path: tiled or direct
+        if (self.use_tiled_rendering and self.tile_grid != null and self.tile_buffers != null) {
+            try self.renderTiled(mesh, projected, transformed_vertices, transform, light_dir, should_log_debug);
+        } else {
+            // Direct rendering to screen buffer (original method)
+            try self.renderDirect(mesh, projected, transformed_vertices, transform, light_dir, light_pos, z_offset, center_x, center_y, should_log_debug);
+        }
+
+        // ===== STEP 5.5: Project and draw light position as a cyan sphere =====
+        // Project the light position to screen space
+        const light_camera_z = light_pos.z + z_offset;
+        if (light_camera_z > 0.1) {
+            const fov = 400.0;
+            const light_screen_x = (light_pos.x / light_camera_z) * fov + center_x;
+            const light_screen_y = -(light_pos.y / light_camera_z) * fov + center_y;
+
+            const light_x = @as(i32, @intFromFloat(light_screen_x));
+            const light_y = @as(i32, @intFromFloat(light_screen_y));
+
+            // Draw a small circle (radius 5 pixels) in bright cyan to represent light 1
+            const light_radius: i32 = 5;
+            const light_color = 0xFF00FFFF; // Cyan: ARGB format
+
+            var py = light_y - light_radius;
+            while (py <= light_y + light_radius) : (py += 1) {
+                if (py < 0 or py >= @as(i32, @intCast(self.bitmap.height))) continue;
+                var px = light_x - light_radius;
+                while (px <= light_x + light_radius) : (px += 1) {
+                    if (px < 0 or px >= @as(i32, @intCast(self.bitmap.width))) continue;
+
+                    const dx = @as(f32, @floatFromInt(px)) - @as(f32, @floatFromInt(light_x));
+                    const dy = @as(f32, @floatFromInt(py)) - @as(f32, @floatFromInt(light_y));
+                    const dist = @sqrt(dx * dx + dy * dy);
+
+                    if (dist <= @as(f32, @floatFromInt(light_radius))) {
+                        const idx = @as(usize, @intCast(py)) * @as(usize, @intCast(self.bitmap.width)) + @as(usize, @intCast(px));
+                        if (idx < self.bitmap.pixels.len) {
+                            self.bitmap.pixels[idx] = light_color;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ===== STEP 6: Copy bitmap to screen =====
+        self.drawBitmap();
+
+        // ===== STEP 7: Calculate brightness statistics from rendered frame =====
+        self.calculateBrightnessStats();
+
+        // ===== STEP 8: Update FPS counter and log =====
+        self.frame_count += 1;
+        const current_time = std.time.nanoTimestamp();
+        const elapsed_ns = current_time - self.last_time;
+
+        // Update FPS every 500ms (500_000_000 nanoseconds)
+        if (elapsed_ns >= 500_000_000) {
+            // Calculate FPS: frames * 1_000_000_000 ns/s / elapsed nanoseconds
+            const elapsed_us = @divTrunc(elapsed_ns, 1000); // Convert to microseconds
+            self.current_fps = @as(u32, @intCast((self.frame_count * 1_000_000) / @as(u32, @intCast(elapsed_us))));
+
+            // Calculate average frame time BEFORE resetting frame_count
+            const frame_count_f = @as(f32, @floatFromInt(self.frame_count));
+            const elapsed_ms = @as(f32, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+            const avg_frame_time_ms = elapsed_ms / frame_count_f;
+
+            self.frame_count = 0;
+            self.last_time = current_time;
+
+            // Log rotation angle and shading information
+            const rotation_degrees = self.rotation_angle * 180.0 / 3.14159265359;
+            const light_orbit_x_degrees = self.light_orbit_x * 180.0 / 3.14159265359;
+            const light_orbit_y_degrees = self.light_orbit_y * 180.0 / 3.14159265359;
+            const sample_r = @as(u32, @intFromFloat(self.last_brightness_avg * 255));
+            const sample_g = @as(u32, @intFromFloat(self.last_brightness_avg * 200));
+            const sample_b = @as(u32, @intFromFloat(self.last_brightness_avg * 50));
+
+            std.debug.print("Rotation: {d:.2}° | Light Orbit: X={d:.2}° Y={d:.2}° | Brightness: min={d:.2} avg={d:.2} max={d:.2} | Sample RGB: ({}, {}, {}) | FPS: {}\n", .{ rotation_degrees, light_orbit_x_degrees, light_orbit_y_degrees, self.last_brightness_min, self.last_brightness_avg, self.last_brightness_max, sample_r, sample_g, sample_b, self.current_fps });
+
+            // Update window title with FPS info
+            var title_buffer: [256]u8 = undefined;
+            const title = std.fmt.bufPrint(&title_buffer, "Zig 3D CPU Rasterizer | FPS: {} | Frame: {d:.2}ms", .{ self.current_fps, avg_frame_time_ms }) catch "Zig 3D CPU Rasterizer";
+
+            var title_wide: [256:0]u16 = undefined;
+            const title_len = std.unicode.utf8ToUtf16Le(&title_wide, title) catch 0;
+            title_wide[title_len] = 0;
+            _ = SetWindowTextW(self.hwnd, &title_wide);
+        }
+    }
+
+    /// Render using tile-based method (new, for parallelization)
+    fn renderTiled(
+        self: *Renderer,
+        mesh: *const Mesh,
+        projected: [][2]i32,
+        transformed_vertices: []math.Vec3,
+        transform: math.Mat4,
+        light_dir: math.Vec3,
+        should_log_debug: bool,
+    ) !void {
+        // Get tile grid and buffers
+        const grid = &(self.tile_grid.?);
+        const tile_buffers = self.tile_buffers.?;
+
+        // Clear all tile buffers
+        for (tile_buffers) |*buf| {
+            buf.clear();
+        }
+
+        // Bin triangles to tiles
+        const triangle_indices = try self.allocator.alloc([3]usize, mesh.triangles.len);
+        defer self.allocator.free(triangle_indices);
+
+        for (mesh.triangles, 0..) |tri, i| {
+            triangle_indices[i] = [3]usize{ tri.v0, tri.v1, tri.v2 };
+        }
+
+        const tile_lists = try BinningStage.binTrianglesToTiles(
+            projected,
+            triangle_indices,
+            grid,
+            self.allocator,
+        );
+        defer BinningStage.freeTileTriangleLists(tile_lists, self.allocator);
+
+        // Render each tile
+        for (grid.tiles, 0..) |*tile, tile_idx| {
+            const tile_buffer = &tile_buffers[tile_idx];
+            const tri_list = &tile_lists[tile_idx];
+
+            // Render triangles in this tile
+            for (tri_list.triangles.items) |tri_idx| {
+                const tri = mesh.triangles[tri_idx];
+
+                // Skip if fill is culled
+                if (tri.cull_flags.cull_fill) continue;
+
+                const p0 = projected[tri.v0];
+                const p1 = projected[tri.v1];
+                const p2 = projected[tri.v2];
+
+                // Check if triangle is completely off-screen
+                if (p0[0] < -1000 or p1[0] < -1000 or p2[0] < -1000) continue;
+
+                // Transform the face normal
+                const normal = mesh.normals[tri_idx];
+                const normal_transformed_raw = math.Vec3.new(
+                    transform.data[0] * normal.x + transform.data[1] * normal.y + transform.data[2] * normal.z,
+                    transform.data[4] * normal.x + transform.data[5] * normal.y + transform.data[6] * normal.z,
+                    transform.data[8] * normal.x + transform.data[9] * normal.y + transform.data[10] * normal.z,
+                );
+                const normal_transformed = normal_transformed_raw.normalize();
+
+                // Backface culling
+                const p0_cam = transformed_vertices[tri.v0];
+                const p1_cam = transformed_vertices[tri.v1];
+                const p2_cam = transformed_vertices[tri.v2];
+
+                const face_center_unscaled = math.Vec3.add(math.Vec3.add(p0_cam, p1_cam), p2_cam);
+                const face_center = math.Vec3.scale(face_center_unscaled, 1.0 / 3.0);
+
+                const view_length = face_center.length();
+                if (view_length <= 0.0001) continue;
+                const view_vector = math.Vec3.scale(face_center, -1.0 / view_length);
+
+                const camera_facing = normal_transformed.dot(view_vector);
+                if (camera_facing <= 0.0) continue;
+
+                // Calculate lighting
+                var brightness = normal_transformed.dot(light_dir);
+                if (brightness < 0.0) brightness = 0.0;
+                if (brightness > 1.0) brightness = 1.0;
+
+                // Convert brightness to color
+                const r = @as(u32, @intFromFloat(brightness * 255)) << 16;
+                const g = @as(u32, @intFromFloat(brightness * 200)) << 8;
+                const b = @as(u32, @intFromFloat(brightness * 50));
+                const shaded_color = 0xFF000000 | r | g | b;
+
+                // Rasterize triangle to tile buffer
+                TileRenderer.rasterizeTriangleToTile(tile, tile_buffer, p0, p1, p2, shaded_color);
+            }
+
+            // Draw wireframe for triangles in this tile
+            for (tri_list.triangles.items) |tri_idx| {
+                const tri = mesh.triangles[tri_idx];
+                if (tri.cull_flags.cull_wireframe) continue;
+
+                const p0 = projected[tri.v0];
+                const p1 = projected[tri.v1];
+                const p2 = projected[tri.v2];
+
+                // Apply backface culling (same as filled)
+                const normal = mesh.normals[tri_idx];
+                const normal_transformed_raw = math.Vec3.new(
+                    transform.data[0] * normal.x + transform.data[1] * normal.y + transform.data[2] * normal.z,
+                    transform.data[4] * normal.x + transform.data[5] * normal.y + transform.data[6] * normal.z,
+                    transform.data[8] * normal.x + transform.data[9] * normal.y + transform.data[10] * normal.z,
+                );
+                const normal_transformed = normal_transformed_raw.normalize();
+
+                const p0_cam = transformed_vertices[tri.v0];
+                const p1_cam = transformed_vertices[tri.v1];
+                const p2_cam = transformed_vertices[tri.v2];
+
+                const face_center_unscaled = math.Vec3.add(math.Vec3.add(p0_cam, p1_cam), p2_cam);
+                const face_center = math.Vec3.scale(face_center_unscaled, 1.0 / 3.0);
+
+                const view_length = face_center.length();
+                if (view_length <= 0.0001) continue;
+                const view_vector = math.Vec3.scale(face_center, -1.0 / view_length);
+
+                const camera_facing = normal_transformed.dot(view_vector);
+                if (camera_facing <= 0.0) continue;
+
+                // Draw wireframe edges
+                TileRenderer.drawLineToTile(tile, tile_buffer, p0, p1, 0xFFFFFFFF);
+                TileRenderer.drawLineToTile(tile, tile_buffer, p1, p2, 0xFFFFFFFF);
+                TileRenderer.drawLineToTile(tile, tile_buffer, p2, p0, 0xFFFFFFFF);
+            }
+
+            // Composite tile to screen
+            TileRenderer.compositeTileToScreen(tile, tile_buffer, &self.bitmap);
+        }
+
+        _ = should_log_debug; // Suppress unused warning for now
+    }
+
+    /// Render using direct method (original, for comparison)
+    fn renderDirect(
+        self: *Renderer,
+        mesh: *const Mesh,
+        projected: [][2]i32,
+        transformed_vertices: []math.Vec3,
+        transform: math.Mat4,
+        light_dir: math.Vec3,
+        light_pos: math.Vec3,
+        z_offset: f32,
+        center_x: f32,
+        center_y: f32,
+        should_log_debug: bool,
+    ) !void {
         for (mesh.triangles, 0..) |tri, tri_idx| {
             // Skip if fill is culled
             if (tri.cull_flags.cull_fill) {
@@ -522,20 +790,18 @@ pub const Renderer = struct {
             const camera_facing = normal_transformed.dot(view_vector);
             if (camera_facing <= 0.0) {
                 if (should_log_debug) {
-                    std.debug.print("Triangle {}: CULLED (backface: dot={d:.4})\n", .{tri_idx, camera_facing});
+                    std.debug.print("Triangle {}: CULLED (backface: dot={d:.4})\n", .{ tri_idx, camera_facing });
                 }
                 continue;
             }
 
             if (should_log_debug) {
-                std.debug.print("Triangle {}: RENDERED (frontface: dot={d:.4}, normal=({d:.4}, {d:.4}, {d:.4}))\n", .{
-                    tri_idx, camera_facing, normal_transformed.x, normal_transformed.y, normal_transformed.z
-                });
+                std.debug.print("Triangle {}: RENDERED (frontface: dot={d:.4}, normal=({d:.4}, {d:.4}, {d:.4}))\n", .{ tri_idx, camera_facing, normal_transformed.x, normal_transformed.y, normal_transformed.z });
             }
 
             // Calculate lighting from light
             var brightness = normal_transformed.dot(light_dir);
-            
+
             // Clamp to 0-1 range
             if (brightness < 0.0) brightness = 0.0;
             if (brightness > 1.0) brightness = 1.0;
@@ -600,25 +866,25 @@ pub const Renderer = struct {
             const fov = 400.0;
             const light_screen_x = (light_pos.x / light_camera_z) * fov + center_x;
             const light_screen_y = -(light_pos.y / light_camera_z) * fov + center_y;
-            
+
             const light_x = @as(i32, @intFromFloat(light_screen_x));
             const light_y = @as(i32, @intFromFloat(light_screen_y));
-            
+
             // Draw a small circle (radius 5 pixels) in bright cyan to represent light 1
             const light_radius: i32 = 5;
             const light_color = 0xFF00FFFF; // Cyan: ARGB format
-            
+
             var py = light_y - light_radius;
             while (py <= light_y + light_radius) : (py += 1) {
                 if (py < 0 or py >= @as(i32, @intCast(self.bitmap.height))) continue;
                 var px = light_x - light_radius;
                 while (px <= light_x + light_radius) : (px += 1) {
                     if (px < 0 or px >= @as(i32, @intCast(self.bitmap.width))) continue;
-                    
+
                     const dx = @as(f32, @floatFromInt(px)) - @as(f32, @floatFromInt(light_x));
                     const dy = @as(f32, @floatFromInt(py)) - @as(f32, @floatFromInt(light_y));
                     const dist = @sqrt(dx * dx + dy * dy);
-                    
+
                     if (dist <= @as(f32, @floatFromInt(light_radius))) {
                         const idx = @as(usize, @intCast(py)) * @as(usize, @intCast(self.bitmap.width)) + @as(usize, @intCast(px));
                         if (idx < self.bitmap.pixels.len) {
@@ -628,7 +894,7 @@ pub const Renderer = struct {
                 }
             }
         }
-        
+
         // ===== STEP 6: Copy bitmap to screen =====
         self.drawBitmap();
 
@@ -645,12 +911,12 @@ pub const Renderer = struct {
             // Calculate FPS: frames * 1_000_000_000 ns/s / elapsed nanoseconds
             const elapsed_us = @divTrunc(elapsed_ns, 1000); // Convert to microseconds
             self.current_fps = @as(u32, @intCast((self.frame_count * 1_000_000) / @as(u32, @intCast(elapsed_us))));
-            
+
             // Calculate average frame time BEFORE resetting frame_count
             const frame_count_f = @as(f32, @floatFromInt(self.frame_count));
             const elapsed_ms = @as(f32, @floatFromInt(elapsed_ns)) / 1_000_000.0;
             const avg_frame_time_ms = elapsed_ms / frame_count_f;
-            
+
             self.frame_count = 0;
             self.last_time = current_time;
 
@@ -662,16 +928,11 @@ pub const Renderer = struct {
             const sample_g = @as(u32, @intFromFloat(self.last_brightness_avg * 200));
             const sample_b = @as(u32, @intFromFloat(self.last_brightness_avg * 50));
 
-            std.debug.print("Rotation: {d:.2}° | Light Orbit: X={d:.2}° Y={d:.2}° | Brightness: min={d:.2} avg={d:.2} max={d:.2} | Sample RGB: ({}, {}, {}) | FPS: {}\n", .{
-                rotation_degrees, light_orbit_x_degrees, light_orbit_y_degrees, self.last_brightness_min, self.last_brightness_avg, self.last_brightness_max, sample_r, sample_g, sample_b, self.current_fps
-            });
+            std.debug.print("Rotation: {d:.2}° | Light Orbit: X={d:.2}° Y={d:.2}° | Brightness: min={d:.2} avg={d:.2} max={d:.2} | Sample RGB: ({}, {}, {}) | FPS: {}\n", .{ rotation_degrees, light_orbit_x_degrees, light_orbit_y_degrees, self.last_brightness_min, self.last_brightness_avg, self.last_brightness_max, sample_r, sample_g, sample_b, self.current_fps });
 
             // Update window title with FPS info
             var title_buffer: [256]u8 = undefined;
-            const title = std.fmt.bufPrint(&title_buffer, "Zig 3D CPU Rasterizer | FPS: {} | Frame: {d:.2}ms", .{
-                self.current_fps,
-                avg_frame_time_ms
-            }) catch "Zig 3D CPU Rasterizer";
+            const title = std.fmt.bufPrint(&title_buffer, "Zig 3D CPU Rasterizer | FPS: {} | Frame: {d:.2}ms", .{ self.current_fps, avg_frame_time_ms }) catch "Zig 3D CPU Rasterizer";
 
             var title_wide: [256:0]u16 = undefined;
             const title_len = std.unicode.utf8ToUtf16Le(&title_wide, title) catch 0;
@@ -1033,6 +1294,13 @@ pub const Renderer = struct {
     /// This is the core rendering operation: get pixels on screen
     /// Similar to: ctx.putImageData() in JavaScript
     fn drawBitmap(self: *Renderer) void {
+        // Draw tile boundaries if enabled (for visualization)
+        if (self.show_tile_borders) {
+            if (self.tile_grid) |*grid| {
+                TileRenderer.drawTileBoundaries(grid, &self.bitmap);
+            }
+        }
+        
         if (self.hdc) |hdc| {
             if (self.hdc_mem) |hdc_mem| {
                 // ===== Select our bitmap into the memory DC =====
