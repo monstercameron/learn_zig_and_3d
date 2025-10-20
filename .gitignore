@@ -20,4 +20,4 @@ Thumbs.db
 .directory
 
 # Dependencies
-.zig-cache/
+.zig-cache/*

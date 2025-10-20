@@ -36,6 +36,11 @@ const MSG = extern struct {
     pt: windows.POINT, // Mouse position when message occurred
 };
 
+// Windows message constants
+const WM_KEYDOWN = 0x0100;
+const WM_KEYUP = 0x0101;
+const WM_QUIT = 0x12;
+
 // Windows API function declarations - these are the "system event handlers"
 // Like addEventListener() but at the OS level
 extern "user32" fn GetMessageW(
@@ -87,9 +92,9 @@ pub fn main() !void {
     var renderer = try Renderer.init(window.hwnd, 800, 600, allocator);
     defer renderer.deinit();
 
-    // Create a 3D cube mesh
-    var cube = try Mesh.cube(allocator);
-    defer cube.deinit();
+    // Create a single rotating triangle mesh
+    var triangle = try Mesh.triangle(allocator);
+    defer triangle.deinit();
 
     // ========== EVENT LOOP PHASE ==========
     // Continuous rendering loop with frame rate limiting
@@ -102,9 +107,18 @@ pub fn main() !void {
         // PeekMessageW returns non-zero if there was a message to process
         if (PeekMessageW(&msg, null, 0, 0, PM_REMOVE) != 0) {
             // Check if it's a quit message
-            if (msg.message == 0x12) { // WM_QUIT = 0x12
+            if (msg.message == WM_QUIT) {
                 running = false;
                 break;
+            }
+
+            // Handle keyboard input
+            if (msg.message == WM_KEYDOWN) {
+                const key_code: u32 = @intCast(msg.wParam);
+                renderer.handleKeyInput(key_code, true);
+            } else if (msg.message == WM_KEYUP) {
+                const key_code: u32 = @intCast(msg.wParam);
+                renderer.handleKeyInput(key_code, false);
             }
 
             // Process the message
@@ -114,7 +128,7 @@ pub fn main() !void {
 
         // Check if it's time to render a new frame (frame rate limiting)
         if (renderer.shouldRenderFrame()) {
-            try renderer.render3DMesh(&cube);
+            try renderer.render3DMesh(&triangle);
         }
         // Note: No sleep - let it spin tight on frame checking
         // This gives smoother frame pacing than OS sleep granularity

@@ -121,8 +121,8 @@ pub const Mat4 = struct {
         for (0..16) |i| {
             m.data[i] = 0;
         }
-        m.data[0] = 1;  // m[0][0]
-        m.data[5] = 1;  // m[1][1]
+        m.data[0] = 1; // m[0][0]
+        m.data[5] = 1; // m[1][1]
         m.data[10] = 1; // m[2][2]
         m.data[15] = 1; // m[3][3]
         return m;
@@ -142,9 +142,9 @@ pub const Mat4 = struct {
     /// Scales an object by (sx, sy, sz)
     pub fn scale(sx: f32, sy: f32, sz: f32) Mat4 {
         var m = Mat4.identity();
-        m.data[0] = sx;   // m[0][0]
-        m.data[5] = sy;   // m[1][1]
-        m.data[10] = sz;  // m[2][2]
+        m.data[0] = sx; // m[0][0]
+        m.data[5] = sy; // m[1][1]
+        m.data[10] = sz; // m[2][2]
         return m;
     }
 
@@ -154,10 +154,10 @@ pub const Mat4 = struct {
         const cos_a = @cos(angle);
         const sin_a = @sin(angle);
         var m = Mat4.identity();
-        m.data[5] = cos_a;   // m[1][1]
-        m.data[6] = sin_a;   // m[1][2]
-        m.data[9] = -sin_a;  // m[2][1]
-        m.data[10] = cos_a;  // m[2][2]
+        m.data[5] = cos_a; // m[1][1]
+        m.data[6] = sin_a; // m[1][2]
+        m.data[9] = -sin_a; // m[2][1]
+        m.data[10] = cos_a; // m[2][2]
         return m;
     }
 
@@ -166,10 +166,10 @@ pub const Mat4 = struct {
         const cos_a = @cos(angle);
         const sin_a = @sin(angle);
         var m = Mat4.identity();
-        m.data[0] = cos_a;   // m[0][0]
-        m.data[2] = -sin_a;  // m[0][2]
-        m.data[8] = sin_a;   // m[2][0]
-        m.data[10] = cos_a;  // m[2][2]
+        m.data[0] = cos_a; // m[0][0]
+        m.data[2] = -sin_a; // m[0][2]
+        m.data[8] = sin_a; // m[2][0]
+        m.data[10] = cos_a; // m[2][2]
         return m;
     }
 
@@ -178,10 +178,10 @@ pub const Mat4 = struct {
         const cos_a = @cos(angle);
         const sin_a = @sin(angle);
         var m = Mat4.identity();
-        m.data[0] = cos_a;  // m[0][0]
-        m.data[1] = sin_a;  // m[0][1]
+        m.data[0] = cos_a; // m[0][0]
+        m.data[1] = sin_a; // m[0][1]
         m.data[4] = -sin_a; // m[1][0]
-        m.data[5] = cos_a;  // m[1][1]
+        m.data[5] = cos_a; // m[1][1]
         return m;
     }
 
@@ -198,10 +198,10 @@ pub const Mat4 = struct {
         const f = 1.0 / @tan(fov / 2.0);
         const range = 1.0 / (near - far);
 
-        m.data[0] = f / aspect;  // m[0][0]
-        m.data[5] = f;           // m[1][1]
+        m.data[0] = f / aspect; // m[0][0]
+        m.data[5] = f; // m[1][1]
         m.data[10] = (near + far) * range; // m[2][2]
-        m.data[11] = -1.0;       // m[2][3]
+        m.data[11] = -1.0; // m[2][3]
         m.data[14] = 2.0 * near * far * range; // m[3][2]
 
         return m;
@@ -214,13 +214,13 @@ pub const Mat4 = struct {
             m.data[i] = 0;
         }
 
-        m.data[0] = 2.0 / (right - left);    // m[0][0]
-        m.data[5] = 2.0 / (top - bottom);    // m[1][1]
-        m.data[10] = -2.0 / (far - near);    // m[2][2]
+        m.data[0] = 2.0 / (right - left); // m[0][0]
+        m.data[5] = 2.0 / (top - bottom); // m[1][1]
+        m.data[10] = -2.0 / (far - near); // m[2][2]
         m.data[12] = -(right + left) / (right - left); // m[3][0]
         m.data[13] = -(top + bottom) / (top - bottom); // m[3][1]
-        m.data[14] = -(far + near) / (far - near);     // m[3][2]
-        m.data[15] = 1.0;                    // m[3][3]
+        m.data[14] = -(far + near) / (far - near); // m[3][2]
+        m.data[15] = 1.0; // m[3][3]
 
         return m;
     }

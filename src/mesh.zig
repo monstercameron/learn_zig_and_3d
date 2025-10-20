@@ -13,7 +13,7 @@
 //!     this.vertices = [];   // Array of {x, y, z}
 //!     this.triangles = [];  // Array of [v0, v1, v2] (vertex indices)
 //!   }
-//!   
+//!
 //!   static cube() {
 //!     const m = new Mesh();
 //!     // Define 8 corner vertices
@@ -29,14 +29,25 @@ const Vec3 = math.Vec3;
 
 // ========== MESH STRUCTURE ==========
 
-/// A triangle face - references 3 vertex indices
+/// Triangle culling flags to control rendering
+pub const TriangleCullFlags = struct {
+    cull_fill: bool = false, // If true, skip painting the filled triangle
+    cull_wireframe: bool = false, // If true, skip drawing the wireframe edges
+};
+
+/// A triangle face - references 3 vertex indices with optional culling flags
 pub const Triangle = struct {
     v0: usize,
     v1: usize,
     v2: usize,
+    cull_flags: TriangleCullFlags = .{}, // Culling flags for independent fill/wireframe control
 
     pub fn new(v0: usize, v1: usize, v2: usize) Triangle {
-        return Triangle{ .v0 = v0, .v1 = v1, .v2 = v2 };
+        return Triangle{ .v0 = v0, .v1 = v1, .v2 = v2, .cull_flags = .{} };
+    }
+
+    pub fn newWithCulling(v0: usize, v1: usize, v2: usize, cull_fill: bool, cull_wireframe: bool) Triangle {
+        return Triangle{ .v0 = v0, .v1 = v1, .v2 = v2, .cull_flags = .{ .cull_fill = cull_fill, .cull_wireframe = cull_wireframe } };
     }
 };
 
@@ -86,13 +97,13 @@ pub const Mesh = struct {
 
         const vertices = try allocator.alloc(Vec3, 8);
         vertices[0] = Vec3.new(-1, -1, -1); // back-bottom-left
-        vertices[1] = Vec3.new(1, -1, -1);  // back-bottom-right
-        vertices[2] = Vec3.new(1, 1, -1);   // back-top-right
-        vertices[3] = Vec3.new(-1, 1, -1);  // back-top-left
-        vertices[4] = Vec3.new(-1, -1, 1);  // front-bottom-left
-        vertices[5] = Vec3.new(1, -1, 1);   // front-bottom-right
-        vertices[6] = Vec3.new(1, 1, 1);    // front-top-right
-        vertices[7] = Vec3.new(-1, 1, 1);   // front-top-left
+        vertices[1] = Vec3.new(1, -1, -1); // back-bottom-right
+        vertices[2] = Vec3.new(1, 1, -1); // back-top-right
+        vertices[3] = Vec3.new(-1, 1, -1); // back-top-left
+        vertices[4] = Vec3.new(-1, -1, 1); // front-bottom-left
+        vertices[5] = Vec3.new(1, -1, 1); // front-bottom-right
+        vertices[6] = Vec3.new(1, 1, 1); // front-top-right
+        vertices[7] = Vec3.new(-1, 1, 1); // front-top-left
 
         // ===== Create 12 triangles (2 per face) =====
         // Each face is split into 2 triangles
@@ -140,6 +151,28 @@ pub const Mesh = struct {
         // Calculate all face normals
         mesh.calculateNormals();
 
+        return mesh;
+    }
+
+    /// Create a single triangle mesh positioned around the origin
+    /// Useful for simple rotation demos without hidden faces
+    pub fn triangle(allocator: std.mem.Allocator) !Mesh {
+        const vertices = try allocator.alloc(Vec3, 3);
+        vertices[0] = Vec3.new(0, 1, 0); // top
+        vertices[1] = Vec3.new(-1, -1, 0); // bottom-left
+        vertices[2] = Vec3.new(1, -1, 0); // bottom-right
+
+        const triangles = try allocator.alloc(Triangle, 1);
+        triangles[0] = Triangle.new(0, 1, 2);
+
+        var mesh = Mesh{
+            .vertices = vertices,
+            .triangles = triangles,
+            .normals = try allocator.alloc(Vec3, 1),
+            .allocator = allocator,
+        };
+
+        mesh.calculateNormals();
         return mesh;
     }
 

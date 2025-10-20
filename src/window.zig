@@ -1,6 +1,6 @@
 //! # Window Management Module
 //!
-//! This module handles all window creation and lifecycle management.
+//! This module handles all window creation and life*cycle management.
 //!
 //! **Single Concern**: Creating, displaying, and managing a native Windows window
 //!
@@ -103,6 +103,14 @@ extern "user32" fn DefWindowProcW(
 /// Get the application instance handle
 extern "kernel32" fn GetModuleHandleW(lpModuleName: ?[*:0]const u16) windows.HINSTANCE;
 
+// Message constants
+const WM_KEYDOWN = 0x0100;
+const WM_KEYUP = 0x0101;
+
+// Virtual key codes
+const VK_LEFT = 0x25;
+const VK_RIGHT = 0x27;
+
 // ========== WINDOW MESSAGE HANDLER ==========
 /// This is the callback function that receives all window messages
 /// Similar to addEventListener() callback in JavaScript
@@ -125,6 +133,15 @@ export fn WindowProc(
         WM_DESTROY => {
             PostQuitMessage(0);
             return 0;
+        },
+        // Keyboard key pressed
+        WM_KEYDOWN => {
+            const vkey = wParam;
+            if (vkey == VK_LEFT or vkey == VK_RIGHT) {
+                // Let the default handler process key repeats
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
+            }
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         // Any other message - use default handling
         else => DefWindowProcW(hwnd, msg, wParam, lParam),
@@ -169,11 +186,8 @@ pub const Window = struct {
 
         // Register the class
         if (RegisterClassW(&wc) == 0) {
-            std.debug.print("RegisterClassW failed\n", .{});
             return error.ClassRegistrationFailed;
         }
-
-        std.debug.print("RegisterClassW succeeded\n", .{});
 
         // ===== STEP 4: Create the window =====
         // Now that we have a class defined, instantiate a window from it
@@ -192,7 +206,6 @@ pub const Window = struct {
             hinstance, // Application instance
             null, // Extra parameters
         ) orelse {
-            std.debug.print("CreateWindowExW failed\n", .{});
             return error.WindowCreationFailed;
         };
 

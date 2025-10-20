@@ -93,6 +93,13 @@ extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
 /// Import the Bitmap module for pixel buffer management
 const Bitmap = @import("bitmap.zig").Bitmap;
 
+// ========== RENDERING CONSTANTS ==========
+/// Light direction: direction TO the light source (where bright faces should point)
+/// Camera looks along +Z axis at the mesh
+/// Light should come FROM behind the camera, pointing toward -Z (into the screen)
+/// This lights up faces that point toward the camera
+const LIGHT_DIR = math.Vec3.new(0.0, 0.0, -1.0); // Pointing toward -Z (into screen)
+
 // ========== RENDERER STRUCT ==========
 /// Manages rendering operations: converting bitmap data to screen display
 /// Similar to a canvas context: ctx = canvas.getContext("2d")
@@ -102,12 +109,18 @@ pub const Renderer = struct {
     hdc: ?windows.HDC, // Device context - the interface for drawing to the window
     hdc_mem: ?windows.HDC, // Cached memory device context (for faster blitting)
     allocator: std.mem.Allocator, // Memory allocator
-    rotation_angle: f32, // Current rotation angle for animation
+    rotation_angle: f32, // Current rotation angle around Y axis
+    rotation_x: f32, // Current rotation angle around X axis
+    keys_pressed: u32, // Bitmask for currently pressed keys
     frame_count: u32, // Number of frames rendered
     last_time: i128, // Last time we calculated FPS (in nanoseconds)
     last_frame_time: i128, // Last time a frame was rendered (in nanoseconds)
     current_fps: u32, // Current FPS counter
     target_frame_time_ns: i128, // Target nanoseconds per frame (1_000_000_000 / 120)
+    last_log_time: i128, // Last time we logged rotation/shading info
+    last_brightness_min: f32, // Minimum brightness from last frame
+    last_brightness_max: f32, // Maximum brightness from last frame
+    last_brightness_avg: f32, // Average brightness from last frame
 
     /// Initialize the renderer for a window
     /// Similar to: canvas = document.createElement("canvas"); ctx = canvas.getContext("2d")
@@ -138,11 +151,17 @@ pub const Renderer = struct {
             .hdc_mem = hdc_mem,
             .allocator = allocator,
             .rotation_angle = 0,
+            .rotation_x = 0,
+            .keys_pressed = 0,
             .frame_count = 0,
             .last_time = current_time,
             .last_frame_time = current_time,
             .current_fps = 0,
             .target_frame_time_ns = 8_333_333, // 1_000_000_000 / 120 = 8.333ms in nanoseconds
+            .last_log_time = current_time,
+            .last_brightness_min = 0,
+            .last_brightness_max = 0,
+            .last_brightness_avg = 0,
         };
     }
 
@@ -156,6 +175,75 @@ pub const Renderer = struct {
             _ = ReleaseDC(self.hwnd, hdc);
         }
         self.bitmap.deinit();
+    }
+
+    /// Calculate brightness statistics from the current frame
+    fn calculateBrightnessStats(self: *Renderer) void {
+        var min_brightness: f32 = 1.0;
+        var max_brightness: f32 = 0.0;
+        var sum_brightness: f32 = 0.0;
+        var non_black_count: u32 = 0;
+
+        for (self.bitmap.pixels) |pixel| {
+            // Skip black pixels (background)
+            if (pixel == 0xFF000000) continue;
+
+            // Skip pure white (wireframe edges)
+            if (pixel == 0xFFFFFFFF) continue;
+
+            // Extract RGB components (BGRA format)
+            const b = @as(f32, @floatFromInt((pixel >> 0) & 0xFF)) / 255.0;
+            const g = @as(f32, @floatFromInt((pixel >> 8) & 0xFF)) / 255.0;
+            const r = @as(f32, @floatFromInt((pixel >> 16) & 0xFF)) / 255.0;
+
+            // Calculate perceived brightness as average of RGB
+            const brightness = (r + g + b) / 3.0;
+
+            if (brightness < min_brightness) min_brightness = brightness;
+            if (brightness > max_brightness) max_brightness = brightness;
+            sum_brightness += brightness;
+            non_black_count += 1;
+        }
+
+        self.last_brightness_min = if (non_black_count > 0) min_brightness else 0;
+        self.last_brightness_max = if (non_black_count > 0) max_brightness else 0;
+        self.last_brightness_avg = if (non_black_count > 0) sum_brightness / @as(f32, @floatFromInt(non_black_count)) else 0;
+    }
+    pub fn handleKeyInput(self: *Renderer, key: u32, is_down: bool) void {
+        const VK_LEFT = 0x25;
+        const VK_RIGHT = 0x27;
+        const VK_UP = 0x26;
+        const VK_DOWN = 0x28;
+        const KEY_LEFT_BIT: u32 = 1;
+        const KEY_RIGHT_BIT: u32 = 2;
+        const KEY_UP_BIT: u32 = 4;
+        const KEY_DOWN_BIT: u32 = 8;
+
+        if (key == VK_LEFT) {
+            if (is_down) {
+                self.keys_pressed |= KEY_LEFT_BIT;
+            } else {
+                self.keys_pressed &= ~KEY_LEFT_BIT;
+            }
+        } else if (key == VK_RIGHT) {
+            if (is_down) {
+                self.keys_pressed |= KEY_RIGHT_BIT;
+            } else {
+                self.keys_pressed &= ~KEY_RIGHT_BIT;
+            }
+        } else if (key == VK_UP) {
+            if (is_down) {
+                self.keys_pressed |= KEY_UP_BIT;
+            } else {
+                self.keys_pressed &= ~KEY_UP_BIT;
+            }
+        } else if (key == VK_DOWN) {
+            if (is_down) {
+                self.keys_pressed |= KEY_DOWN_BIT;
+            } else {
+                self.keys_pressed &= ~KEY_DOWN_BIT;
+            }
+        }
     }
 
     /// Wait until it's time to render the next frame (frame rate limiting)
@@ -188,28 +276,50 @@ pub const Renderer = struct {
         const black: u32 = 0xFF000000;
         @memset(self.bitmap.pixels, black);
 
-        // ===== STEP 2: Create transformation matrices =====
-        // Simple rotation: rotate slowly on X and Y axes only
-        const rot_x = math.Mat4.rotateX(self.rotation_angle);
-        const rot_y = math.Mat4.rotateY(self.rotation_angle);
+        // ===== STEP 2: Update rotation based on currently pressed keys =====
+        const KEY_LEFT_BIT: u32 = 1;
+        const KEY_RIGHT_BIT: u32 = 2;
+        const KEY_UP_BIT: u32 = 4;
+        const KEY_DOWN_BIT: u32 = 8;
+        const rotation_speed = 0.02; // Radians per frame
 
-        // Combine rotations: total = Y * X
-        const transform = math.Mat4.multiply(rot_y, rot_x);
+        if ((self.keys_pressed & KEY_LEFT_BIT) != 0) {
+            self.rotation_angle -= rotation_speed;
+        }
+        if ((self.keys_pressed & KEY_RIGHT_BIT) != 0) {
+            self.rotation_angle += rotation_speed;
+        }
+        if ((self.keys_pressed & KEY_UP_BIT) != 0) {
+            self.rotation_x -= rotation_speed;
+        }
+        if ((self.keys_pressed & KEY_DOWN_BIT) != 0) {
+            self.rotation_x += rotation_speed;
+        }
+
+        // ===== STEP 3: Create transformation matrices =====
+        // Apply both Y-axis rotation (left/right) and X-axis rotation (up/down)
+        const transform_y = math.Mat4.rotateY(self.rotation_angle);
+        const transform_x = math.Mat4.rotateX(self.rotation_x);
+        const transform = math.Mat4.multiply(transform_y, transform_x);
 
         // ===== STEP 3: Transform and project vertices =====
         const projected = try self.allocator.alloc([2]i32, mesh.vertices.len);
         defer self.allocator.free(projected);
 
+        const transformed_vertices = try self.allocator.alloc(math.Vec3, mesh.vertices.len);
+        defer self.allocator.free(transformed_vertices);
+
         const center_x = @as(f32, @floatFromInt(self.bitmap.width)) / 2.0;
         const center_y = @as(f32, @floatFromInt(self.bitmap.height)) / 2.0;
+        const z_offset = 4.0; // Push mesh forward so the camera sits at the origin
 
         for (mesh.vertices, 0..) |vertex, i| {
             // Transform vertex by rotation
-            const transformed = transform.mulVec3(vertex);
+            const rotated = transform.mulVec3(vertex);
+            const transformed = math.Vec3.new(rotated.x, rotated.y, rotated.z + z_offset);
+            transformed_vertices[i] = transformed;
 
-            // Move away from camera (simple z offset for perspective)
-            const z_offset = 4.0; // Distance from camera
-            const camera_z = transformed.z + z_offset;
+            const camera_z = transformed.z;
 
             // Avoid division by zero or negative z
             if (camera_z <= 0.1) {
@@ -230,10 +340,13 @@ pub const Renderer = struct {
 
         // ===== STEP 4: Draw filled triangles (flat shaded) =====
         // Use flat shading based on face normals and light direction
-        const light_dir = math.Vec3.new(1, 1, 1).normalize(); // Light from top-right-front
-        const camera_dir = math.Vec3.new(0, 0, 1).normalize(); // Camera looks down +Z axis
-        
+
         for (mesh.triangles, 0..) |tri, tri_idx| {
+            // Skip if fill is culled
+            if (tri.cull_flags.cull_fill) {
+                continue;
+            }
+
             const p0 = projected[tri.v0];
             const p1 = projected[tri.v1];
             const p2 = projected[tri.v2];
@@ -246,36 +359,55 @@ pub const Renderer = struct {
             // Transform the face normal using ONLY rotation (w=0 prevents translation)
             // We manually multiply by rotation part of matrix
             const normal = mesh.normals[tri_idx];
-            const normal_transformed = math.Vec3.new(
+            const normal_transformed_raw = math.Vec3.new(
                 transform.data[0] * normal.x + transform.data[1] * normal.y + transform.data[2] * normal.z,
                 transform.data[4] * normal.x + transform.data[5] * normal.y + transform.data[6] * normal.z,
                 transform.data[8] * normal.x + transform.data[9] * normal.y + transform.data[10] * normal.z,
             );
-            
-            // Back-face culling: skip triangles facing away from camera
-            // Check if normal is pointing toward camera (positive dot product)
-            const camera_facing = normal_transformed.dot(camera_dir);
-            if (camera_facing < 0.01) {
+            const normal_transformed = normal_transformed_raw.normalize();
+
+            // Use the triangle center in camera space to decide if it faces the viewer
+            const p0_cam = transformed_vertices[tri.v0];
+            const p1_cam = transformed_vertices[tri.v1];
+            const p2_cam = transformed_vertices[tri.v2];
+
+            const face_center_unscaled = math.Vec3.add(math.Vec3.add(p0_cam, p1_cam), p2_cam);
+            const face_center = math.Vec3.scale(face_center_unscaled, 1.0 / 3.0);
+
+            const view_length = face_center.length();
+            if (view_length <= 0.0001) {
                 continue;
             }
-            
+            const view_vector = math.Vec3.scale(face_center, -1.0 / view_length);
+
+            const camera_facing = normal_transformed.dot(view_vector);
+            if (camera_facing <= 0.0) {
+                continue;
+            }
+
             // Calculate lighting: dot product of normal and light direction
-            var brightness = normal_transformed.dot(light_dir);
-            
-            // Clamp to 0-1 range (minimum ambient light so dark sides aren't black)
-            if (brightness < 0.2) brightness = 0.2;
-            if (brightness > 1) brightness = 1;
-            
-            // Convert brightness to color (0 = dark green, 1 = bright green)
+            var brightness = normal_transformed.dot(LIGHT_DIR);
+
+            // Clamp to 0-1 range (NO minimum ambient light for debugging shading)
+            if (brightness < 0.0) brightness = 0.0;
+            if (brightness > 1.0) brightness = 1.0;
+
+            // Convert brightness to color (yellow-orange gradient for high contrast)
             const r = @as(u32, @intFromFloat(brightness * 255)) << 16;
-            const g = @as(u32, @intFromFloat(brightness * 170)) << 8;
-            const shaded_color = 0xFF000000 | r | g;
+            const g = @as(u32, @intFromFloat(brightness * 200)) << 8;
+            const b = @as(u32, @intFromFloat(brightness * 50));
+            const shaded_color = 0xFF000000 | r | g | b;
 
             self.drawFilledTriangle(p0[0], p0[1], p1[0], p1[1], p2[0], p2[1], shaded_color);
         }
 
         // ===== STEP 5: Draw wireframe edges on top (white lines) =====
         for (mesh.triangles) |tri| {
+            // Skip if wireframe is culled
+            if (tri.cull_flags.cull_wireframe) {
+                continue;
+            }
+
             const p0 = projected[tri.v0];
             const p1 = projected[tri.v1];
             const p2 = projected[tri.v2];
@@ -289,7 +421,10 @@ pub const Renderer = struct {
         // ===== STEP 6: Copy bitmap to screen =====
         self.drawBitmap();
 
-        // ===== STEP 7: Update FPS counter =====
+        // ===== STEP 7: Calculate brightness statistics from rendered frame =====
+        self.calculateBrightnessStats();
+
+        // ===== STEP 8: Update FPS counter and log =====
         self.frame_count += 1;
         const current_time = std.time.nanoTimestamp();
         const elapsed_ns = current_time - self.last_time;
@@ -302,25 +437,16 @@ pub const Renderer = struct {
             self.frame_count = 0;
             self.last_time = current_time;
 
-            // Create title string: "Zig 3D CPU Rasterizer - X FPS"
-            var fps_buf: [64]u8 = undefined;
-            const fps_str = std.fmt.bufPrint(&fps_buf, "Zig 3D CPU Rasterizer - FPS: {d}", .{self.current_fps}) catch "Zig 3D CPU Rasterizer";
+            // Log rotation angle and shading information
+            const rotation_degrees = self.rotation_angle * 180.0 / 3.14159265359;
+            const sample_r = @as(u32, @intFromFloat(self.last_brightness_avg * 255));
+            const sample_g = @as(u32, @intFromFloat(self.last_brightness_avg * 200));
+            const sample_b = @as(u32, @intFromFloat(self.last_brightness_avg * 50));
 
-            // Convert UTF-8 to UTF-16 for Windows (null-terminated)
-            var wide_title: [128:0]u16 = undefined;
-            var idx: usize = 0;
-            for (fps_str) |ch| {
-                if (idx >= 127) break;
-                wide_title[idx] = ch;
-                idx += 1;
-            }
-            wide_title[idx] = 0; // Null terminator
-
-            _ = SetWindowTextW(self.hwnd, &wide_title);
+            std.debug.print("Rotation: {d:.2}° | Brightness: min={d:.2} avg={d:.2} max={d:.2} | Sample RGB: ({}, {}, {}) | FPS: {}\n", .{
+                rotation_degrees, self.last_brightness_min, self.last_brightness_avg, self.last_brightness_max, sample_r, sample_g, sample_b, self.current_fps
+            });
         }
-
-        // ===== STEP 7: Update rotation for next frame =====
-        self.rotation_angle += 0.005; // Slow rotation: 0.005 radians per frame
     }
 
     /// Render initial "Hello World" - fills screen with black color
@@ -342,7 +468,7 @@ pub const Renderer = struct {
         // Triangle vertices: top center, bottom-left, bottom-right
         const width = self.bitmap.width;
         const height = self.bitmap.height;
-        
+
         // Triangle corners
         const top_x = @divTrunc(width, 2);
         const top_y = @divTrunc(height, 4);
@@ -350,12 +476,12 @@ pub const Renderer = struct {
         const left_y = @divTrunc(3 * height, 4);
         const right_x = @divTrunc(3 * width, 4);
         const right_y = @divTrunc(3 * height, 4);
-        
+
         // Draw the three edges as lines
         // This is similar to: canvas.strokeStyle = "#FF0000"; canvas.strokeRect()
-        self.drawLine(top_x, top_y, left_x, left_y);    // Top-left edge
-        self.drawLine(left_x, left_y, right_x, right_y);  // Bottom edge
-        self.drawLine(right_x, right_y, top_x, top_y);   // Right edge
+        self.drawLine(top_x, top_y, left_x, left_y); // Top-left edge
+        self.drawLine(left_x, left_y, right_x, right_y); // Bottom edge
+        self.drawLine(right_x, right_y, top_x, top_y); // Right edge
 
         // ===== STEP 3: Copy bitmap to screen =====
         // Now that we've filled the bitmap, draw it to the window
@@ -367,13 +493,13 @@ pub const Renderer = struct {
     fn drawLineColored(self: *Renderer, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) void {
         var x = x0;
         var y = y0;
-        
+
         const dx = if (x0 < x1) x1 - x0 else x0 - x1;
         const dy = if (y0 < y1) y1 - y0 else y0 - y1;
-        
+
         const sx = if (x0 < x1) @as(i32, 1) else @as(i32, -1);
         const sy = if (y0 < y1) @as(i32, 1) else @as(i32, -1);
-        
+
         var err = dx - dy;
 
         while (true) {
@@ -403,12 +529,12 @@ pub const Renderer = struct {
 
     /// Draw a line between two points using Bresenham's line algorithm
     /// This is the fundamental algorithm for drawing lines on a raster display
-    /// 
+    ///
     /// **How it works**:
     /// - Determine the major axis (dx vs dy)
     /// - Calculate the error term that determines when to step in the minor axis
     /// - Step along the major axis, using the error term to decide minor axis steps
-    /// 
+    ///
     /// **JavaScript Equivalent**:
     /// ```javascript
     /// function drawLine(x0, y0, x1, y1) {
@@ -418,7 +544,7 @@ pub const Renderer = struct {
     ///   let x = x0, y = y0;
     ///   const sx = x0 < x1 ? 1 : -1;
     ///   const sy = y0 < y1 ? 1 : -1;
-    ///   
+    ///
     ///   while (true) {
     ///     setPixel(x, y, RED);
     ///     if (x === x1 && y === y1) break;
@@ -445,12 +571,8 @@ pub const Renderer = struct {
         const y3_clamped = std.math.clamp(y3, -margin, self.bitmap.height + margin);
 
         // Sort vertices by Y coordinate (top to bottom)
-        var v = [3][2]i32{ 
-            .{ x1_clamped, y1_clamped }, 
-            .{ x2_clamped, y2_clamped }, 
-            .{ x3_clamped, y3_clamped } 
-        };
-        
+        var v = [3][2]i32{ .{ x1_clamped, y1_clamped }, .{ x2_clamped, y2_clamped }, .{ x3_clamped, y3_clamped } };
+
         // Bubble sort by Y
         if (v[0][1] > v[1][1]) {
             const temp = v[0];
@@ -533,20 +655,20 @@ pub const Renderer = struct {
         }
     }
     /// This is a fundamental graphics algorithm
-    /// 
+    ///
     /// **How it works**:
     /// - Sort vertices by Y coordinate (top to bottom)
     /// - Draw upper triangle (flat bottom) from top to middle
     /// - Draw lower triangle (flat top) from middle to bottom
     /// - For each scanline, find exact left and right edges
-    /// 
+    ///
     /// **JavaScript Equivalent**:
     /// ```javascript
     /// function drawTriangle(x1, y1, x2, y2, x3, y3) {
     ///   // Sort vertices by y
     ///   const verts = sortByY([{x:x1,y:y1}, {x:x2,y:y2}, {x:x3,y:y3}]);
     ///   const [top, mid, bot] = verts;
-    ///   
+    ///
     ///   // Upper half: edges are (top->mid) and (top->bot)
     ///   for (let y = top.y; y <= mid.y; y++) {
     ///     const xL = interpolateX(top, mid, y);
@@ -567,7 +689,7 @@ pub const Renderer = struct {
 
         // Sort vertices by Y coordinate (top to bottom)
         var v = [3][2]i32{ .{ x1, y1 }, .{ x2, y2 }, .{ x3, y3 } };
-        
+
         // Bubble sort by Y
         if (v[0][1] > v[1][1]) {
             const temp = v[0];
@@ -651,12 +773,12 @@ pub const Renderer = struct {
 
     /// Calculate where a line segment intersects a horizontal scanline
     /// Uses linear interpolation to find the x coordinate
-    /// 
+    ///
     /// **How it works**:
     /// - Given a line from (x1,y1) to (x2,y2)
     /// - Find where it crosses a horizontal line at height y
     /// - Uses the formula: x = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
-    /// 
+    ///
     /// This is linear interpolation (lerp) - fundamental in graphics
     fn lineIntersectionX(_: *Renderer, x1: i32, y1: i32, x2: i32, y2: i32, y: i32) i32 {
         // Avoid division by zero
@@ -665,11 +787,11 @@ pub const Renderer = struct {
         // Linear interpolation formula
         // (x - x1) / (x2 - x1) = (y - y1) / (y2 - y1)
         // Solve for x: x = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
-        
+
         const dy = y2 - y1;
         const dx = x2 - x1;
         const t_num = y - y1;
-        
+
         // Use integer arithmetic to avoid floating point
         // Result: x1 + (t_num * dx) / dy
         const result = x1 + @divTrunc(t_num * dx, dy);
