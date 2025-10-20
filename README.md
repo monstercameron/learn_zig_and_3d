@@ -1,69 +1,109 @@
-# Zig Windows API Hello World Application# Zig Rasterizer
+# Zig 3D CPU Rasterizer
 
+A complete CPU-based 3D rasterizer built in Zig, featuring real-time rendering, backface culling, flat shading, and interactive controls.
 
+## Features
 
-This is a simple Zig application that demonstrates creating a window using the Windows API, rendering a bitmap, and drawing it to the window.## Overview
-
-The Zig Rasterizer is a CPU-based 3D rasterizer designed with a high-level, tile-based, job-based architecture. It focuses on rendering single triangles efficiently while maintaining clean and modular code.
+- **Real-time 3D Rendering**: 120 FPS CPU-based rasterization
+- **Perspective Projection**: Proper 3D-to-2D projection with depth
+- **Backface Culling**: Efficient culling of hidden triangles
+- **Flat Shading**: Directional lighting with brightness calculations
+- **Wireframe Rendering**: Optional wireframe overlay with proper culling
+- **Interactive Controls**:
+  - **Arrow Keys**: Rotate cube (left/right/up/down)
+  - **WASD Keys**: Orbit light source
+  - **Q/E Keys**: Adjust light distance (closer/farther)
+- **Debug Information**: Real-time FPS, brightness statistics, and triangle culling status
 
 ## Project Structure
 
-## Project Structure
-
-- `build.zig`: The build script that configures the executable and links necessary libraries.```
-
-- `src/main.zig`: The main entry point that initializes the window and renderer, then enters the message loop.zig-rasterizer
-
-- `src/window.zig`: Module for creating and managing the Windows window.├── src
-
-- `src/renderer.zig`: Module for rendering content to a bitmap and drawing it to the window.│   ├── main.zig         # Entry point of the application
-
-- `src/bitmap.zig`: Module for creating and managing device-independent bitmaps.│   ├── rasterizer.zig   # Handles the overall rasterization process
-
-│   ├── tile.zig         # Represents a tile in the rasterization process
-
-## Building and Running│   ├── job.zig          # Represents a job in the job-based architecture
-
-│   └── triangle.zig     # Represents a single triangle to be rasterized
-
-1. Ensure you have Zig installed (version 0.11 or later).├── build.zig            # Build configuration for the Zig project
-
-2. Run `zig build` to build the application.└── README.md            # Documentation for the project
-
-3. Run `zig build run` to build and run the application.```
-
-
-
-The application will create a window and display a blue bitmap.## Setup Instructions
-
-1. Ensure you have Zig installed on your system. You can download it from the official Zig website.
-
-## Learning Zig2. Clone the repository or download the project files.
-
-3. Navigate to the project directory.
-
-This project is structured to help learn Zig by:
-
-- Using the Windows API directly for low-level control.## Usage
-
-- Separating concerns into different modules.To build and run the project, use the following command:
-
-- Including detailed comments explaining each part of the code.```
-
-- Demonstrating error handling, memory management, and Windows-specific concepts.zig build run
+```
+├── build.zig           # Build configuration
+├── src/
+│   ├── main.zig        # Application entry point and event loop
+│   ├── renderer.zig    # Core 3D rendering pipeline
+│   ├── window.zig      # Windows API window management
+│   ├── bitmap.zig      # Pixel buffer management
+│   ├── mesh.zig        # 3D mesh data structures
+│   └── math.zig        # 3D math operations (vectors, matrices)
+└── README.md
 ```
 
-## Architecture
-The architecture of the Zig Rasterizer is designed to be modular and efficient:
-- **Rasterizer**: Manages the lifecycle of the rasterization process, including initialization, rendering, and shutdown.
-- **Tile**: Represents a section of the screen where triangles are drawn, allowing for efficient management of rendering tasks.
-- **Job**: Encapsulates the work needed to rasterize a triangle, enabling a job-based approach to processing.
-- **Triangle**: Defines the properties of a triangle, including its vertices and methods for calculations necessary for rasterization.
+## Controls
 
-## Design Principles
-- **Clean Code**: The project emphasizes readability and maintainability, ensuring that each component is well-defined and easy to understand.
-- **Modularity**: Each file and struct is designed to handle a specific aspect of the rasterization process, promoting separation of concerns.
-- **Efficiency**: The tile-based and job-based architecture allows for efficient rendering, making the most of CPU resources.
+- **Left/Right Arrows**: Rotate cube horizontally
+- **Up/Down Arrows**: Rotate cube vertically
+- **WASD**: Orbit light source around cube
+- **Q**: Move light closer to cube
+- **E**: Move light farther from cube
+
+## Building and Running
+
+### Prerequisites
+- Zig 0.11 or later
+- Windows (uses Windows API)
+
+### Build
+```bash
+zig build
+```
+
+### Run
+```bash
+zig build run
+# or
+.\zig-out\bin\zig-windows-app.exe
+```
+
+## Technical Details
+
+### Rendering Pipeline
+1. **Vertex Transformation**: Apply rotation matrices to 3D vertices
+2. **Perspective Projection**: Convert 3D coordinates to 2D screen space
+3. **Backface Culling**: Remove triangles facing away from camera
+4. **Rasterization**: Fill triangles using scanline algorithm
+5. **Lighting**: Calculate brightness based on surface normals and light direction
+6. **Wireframe Overlay**: Draw triangle edges on top of filled geometry
+
+### Performance
+- **120 FPS** target with frame rate limiting
+- **CPU-based**: No GPU acceleration required
+- **Efficient algorithms**: Bresenham line drawing, scanline triangle filling
+- **Memory managed**: Proper allocation/deallocation of resources
+
+### Architecture
+- **Modular design**: Separate concerns across multiple files
+- **Windows API**: Direct integration with Win32 for maximum control
+- **Error handling**: Comprehensive error checking and recovery
+- **Debug logging**: Real-time performance and rendering statistics
+
+## Learning Zig
+
+This project demonstrates advanced Zig concepts:
+- **Windows API integration**: Direct FFI calls to user32.dll and gdi32.dll
+- **Memory management**: Manual allocation and deallocation
+- **Error handling**: Try/catch patterns and error unions
+- **Struct composition**: Object-oriented patterns in Zig
+- **Performance optimization**: CPU cache-friendly algorithms
+- **Real-time systems**: Frame pacing and timing
+
+## Screenshots
+
+The application renders a rotating cube with:
+- Smooth flat shading based on light position
+- Cyan sphere indicating light source location
+- White wireframe edges (only for visible triangles)
+- Real-time debug information in console
 
 ## Contributing
-Contributions are welcome! Please feel free to submit issues or pull requests to improve the project.
+
+This is a complete, working 3D rasterizer. For learning purposes, consider:
+- Adding texture mapping
+- Implementing different shading models
+- Adding more complex meshes
+- Optimizing for better performance
+- Porting to other platforms
+
+## License
+
+This project is open source and available under the MIT License.

@@ -222,6 +222,8 @@ pub const Renderer = struct {
         const VK_A = 0x41;
         const VK_S = 0x53;
         const VK_D = 0x44;
+        const VK_Q = 0x51;
+        const VK_E = 0x45;
         const KEY_LEFT_BIT: u32 = 1;
         const KEY_RIGHT_BIT: u32 = 2;
         const KEY_UP_BIT: u32 = 4;
@@ -230,6 +232,8 @@ pub const Renderer = struct {
         const KEY_A_BIT: u32 = 32;
         const KEY_S_BIT: u32 = 64;
         const KEY_D_BIT: u32 = 128;
+        const KEY_Q_BIT: u32 = 256;
+        const KEY_E_BIT: u32 = 512;
 
         if (key == VK_LEFT) {
             if (is_down) {
@@ -279,6 +283,18 @@ pub const Renderer = struct {
             } else {
                 self.keys_pressed &= ~KEY_D_BIT;
             }
+        } else if (key == VK_Q) {
+            if (is_down) {
+                self.keys_pressed |= KEY_Q_BIT;
+            } else {
+                self.keys_pressed &= ~KEY_Q_BIT;
+            }
+        } else if (key == VK_E) {
+            if (is_down) {
+                self.keys_pressed |= KEY_E_BIT;
+            } else {
+                self.keys_pressed &= ~KEY_E_BIT;
+            }
         }
     }
 
@@ -321,6 +337,8 @@ pub const Renderer = struct {
         const KEY_A_BIT: u32 = 32;
         const KEY_S_BIT: u32 = 64;
         const KEY_D_BIT: u32 = 128;
+        const KEY_Q_BIT: u32 = 256;
+        const KEY_E_BIT: u32 = 512;
         const rotation_speed = 0.02; // Radians per frame
         const auto_orbit_speed = 0.01; // Radians per frame for automatic light orbit
 
@@ -349,6 +367,17 @@ pub const Renderer = struct {
             self.light_orbit_y += rotation_speed;
         }
 
+        // Handle light distance adjustment with Q and E keys
+        const distance_speed = 0.1; // Distance change per frame
+        if ((self.keys_pressed & KEY_Q_BIT) != 0) {
+            self.light_distance -= distance_speed;
+            if (self.light_distance < 0.5) self.light_distance = 0.5; // Minimum distance
+        }
+        if ((self.keys_pressed & KEY_E_BIT) != 0) {
+            self.light_distance += distance_speed;
+            if (self.light_distance > 10.0) self.light_distance = 10.0; // Maximum distance
+        }
+
         // Automatic light orbit: continuously rotate the light around the triangle on X axis only
         self.light_orbit_x += auto_orbit_speed;
 
@@ -363,16 +392,15 @@ pub const Renderer = struct {
         const light_pos_4d = light_orbit.mulVec4(math.Vec4.from3D(light_base_pos));
         const light_pos = light_pos_4d.to3D();
         
-        // Light 1 direction: from light position to origin (center of triangle)
-        var light_dir = math.Vec3.scale(light_pos, -1.0);
-        light_dir = light_dir.normalize();
+        // Light 1 direction: from surface to light (for proper dot product with outward normals)
+        const light_dir = light_pos.normalize();
         
         // DEBUG: Print orbit angles and light positions
         if (self.frame_count % 60 == 0) {
             const orbit_x_deg = self.light_orbit_x * 180.0 / 3.14159265359;
             const orbit_y_deg = self.light_orbit_y * 180.0 / 3.14159265359;
-            std.debug.print("Light: X={d:.2}° Y={d:.2}° Pos:({d:.2}, {d:.2}, {d:.2})\n", .{
-                orbit_x_deg, orbit_y_deg, light_pos.x, light_pos.y, light_pos.z
+            std.debug.print("Light: X={d:.2}° Y={d:.2}° Pos:({d:.2}, {d:.2}, {d:.2}) Dir:({d:.2}, {d:.2}, {d:.2})\n", .{
+                orbit_x_deg, orbit_y_deg, light_pos.x, light_pos.y, light_pos.z, light_dir.x, light_dir.y, light_dir.z
             });
         }
 
@@ -528,7 +556,7 @@ pub const Renderer = struct {
                 continue;
             }
 
-            // Also perform backface culling for wireframes
+            // Apply the same backface culling as filled triangles
             const normal = mesh.normals[tri_idx];
             const normal_transformed_raw = math.Vec3.new(
                 transform.data[0] * normal.x + transform.data[1] * normal.y + transform.data[2] * normal.z,
