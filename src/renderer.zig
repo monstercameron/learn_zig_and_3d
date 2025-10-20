@@ -94,11 +94,9 @@ extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
 const Bitmap = @import("bitmap.zig").Bitmap;
 
 // ========== RENDERING CONSTANTS ==========
-/// Light direction: direction TO the light source (where bright faces should point)
-/// Camera looks along +Z axis at the mesh
-/// Light should come FROM behind the camera, pointing toward -Z (into the screen)
-/// This lights up faces that point toward the camera
-const LIGHT_DIR = math.Vec3.new(0.0, 0.0, -1.0); // Pointing toward -Z (into screen)
+/// Initial light direction - will be modified by keyboard input
+/// This is now a base, and the actual light is computed per frame
+const INITIAL_LIGHT_DIR = math.Vec3.new(0.0, 0.0, -1.0); // Pointing toward -Z (into screen)
 
 // ========== RENDERER STRUCT ==========
 /// Manages rendering operations: converting bitmap data to screen display
@@ -111,6 +109,12 @@ pub const Renderer = struct {
     allocator: std.mem.Allocator, // Memory allocator
     rotation_angle: f32, // Current rotation angle around Y axis
     rotation_x: f32, // Current rotation angle around X axis
+    light_orbit_x: f32, // Light 1: orbit angle around X axis
+    light_orbit_y: f32, // Light 1: orbit angle around Y axis
+    light_distance: f32, // Distance of light from origin
+    light2_orbit_x: f32, // Light 2: orbit angle around X axis
+    light2_orbit_y: f32, // Light 2: orbit angle around Y axis
+    light2_distance: f32, // Distance of light 2 from origin
     keys_pressed: u32, // Bitmask for currently pressed keys
     frame_count: u32, // Number of frames rendered
     last_time: i128, // Last time we calculated FPS (in nanoseconds)
@@ -152,6 +156,12 @@ pub const Renderer = struct {
             .allocator = allocator,
             .rotation_angle = 0,
             .rotation_x = 0,
+            .light_orbit_x = 0.0,
+            .light_orbit_y = 0.0,
+            .light_distance = 3.0,
+            .light2_orbit_x = 0.0,
+            .light2_orbit_y = 3.14159, // π - 180 degrees out of phase
+            .light2_distance = 3.0,
             .keys_pressed = 0,
             .frame_count = 0,
             .last_time = current_time,
@@ -214,10 +224,18 @@ pub const Renderer = struct {
         const VK_RIGHT = 0x27;
         const VK_UP = 0x26;
         const VK_DOWN = 0x28;
+        const VK_W = 0x57;
+        const VK_A = 0x41;
+        const VK_S = 0x53;
+        const VK_D = 0x44;
         const KEY_LEFT_BIT: u32 = 1;
         const KEY_RIGHT_BIT: u32 = 2;
         const KEY_UP_BIT: u32 = 4;
         const KEY_DOWN_BIT: u32 = 8;
+        const KEY_W_BIT: u32 = 16;
+        const KEY_A_BIT: u32 = 32;
+        const KEY_S_BIT: u32 = 64;
+        const KEY_D_BIT: u32 = 128;
 
         if (key == VK_LEFT) {
             if (is_down) {
@@ -242,6 +260,30 @@ pub const Renderer = struct {
                 self.keys_pressed |= KEY_DOWN_BIT;
             } else {
                 self.keys_pressed &= ~KEY_DOWN_BIT;
+            }
+        } else if (key == VK_W) {
+            if (is_down) {
+                self.keys_pressed |= KEY_W_BIT;
+            } else {
+                self.keys_pressed &= ~KEY_W_BIT;
+            }
+        } else if (key == VK_A) {
+            if (is_down) {
+                self.keys_pressed |= KEY_A_BIT;
+            } else {
+                self.keys_pressed &= ~KEY_A_BIT;
+            }
+        } else if (key == VK_S) {
+            if (is_down) {
+                self.keys_pressed |= KEY_S_BIT;
+            } else {
+                self.keys_pressed &= ~KEY_S_BIT;
+            }
+        } else if (key == VK_D) {
+            if (is_down) {
+                self.keys_pressed |= KEY_D_BIT;
+            } else {
+                self.keys_pressed &= ~KEY_D_BIT;
             }
         }
     }
@@ -281,7 +323,12 @@ pub const Renderer = struct {
         const KEY_RIGHT_BIT: u32 = 2;
         const KEY_UP_BIT: u32 = 4;
         const KEY_DOWN_BIT: u32 = 8;
+        const KEY_W_BIT: u32 = 16;
+        const KEY_A_BIT: u32 = 32;
+        const KEY_S_BIT: u32 = 64;
+        const KEY_D_BIT: u32 = 128;
         const rotation_speed = 0.02; // Radians per frame
+        const auto_orbit_speed = 0.01; // Radians per frame for automatic light orbit
 
         if ((self.keys_pressed & KEY_LEFT_BIT) != 0) {
             self.rotation_angle -= rotation_speed;
@@ -295,8 +342,68 @@ pub const Renderer = struct {
         if ((self.keys_pressed & KEY_DOWN_BIT) != 0) {
             self.rotation_x += rotation_speed;
         }
+        if ((self.keys_pressed & KEY_W_BIT) != 0) {
+            self.light_orbit_x += rotation_speed;
+        }
+        if ((self.keys_pressed & KEY_S_BIT) != 0) {
+            self.light_orbit_x -= rotation_speed;
+        }
+        if ((self.keys_pressed & KEY_A_BIT) != 0) {
+            self.light_orbit_y -= rotation_speed;
+        }
+        if ((self.keys_pressed & KEY_D_BIT) != 0) {
+            self.light_orbit_y += rotation_speed;
+        }
 
-        // ===== STEP 3: Create transformation matrices =====
+        // Automatic light orbit: continuously rotate the light around the triangle on X axis only
+        self.light_orbit_x += auto_orbit_speed;
+        
+        // Automatic light 2 orbit: continuously rotate on Y axis only
+        self.light2_orbit_y += auto_orbit_speed;
+
+        // ===== STEP 3: Compute light 1 position using orbit transform =====
+        // Light 1 orbits around the triangle on X axis
+        const light_orbit_x_mat = math.Mat4.rotateX(self.light_orbit_x);
+        const light_orbit_y_mat = math.Mat4.rotateY(self.light_orbit_y);
+        const light_orbit = math.Mat4.multiply(light_orbit_y_mat, light_orbit_x_mat);
+        
+        // Start with light at distance along +Z, then apply orbit transforms
+        const light_base_pos = math.Vec3.new(0.0, 0.0, self.light_distance);
+        const light_pos_4d = light_orbit.mulVec4(math.Vec4.from3D(light_base_pos));
+        const light_pos = light_pos_4d.to3D();
+        
+        // Light 1 direction: from light position to origin (center of triangle)
+        var light_dir = math.Vec3.scale(light_pos, -1.0);
+        light_dir = light_dir.normalize();
+        
+        // ===== STEP 3B: Compute light 2 position using orbit transform =====
+        // Light 2 orbits around the triangle on Y axis
+        const light2_orbit_x_mat = math.Mat4.rotateX(self.light2_orbit_x);
+        const light2_orbit_y_mat = math.Mat4.rotateY(self.light2_orbit_y);
+        const light2_orbit = math.Mat4.multiply(light2_orbit_y_mat, light2_orbit_x_mat);
+        
+        // Start with light 2 at distance along +Z, then apply orbit transforms
+        const light2_base_pos = math.Vec3.new(0.0, 0.0, self.light2_distance);
+        const light2_pos_4d = light2_orbit.mulVec4(math.Vec4.from3D(light2_base_pos));
+        const light2_pos = light2_pos_4d.to3D();
+        
+        // Light 2 direction: from light position to origin (center of triangle)
+        var light2_dir = math.Vec3.scale(light2_pos, -1.0);
+        light2_dir = light2_dir.normalize();
+        
+        // DEBUG: Print orbit angles and light positions
+        if (self.frame_count % 60 == 0) {
+            const orbit_x_deg = self.light_orbit_x * 180.0 / 3.14159265359;
+            const orbit_y_deg = self.light_orbit_y * 180.0 / 3.14159265359;
+            const orbit2_x_deg = self.light2_orbit_x * 180.0 / 3.14159265359;
+            const orbit2_y_deg = self.light2_orbit_y * 180.0 / 3.14159265359;
+            std.debug.print("Light 1: X={d:.2}° Y={d:.2}° Pos:({d:.2}, {d:.2}, {d:.2}) | Light 2: X={d:.2}° Y={d:.2}° Pos:({d:.2}, {d:.2}, {d:.2})\n", .{
+                orbit_x_deg, orbit_y_deg, light_pos.x, light_pos.y, light_pos.z,
+                orbit2_x_deg, orbit2_y_deg, light2_pos.x, light2_pos.y, light2_pos.z
+            });
+        }
+
+        // ===== STEP 4: Create transformation matrices for mesh =====
         // Apply both Y-axis rotation (left/right) and X-axis rotation (up/down)
         const transform_y = math.Mat4.rotateY(self.rotation_angle);
         const transform_x = math.Mat4.rotateX(self.rotation_x);
@@ -385,12 +492,18 @@ pub const Renderer = struct {
                 continue;
             }
 
-            // Calculate lighting: dot product of normal and light direction
-            var brightness = normal_transformed.dot(LIGHT_DIR);
-
-            // Clamp to 0-1 range (NO minimum ambient light for debugging shading)
-            if (brightness < 0.0) brightness = 0.0;
-            if (brightness > 1.0) brightness = 1.0;
+            // Calculate lighting from both lights: blend their contributions
+            var brightness1 = normal_transformed.dot(light_dir);
+            var brightness2 = normal_transformed.dot(light2_dir);
+            
+            // Clamp each light to 0-1 range
+            if (brightness1 < 0.0) brightness1 = 0.0;
+            if (brightness1 > 1.0) brightness1 = 1.0;
+            if (brightness2 < 0.0) brightness2 = 0.0;
+            if (brightness2 > 1.0) brightness2 = 1.0;
+            
+            // Average the two lights
+            const brightness = (brightness1 + brightness2) * 0.5;
 
             // Convert brightness to color (yellow-orange gradient for high contrast)
             const r = @as(u32, @intFromFloat(brightness * 255)) << 16;
@@ -418,6 +531,78 @@ pub const Renderer = struct {
             self.drawLineColored(p2[0], p2[1], p0[0], p0[1], 0xFFFFFFFF);
         }
 
+        // ===== STEP 5.5: Project and draw light position as a cyan sphere =====
+        // Project the light position to screen space
+        const light_camera_z = light_pos.z + z_offset;
+        if (light_camera_z > 0.1) {
+            const fov = 400.0;
+            const light_screen_x = (light_pos.x / light_camera_z) * fov + center_x;
+            const light_screen_y = -(light_pos.y / light_camera_z) * fov + center_y;
+            
+            const light_x = @as(i32, @intFromFloat(light_screen_x));
+            const light_y = @as(i32, @intFromFloat(light_screen_y));
+            
+            // Draw a small circle (radius 5 pixels) in bright cyan to represent light 1
+            const light_radius: i32 = 5;
+            const light_color = 0xFF00FFFF; // Cyan: ARGB format
+            
+            var py = light_y - light_radius;
+            while (py <= light_y + light_radius) : (py += 1) {
+                if (py < 0 or py >= @as(i32, @intCast(self.bitmap.height))) continue;
+                var px = light_x - light_radius;
+                while (px <= light_x + light_radius) : (px += 1) {
+                    if (px < 0 or px >= @as(i32, @intCast(self.bitmap.width))) continue;
+                    
+                    const dx = @as(f32, @floatFromInt(px)) - @as(f32, @floatFromInt(light_x));
+                    const dy = @as(f32, @floatFromInt(py)) - @as(f32, @floatFromInt(light_y));
+                    const dist = @sqrt(dx * dx + dy * dy);
+                    
+                    if (dist <= @as(f32, @floatFromInt(light_radius))) {
+                        const idx = @as(usize, @intCast(py)) * @as(usize, @intCast(self.bitmap.width)) + @as(usize, @intCast(px));
+                        if (idx < self.bitmap.pixels.len) {
+                            self.bitmap.pixels[idx] = light_color;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // ===== STEP 5.6: Project and draw light 2 position as a magenta sphere =====
+        // Project the second light position to screen space
+        const light2_camera_z = light2_pos.z + z_offset;
+        if (light2_camera_z > 0.1) {
+            const fov = 400.0;
+            const light2_screen_x = (light2_pos.x / light2_camera_z) * fov + center_x;
+            const light2_screen_y = -(light2_pos.y / light2_camera_z) * fov + center_y;
+            
+            const light2_x = @as(i32, @intFromFloat(light2_screen_x));
+            const light2_y = @as(i32, @intFromFloat(light2_screen_y));
+            
+            // Draw a small circle (radius 5 pixels) in bright magenta to represent light 2
+            const light_radius: i32 = 5;
+            const light2_color = 0xFFFF00FF; // Magenta: ARGB format
+            
+            var py = light2_y - light_radius;
+            while (py <= light2_y + light_radius) : (py += 1) {
+                if (py < 0 or py >= @as(i32, @intCast(self.bitmap.height))) continue;
+                var px = light2_x - light_radius;
+                while (px <= light2_x + light_radius) : (px += 1) {
+                    if (px < 0 or px >= @as(i32, @intCast(self.bitmap.width))) continue;
+                    
+                    const dx = @as(f32, @floatFromInt(px)) - @as(f32, @floatFromInt(light2_x));
+                    const dy = @as(f32, @floatFromInt(py)) - @as(f32, @floatFromInt(light2_y));
+                    const dist = @sqrt(dx * dx + dy * dy);
+                    
+                    if (dist <= @as(f32, @floatFromInt(light_radius))) {
+                        const idx = @as(usize, @intCast(py)) * @as(usize, @intCast(self.bitmap.width)) + @as(usize, @intCast(px));
+                        if (idx < self.bitmap.pixels.len) {
+                            self.bitmap.pixels[idx] = light2_color;
+                        }
+                    }
+                }
+            }
+        }
+
         // ===== STEP 6: Copy bitmap to screen =====
         self.drawBitmap();
 
@@ -434,18 +619,38 @@ pub const Renderer = struct {
             // Calculate FPS: frames * 1_000_000_000 ns/s / elapsed nanoseconds
             const elapsed_us = @divTrunc(elapsed_ns, 1000); // Convert to microseconds
             self.current_fps = @as(u32, @intCast((self.frame_count * 1_000_000) / @as(u32, @intCast(elapsed_us))));
+            
+            // Calculate average frame time BEFORE resetting frame_count
+            const frame_count_f = @as(f32, @floatFromInt(self.frame_count));
+            const elapsed_ms = @as(f32, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+            const avg_frame_time_ms = elapsed_ms / frame_count_f;
+            
             self.frame_count = 0;
             self.last_time = current_time;
 
             // Log rotation angle and shading information
             const rotation_degrees = self.rotation_angle * 180.0 / 3.14159265359;
+            const light_orbit_x_degrees = self.light_orbit_x * 180.0 / 3.14159265359;
+            const light_orbit_y_degrees = self.light_orbit_y * 180.0 / 3.14159265359;
             const sample_r = @as(u32, @intFromFloat(self.last_brightness_avg * 255));
             const sample_g = @as(u32, @intFromFloat(self.last_brightness_avg * 200));
             const sample_b = @as(u32, @intFromFloat(self.last_brightness_avg * 50));
 
-            std.debug.print("Rotation: {d:.2}° | Brightness: min={d:.2} avg={d:.2} max={d:.2} | Sample RGB: ({}, {}, {}) | FPS: {}\n", .{
-                rotation_degrees, self.last_brightness_min, self.last_brightness_avg, self.last_brightness_max, sample_r, sample_g, sample_b, self.current_fps
+            std.debug.print("Rotation: {d:.2}° | Light Orbit: X={d:.2}° Y={d:.2}° | Brightness: min={d:.2} avg={d:.2} max={d:.2} | Sample RGB: ({}, {}, {}) | FPS: {}\n", .{
+                rotation_degrees, light_orbit_x_degrees, light_orbit_y_degrees, self.last_brightness_min, self.last_brightness_avg, self.last_brightness_max, sample_r, sample_g, sample_b, self.current_fps
             });
+
+            // Update window title with FPS info
+            var title_buffer: [256]u8 = undefined;
+            const title = std.fmt.bufPrint(&title_buffer, "Zig 3D CPU Rasterizer | FPS: {} | Frame: {d:.2}ms", .{
+                self.current_fps,
+                avg_frame_time_ms
+            }) catch "Zig 3D CPU Rasterizer";
+
+            var title_wide: [256:0]u16 = undefined;
+            const title_len = std.unicode.utf8ToUtf16Le(&title_wide, title) catch 0;
+            title_wide[title_len] = 0;
+            _ = SetWindowTextW(self.hwnd, &title_wide);
         }
     }
 

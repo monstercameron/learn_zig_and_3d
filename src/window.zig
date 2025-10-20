@@ -103,6 +103,9 @@ extern "user32" fn DefWindowProcW(
 /// Get the application instance handle
 extern "kernel32" fn GetModuleHandleW(lpModuleName: ?[*:0]const u16) windows.HINSTANCE;
 
+/// Set the window title text
+extern "user32" fn SetWindowTextW(hWnd: windows.HWND, lpString: [*:0]const u16) i32;
+
 // Message constants
 const WM_KEYDOWN = 0x0100;
 const WM_KEYUP = 0x0101;
@@ -223,5 +226,13 @@ pub const Window = struct {
     /// Similar to destructor or cleanup() in JavaScript
     pub fn deinit(self: *Window) void {
         _ = DestroyWindow(self.hwnd);
+    }
+
+    /// Update the window title text
+    pub fn setTitle(self: *const Window, title: []const u8) void {
+        var title_wide: [512:0]u16 = undefined;
+        const title_len = std.unicode.utf8ToUtf16Le(&title_wide, title) catch return;
+        title_wide[title_len] = 0; // Null-terminate the string
+        _ = SetWindowTextW(self.hwnd, &title_wide);
     }
 };
