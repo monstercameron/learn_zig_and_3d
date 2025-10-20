@@ -129,17 +129,179 @@ pub const Renderer = struct {
         // Color format: 0xAARRGGBB (Alpha, Red, Green, Blue)
         // 0xFF0000FF = opaque (FF) + red (00) + green (00) + blue (FF)
         // In BGRA format (used by Windows): it becomes blue
-        const color: u32 = 0xFF0000FF;
+        const blue: u32 = 0xFF0000FF;
 
         // Loop through every pixel and set it to blue
         // Similar to JavaScript: pixels.fill(0xFF0000FF)
         for (self.bitmap.pixels) |*pixel| {
-            pixel.* = color;
+            pixel.* = blue;
         }
 
-        // ===== STEP 2: Copy bitmap to screen =====
+        // ===== STEP 2: Draw a red triangle =====
+        // Triangle vertices: top center, bottom-left, bottom-right
+        const width = self.bitmap.width;
+        const height = self.bitmap.height;
+        
+        // Triangle corners
+        const top_x = @divTrunc(width, 2);
+        const top_y = @divTrunc(height, 4);
+        const left_x = @divTrunc(width, 4);
+        const left_y = @divTrunc(3 * height, 4);
+        const right_x = @divTrunc(3 * width, 4);
+        const right_y = @divTrunc(3 * height, 4);
+        
+        // Draw the triangle by scanning horizontally
+        // This is similar to: canvas.fillStyle = "#FF0000"; canvas.fillPath()
+        self.drawTriangle(top_x, top_y, left_x, left_y, right_x, right_y);
+
+        // ===== STEP 3: Copy bitmap to screen =====
         // Now that we've filled the bitmap, draw it to the window
         self.drawBitmap();
+    }
+
+    /// Draw a filled triangle using scanline rasterization
+    /// This is a fundamental graphics algorithm
+    /// 
+    /// **How it works**:
+    /// - Sort vertices by Y coordinate (top to bottom)
+    /// - Draw upper triangle (flat bottom) from top to middle
+    /// - Draw lower triangle (flat top) from middle to bottom
+    /// - For each scanline, find exact left and right edges
+    /// 
+    /// **JavaScript Equivalent**:
+    /// ```javascript
+    /// function drawTriangle(x1, y1, x2, y2, x3, y3) {
+    ///   // Sort vertices by y
+    ///   const verts = sortByY([{x:x1,y:y1}, {x:x2,y:y2}, {x:x3,y:y3}]);
+    ///   const [top, mid, bot] = verts;
+    ///   
+    ///   // Upper half: edges are (top->mid) and (top->bot)
+    ///   for (let y = top.y; y <= mid.y; y++) {
+    ///     const xL = interpolateX(top, mid, y);
+    ///     const xR = interpolateX(top, bot, y);
+    ///     fillScanline(y, Math.min(xL,xR), Math.max(xL,xR));
+    ///   }
+    ///   // Lower half: edges are (mid->bot) and (top->bot)
+    ///   for (let y = mid.y; y <= bot.y; y++) {
+    ///     const xL = interpolateX(mid, bot, y);
+    ///     const xR = interpolateX(top, bot, y);
+    ///     fillScanline(y, Math.min(xL,xR), Math.max(xL,xR));
+    ///   }
+    /// }
+    /// ```
+    fn drawTriangle(self: *Renderer, x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32) void {
+        // Red color in BGRA format
+        const red: u32 = 0xFFFF0000;
+
+        // Sort vertices by Y coordinate (top to bottom)
+        var v = [3][2]i32{ .{ x1, y1 }, .{ x2, y2 }, .{ x3, y3 } };
+        
+        // Bubble sort by Y
+        if (v[0][1] > v[1][1]) {
+            const temp = v[0];
+            v[0] = v[1];
+            v[1] = temp;
+        }
+        if (v[1][1] > v[2][1]) {
+            const temp = v[1];
+            v[1] = v[2];
+            v[2] = temp;
+        }
+        if (v[0][1] > v[1][1]) {
+            const temp = v[0];
+            v[0] = v[1];
+            v[1] = temp;
+        }
+
+        const top_x = v[0][0];
+        const top_y = v[0][1];
+        const mid_x = v[1][0];
+        const mid_y = v[1][1];
+        const bot_x = v[2][0];
+        const bot_y = v[2][1];
+
+        // Draw upper half (from top to middle)
+        var y = top_y;
+        while (y <= mid_y) : (y += 1) {
+            if (y < 0 or y >= self.bitmap.height) continue;
+
+            const x_left_edge = self.lineIntersectionX(top_x, top_y, mid_x, mid_y, y);
+            const x_right_edge = self.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
+
+            var x_left = minI32(x_left_edge, x_right_edge);
+            var x_right = maxI32(x_left_edge, x_right_edge);
+
+            x_left = maxI32(x_left, 0);
+            x_right = minI32(x_right, self.bitmap.width - 1);
+
+            var x = x_left;
+            while (x <= x_right) : (x += 1) {
+                const pixel_index = @as(usize, @intCast(y * self.bitmap.width + x));
+                if (pixel_index < self.bitmap.pixels.len) {
+                    self.bitmap.pixels[pixel_index] = red;
+                }
+            }
+        }
+
+        // Draw lower half (from middle to bottom)
+        y = mid_y;
+        while (y <= bot_y) : (y += 1) {
+            if (y < 0 or y >= self.bitmap.height) continue;
+
+            const x_left_edge = self.lineIntersectionX(mid_x, mid_y, bot_x, bot_y, y);
+            const x_right_edge = self.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
+
+            var x_left = minI32(x_left_edge, x_right_edge);
+            var x_right = maxI32(x_left_edge, x_right_edge);
+
+            x_left = maxI32(x_left, 0);
+            x_right = minI32(x_right, self.bitmap.width - 1);
+
+            var x = x_left;
+            while (x <= x_right) : (x += 1) {
+                const pixel_index = @as(usize, @intCast(y * self.bitmap.width + x));
+                if (pixel_index < self.bitmap.pixels.len) {
+                    self.bitmap.pixels[pixel_index] = red;
+                }
+            }
+        }
+    }
+
+    /// Helper: return the minimum of two i32 values
+    fn minI32(a: i32, b: i32) i32 {
+        return if (a < b) a else b;
+    }
+
+    /// Helper: return the maximum of two i32 values
+    fn maxI32(a: i32, b: i32) i32 {
+        return if (a > b) a else b;
+    }
+
+    /// Calculate where a line segment intersects a horizontal scanline
+    /// Uses linear interpolation to find the x coordinate
+    /// 
+    /// **How it works**:
+    /// - Given a line from (x1,y1) to (x2,y2)
+    /// - Find where it crosses a horizontal line at height y
+    /// - Uses the formula: x = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+    /// 
+    /// This is linear interpolation (lerp) - fundamental in graphics
+    fn lineIntersectionX(_: *Renderer, x1: i32, y1: i32, x2: i32, y2: i32, y: i32) i32 {
+        // Avoid division by zero
+        if (y1 == y2) return x1;
+
+        // Linear interpolation formula
+        // (x - x1) / (x2 - x1) = (y - y1) / (y2 - y1)
+        // Solve for x: x = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+        
+        const dy = y2 - y1;
+        const dx = x2 - x1;
+        const t_num = y - y1;
+        
+        // Use integer arithmetic to avoid floating point
+        // Result: x1 + (t_num * dx) / dy
+        const result = x1 + @divTrunc(t_num * dx, dy);
+        return result;
     }
 
     /// Copy the bitmap to the window display
