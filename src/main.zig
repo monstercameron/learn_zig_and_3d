@@ -152,7 +152,11 @@ pub fn main() !void {
                 std.debug.print("Rendering frame {}\n", .{frame_count});
             }
             renderer.render3DMeshWithPump(&cube, MessagePump.pump) catch |err| {
-                std.debug.print("ERROR during rendering: {}\n", .{err});
+                if (err == error.RenderInterrupted) {
+                    std.debug.print("Render interrupted by shutdown request\n", .{});
+                } else {
+                    std.debug.print("ERROR during rendering: {}\n", .{err});
+                }
                 running = false;
                 break;
             };
@@ -161,8 +165,8 @@ pub fn main() !void {
             }
         }
 
-        // Small sleep to prevent 100% CPU usage when idle
-        Sleep(1);
+        // Yield to the OS without forcing a 1ms minimum delay.
+        Sleep(0);
     }
 
     std.debug.print("Exited main loop after {} frames\n", .{frame_count});

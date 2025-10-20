@@ -464,17 +464,8 @@ pub const Renderer = struct {
     /// Implements frame pacing to hit target FPS with nanosecond precision
     /// Target: 120 FPS = 8.333333ms per frame = 8_333_333ns per frame
     pub fn shouldRenderFrame(self: *Renderer) bool {
-        const current_time = std.time.nanoTimestamp();
-        const elapsed = current_time - self.last_frame_time;
-
-        // Use exact nanosecond timing for precise 120 FPS
-        // 1_000_000_000 ns / 120 fps = 8_333_333.333ns per frame
-        // No need for patterns - nanoseconds give us the fractional timing naturally
-        if (elapsed >= self.target_frame_time_ns) {
-            self.last_frame_time = current_time;
-            return true;
-        }
-        return false;
+        _ = self;
+        return true;
     }
 
     /// Render a 3D mesh with rotation and projection
@@ -741,6 +732,10 @@ pub const Renderer = struct {
             buf.clear();
         }
 
+        if (pump) |pump_fn| {
+            if (!pump_fn(self)) return error.RenderInterrupted;
+        }
+
         // Bin triangles to tiles
         const triangle_indices = try self.allocator.alloc([3]usize, mesh.triangles.len);
         defer self.allocator.free(triangle_indices);
@@ -781,6 +776,14 @@ pub const Renderer = struct {
                 std.debug.print("Dispatching {} tile jobs to workers...\n", .{grid.tiles.len});
             }
             for (grid.tiles, 0..) |*tile, tile_idx| {
+                if (pump) |pump_fn| {
+                    if ((tile_idx & 7) == 0 and !pump_fn(self)) {
+                        self.previous_frame_jobs = jobs;
+                        self.previous_frame_tile_jobs = tile_jobs;
+                        return error.RenderInterrupted;
+                    }
+                }
+
                 const tile_buffer = &tile_buffers[tile_idx];
                 const tri_list = &tile_lists[tile_idx];
 
@@ -811,19 +814,47 @@ pub const Renderer = struct {
                 }
             }
 
-            // Wait for all tiles to complete
+            // Wait for all tiles to complete with cooperative message pumping
             if (should_log_debug) {
                 std.debug.print("Waiting for {} jobs to complete...\n", .{jobs.len});
             }
-            for (jobs, 0..) |*job, i| {
-                if (should_log_debug and i < 3) {
-                    std.debug.print("Waiting for job {}... (complete={})\n", .{ i, job.isComplete() });
+
+            const job_done = try self.allocator.alloc(bool, jobs.len);
+            defer self.allocator.free(job_done);
+            @memset(job_done, false);
+
+            var remaining = jobs.len;
+            while (remaining > 0) {
+                var progress = false;
+                for (jobs, 0..) |*job, idx| {
+                    if (job_done[idx]) continue;
+                    if (job.isComplete()) {
+                        job_done[idx] = true;
+                        remaining -= 1;
+                        progress = true;
+                        if (should_log_debug and idx < 3) {
+                            std.debug.print("Job {} completed\n", .{idx});
+                        }
+                    } else if (should_log_debug and idx < 3) {
+                        std.debug.print("Waiting for job {}... (complete=false)\n", .{idx});
+                    }
                 }
-                job.wait();
-                if (should_log_debug and i < 3) {
-                    std.debug.print("Job {} completed\n", .{i});
+
+                if (remaining == 0) break;
+
+                if (pump) |pump_fn| {
+                    if (!pump_fn(self)) {
+                        self.previous_frame_jobs = jobs;
+                        self.previous_frame_tile_jobs = tile_jobs;
+                        return error.RenderInterrupted;
+                    }
+                }
+
+                if (!progress) {
+                    std.Thread.yield() catch {};
                 }
             }
+
             if (should_log_debug) {
                 std.debug.print("All jobs complete\n", .{});
             }
@@ -840,6 +871,10 @@ pub const Renderer = struct {
             return;
         }
 
+        if (pump) |pump_fn| {
+            if (!pump_fn(self)) return error.RenderInterrupted;
+        }
+
         // Composite all tiles to screen after parallel rendering
         for (grid.tiles, 0..) |*tile, tile_idx| {
             const tile_buffer = &tile_buffers[tile_idx];
@@ -848,7 +883,7 @@ pub const Renderer = struct {
 
         // Process messages if pump callback provided
         if (pump) |pump_fn| {
-            _ = pump_fn(self);
+            if (!pump_fn(self)) return error.RenderInterrupted;
         }
     }
 

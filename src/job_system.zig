@@ -247,12 +247,10 @@ pub const JobSystem = struct {
 
     /// Initialize job system with N-1 worker threads (leave 1 core for main thread)
     pub fn init(allocator: std.mem.Allocator) !*JobSystem {
-        const cpu_count = std.Thread.getCpuCount() catch 4;
-        // TEMPORARY: Force single worker for testing
-        const worker_count: u32 = 1;
-        // const worker_count = if (cpu_count > 1) @as(u32, @intCast(cpu_count - 1)) else 1;
+    const cpu_count = std.Thread.getCpuCount() catch 4;
+    const worker_count: u32 = if (cpu_count > 1) @as(u32, @intCast(cpu_count - 1)) else 1;
 
-        std.debug.print("Job System: Detected {} CPUs, creating {} worker thread(s) [TESTING MODE]\n", .{ cpu_count, worker_count });
+    std.debug.print("Job System: Detected {} CPUs, creating {} worker thread(s)\n", .{ cpu_count, worker_count });
 
         const workers = try allocator.alloc(WorkerThread, worker_count);
         errdefer allocator.free(workers);

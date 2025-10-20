@@ -129,8 +129,8 @@ export fn WindowProc(
     return switch (msg) {
         // User clicked the close button or Alt+F4
         WM_CLOSE => {
-            // Post a quit message to exit gracefully
-            PostQuitMessage(0);
+            // Destroy the window immediately so it disappears on the first click
+            _ = DestroyWindow(hwnd);
             return 0;
         },
         // Window is being destroyed
