@@ -60,6 +60,9 @@ extern "user32" fn DispatchMessageW(lpMsg: *const MSG) windows.LRESULT;
 // PeekMessageW constants
 const PM_REMOVE = 1;
 
+// Windows Sleep function for frame pacing
+extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
+
 // Import modules - each handles one specific concern
 const Window = @import("window.zig").Window;
 const Renderer = @import("renderer.zig").Renderer;
@@ -89,10 +92,9 @@ pub fn main() !void {
     defer cube.deinit();
 
     // ========== EVENT LOOP PHASE ==========
-    // Continuous rendering loop - render as fast as CPU can manage
-    // Use PeekMessageW instead of GetMessageW to avoid blocking
-    // PeekMessageW returns immediately whether there's a message or not
-    // This allows us to render continuously between messages
+    // Continuous rendering loop with frame rate limiting
+    // Use PeekMessageW for non-blocking message processing
+    // Frame rate limited to 120 FPS with proper pacing
     var msg: MSG = undefined;
     var running = true;
     while (running) {
@@ -110,7 +112,11 @@ pub fn main() !void {
             _ = DispatchMessageW(&msg);
         }
 
-        // Render the 3D cube on every iteration (as fast as CPU allows)
-        try renderer.render3DMesh(&cube);
+        // Check if it's time to render a new frame (frame rate limiting)
+        if (renderer.shouldRenderFrame()) {
+            try renderer.render3DMesh(&cube);
+        }
+        // Note: No sleep - let it spin tight on frame checking
+        // This gives smoother frame pacing than OS sleep granularity
     }
 }

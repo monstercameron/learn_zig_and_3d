@@ -86,6 +86,9 @@ extern "gdi32" fn DeleteDC(hdc: windows.HDC) bool;
 /// Set window text (title)
 extern "user32" fn SetWindowTextW(hWnd: windows.HWND, lpString: [*:0]const u16) bool;
 
+/// Sleep for a given number of milliseconds
+extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
+
 // ========== MODULE IMPORTS ==========
 /// Import the Bitmap module for pixel buffer management
 const Bitmap = @import("bitmap.zig").Bitmap;
@@ -101,7 +104,9 @@ pub const Renderer = struct {
     rotation_angle: f32, // Current rotation angle for animation
     frame_count: u32, // Number of frames rendered
     last_time: i64, // Last time we calculated FPS (in milliseconds)
+    last_frame_time: i64, // Last time a frame was rendered (for frame pacing)
     current_fps: u32, // Current FPS counter
+    target_frame_time_ms: i64, // Target milliseconds per frame (1000/120 = 8.33ms)
 
     /// Initialize the renderer for a window
     /// Similar to: canvas = document.createElement("canvas"); ctx = canvas.getContext("2d")
@@ -116,6 +121,7 @@ pub const Renderer = struct {
         // This allocates a pixel buffer (width × height × 4 bytes)
         const bitmap = try Bitmap.init(width, height);
 
+        const current_time = std.time.milliTimestamp();
         return Renderer{
             .hwnd = hwnd,
             .bitmap = bitmap,
@@ -123,8 +129,10 @@ pub const Renderer = struct {
             .allocator = allocator,
             .rotation_angle = 0,
             .frame_count = 0,
-            .last_time = std.time.milliTimestamp(),
+            .last_time = current_time,
+            .last_frame_time = current_time,
             .current_fps = 0,
+            .target_frame_time_ms = 8, // 1000ms / 120fps = 8.33ms, round to 8
         };
     }
 
@@ -135,6 +143,21 @@ pub const Renderer = struct {
             _ = ReleaseDC(self.hwnd, hdc);
         }
         self.bitmap.deinit();
+    }
+
+    /// Wait until it's time to render the next frame (frame rate limiting)
+    /// Implements frame pacing to hit target FPS
+    /// Returns true if frame should be rendered, false if we should skip it
+    pub fn shouldRenderFrame(self: *Renderer) bool {
+        const current_time = std.time.milliTimestamp();
+        const elapsed_since_last_frame = current_time - self.last_frame_time;
+
+        // Only render if enough time has passed for the target frame rate
+        if (elapsed_since_last_frame >= self.target_frame_time_ms) {
+            self.last_frame_time = current_time;
+            return true;
+        }
+        return false;
     }
 
     /// Render a 3D mesh with rotation and projection
