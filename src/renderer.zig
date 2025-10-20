@@ -125,19 +125,19 @@ pub const Renderer = struct {
     /// Render initial "Hello World" - fills screen with blue color
     /// This demonstrates both pixel manipulation and blitting to screen
     pub fn renderHelloWorld(self: *Renderer) void {
-        // ===== STEP 1: Fill all pixels with blue color =====
+        // ===== STEP 1: Fill all pixels with black color =====
         // Color format: 0xAARRGGBB (Alpha, Red, Green, Blue)
-        // 0xFF0000FF = opaque (FF) + red (00) + green (00) + blue (FF)
-        // In BGRA format (used by Windows): it becomes blue
-        const blue: u32 = 0xFF0000FF;
+        // 0xFF000000 = opaque (FF) + no red (00) + no green (00) + no blue (00) = black
+        // In BGRA format (used by Windows): it becomes black
+        const black: u32 = 0xFF000000;
 
-        // Loop through every pixel and set it to blue
-        // Similar to JavaScript: pixels.fill(0xFF0000FF)
+        // Loop through every pixel and set it to black
+        // Similar to JavaScript: pixels.fill(0xFF000000)
         for (self.bitmap.pixels) |*pixel| {
-            pixel.* = blue;
+            pixel.* = black;
         }
 
-        // ===== STEP 2: Draw a red triangle =====
+        // ===== STEP 2: Draw a red triangle wireframe =====
         // Triangle vertices: top center, bottom-left, bottom-right
         const width = self.bitmap.width;
         const height = self.bitmap.height;
@@ -150,13 +150,82 @@ pub const Renderer = struct {
         const right_x = @divTrunc(3 * width, 4);
         const right_y = @divTrunc(3 * height, 4);
         
-        // Draw the triangle by scanning horizontally
-        // This is similar to: canvas.fillStyle = "#FF0000"; canvas.fillPath()
-        self.drawTriangle(top_x, top_y, left_x, left_y, right_x, right_y);
+        // Draw the three edges as lines
+        // This is similar to: canvas.strokeStyle = "#FF0000"; canvas.strokeRect()
+        self.drawLine(top_x, top_y, left_x, left_y);    // Top-left edge
+        self.drawLine(left_x, left_y, right_x, right_y);  // Bottom edge
+        self.drawLine(right_x, right_y, top_x, top_y);   // Right edge
 
         // ===== STEP 3: Copy bitmap to screen =====
         // Now that we've filled the bitmap, draw it to the window
         self.drawBitmap();
+    }
+
+    /// Draw a line between two points using Bresenham's line algorithm
+    /// This is the fundamental algorithm for drawing lines on a raster display
+    /// 
+    /// **How it works**:
+    /// - Determine the major axis (dx vs dy)
+    /// - Calculate the error term that determines when to step in the minor axis
+    /// - Step along the major axis, using the error term to decide minor axis steps
+    /// 
+    /// **JavaScript Equivalent**:
+    /// ```javascript
+    /// function drawLine(x0, y0, x1, y1) {
+    ///   const dx = Math.abs(x1 - x0);
+    ///   const dy = Math.abs(y1 - y0);
+    ///   let err = dx - dy;
+    ///   let x = x0, y = y0;
+    ///   const sx = x0 < x1 ? 1 : -1;
+    ///   const sy = y0 < y1 ? 1 : -1;
+    ///   
+    ///   while (true) {
+    ///     setPixel(x, y, RED);
+    ///     if (x === x1 && y === y1) break;
+    ///     const e2 = 2 * err;
+    ///     if (e2 > -dy) { err -= dy; x += sx; }
+    ///     if (e2 <  dx) { err += dx; y += sy; }
+    ///   }
+    /// }
+    /// ```
+    fn drawLine(self: *Renderer, x0: i32, y0: i32, x1: i32, y1: i32) void {
+        // White color in BGRA format: 0xFFFFFFFF
+        const white: u32 = 0xFFFFFFFF;
+
+        var x = x0;
+        var y = y0;
+        
+        const dx = if (x0 < x1) x1 - x0 else x0 - x1;
+        const dy = if (y0 < y1) y1 - y0 else y0 - y1;
+        
+        const sx = if (x0 < x1) @as(i32, 1) else @as(i32, -1);
+        const sy = if (y0 < y1) @as(i32, 1) else @as(i32, -1);
+        
+        var err = dx - dy;
+
+        while (true) {
+            // Plot current pixel if within bounds
+            if (x >= 0 and x < self.bitmap.width and y >= 0 and y < self.bitmap.height) {
+                const pixel_index = @as(usize, @intCast(y * self.bitmap.width + x));
+                if (pixel_index < self.bitmap.pixels.len) {
+                    self.bitmap.pixels[pixel_index] = white;
+                }
+            }
+
+            // Check if we've reached the endpoint
+            if (x == x1 and y == y1) break;
+
+            // Bresenham error term stepping
+            const e2 = 2 * err;
+            if (e2 > -dy) {
+                err -= dy;
+                x += sx;
+            }
+            if (e2 < dx) {
+                err += dx;
+                y += sy;
+            }
+        }
     }
 
     /// Draw a filled triangle using scanline rasterization
