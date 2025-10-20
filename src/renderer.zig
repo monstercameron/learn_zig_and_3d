@@ -100,6 +100,7 @@ pub const Renderer = struct {
     hwnd: windows.HWND, // Window handle - where we'll draw
     bitmap: Bitmap, // The pixel buffer we draw to
     hdc: ?windows.HDC, // Device context - the interface for drawing to the window
+    hdc_mem: ?windows.HDC, // Cached memory device context (for faster blitting)
     allocator: std.mem.Allocator, // Memory allocator
     rotation_angle: f32, // Current rotation angle for animation
     frame_count: u32, // Number of frames rendered
@@ -117,7 +118,15 @@ pub const Renderer = struct {
         const hdc = GetDC(hwnd);
         if (hdc == null) return error.DCNotFound;
 
-        // ===== STEP 2: Create a bitmap =====
+        // ===== STEP 2: Create cached memory device context =====
+        // Create this once and reuse it for all frames (much faster than recreating every frame)
+        const hdc_mem = CreateCompatibleDC(hdc);
+        if (hdc_mem == null) {
+            _ = ReleaseDC(hwnd, hdc.?);
+            return error.MemoryDCCreationFailed;
+        }
+
+        // ===== STEP 3: Create a bitmap =====
         // This allocates a pixel buffer (width × height × 4 bytes)
         const bitmap = try Bitmap.init(width, height);
 
@@ -126,6 +135,7 @@ pub const Renderer = struct {
             .hwnd = hwnd,
             .bitmap = bitmap,
             .hdc = hdc,
+            .hdc_mem = hdc_mem,
             .allocator = allocator,
             .rotation_angle = 0,
             .frame_count = 0,
@@ -139,6 +149,9 @@ pub const Renderer = struct {
     /// Clean up renderer resources
     /// Called with 'defer renderer.deinit()' in main.zig
     pub fn deinit(self: *Renderer) void {
+        if (self.hdc_mem) |hdc_mem| {
+            _ = DeleteDC(hdc_mem);
+        }
         if (self.hdc) |hdc| {
             _ = ReleaseDC(self.hwnd, hdc);
         }
@@ -171,20 +184,17 @@ pub const Renderer = struct {
     /// 5. Draw wireframe on top
     pub fn render3DMesh(self: *Renderer, mesh: *const Mesh) !void {
         // ===== STEP 1: Fill all pixels with black color =====
+        // Use @memset for much faster clearing (CPU-optimized bulk fill)
         const black: u32 = 0xFF000000;
-        for (self.bitmap.pixels) |*pixel| {
-            pixel.* = black;
-        }
+        @memset(self.bitmap.pixels, black);
 
         // ===== STEP 2: Create transformation matrices =====
-        // Rotation matrices for X, Y, Z axes
+        // Simple rotation: rotate slowly on X and Y axes only
         const rot_x = math.Mat4.rotateX(self.rotation_angle);
-        const rot_y = math.Mat4.rotateY(self.rotation_angle * 1.5);
-        const rot_z = math.Mat4.rotateZ(self.rotation_angle * 0.7);
+        const rot_y = math.Mat4.rotateY(self.rotation_angle);
 
-        // Combine rotations: total = Z * Y * X
-        const rot_xy = math.Mat4.multiply(rot_y, rot_x);
-        const transform = math.Mat4.multiply(rot_z, rot_xy);
+        // Combine rotations: total = Y * X
+        const transform = math.Mat4.multiply(rot_y, rot_x);
 
         // ===== STEP 3: Transform and project vertices =====
         const projected = try self.allocator.alloc([2]i32, mesh.vertices.len);
@@ -219,14 +229,49 @@ pub const Renderer = struct {
         }
 
         // ===== STEP 4: Draw filled triangles (flat shaded) =====
-        // Use a soft green color for the faces
-        const face_color: u32 = 0xFF00AA00;
-        for (mesh.triangles) |tri| {
+        // Use flat shading based on face normals and light direction
+        const light_dir = math.Vec3.new(1, 1, 1).normalize(); // Light from top-right-front
+        const camera_dir = math.Vec3.new(0, 0, 1).normalize(); // Camera looks down +Z axis
+        
+        for (mesh.triangles, 0..) |tri, tri_idx| {
             const p0 = projected[tri.v0];
             const p1 = projected[tri.v1];
             const p2 = projected[tri.v2];
 
-            self.drawFilledTriangle(p0[0], p0[1], p1[0], p1[1], p2[0], p2[1], face_color);
+            // Check if triangle is completely off-screen
+            if (p0[0] < -1000 or p1[0] < -1000 or p2[0] < -1000) {
+                continue;
+            }
+
+            // Transform the face normal using ONLY rotation (w=0 prevents translation)
+            // We manually multiply by rotation part of matrix
+            const normal = mesh.normals[tri_idx];
+            const normal_transformed = math.Vec3.new(
+                transform.data[0] * normal.x + transform.data[1] * normal.y + transform.data[2] * normal.z,
+                transform.data[4] * normal.x + transform.data[5] * normal.y + transform.data[6] * normal.z,
+                transform.data[8] * normal.x + transform.data[9] * normal.y + transform.data[10] * normal.z,
+            );
+            
+            // Back-face culling: skip triangles facing away from camera
+            // Check if normal is pointing toward camera (positive dot product)
+            const camera_facing = normal_transformed.dot(camera_dir);
+            if (camera_facing < 0.01) {
+                continue;
+            }
+            
+            // Calculate lighting: dot product of normal and light direction
+            var brightness = normal_transformed.dot(light_dir);
+            
+            // Clamp to 0-1 range (minimum ambient light so dark sides aren't black)
+            if (brightness < 0.2) brightness = 0.2;
+            if (brightness > 1) brightness = 1;
+            
+            // Convert brightness to color (0 = dark green, 1 = bright green)
+            const r = @as(u32, @intFromFloat(brightness * 255)) << 16;
+            const g = @as(u32, @intFromFloat(brightness * 170)) << 8;
+            const shaded_color = 0xFF000000 | r | g;
+
+            self.drawFilledTriangle(p0[0], p0[1], p1[0], p1[1], p2[0], p2[1], shaded_color);
         }
 
         // ===== STEP 5: Draw wireframe edges on top (white lines) =====
@@ -275,7 +320,7 @@ pub const Renderer = struct {
         }
 
         // ===== STEP 7: Update rotation for next frame =====
-        self.rotation_angle += 0.02;
+        self.rotation_angle += 0.005; // Slow rotation: 0.005 radians per frame
     }
 
     /// Render initial "Hello World" - fills screen with black color
@@ -390,8 +435,21 @@ pub const Renderer = struct {
     /// Draw a filled triangle using scanline rasterization
     /// This is a fundamental graphics algorithm
     fn drawFilledTriangle(self: *Renderer, x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32) void {
+        // Clamp vertices to screen bounds + margin for partial triangles
+        const margin = 50;
+        const x1_clamped = std.math.clamp(x1, -margin, self.bitmap.width + margin);
+        const y1_clamped = std.math.clamp(y1, -margin, self.bitmap.height + margin);
+        const x2_clamped = std.math.clamp(x2, -margin, self.bitmap.width + margin);
+        const y2_clamped = std.math.clamp(y2, -margin, self.bitmap.height + margin);
+        const x3_clamped = std.math.clamp(x3, -margin, self.bitmap.width + margin);
+        const y3_clamped = std.math.clamp(y3, -margin, self.bitmap.height + margin);
+
         // Sort vertices by Y coordinate (top to bottom)
-        var v = [3][2]i32{ .{ x1, y1 }, .{ x2, y2 }, .{ x3, y3 } };
+        var v = [3][2]i32{ 
+            .{ x1_clamped, y1_clamped }, 
+            .{ x2_clamped, y2_clamped }, 
+            .{ x3_clamped, y3_clamped } 
+        };
         
         // Bubble sort by Y
         if (v[0][1] > v[1][1]) {
@@ -417,48 +475,59 @@ pub const Renderer = struct {
         const bot_x = v[2][0];
         const bot_y = v[2][1];
 
+        // Skip degenerate triangles (all points on same line)
+        if (top_y == mid_y and mid_y == bot_y) return;
+
         // Draw upper half (from top to middle)
-        var y = top_y;
-        while (y <= mid_y) : (y += 1) {
-            if (y < 0 or y >= self.bitmap.height) continue;
+        if (top_y < mid_y) {
+            var y = top_y;
+            while (y <= mid_y) : (y += 1) {
+                if (y >= 0 and y < self.bitmap.height) {
+                    const x_left_edge = self.lineIntersectionX(top_x, top_y, mid_x, mid_y, y);
+                    const x_right_edge = self.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
 
-            const x_left_edge = self.lineIntersectionX(top_x, top_y, mid_x, mid_y, y);
-            const x_right_edge = self.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
+                    var x_left = minI32(x_left_edge, x_right_edge);
+                    var x_right = maxI32(x_left_edge, x_right_edge);
 
-            var x_left = minI32(x_left_edge, x_right_edge);
-            var x_right = maxI32(x_left_edge, x_right_edge);
+                    x_left = maxI32(x_left, 0);
+                    x_right = minI32(x_right, self.bitmap.width - 1);
 
-            x_left = maxI32(x_left, 0);
-            x_right = minI32(x_right, self.bitmap.width - 1);
-
-            var x = x_left;
-            while (x <= x_right) : (x += 1) {
-                const pixel_index = @as(usize, @intCast(y * self.bitmap.width + x));
-                if (pixel_index < self.bitmap.pixels.len) {
-                    self.bitmap.pixels[pixel_index] = color;
+                    if (x_left <= x_right) {
+                        var x = x_left;
+                        while (x <= x_right) : (x += 1) {
+                            const pixel_index = @as(usize, @intCast(y * self.bitmap.width + x));
+                            if (pixel_index < self.bitmap.pixels.len) {
+                                self.bitmap.pixels[pixel_index] = color;
+                            }
+                        }
+                    }
                 }
             }
         }
 
         // Draw lower half (from middle to bottom)
-        y = mid_y;
-        while (y <= bot_y) : (y += 1) {
-            if (y < 0 or y >= self.bitmap.height) continue;
+        if (mid_y < bot_y) {
+            var y = mid_y;
+            while (y <= bot_y) : (y += 1) {
+                if (y >= 0 and y < self.bitmap.height) {
+                    const x_left_edge = self.lineIntersectionX(mid_x, mid_y, bot_x, bot_y, y);
+                    const x_right_edge = self.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
 
-            const x_left_edge = self.lineIntersectionX(mid_x, mid_y, bot_x, bot_y, y);
-            const x_right_edge = self.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
+                    var x_left = minI32(x_left_edge, x_right_edge);
+                    var x_right = maxI32(x_left_edge, x_right_edge);
 
-            var x_left = minI32(x_left_edge, x_right_edge);
-            var x_right = maxI32(x_left_edge, x_right_edge);
+                    x_left = maxI32(x_left, 0);
+                    x_right = minI32(x_right, self.bitmap.width - 1);
 
-            x_left = maxI32(x_left, 0);
-            x_right = minI32(x_right, self.bitmap.width - 1);
-
-            var x = x_left;
-            while (x <= x_right) : (x += 1) {
-                const pixel_index = @as(usize, @intCast(y * self.bitmap.width + x));
-                if (pixel_index < self.bitmap.pixels.len) {
-                    self.bitmap.pixels[pixel_index] = color;
+                    if (x_left <= x_right) {
+                        var x = x_left;
+                        while (x <= x_right) : (x += 1) {
+                            const pixel_index = @as(usize, @intCast(y * self.bitmap.width + x));
+                            if (pixel_index < self.bitmap.pixels.len) {
+                                self.bitmap.pixels[pixel_index] = color;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -607,42 +676,34 @@ pub const Renderer = struct {
         return result;
     }
 
-    /// Copy the bitmap to the window display
+    /// Copy the bitmap to the window display using cached memory DC
     /// This is the core rendering operation: get pixels on screen
     /// Similar to: ctx.putImageData() in JavaScript
     fn drawBitmap(self: *Renderer) void {
         if (self.hdc) |hdc| {
-            // ===== STEP 1: Create a memory DC =====
-            // Create an off-screen drawing surface compatible with the window DC
-            // This is necessary because SelectObject needs a DC to work with
-            const hdc_mem = CreateCompatibleDC(hdc);
-            if (hdc_mem == null) return;
-            const hdc_mem_unwrapped = hdc_mem.?;
+            if (self.hdc_mem) |hdc_mem| {
+                // ===== Select our bitmap into the memory DC =====
+                // Tell Windows: "I want to draw from THIS bitmap"
+                // SelectObject returns the old object (so we can restore it)
+                const old_bitmap = SelectObject(hdc_mem, self.bitmap.hbitmap);
+                defer _ = SelectObject(hdc_mem, old_bitmap);
 
-            // Use 'defer' to ensure cleanup even if we return early
-            // This is like try/finally in JavaScript: cleanup always happens
-            defer _ = DeleteDC(hdc_mem_unwrapped);
-
-            // ===== STEP 2: Select our bitmap into the memory DC =====
-            // Tell Windows: "I want to draw from THIS bitmap"
-            // SelectObject returns the old object (so we can restore it)
-            const old_bitmap = SelectObject(hdc_mem_unwrapped, self.bitmap.hbitmap);
-            defer _ = SelectObject(hdc_mem_unwrapped, old_bitmap);
-
-            // ===== STEP 3: Copy bitmap to window (BitBlt = Bit Block Transfer) =====
-            // This is the fundamental pixel-copying operation
-            // Copy a rectangle of pixels from source (memory DC) to destination (window DC)
-            // Like: ctx.drawImage(sourceCanvas, destX, destY, width, height)
-            _ = BitBlt(hdc, // Destination: window display
-                0, // Destination X position
-                0, // Destination Y position
-                self.bitmap.width, // Source width
-                self.bitmap.height, // Source height
-                hdc_mem_unwrapped, // Source: memory DC containing our bitmap
-                0, // Source X position
-                0, // Source Y position
-                SRCCOPY // Raster operation: direct copy (no blending)
-            );
+                // ===== Copy bitmap to window (BitBlt = Bit Block Transfer) =====
+                // This is the fundamental pixel-copying operation
+                // Copy a rectangle of pixels from source (memory DC) to destination (window DC)
+                // Using cached memory DC avoids the overhead of creating/destroying it every frame
+                // Like: ctx.drawImage(sourceCanvas, destX, destY, width, height)
+                _ = BitBlt(hdc, // Destination: window display
+                    0, // Destination X position
+                    0, // Destination Y position
+                    self.bitmap.width, // Source width
+                    self.bitmap.height, // Source height
+                    hdc_mem, // Source: memory DC containing our bitmap
+                    0, // Source X position
+                    0, // Source Y position
+                    SRCCOPY // Raster operation: direct copy (no blending)
+                );
+            }
         }
     }
 };

@@ -44,6 +44,7 @@ pub const Triangle = struct {
 pub const Mesh = struct {
     vertices: []Vec3,
     triangles: []Triangle,
+    normals: []Vec3, // Face normals (one per triangle)
     allocator: std.mem.Allocator,
 
     /// Initialize an empty mesh
@@ -51,8 +52,26 @@ pub const Mesh = struct {
         return Mesh{
             .vertices = &[_]Vec3{},
             .triangles = &[_]Triangle{},
+            .normals = &[_]Vec3{},
             .allocator = allocator,
         };
+    }
+
+    /// Calculate face normals for all triangles
+    fn calculateNormals(self: *Mesh) void {
+        for (self.triangles, 0..) |tri, i| {
+            const v0 = self.vertices[tri.v0];
+            const v1 = self.vertices[tri.v1];
+            const v2 = self.vertices[tri.v2];
+
+            // Calculate two edge vectors
+            const edge1 = Vec3.sub(v1, v0);
+            const edge2 = Vec3.sub(v2, v0);
+
+            // Normal is the cross product of edges
+            const normal = Vec3.cross(edge1, edge2);
+            self.normals[i] = normal.normalize();
+        }
     }
 
     /// Create a cube mesh (8 vertices, 12 triangles = 2 per face)
@@ -81,40 +100,53 @@ pub const Mesh = struct {
 
         const triangles = try allocator.alloc(Triangle, 12);
 
-        // Back face (z = -1): vertices 0, 1, 2, 3
-        triangles[0] = Triangle.new(0, 1, 2);
-        triangles[1] = Triangle.new(0, 2, 3);
+        // Back face (z = -1): should point outward (negative Z)
+        // Viewed from outside (negative Z), counter-clockwise: 3->2->1->0
+        triangles[0] = Triangle.new(3, 2, 1);
+        triangles[1] = Triangle.new(3, 1, 0);
 
-        // Front face (z = 1): vertices 4, 5, 6, 7
-        triangles[2] = Triangle.new(5, 4, 7);
-        triangles[3] = Triangle.new(5, 7, 6);
+        // Front face (z = 1): should point outward (positive Z)
+        // Viewed from outside (positive Z), counter-clockwise: 4->5->6->7
+        triangles[2] = Triangle.new(4, 5, 6);
+        triangles[3] = Triangle.new(4, 6, 7);
 
-        // Left face (x = -1): vertices 0, 3, 7, 4
-        triangles[4] = Triangle.new(3, 7, 4);
-        triangles[5] = Triangle.new(3, 4, 0);
+        // Left face (x = -1): should point outward (negative X)
+        // Viewed from outside (negative X), counter-clockwise: 0->3->7->4
+        triangles[4] = Triangle.new(0, 3, 7);
+        triangles[5] = Triangle.new(0, 7, 4);
 
-        // Right face (x = 1): vertices 1, 5, 6, 2
-        triangles[6] = Triangle.new(1, 5, 6);
-        triangles[7] = Triangle.new(1, 6, 2);
+        // Right face (x = 1): should point outward (positive X)
+        // Viewed from outside (positive X), counter-clockwise: 2->6->5->1
+        triangles[6] = Triangle.new(2, 6, 5);
+        triangles[7] = Triangle.new(2, 5, 1);
 
-        // Bottom face (y = -1): vertices 0, 4, 5, 1
-        triangles[8] = Triangle.new(4, 5, 1);
-        triangles[9] = Triangle.new(4, 1, 0);
+        // Bottom face (y = -1): should point outward (negative Y)
+        // Viewed from outside (negative Y), counter-clockwise: 0->1->5->4
+        triangles[8] = Triangle.new(0, 1, 5);
+        triangles[9] = Triangle.new(0, 5, 4);
 
-        // Top face (y = 1): vertices 3, 2, 6, 7
-        triangles[10] = Triangle.new(3, 6, 2);
-        triangles[11] = Triangle.new(3, 7, 6);
+        // Top face (y = 1): should point outward (positive Y)
+        // Viewed from outside (positive Y), counter-clockwise: 7->6->2->3
+        triangles[10] = Triangle.new(7, 6, 2);
+        triangles[11] = Triangle.new(7, 2, 3);
 
-        return Mesh{
+        var mesh = Mesh{
             .vertices = vertices,
             .triangles = triangles,
+            .normals = try allocator.alloc(Vec3, 12),
             .allocator = allocator,
         };
+
+        // Calculate all face normals
+        mesh.calculateNormals();
+
+        return mesh;
     }
 
     /// Free allocated memory
     pub fn deinit(self: *Mesh) void {
         self.allocator.free(self.vertices);
         self.allocator.free(self.triangles);
+        self.allocator.free(self.normals);
     }
 };
