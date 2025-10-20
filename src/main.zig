@@ -92,9 +92,9 @@ pub fn main() !void {
     var renderer = try Renderer.init(window.hwnd, 800, 600, allocator);
     defer renderer.deinit();
 
-    // Create a single rotating triangle mesh
-    var triangle = try Mesh.triangle(allocator);
-    defer triangle.deinit();
+    // Create a cube mesh with backface culling
+    var cube = try Mesh.cube(allocator);
+    defer cube.deinit();
 
     // ========== EVENT LOOP PHASE ==========
     // Continuous rendering loop with frame rate limiting
@@ -128,7 +128,7 @@ pub fn main() !void {
 
         // Check if it's time to render a new frame (frame rate limiting)
         if (renderer.shouldRenderFrame()) {
-            try renderer.render3DMesh(&triangle);
+            try renderer.render3DMesh(&cube);
         }
         // Note: No sleep - let it spin tight on frame checking
         // This gives smoother frame pacing than OS sleep granularity

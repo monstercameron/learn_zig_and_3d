@@ -111,35 +111,35 @@ pub const Mesh = struct {
 
         const triangles = try allocator.alloc(Triangle, 12);
 
-        // Back face (z = -1): should point outward (negative Z)
-        // Viewed from outside (negative Z), counter-clockwise: 3->2->1->0
-        triangles[0] = Triangle.new(3, 2, 1);
-        triangles[1] = Triangle.new(3, 1, 0);
+        // Back face (z = -1): should point outward (toward camera from -Z)
+        // Viewed from camera (+Z), counter-clockwise: 0->3->2->1
+        triangles[0] = Triangle.new(0, 3, 2);
+        triangles[1] = Triangle.new(0, 2, 1);
 
-        // Front face (z = 1): should point outward (positive Z)
-        // Viewed from outside (positive Z), counter-clockwise: 4->5->6->7
+        // Front face (z = 1): should point outward (toward camera from +Z)
+        // Viewed from camera (+Z), counter-clockwise: 4->5->6->7
         triangles[2] = Triangle.new(4, 5, 6);
         triangles[3] = Triangle.new(4, 6, 7);
 
-        // Left face (x = -1): should point outward (negative X)
-        // Viewed from outside (negative X), counter-clockwise: 0->3->7->4
-        triangles[4] = Triangle.new(0, 3, 7);
-        triangles[5] = Triangle.new(0, 7, 4);
+        // Left face (x = -1): should point outward (toward camera from -X)
+        // Viewed from camera (+Z), counter-clockwise: 0->4->7->3
+        triangles[4] = Triangle.new(0, 4, 7);
+        triangles[5] = Triangle.new(0, 7, 3);
 
-        // Right face (x = 1): should point outward (positive X)
-        // Viewed from outside (positive X), counter-clockwise: 2->6->5->1
-        triangles[6] = Triangle.new(2, 6, 5);
-        triangles[7] = Triangle.new(2, 5, 1);
+        // Right face (x = 1): should point outward (toward camera from +X)
+        // Viewed from camera (+Z), counter-clockwise: 1->2->6->5
+        triangles[6] = Triangle.new(1, 2, 6);
+        triangles[7] = Triangle.new(1, 6, 5);
 
-        // Bottom face (y = -1): should point outward (negative Y)
-        // Viewed from outside (negative Y), counter-clockwise: 0->1->5->4
+        // Bottom face (y = -1): should point outward (toward camera from -Y)
+        // Viewed from camera (+Z), counter-clockwise: 0->1->5->4
         triangles[8] = Triangle.new(0, 1, 5);
         triangles[9] = Triangle.new(0, 5, 4);
 
-        // Top face (y = 1): should point outward (positive Y)
-        // Viewed from outside (positive Y), counter-clockwise: 7->6->2->3
-        triangles[10] = Triangle.new(7, 6, 2);
-        triangles[11] = Triangle.new(7, 2, 3);
+        // Top face (y = 1): should point outward (toward camera from +Y)
+        // Viewed from camera (+Z), counter-clockwise: 3->7->6->2
+        triangles[10] = Triangle.new(3, 7, 6);
+        triangles[11] = Triangle.new(3, 6, 2);
 
         var mesh = Mesh{
             .vertices = vertices,

@@ -109,12 +109,9 @@ pub const Renderer = struct {
     allocator: std.mem.Allocator, // Memory allocator
     rotation_angle: f32, // Current rotation angle around Y axis
     rotation_x: f32, // Current rotation angle around X axis
-    light_orbit_x: f32, // Light 1: orbit angle around X axis
-    light_orbit_y: f32, // Light 1: orbit angle around Y axis
+    light_orbit_x: f32, // Light: orbit angle around X axis
+    light_orbit_y: f32, // Light: orbit angle around Y axis
     light_distance: f32, // Distance of light from origin
-    light2_orbit_x: f32, // Light 2: orbit angle around X axis
-    light2_orbit_y: f32, // Light 2: orbit angle around Y axis
-    light2_distance: f32, // Distance of light 2 from origin
     keys_pressed: u32, // Bitmask for currently pressed keys
     frame_count: u32, // Number of frames rendered
     last_time: i128, // Last time we calculated FPS (in nanoseconds)
@@ -159,9 +156,6 @@ pub const Renderer = struct {
             .light_orbit_x = 0.0,
             .light_orbit_y = 0.0,
             .light_distance = 3.0,
-            .light2_orbit_x = 0.0,
-            .light2_orbit_y = 3.14159, // π - 180 degrees out of phase
-            .light2_distance = 3.0,
             .keys_pressed = 0,
             .frame_count = 0,
             .last_time = current_time,
@@ -357,9 +351,6 @@ pub const Renderer = struct {
 
         // Automatic light orbit: continuously rotate the light around the triangle on X axis only
         self.light_orbit_x += auto_orbit_speed;
-        
-        // Automatic light 2 orbit: continuously rotate on Y axis only
-        self.light2_orbit_y += auto_orbit_speed;
 
         // ===== STEP 3: Compute light 1 position using orbit transform =====
         // Light 1 orbits around the triangle on X axis
@@ -376,30 +367,12 @@ pub const Renderer = struct {
         var light_dir = math.Vec3.scale(light_pos, -1.0);
         light_dir = light_dir.normalize();
         
-        // ===== STEP 3B: Compute light 2 position using orbit transform =====
-        // Light 2 orbits around the triangle on Y axis
-        const light2_orbit_x_mat = math.Mat4.rotateX(self.light2_orbit_x);
-        const light2_orbit_y_mat = math.Mat4.rotateY(self.light2_orbit_y);
-        const light2_orbit = math.Mat4.multiply(light2_orbit_y_mat, light2_orbit_x_mat);
-        
-        // Start with light 2 at distance along +Z, then apply orbit transforms
-        const light2_base_pos = math.Vec3.new(0.0, 0.0, self.light2_distance);
-        const light2_pos_4d = light2_orbit.mulVec4(math.Vec4.from3D(light2_base_pos));
-        const light2_pos = light2_pos_4d.to3D();
-        
-        // Light 2 direction: from light position to origin (center of triangle)
-        var light2_dir = math.Vec3.scale(light2_pos, -1.0);
-        light2_dir = light2_dir.normalize();
-        
         // DEBUG: Print orbit angles and light positions
         if (self.frame_count % 60 == 0) {
             const orbit_x_deg = self.light_orbit_x * 180.0 / 3.14159265359;
             const orbit_y_deg = self.light_orbit_y * 180.0 / 3.14159265359;
-            const orbit2_x_deg = self.light2_orbit_x * 180.0 / 3.14159265359;
-            const orbit2_y_deg = self.light2_orbit_y * 180.0 / 3.14159265359;
-            std.debug.print("Light 1: X={d:.2}° Y={d:.2}° Pos:({d:.2}, {d:.2}, {d:.2}) | Light 2: X={d:.2}° Y={d:.2}° Pos:({d:.2}, {d:.2}, {d:.2})\n", .{
-                orbit_x_deg, orbit_y_deg, light_pos.x, light_pos.y, light_pos.z,
-                orbit2_x_deg, orbit2_y_deg, light2_pos.x, light2_pos.y, light2_pos.z
+            std.debug.print("Light: X={d:.2}° Y={d:.2}° Pos:({d:.2}, {d:.2}, {d:.2})\n", .{
+                orbit_x_deg, orbit_y_deg, light_pos.x, light_pos.y, light_pos.z
             });
         }
 
@@ -408,6 +381,24 @@ pub const Renderer = struct {
         const transform_y = math.Mat4.rotateY(self.rotation_angle);
         const transform_x = math.Mat4.rotateX(self.rotation_x);
         const transform = math.Mat4.multiply(transform_y, transform_x);
+
+        // DEBUG: Print transform matrix and culling info once per second
+        const current_time_ns = std.time.nanoTimestamp();
+        const should_log_debug = (current_time_ns - self.last_log_time) >= 1_000_000_000; // 1 second in nanoseconds
+        
+        if (should_log_debug) {
+            std.debug.print("\n=== TRANSFORM MATRIX ===\n", .{});
+            std.debug.print("Rotation Y: {d:.4} rad ({d:.2}°), Rotation X: {d:.4} rad ({d:.2}°)\n", .{
+                self.rotation_angle, self.rotation_angle * 180.0 / 3.14159265359,
+                self.rotation_x, self.rotation_x * 180.0 / 3.14159265359
+            });
+            std.debug.print("Transform Matrix:\n", .{});
+            std.debug.print("  [{d:.4} {d:.4} {d:.4} {d:.4}]\n", .{ transform.data[0], transform.data[1], transform.data[2], transform.data[3] });
+            std.debug.print("  [{d:.4} {d:.4} {d:.4} {d:.4}]\n", .{ transform.data[4], transform.data[5], transform.data[6], transform.data[7] });
+            std.debug.print("  [{d:.4} {d:.4} {d:.4} {d:.4}]\n", .{ transform.data[8], transform.data[9], transform.data[10], transform.data[11] });
+            std.debug.print("  [{d:.4} {d:.4} {d:.4} {d:.4}]\n", .{ transform.data[12], transform.data[13], transform.data[14], transform.data[15] });
+            self.last_log_time = current_time_ns;
+        }
 
         // ===== STEP 3: Transform and project vertices =====
         const projected = try self.allocator.alloc([2]i32, mesh.vertices.len);
@@ -448,9 +439,16 @@ pub const Renderer = struct {
         // ===== STEP 4: Draw filled triangles (flat shaded) =====
         // Use flat shading based on face normals and light direction
 
+        if (should_log_debug) {
+            std.debug.print("\n=== TRIANGLE CULLING STATUS ===\n", .{});
+        }
+
         for (mesh.triangles, 0..) |tri, tri_idx| {
             // Skip if fill is culled
             if (tri.cull_flags.cull_fill) {
+                if (should_log_debug) {
+                    std.debug.print("Triangle {}: CULLED (cull_fill flag set)\n", .{tri_idx});
+                }
                 continue;
             }
 
@@ -460,6 +458,9 @@ pub const Renderer = struct {
 
             // Check if triangle is completely off-screen
             if (p0[0] < -1000 or p1[0] < -1000 or p2[0] < -1000) {
+                if (should_log_debug) {
+                    std.debug.print("Triangle {}: CULLED (off-screen)\n", .{tri_idx});
+                }
                 continue;
             }
 
@@ -483,27 +484,33 @@ pub const Renderer = struct {
 
             const view_length = face_center.length();
             if (view_length <= 0.0001) {
+                if (should_log_debug) {
+                    std.debug.print("Triangle {}: CULLED (view length too small)\n", .{tri_idx});
+                }
                 continue;
             }
             const view_vector = math.Vec3.scale(face_center, -1.0 / view_length);
 
             const camera_facing = normal_transformed.dot(view_vector);
             if (camera_facing <= 0.0) {
+                if (should_log_debug) {
+                    std.debug.print("Triangle {}: CULLED (backface: dot={d:.4})\n", .{tri_idx, camera_facing});
+                }
                 continue;
             }
 
-            // Calculate lighting from both lights: blend their contributions
-            var brightness1 = normal_transformed.dot(light_dir);
-            var brightness2 = normal_transformed.dot(light2_dir);
+            if (should_log_debug) {
+                std.debug.print("Triangle {}: RENDERED (frontface: dot={d:.4}, normal=({d:.4}, {d:.4}, {d:.4}))\n", .{
+                    tri_idx, camera_facing, normal_transformed.x, normal_transformed.y, normal_transformed.z
+                });
+            }
+
+            // Calculate lighting from light
+            var brightness = normal_transformed.dot(light_dir);
             
-            // Clamp each light to 0-1 range
-            if (brightness1 < 0.0) brightness1 = 0.0;
-            if (brightness1 > 1.0) brightness1 = 1.0;
-            if (brightness2 < 0.0) brightness2 = 0.0;
-            if (brightness2 > 1.0) brightness2 = 1.0;
-            
-            // Average the two lights
-            const brightness = (brightness1 + brightness2) * 0.5;
+            // Clamp to 0-1 range
+            if (brightness < 0.0) brightness = 0.0;
+            if (brightness > 1.0) brightness = 1.0;
 
             // Convert brightness to color (yellow-orange gradient for high contrast)
             const r = @as(u32, @intFromFloat(brightness * 255)) << 16;
@@ -515,10 +522,37 @@ pub const Renderer = struct {
         }
 
         // ===== STEP 5: Draw wireframe edges on top (white lines) =====
-        for (mesh.triangles) |tri| {
+        for (mesh.triangles, 0..) |tri, tri_idx| {
             // Skip if wireframe is culled
             if (tri.cull_flags.cull_wireframe) {
                 continue;
+            }
+
+            // Also perform backface culling for wireframes
+            const normal = mesh.normals[tri_idx];
+            const normal_transformed_raw = math.Vec3.new(
+                transform.data[0] * normal.x + transform.data[1] * normal.y + transform.data[2] * normal.z,
+                transform.data[4] * normal.x + transform.data[5] * normal.y + transform.data[6] * normal.z,
+                transform.data[8] * normal.x + transform.data[9] * normal.y + transform.data[10] * normal.z,
+            );
+            const normal_transformed = normal_transformed_raw.normalize();
+
+            const p0_cam = transformed_vertices[tri.v0];
+            const p1_cam = transformed_vertices[tri.v1];
+            const p2_cam = transformed_vertices[tri.v2];
+
+            const face_center_unscaled = math.Vec3.add(math.Vec3.add(p0_cam, p1_cam), p2_cam);
+            const face_center = math.Vec3.scale(face_center_unscaled, 1.0 / 3.0);
+
+            const view_length = face_center.length();
+            if (view_length <= 0.0001) {
+                continue;
+            }
+            const view_vector = math.Vec3.scale(face_center, -1.0 / view_length);
+
+            const camera_facing = normal_transformed.dot(view_vector);
+            if (camera_facing <= 0.0) {
+                continue; // Skip back-facing wireframes
             }
 
             const p0 = projected[tri.v0];
@@ -567,42 +601,6 @@ pub const Renderer = struct {
             }
         }
         
-        // ===== STEP 5.6: Project and draw light 2 position as a magenta sphere =====
-        // Project the second light position to screen space
-        const light2_camera_z = light2_pos.z + z_offset;
-        if (light2_camera_z > 0.1) {
-            const fov = 400.0;
-            const light2_screen_x = (light2_pos.x / light2_camera_z) * fov + center_x;
-            const light2_screen_y = -(light2_pos.y / light2_camera_z) * fov + center_y;
-            
-            const light2_x = @as(i32, @intFromFloat(light2_screen_x));
-            const light2_y = @as(i32, @intFromFloat(light2_screen_y));
-            
-            // Draw a small circle (radius 5 pixels) in bright magenta to represent light 2
-            const light_radius: i32 = 5;
-            const light2_color = 0xFFFF00FF; // Magenta: ARGB format
-            
-            var py = light2_y - light_radius;
-            while (py <= light2_y + light_radius) : (py += 1) {
-                if (py < 0 or py >= @as(i32, @intCast(self.bitmap.height))) continue;
-                var px = light2_x - light_radius;
-                while (px <= light2_x + light_radius) : (px += 1) {
-                    if (px < 0 or px >= @as(i32, @intCast(self.bitmap.width))) continue;
-                    
-                    const dx = @as(f32, @floatFromInt(px)) - @as(f32, @floatFromInt(light2_x));
-                    const dy = @as(f32, @floatFromInt(py)) - @as(f32, @floatFromInt(light2_y));
-                    const dist = @sqrt(dx * dx + dy * dy);
-                    
-                    if (dist <= @as(f32, @floatFromInt(light_radius))) {
-                        const idx = @as(usize, @intCast(py)) * @as(usize, @intCast(self.bitmap.width)) + @as(usize, @intCast(px));
-                        if (idx < self.bitmap.pixels.len) {
-                            self.bitmap.pixels[idx] = light2_color;
-                        }
-                    }
-                }
-            }
-        }
-
         // ===== STEP 6: Copy bitmap to screen =====
         self.drawBitmap();
 
