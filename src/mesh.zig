@@ -200,4 +200,56 @@ pub const Mesh = struct {
         self.allocator.free(self.normals);
         self.allocator.free(self.tex_coords);
     }
+
+    /// Translate the mesh so its bounding box center sits at the origin.
+    pub fn centerToOrigin(self: *Mesh) void {
+        if (self.vertices.len == 0) return;
+
+        var min = self.vertices[0];
+        var max = self.vertices[0];
+
+        for (self.vertices[1..]) |v| {
+            min = Vec3.new(@min(min.x, v.x), @min(min.y, v.y), @min(min.z, v.z));
+            max = Vec3.new(@max(max.x, v.x), @max(max.y, v.y), @max(max.z, v.z));
+        }
+
+        const center = Vec3.scale(Vec3.add(min, max), 0.5);
+
+        for (self.vertices, 0..) |v, i| {
+            self.vertices[i] = Vec3.sub(v, center);
+        }
+    }
+
+    /// Build a flat ground plane centered on the origin
+    pub fn groundPlane(allocator: std.mem.Allocator, size: f32, uv_scale: f32, elevation: f32, offset_z: f32) !Mesh {
+        const half = size * 0.5;
+
+        const vertices = try allocator.alloc(Vec3, 4);
+        vertices[0] = Vec3.new(-half, elevation, -half + offset_z);
+        vertices[1] = Vec3.new(half, elevation, -half + offset_z);
+        vertices[2] = Vec3.new(half, elevation, half + offset_z);
+        vertices[3] = Vec3.new(-half, elevation, half + offset_z);
+
+        const triangles = try allocator.alloc(Triangle, 2);
+        triangles[0] = Triangle.new(0, 2, 1);
+        triangles[1] = Triangle.new(0, 3, 2);
+
+    const tex_coords = try allocator.alloc(Vec2, 4);
+    const uv_max = uv_scale;
+    tex_coords[0] = Vec2.new(0, 0);
+    tex_coords[1] = Vec2.new(uv_max, 0);
+    tex_coords[2] = Vec2.new(uv_max, uv_max);
+    tex_coords[3] = Vec2.new(0, uv_max);
+
+        var mesh = Mesh{
+            .vertices = vertices,
+            .triangles = triangles,
+            .normals = try allocator.alloc(Vec3, 2),
+            .tex_coords = tex_coords,
+            .allocator = allocator,
+        };
+
+        mesh.recalculateNormals();
+        return mesh;
+    }
 };

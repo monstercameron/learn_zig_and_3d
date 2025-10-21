@@ -1,108 +1,111 @@
 # Zig 3D CPU Rasterizer
 
-A complete CPU-based 3D rasterizer built in Zig, featuring real-time rendering, backface culling, flat shading, and interactive controls.
+A high-performance, CPU-based 3D rasterizer built from scratch in Zig. This project showcases advanced rendering techniques, including a multi-threaded, tile-based pipeline, real-time lighting, texture mapping, and interactive controls. It serves as a comprehensive example of systems programming in Zig for graphics applications.
 
-## Features
+## Key Features
 
-- **Real-time 3D Rendering**: 120 FPS CPU-based rasterization
-- **Perspective Projection**: Proper 3D-to-2D projection with depth
-- **Backface Culling**: Efficient culling of hidden triangles
-- **Flat Shading**: Directional lighting with brightness calculations
-- **Wireframe Rendering**: Optional wireframe overlay with proper culling
-- **Interactive Controls**:
-  - **Arrow Keys**: Rotate cube (left/right/up/down)
-  - **WASD Keys**: Orbit light source
-  - **Q/E Keys**: Adjust light distance (closer/farther)
-- **Debug Information**: Real-time FPS, brightness statistics, and triangle culling status
+*   **Advanced Rendering Pipeline**: A complete 3D rendering pipeline, from model loading to final image composition.
+*   **Multi-threaded Rendering**: Utilizes a custom-built, work-stealing job system to parallelize the rendering workload across multiple CPU cores, significantly boosting performance.
+*   **Tile-Based Architecture**: The screen is divided into a grid of tiles that are rendered independently. This approach improves cache locality and is the foundation for the parallel rendering system.
+*   **Real-time Lighting and Shading**: Implements a flat shading model with a dynamic, directional light source that can be manipulated interactively.
+*   **Texture Mapping**: Supports textured models, with correct perspective-aware texture coordinate interpolation.
+*   **Model Loading**: Loads 3D models from the Wavefront `.obj` file format.
+*   **Interactive Controls**: Full real-time control over the camera and light source position.
+*   **Debug Visualizations**: Includes optional overlays for wireframe rendering and tile boundaries to help visualize the rendering process.
 
-## Project Structure
+## The Rendering Pipeline
 
+The renderer processes 3D scenes through a sophisticated, multi-stage pipeline designed for performance and parallelism.
+
+1.  **Vertex Transformation**: 3D model vertices are transformed from model space into world space and then into camera space using matrix transformations.
+2.  **Perspective Projection**: The 3D camera-space coordinates are projected into 2D screen-space coordinates, creating the illusion of depth.
+3.  **Backface Culling**: Triangles that are facing away from the camera are culled early in the pipeline to avoid unnecessary processing.
+4.  **Triangle Binning**: Each triangle is assigned to one or more screen-space tiles that it overlaps. This "binning" process creates a list of triangles for each tile to render.
+5.  **Parallel Tile Rendering**: The core of the rendering process. The job system dispatches rendering jobs for each tile to a pool of worker threads. Each thread independently rasterizes, shades, and textures the triangles in its assigned tiles.
+6.  **Rasterization**: For each triangle, the scanline algorithm is used to determine which pixels to fill.
+7.  **Shading and Texturing**: The color of each pixel is calculated based on the lighting conditions and the model's texture.
+8.  **Compositing**: Once all tiles are rendered, they are composited together into the final framebuffer, which is then displayed on the screen.
+
+## Architecture
+
+The project is designed with a modular architecture, where each component has a single, well-defined responsibility.
+
+*   **`main.zig`**: The application's entry point. It initializes the window, renderer, and job system, and runs the main event loop.
+*   **`renderer.zig`**: The central orchestrator of the rendering process. It manages the rendering pipeline, handles user input, and coordinates the other rendering-related modules.
+*   **`job_system.zig`**: A general-purpose, work-stealing job system that enables parallel execution of tasks. It is used to parallelize the tile rendering stage.
+*   **`tile_renderer.zig`**: Contains the logic for tile-based rendering, including the data structures for tiles and tile grids.
+*   **`binning_stage.zig`**: Implements the triangle binning logic, which is a crucial step in the tile-based rendering pipeline.
+*   **`mesh.zig` & `obj_loader.zig`**: Handle the data structures for 3D models and the logic for loading them from `.obj` files.
+*   **`texture.zig` & `bitmap.zig`**: Manage texture and image data, including loading and sampling.
+*   **`math.zig`**: A comprehensive 3D math library with support for vectors, matrices, and transformations.
+*   **`window.zig`**: Abstracts the platform-specific window creation and management logic.
+
+## Rendering Pipeline Diagram
+
+```mermaid
+graph TD
+    A[Start] --> B(Vertex Transformation);
+    B --> C(Perspective Projection);
+    C --> D(Backface Culling);
+    D --> E(Triangle Binning);
+    E --> F{Parallel Tile Rendering};
+    F --> G(Rasterization);
+    G --> H(Shading & Texturing);
+    H --> I(Compositing);
+    I --> J[Final Image];
 ```
-├── build.zig           # Build configuration
-├── src/
-│   ├── main.zig        # Application entry point and event loop
-│   ├── renderer.zig    # Core 3D rendering pipeline
-│   ├── window.zig      # Windows API window management
-│   ├── bitmap.zig      # Pixel buffer management
-│   ├── mesh.zig        # 3D mesh data structures
-│   └── math.zig        # 3D math operations (vectors, matrices)
-└── README.md
+
+## Architecture Diagram
+
+```mermaid
+graph TD
+    subgraph "High-Level Orchestration"
+        main["main.zig"]
+        renderer["renderer.zig"]
+    end
+
+    subgraph "Parallel Rendering Core"
+        job_system["job_system.zig"]
+        tile_renderer["tile_renderer.zig"]
+        binning_stage["binning_stage.zig"]
+    end
+
+    subgraph "Data & Assets"
+        mesh["mesh.zig / obj_loader.zig"]
+        texture["texture.zig / bitmap.zig"]
+    end
+
+    subgraph "Low-Level Modules"
+        math["math.zig"]
+        window["window.zig"]
+        input["input.zig"]
+    end
+
+    main --> renderer;
+    renderer --> job_system;
+    renderer --> tile_renderer;
+    tile_renderer --> binning_stage;
+    renderer --> mesh;
+    renderer --> texture;
+    renderer --> math;
+    renderer --> window;
+    renderer --> input;
 ```
 
 ## Controls
 
-- **Left/Right Arrows**: Rotate cube horizontally
-- **Up/Down Arrows**: Rotate cube vertically
-- **WASD**: Orbit light source around cube
-- **Q**: Move light closer to cube
-- **E**: Move light farther from cube
+*   **Arrow Keys**: Rotate the model.
+*   **WASD Keys**: Orbit the light source around the model.
+*   **Q/E Keys**: Adjust the camera's field of view (FOV).
 
-## Building and Running
+## Future Goals
 
-### Prerequisites
-- Zig 0.11 or later
-- Windows (uses Windows API)
+While the rasterizer is fully functional, there are many opportunities for further development and learning:
 
-### Build
-```bash
-zig build
-```
-
-### Run
-```bash
-zig build run
-# or
-.\zig-out\bin\zig-windows-app.exe
-```
-
-## Technical Details
-
-### Rendering Pipeline
-1. **Vertex Transformation**: Apply rotation matrices to 3D vertices
-2. **Perspective Projection**: Convert 3D coordinates to 2D screen space
-3. **Backface Culling**: Remove triangles facing away from camera
-4. **Rasterization**: Fill triangles using scanline algorithm
-5. **Lighting**: Calculate brightness based on surface normals and light direction
-6. **Wireframe Overlay**: Draw triangle edges on top of filled geometry
-
-### Performance
-- **120 FPS** target with frame rate limiting
-- **CPU-based**: No GPU acceleration required
-- **Efficient algorithms**: Bresenham line drawing, scanline triangle filling
-- **Memory managed**: Proper allocation/deallocation of resources
-
-### Architecture
-- **Modular design**: Separate concerns across multiple files
-- **Windows API**: Direct integration with Win32 for maximum control
-- **Error handling**: Comprehensive error checking and recovery
-- **Debug logging**: Real-time performance and rendering statistics
-
-## Learning Zig
-
-This project demonstrates advanced Zig concepts:
-- **Windows API integration**: Direct FFI calls to user32.dll and gdi32.dll
-- **Memory management**: Manual allocation and deallocation
-- **Error handling**: Try/catch patterns and error unions
-- **Struct composition**: Object-oriented patterns in Zig
-- **Performance optimization**: CPU cache-friendly algorithms
-- **Real-time systems**: Frame pacing and timing
-
-## Screenshots
-
-The application renders a rotating cube with:
-- Smooth flat shading based on light position
-- Cyan sphere indicating light source location
-- White wireframe edges (only for visible triangles)
-- Real-time debug information in console
-
-## Contributing
-
-This is a complete, working 3D rasterizer. For learning purposes, consider:
-- Adding texture mapping
-- Implementing different shading models
-- Adding more complex meshes
-- Optimizing for better performance
-- Porting to other platforms
+*   **Advanced Shading Models**: Implement more sophisticated shading techniques like Gouraud or Phong shading for smoother, more realistic lighting.
+*   **More Complex Scenes**: Extend the renderer to support multiple objects and a more complex scene graph.
+*   **Performance Optimizations**: Further optimize the rendering pipeline, for example by implementing more advanced culling techniques like frustum culling.
+*   **Cross-Platform Support**: Port the windowing and input handling logic to other operating systems like Linux and macOS.
 
 ## License
 
