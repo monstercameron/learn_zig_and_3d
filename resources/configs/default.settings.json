@@ -1,0 +1,27 @@
+{
+  "window": {
+    "title": "Zig 3D CPU Rasterizer",
+    "width": 1280,
+    "height": 720,
+    "fullscreen": false,
+    "vsync": true
+  },
+  "rendering": {
+    "resolutionScale": 1.0,
+    "fpsLimit": 120,
+    "useTiledRendering": true
+  },
+  "threading": {
+    "workerThreads": 0
+  },
+  "camera": {
+    "initialFovDegrees": 60.0
+  },
+  "input": {
+    "mouseSensitivity": 0.0025
+  },
+  "debug": {
+    "showTileBorders": false,
+    "showWireframe": false
+  }
+}

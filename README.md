@@ -43,53 +43,65 @@ The project is designed with a modular architecture, where each component has a 
 ## Rendering Pipeline Diagram
 
 ```mermaid
-graph TD
-    A[Start] --> B(Vertex Transformation);
-    B --> C(Perspective Projection);
-    C --> D(Backface Culling);
-    D --> E(Triangle Binning);
-    E --> F{Parallel Tile Rendering};
-    F --> G(Rasterization);
-    G --> H(Shading & Texturing);
-    H --> I(Compositing);
-    I --> J[Final Image];
+flowchart TD
+    subgraph "Main Thread - Frame Setup"
+        direction LR
+        A[Input: Mesh Data] --> B(Stage 1: Vertex Processing);
+        B -- Transformed Vertices --> C(Stage 2: Culling & Binning);
+        C -- Per-Tile Triangle Lists --> D{Dispatch Jobs to Workers};
+    end
+
+    subgraph "Worker Threads - Parallel Processing"
+        direction TB
+        E((Tile Render Job));
+        D -.-> E;
+        E -- Processes 1 Tile --> F(Stage 3: Rasterization);
+        F -- Covered Pixels --> G(Stage 4: Fragment Shading);
+        G -- Colored Pixels --> H((Rendered Tile Buffer));
+    end
+
+    subgraph "Main Thread - Frame Finalization"
+        direction LR
+        I{Wait for All Jobs to Complete};
+        H -.-> I;
+        I -- All Tiles Rendered --> J(Stage 5: Compositing);
+        J -- Final Image in Memory --> K[Stage 6: Present to Screen];
+    end
 ```
 
 ## Architecture Diagram
 
 ```mermaid
 graph TD
-    subgraph "High-Level Orchestration"
-        main["main.zig"]
-        renderer["renderer.zig"]
+    subgraph "Entry Point"
+        main["main.zig"];
     end
 
-    subgraph "Parallel Rendering Core"
-        job_system["job_system.zig"]
-        tile_renderer["tile_renderer.zig"]
-        binning_stage["binning_stage.zig"]
+    subgraph "Core Engine"
+        renderer["renderer.zig"];
     end
 
-    subgraph "Data & Assets"
-        mesh["mesh.zig / obj_loader.zig"]
-        texture["texture.zig / bitmap.zig"]
+    subgraph "Major Systems"
+        job_system["job_system.zig"];
+        pipeline["binning_stage.zig &<br>tile_renderer.zig"];
+        assets["obj_loader.zig &<br>texture.zig"];
     end
 
-    subgraph "Low-Level Modules"
-        math["math.zig"]
-        window["window.zig"]
-        input["input.zig"]
+    subgraph "Low-Level Libraries"
+        math["math.zig"];
+        platform["window.zig &<br>input.zig"];
+        data["mesh.zig &<br>bitmap.zig"];
     end
 
     main --> renderer;
+    
     renderer --> job_system;
-    renderer --> tile_renderer;
-    tile_renderer --> binning_stage;
-    renderer --> mesh;
-    renderer --> texture;
+    renderer --> pipeline;
+    renderer --> assets;
+    
     renderer --> math;
-    renderer --> window;
-    renderer --> input;
+    renderer --> platform;
+    renderer --> data;
 ```
 
 ## Controls

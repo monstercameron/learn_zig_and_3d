@@ -47,13 +47,36 @@ pub const Triangle = struct {
     v1: usize, // Index of the second vertex.
     v2: usize, // Index of the third vertex.
     cull_flags: TriangleCullFlags = .{}, // Flags for rendering.
+    base_color: u32 = default_color,
+
+    pub const default_color: u32 = 0xFF7F7F7F;
 
     pub fn new(v0: usize, v1: usize, v2: usize) Triangle {
-        return Triangle{ .v0 = v0, .v1 = v1, .v2 = v2, .cull_flags = .{} };
+        return Triangle{ .v0 = v0, .v1 = v1, .v2 = v2, .cull_flags = .{}, .base_color = default_color };
     }
 
     pub fn newWithCulling(v0: usize, v1: usize, v2: usize, cull_fill: bool, cull_wireframe: bool) Triangle {
-        return Triangle{ .v0 = v0, .v1 = v1, .v2 = v2, .cull_flags = .{ .cull_fill = cull_fill, .cull_wireframe = cull_wireframe } };
+        return Triangle{
+            .v0 = v0,
+            .v1 = v1,
+            .v2 = v2,
+            .cull_flags = .{ .cull_fill = cull_fill, .cull_wireframe = cull_wireframe },
+            .base_color = default_color,
+        };
+    }
+
+    pub fn newWithColor(v0: usize, v1: usize, v2: usize, color: u32) Triangle {
+        return Triangle{ .v0 = v0, .v1 = v1, .v2 = v2, .cull_flags = .{}, .base_color = color };
+    }
+
+    pub fn newWithCullingAndColor(v0: usize, v1: usize, v2: usize, cull_fill: bool, cull_wireframe: bool, color: u32) Triangle {
+        return Triangle{
+            .v0 = v0,
+            .v1 = v1,
+            .v2 = v2,
+            .cull_flags = .{ .cull_fill = cull_fill, .cull_wireframe = cull_wireframe },
+            .base_color = color,
+        };
     }
 };
 

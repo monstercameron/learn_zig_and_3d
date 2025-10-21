@@ -58,14 +58,17 @@ pub const Vec3 = struct {
         return Vec3{ .x = x, .y = y, .z = z };
     }
 
+    // TODO(SIMD): This function can be vectorized. Multiple Vec3 additions can be performed in a single instruction.
     pub fn add(a: Vec3, b: Vec3) Vec3 {
         return Vec3.new(a.x + b.x, a.y + b.y, a.z + b.z);
     }
 
+    // TODO(SIMD): This function can be vectorized. Multiple Vec3 subtractions can be performed in a single instruction.
     pub fn sub(a: Vec3, b: Vec3) Vec3 {
         return Vec3.new(a.x - b.x, a.y - b.y, a.z - b.z);
     }
 
+    // TODO(SIMD): This function can be vectorized. Multiple Vec3 scalar multiplications can be performed in a single instruction.
     pub fn scale(v: Vec3, s: f32) Vec3 {
         return Vec3.new(v.x * s, v.y * s, v.z * s);
     }
@@ -75,6 +78,7 @@ pub const Vec3 = struct {
     /// > 0: Same general direction.
     ///   0: Perpendicular.
     /// < 0: Opposite general direction.
+    // TODO(SIMD): This function is a prime candidate for a SIMD dot product instruction (DPPS on SSE4.1, FMA on AVX2).
     pub fn dot(a: Vec3, b: Vec3) f32 {
         return a.x * b.x + a.y * b.y + a.z * b.z;
     }
@@ -82,6 +86,7 @@ pub const Vec3 = struct {
     /// Calculates the cross product of two vectors (a × b).
     /// The result is a new vector that is perpendicular to both input vectors.
     /// This is essential for calculating surface normals.
+    // TODO(SIMD): The cross product can be vectorized using shuffle and multiply-subtract operations.
     pub fn cross(a: Vec3, b: Vec3) Vec3 {
         return Vec3.new(
             a.y * b.z - a.z * b.y,
@@ -242,6 +247,7 @@ pub const Mat4 = struct {
 
     /// Multiplies two 4x4 matrices. Note: matrix multiplication is not commutative (A * B != B * A).
     /// The order matters and typically corresponds to applying transformations in reverse order.
+    // TODO(SIMD): 4x4 matrix multiplication is a classic SIMD optimization. This can be heavily vectorized by processing rows/columns in parallel.
     pub fn multiply(a: Mat4, b: Mat4) Mat4 {
         var result: Mat4 = std.mem.zeroes(Mat4);
         var row: usize = 0;
@@ -260,6 +266,7 @@ pub const Mat4 = struct {
     }
 
     /// Multiplies a matrix by a 4D vector, applying the transformation.
+    // TODO(SIMD): This operation can be vectorized using 4-wide dot products.
     pub fn mulVec4(m: Mat4, v: Vec4) Vec4 {
         return Vec4.new(
             m.data[0] * v.x + m.data[1] * v.y + m.data[2] * v.z + m.data[3] * v.w,

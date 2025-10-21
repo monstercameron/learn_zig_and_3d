@@ -1,20 +1,20 @@
 //! # Main Entry Point: The Heart of the Application
-//! 
+//!
 //! This file is the equivalent of your `index.js` or the main script that kicks everything off.
 //! It orchestrates the entire application lifecycle:
 //! 1. **Initialization**: Sets up the application window and the renderer.
 //! 2. **Event Loop**: Runs the main loop that processes user input and renders frames.
 //! 3. **Cleanup**: Ensures all resources are freed when the application closes.
-//! 
+//!
 //! ## JavaScript Analogy
-//! 
+//!
 //! Think of this file as the top-level script in an HTML page.
-//! 
+//!
 //! ```javascript
 //! // 1. Initialization
 //! const canvas = document.createElement('canvas');
 //! const renderer = new Renderer(canvas);
-//! 
+//!
 //! // 2. Event Loop (simplified)
 //! function gameLoop() {
 //!   const events = getPendingUserEvents(); // e.g., keyboard, mouse
@@ -22,11 +22,11 @@
 //!   renderer.renderScene();
 //!   requestAnimationFrame(gameLoop);
 //! }
-//! 
+//!
 //! // 3. Start the loop
 //! requestAnimationFrame(gameLoop);
 //! ```
-//! 
+//!
 const std = @import("std");
 const windows = std.os.windows;
 const math = @import("math.zig");
@@ -84,6 +84,7 @@ extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
 const Window = @import("window.zig").Window;
 const Renderer = @import("renderer.zig").Renderer;
 const obj_loader = @import("obj_loader.zig");
+const mesh_module = @import("mesh.zig");
 const config = @import("app_config.zig");
 
 /// # Application Entry Point
@@ -92,7 +93,7 @@ const config = @import("app_config.zig");
 /// as soon as the script loads. The `!void` means it can return an error but
 /// doesn't return a value on success.
 pub fn main() !void {
-    // ========== INITIALIZATION PHASE ========== 
+    // ========== INITIALIZATION PHASE ==========
 
     // Set up a general-purpose allocator for dynamic memory.
     // JS Analogy: JavaScript has a garbage collector that manages memory for you.
@@ -117,14 +118,16 @@ pub fn main() !void {
     defer renderer.deinit(); // Guarantees the renderer is cleaned up on exit.
 
     // Load a 3D model from an .obj file.
-    var teapot = try obj_loader.load(allocator, "resources/models/teapot.onj");
+    var teapot = try obj_loader.load(allocator, "resources/models/teapot.obj");
     defer teapot.deinit(); // Guarantees the mesh memory is freed on exit.
     teapot.centerToOrigin(); // Center the model at (0,0,0).
+    levelLiftMeshToGround(&teapot);
+    try levelAppendGroundPlane(&teapot, allocator);
 
     renderer.setCameraPosition(math.Vec3.new(0.0, 2.0, -10.0));
     renderer.setCameraOrientation(-0.1, 0.0);
 
-    // ========== EVENT LOOP PHASE ========== 
+    // ========== EVENT LOOP PHASE ==========
 
     // This is the main application loop, similar to `requestAnimationFrame` in JS.
     // We use `PeekMessageW` for a non-blocking loop, which allows us to render
@@ -225,4 +228,92 @@ pub fn main() !void {
     }
 
     std.debug.print("Exited main loop after {} frames\n", .{frame_count});
+}
+
+fn levelLiftMeshToGround(mesh: *mesh_module.Mesh) void {
+    if (mesh.vertices.len == 0) return;
+    var min_y = mesh.vertices[0].y;
+    for (mesh.vertices[1..]) |v| {
+        if (v.y < min_y) min_y = v.y;
+    }
+    const offset = -min_y;
+    if (offset == 0.0) return;
+    for (mesh.vertices) |*v| {
+        v.y += offset;
+    }
+}
+
+fn levelAppendGroundPlane(mesh: *mesh_module.Mesh, allocator: std.mem.Allocator) !void {
+    const plane_extent: f32 = 40.0;
+    const plane_y: f32 = -1.0;
+    const plane_color: u32 = 0xFFFFFFFF;
+    const segments: usize = 16;
+
+    const old_vertex_count = mesh.vertices.len;
+    const old_triangle_count = mesh.triangles.len;
+    const verts_per_row = segments + 1;
+    const plane_vertex_count = verts_per_row * verts_per_row;
+    const plane_triangle_count = segments * segments * 2;
+    const new_vertex_count = old_vertex_count + plane_vertex_count;
+    const new_triangle_count = old_triangle_count + plane_triangle_count;
+
+    const new_vertices = try allocator.alloc(math.Vec3, new_vertex_count);
+    errdefer allocator.free(new_vertices);
+    const new_tex_coords = try allocator.alloc(math.Vec2, new_vertex_count);
+    errdefer allocator.free(new_tex_coords);
+    const new_triangles = try allocator.alloc(mesh_module.Triangle, new_triangle_count);
+    errdefer allocator.free(new_triangles);
+
+    std.mem.copyForwards(math.Vec3, new_vertices[0..old_vertex_count], mesh.vertices);
+    std.mem.copyForwards(math.Vec2, new_tex_coords[0..old_vertex_count], mesh.tex_coords);
+
+    const base = old_vertex_count;
+    const step = (plane_extent * 2.0) / @as(f32, @floatFromInt(segments));
+
+    var row: usize = 0;
+    while (row < verts_per_row) : (row += 1) {
+        const z = -plane_extent + step * @as(f32, @floatFromInt(row));
+        var col: usize = 0;
+        while (col < verts_per_row) : (col += 1) {
+            const x = -plane_extent + step * @as(f32, @floatFromInt(col));
+            const idx = base + row * verts_per_row + col;
+            new_vertices[idx] = math.Vec3.new(x, plane_y, z);
+            const u = @as(f32, @floatFromInt(col)) / @as(f32, @floatFromInt(segments));
+            const v = @as(f32, @floatFromInt(row)) / @as(f32, @floatFromInt(segments));
+            new_tex_coords[idx] = math.Vec2.new(u, v);
+        }
+    }
+
+    var tri_write: usize = 0;
+    row = 0;
+    while (row < segments) : (row += 1) {
+        var col: usize = 0;
+        while (col < segments) : (col += 1) {
+            const v00 = base + row * verts_per_row + col;
+            const v10 = base + row * verts_per_row + (col + 1);
+            const v01 = base + (row + 1) * verts_per_row + col;
+            const v11 = base + (row + 1) * verts_per_row + (col + 1);
+
+            new_triangles[tri_write] = mesh_module.Triangle.newWithColor(v00, v11, v10, plane_color);
+            tri_write += 1;
+            new_triangles[tri_write] = mesh_module.Triangle.newWithColor(v00, v01, v11, plane_color);
+            tri_write += 1;
+        }
+    }
+
+    std.mem.copyForwards(mesh_module.Triangle, new_triangles[plane_triangle_count .. plane_triangle_count + old_triangle_count], mesh.triangles);
+
+    const new_normals = try allocator.alloc(math.Vec3, new_triangle_count);
+    errdefer allocator.free(new_normals);
+
+    allocator.free(mesh.vertices);
+    allocator.free(mesh.tex_coords);
+    allocator.free(mesh.triangles);
+    allocator.free(mesh.normals);
+
+    mesh.vertices = new_vertices;
+    mesh.tex_coords = new_tex_coords;
+    mesh.triangles = new_triangles;
+    mesh.normals = new_normals;
+    mesh.recalculateNormals();
 }

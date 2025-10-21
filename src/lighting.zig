@@ -41,6 +41,8 @@ pub fn computeIntensity(brightness: f32) f32 {
 /// - `color`: The original 32-bit integer color of the object (in 0xAARRGGBB format).
 /// - `intensity`: The light intensity to apply, from 0.0 to 1.0.
 /// Returns the new 32-bit integer color after applying the lighting.
+// TODO(SIMD): This function is a prime candidate for SIMD. Multiple pixels (4 or 8) could be processed at once.
+// The process of unpacking a u32 to four u8/f32 components, multiplying, and repacking is a classic use case for PSHUFB, PMUL, etc.
 pub fn applyIntensity(color: u32, intensity: f32) u32 {
     const clamped_intensity = std.math.clamp(intensity, AMBIENT_LIGHT, 1.0);
 

@@ -1,8 +1,0 @@
-# Level resource manifest
-# Each entry uses the format: <type> <relative-path>
-# Supported types: model, texture
-
-model resources/models/box.obj
-model resources/models/suzanne.obj
-model resources/models/teapot.onj
-texture resources/textures/box-texture-1-sm.bmp

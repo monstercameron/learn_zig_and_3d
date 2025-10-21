@@ -38,6 +38,21 @@ const lighting = @import("lighting.zig");
 const scanline = @import("scanline.zig");
 const texture = @import("texture.zig");
 
+const NEAR_CLIP: f32 = 0.01;
+const NEAR_EPSILON: f32 = 1e-4;
+const INVALID_PROJECTED_COORD: i32 = -1000;
+
+const GroundReason = struct {
+    pub const near_plane: u8 = 1 << 0;
+    pub const backface: u8 = 1 << 1;
+    pub const cross_near: u8 = 1 << 2;
+};
+
+const GroundDebugState = struct {
+    last_mask: u8 = 0,
+    frames_since_log: u32 = 0,
+};
+
 // HGDIOBJ: A "handle" (like an ID) to a Windows graphics object.
 const HGDIOBJ = *anyopaque;
 
@@ -112,6 +127,8 @@ pub const Renderer = struct {
     show_light_orb: bool = true,
     cull_light_orb: bool = true,
     use_tiled_rendering: bool = true,
+
+    ground_debug: GroundDebugState = .{},
 
     // Internal state for managing job memory
     previous_frame_jobs: ?[]Job,
@@ -201,6 +218,14 @@ pub const Renderer = struct {
 
     // ========== TILE RENDER JOB ==========
 
+    const ProjectionParams = struct {
+        center_x: f32,
+        center_y: f32,
+        x_scale: f32,
+        y_scale: f32,
+        near_plane: f32,
+    };
+
     /// This struct is the "context object" for a single tile rendering job.
     /// It packages up all the data a worker thread needs to render one tile.
     /// JS Analogy: The data object you would `postMessage` to a Web Worker.
@@ -216,42 +241,130 @@ pub const Renderer = struct {
         draw_wireframe: bool,
         texture: ?*const texture.Texture,
         base_color: u32,
+        projection: ProjectionParams,
+
+        const max_clipped_vertices: usize = 5;
+
+        const ClipVertex = struct {
+            position: math.Vec3,
+            uv: math.Vec2,
+        };
+
+        fn interpolateClipVertex(a: ClipVertex, b: ClipVertex, near_plane: f32) ClipVertex {
+            const denom = b.position.z - a.position.z;
+            const t_raw = if (@abs(denom) < 1e-6) 0.0 else (near_plane - a.position.z) / denom;
+            const t = std.math.clamp(t_raw, 0.0, 1.0);
+            const direction = math.Vec3.sub(b.position, a.position);
+            const position = math.Vec3.add(a.position, math.Vec3.scale(direction, t));
+            const uv_delta = math.Vec2.sub(b.uv, a.uv);
+            const uv = math.Vec2.add(a.uv, math.Vec2.scale(uv_delta, t));
+            return ClipVertex{ .position = position, .uv = uv };
+        }
+
+        fn clipPolygonToNearPlane(vertices: []ClipVertex, near_plane: f32, output: *[max_clipped_vertices]ClipVertex) usize {
+            if (vertices.len == 0) return 0;
+
+            var out_count: usize = 0;
+            var prev = vertices[vertices.len - 1];
+            var prev_inside = prev.position.z >= near_plane - NEAR_EPSILON;
+
+            for (vertices) |curr| {
+                const curr_inside = curr.position.z >= near_plane - NEAR_EPSILON;
+                if (curr_inside) {
+                    if (!prev_inside and out_count < max_clipped_vertices) {
+                        output[out_count] = interpolateClipVertex(prev, curr, near_plane);
+                        out_count += 1;
+                    }
+                    if (out_count < max_clipped_vertices) {
+                        output[out_count] = curr;
+                        out_count += 1;
+                    }
+                } else if (prev_inside and out_count < max_clipped_vertices) {
+                    output[out_count] = interpolateClipVertex(prev, curr, near_plane);
+                    out_count += 1;
+                }
+
+                prev = curr;
+                prev_inside = curr_inside;
+            }
+
+            return out_count;
+        }
+
+        fn projectToScreen(self: *const TileRenderJob, position: math.Vec3) [2]i32 {
+            const clamped_z = if (position.z < self.projection.near_plane + NEAR_EPSILON)
+                self.projection.near_plane + NEAR_EPSILON
+            else
+                position.z;
+            const inv_z = 1.0 / clamped_z;
+            const ndc_x = position.x * inv_z * self.projection.x_scale;
+            const ndc_y = position.y * inv_z * self.projection.y_scale;
+            const screen_x = ndc_x * self.projection.center_x + self.projection.center_x;
+            const screen_y = -ndc_y * self.projection.center_y + self.projection.center_y;
+            return .{
+                @as(i32, @intFromFloat(screen_x)),
+                @as(i32, @intFromFloat(screen_y)),
+            };
+        }
+
+        fn isDegenerate(p0: [2]i32, p1: [2]i32, p2: [2]i32) bool {
+            const ax = @as(i64, p1[0]) - @as(i64, p0[0]);
+            const ay = @as(i64, p1[1]) - @as(i64, p0[1]);
+            const bx = @as(i64, p2[0]) - @as(i64, p0[0]);
+            const by = @as(i64, p2[1]) - @as(i64, p0[1]);
+            const cross = ax * by - ay * bx;
+            return cross == 0;
+        }
+
+        fn rasterizeFan(job: *TileRenderJob, vertices: []ClipVertex, base_color: u32, intensity: f32) void {
+            if (vertices.len < 3) return;
+
+            var screen_pts: [max_clipped_vertices][2]i32 = undefined;
+            for (vertices, 0..) |v, idx| {
+                screen_pts[idx] = job.projectToScreen(v.position);
+            }
+
+            var tri_idx: usize = 1;
+            while (tri_idx < vertices.len - 1) : (tri_idx += 1) {
+                const p0 = screen_pts[0];
+                const p1 = screen_pts[tri_idx];
+                const p2 = screen_pts[tri_idx + 1];
+                if (isDegenerate(p0, p1, p2)) continue;
+
+                const shading = TileRenderer.ShadingParams{
+                    .base_color = base_color,
+                    .texture = job.texture,
+                    .uv0 = vertices[0].uv,
+                    .uv1 = vertices[tri_idx].uv,
+                    .uv2 = vertices[tri_idx + 1].uv,
+                    .intensity = intensity,
+                };
+                TileRenderer.rasterizeTriangleToTile(job.tile, job.tile_buffer, p0, p1, p2, shading);
+            }
+        }
 
         /// The actual function that gets executed by a worker thread.
         fn renderTileJob(ctx: *anyopaque) void {
             const job: *TileRenderJob = @ptrCast(@alignCast(ctx));
+            const near_plane = job.projection.near_plane;
 
             // Iterate through all triangles assigned to this tile.
             for (job.tri_list.triangles.items) |tri_idx| {
                 const tri = job.mesh.triangles[tri_idx];
                 if (tri.cull_flags.cull_fill) continue;
 
-                const p0 = job.projected[tri.v0];
-                const p1 = job.projected[tri.v1];
-                const p2 = job.projected[tri.v2];
-
-                if (p0[0] < -1000 or p1[0] < -1000 or p2[0] < -1000) continue;
-
-                // --- Lighting and Backface Culling ---
                 const normal = job.mesh.normals[tri_idx];
-                const normal_transformed_raw = math.Vec3.new(
-                    job.transform.data[0] * normal.x + job.transform.data[1] * normal.y + job.transform.data[2] * normal.z,
-                    job.transform.data[4] * normal.x + job.transform.data[5] * normal.y + job.transform.data[6] * normal.z,
-                    job.transform.data[8] * normal.x + job.transform.data[9] * normal.y + job.transform.data[10] * normal.z
-                );
+                const normal_transformed_raw = math.Vec3.new(job.transform.data[0] * normal.x + job.transform.data[1] * normal.y + job.transform.data[2] * normal.z, job.transform.data[4] * normal.x + job.transform.data[5] * normal.y + job.transform.data[6] * normal.z, job.transform.data[8] * normal.x + job.transform.data[9] * normal.y + job.transform.data[10] * normal.z);
                 const normal_transformed = normal_transformed_raw.normalize();
 
                 const p0_cam = job.transformed_vertices[tri.v0];
                 const p1_cam = job.transformed_vertices[tri.v1];
                 const p2_cam = job.transformed_vertices[tri.v2];
-                const face_center = math.Vec3.scale(math.Vec3.add(math.Vec3.add(p0_cam, p1_cam), p2_cam), 1.0 / 3.0);
+                const front0 = p0_cam.z >= near_plane - NEAR_EPSILON;
+                const front1 = p1_cam.z >= near_plane - NEAR_EPSILON;
+                const front2 = p2_cam.z >= near_plane - NEAR_EPSILON;
+                if (!front0 and !front1 and !front2) continue;
 
-                const view_vector = math.Vec3.normalize(math.Vec3.scale(face_center, -1.0));
-                if (normal_transformed.dot(view_vector) <= 0.0) continue; // Backface culling.
-
-                // --- Shading ---
-                const brightness = normal_transformed.dot(job.light_dir);
-                const intensity = lighting.computeIntensity(brightness);
                 const uv0 = if (tri.v0 < job.mesh.tex_coords.len)
                     job.mesh.tex_coords[tri.v0]
                 else
@@ -265,15 +378,39 @@ pub const Renderer = struct {
                 else
                     math.Vec2.new(0.0, 0.0);
 
-                const shading = TileRenderer.ShadingParams{
-                    .base_color = job.base_color,
-                    .texture = job.texture,
-                    .uv0 = uv0, .uv1 = uv1, .uv2 = uv2,
-                    .intensity = intensity,
+                var clip_input = [_]ClipVertex{
+                    ClipVertex{ .position = p0_cam, .uv = uv0 },
+                    ClipVertex{ .position = p1_cam, .uv = uv1 },
+                    ClipVertex{ .position = p2_cam, .uv = uv2 },
                 };
 
-                // --- Rasterization ---
-                TileRenderer.rasterizeTriangleToTile(job.tile, job.tile_buffer, p0, p1, p2, shading);
+                var clipped: [max_clipped_vertices]ClipVertex = undefined;
+                const clipped_count = clipPolygonToNearPlane(clip_input[0..], near_plane, &clipped);
+                if (clipped_count < 3) continue;
+
+                const crosses_near = (front0 or front1 or front2) and !(front0 and front1 and front2);
+
+                if (!crosses_near) {
+                    var centroid = math.Vec3.new(0.0, 0.0, 0.0);
+                    for (clipped[0..clipped_count]) |v| {
+                        centroid = math.Vec3.add(centroid, v.position);
+                    }
+                    const count_f = @as(f32, @floatFromInt(clipped_count));
+                    if (count_f <= 0.0) continue;
+                    centroid = math.Vec3.scale(centroid, 1.0 / count_f);
+
+                    const view_dir = math.Vec3.scale(centroid, -1.0);
+                    const view_dir_len = math.Vec3.length(view_dir);
+                    if (view_dir_len < 1e-6) continue;
+                    const view_vector = math.Vec3.scale(view_dir, 1.0 / view_dir_len);
+                    const view_dot = normal_transformed.dot(view_vector);
+                    if (view_dot < -1e-4) continue; // Backface culling with tolerance.
+                }
+
+                const brightness = normal_transformed.dot(job.light_dir);
+                const intensity = lighting.computeIntensity(brightness);
+
+                rasterizeFan(job, clipped[0..clipped_count], tri.base_color, intensity);
             }
 
             // (omitting wireframe drawing for brevity)
@@ -349,8 +486,8 @@ pub const Renderer = struct {
         if ((self.keys_pressed & input.KeyBits.down) != 0) self.rotation_x += rotation_speed * delta_seconds;
 
         const mouse_delta = self.consumeMouseDelta();
-    self.rotation_angle += mouse_delta.x * self.mouse_sensitivity;
-    self.rotation_x -= mouse_delta.y * self.mouse_sensitivity;
+        self.rotation_angle += mouse_delta.x * self.mouse_sensitivity;
+        self.rotation_x -= mouse_delta.y * self.mouse_sensitivity;
         self.rotation_x = std.math.clamp(self.rotation_x, -1.5, 1.5);
 
         const fov_delta = self.consumePendingFovDelta();
@@ -466,9 +603,9 @@ pub const Renderer = struct {
             transformed_vertices[i] = camera_space;
 
             const camera_z = camera_space.z;
-            if (camera_z <= 0.1) {
-                projected[i][0] = -1000;
-                projected[i][1] = -1000;
+            if (camera_z <= NEAR_CLIP) {
+                projected[i][0] = INVALID_PROJECTED_COORD;
+                projected[i][1] = INVALID_PROJECTED_COORD;
                 continue;
             }
 
@@ -481,15 +618,25 @@ pub const Renderer = struct {
             projected[i][1] = @as(i32, @intFromFloat(screen_y));
         }
 
+        const projection = ProjectionParams{
+            .center_x = center_x,
+            .center_y = center_y,
+            .x_scale = x_scale,
+            .y_scale = y_scale,
+            .near_plane = NEAR_CLIP,
+        };
+
+        self.debugGroundPlane(mesh, transformed_vertices, view_rotation);
+
         if (self.use_tiled_rendering and self.tile_grid != null and self.tile_buffers != null) {
-            try self.renderTiled(mesh, projected, transformed_vertices, view_rotation, light_dir, pump);
+            try self.renderTiled(mesh, projected, transformed_vertices, view_rotation, light_dir, pump, projection);
         } else {
-            try self.renderDirect(mesh, projected, transformed_vertices, view_rotation, light_dir);
+            try self.renderDirect(mesh, projected, transformed_vertices, view_rotation, light_dir, projection);
         }
 
         if (self.show_light_orb) {
             const light_camera_z = light_camera.z;
-            if (light_camera_z > 0.1) {
+            if (light_camera_z > NEAR_CLIP) {
                 self.drawLightMarker(light_camera, light_camera_z, center_x, center_y, x_scale, y_scale);
             }
         }
@@ -559,6 +706,129 @@ pub const Renderer = struct {
         _ = SetWindowTextW(self.hwnd, &title_wide);
     }
 
+    fn debugGroundPlane(self: *Renderer, mesh: *const Mesh, transformed_vertices: []math.Vec3, transform: math.Mat4) void {
+        if (mesh.triangles.len < 2 or transformed_vertices.len < mesh.vertices.len) return;
+
+        const tri_limit = @min(mesh.triangles.len, @as(usize, 2));
+        var mask: u8 = 0;
+
+        const TriDebug = struct {
+            index: usize,
+            mask: u8,
+            z: [3]f32,
+            dot: ?f32,
+            front: [3]bool,
+            crosses: bool,
+        };
+
+        var tri_debug: [2]TriDebug = undefined;
+        var tri_debug_count: usize = 0;
+
+        var tri_idx: usize = 0;
+        while (tri_idx < tri_limit) : (tri_idx += 1) {
+            const tri = mesh.triangles[tri_idx];
+            const p0 = transformed_vertices[tri.v0];
+            const p1 = transformed_vertices[tri.v1];
+            const p2 = transformed_vertices[tri.v2];
+
+            const front0 = p0.z >= NEAR_CLIP - NEAR_EPSILON;
+            const front1 = p1.z >= NEAR_CLIP - NEAR_EPSILON;
+            const front2 = p2.z >= NEAR_CLIP - NEAR_EPSILON;
+
+            var tri_mask: u8 = 0;
+
+            if (!front0 or !front1 or !front2) {
+                tri_mask |= GroundReason.near_plane;
+            }
+
+            const crosses_near = (front0 or front1 or front2) and !(front0 and front1 and front2);
+            if (crosses_near) tri_mask |= GroundReason.cross_near;
+            var dot_value: ?f32 = null;
+
+            if (!crosses_near) {
+                const normal = mesh.normals[tri_idx];
+                const normal_transformed_raw = math.Vec3.new(
+                    transform.data[0] * normal.x + transform.data[1] * normal.y + transform.data[2] * normal.z,
+                    transform.data[4] * normal.x + transform.data[5] * normal.y + transform.data[6] * normal.z,
+                    transform.data[8] * normal.x + transform.data[9] * normal.y + transform.data[10] * normal.z,
+                );
+                const normal_transformed = normal_transformed_raw.normalize();
+
+                const centroid = math.Vec3.scale(math.Vec3.add(math.Vec3.add(p0, p1), p2), 1.0 / 3.0);
+                const view_dir = math.Vec3.scale(centroid, -1.0);
+                const view_dir_len = math.Vec3.length(view_dir);
+                if (view_dir_len > 1e-6) {
+                    const view_vector = math.Vec3.scale(view_dir, 1.0 / view_dir_len);
+                    const view_dot = normal_transformed.dot(view_vector);
+                    dot_value = view_dot;
+                    if (view_dot < -1e-4) tri_mask |= GroundReason.backface;
+                }
+            }
+
+            if (tri_mask != 0 and tri_debug_count < tri_debug.len) {
+                tri_debug[tri_debug_count] = TriDebug{
+                    .index = tri_idx,
+                    .mask = tri_mask,
+                    .z = .{ p0.z, p1.z, p2.z },
+                    .dot = dot_value,
+                    .front = .{ front0, front1, front2 },
+                    .crosses = crosses_near,
+                };
+                tri_debug_count += 1;
+            }
+
+            mask |= tri_mask;
+        }
+
+        self.ground_debug.frames_since_log += 1;
+        const first_frame = self.frame_count == 0;
+        const should_log = first_frame or mask != self.ground_debug.last_mask or (mask != 0 and self.ground_debug.frames_since_log >= 60);
+        if (!should_log) return;
+
+        self.ground_debug.frames_since_log = 0;
+        self.ground_debug.last_mask = mask;
+
+        if (mask == 0) {
+            std.debug.print("Ground plane visible (frame {})\n", .{self.frame_count});
+            return;
+        }
+
+        for (tri_debug[0..tri_debug_count]) |info| {
+            if (info.dot) |d| {
+                std.debug.print(
+                    "Ground tri {} issue mask {b:0>3} z[{d:.3},{d:.3},{d:.3}] front[{},{},{}] crosses={} dot={d:.4}\n",
+                    .{
+                        info.index,
+                        info.mask,
+                        info.z[0],
+                        info.z[1],
+                        info.z[2],
+                        info.front[0],
+                        info.front[1],
+                        info.front[2],
+                        info.crosses,
+                        d,
+                    },
+                );
+            } else {
+                std.debug.print(
+                    "Ground tri {} issue mask {b:0>3} z[{d:.3},{d:.3},{d:.3}] front[{},{},{}] crosses={} dot=n/a\n",
+                    .{
+                        info.index,
+                        info.mask,
+                        info.z[0],
+                        info.z[1],
+                        info.z[2],
+                        info.front[0],
+                        info.front[1],
+                        info.front[2],
+                        info.crosses,
+                    },
+                );
+            }
+        }
+    }
+
     fn drawLightMarker(
         self: *Renderer,
         light_pos: math.Vec3,
@@ -568,7 +838,7 @@ pub const Renderer = struct {
         x_scale: f32,
         y_scale: f32,
     ) void {
-        if (light_camera_z <= 0.1) return;
+        if (light_camera_z <= NEAR_CLIP) return;
 
         const ndc_x = (light_pos.x / light_camera_z) * x_scale;
         const ndc_y = (light_pos.y / light_camera_z) * y_scale;
@@ -616,7 +886,7 @@ pub const Renderer = struct {
     }
 
     /// Renders the scene using the parallel, tile-based pipeline.
-    fn renderTiled(self: *Renderer, mesh: *const Mesh, projected: [][2]i32, transformed_vertices: []math.Vec3, transform: math.Mat4, light_dir: math.Vec3, pump: ?*const fn (*Renderer) bool) !void {
+    fn renderTiled(self: *Renderer, mesh: *const Mesh, projected: [][2]i32, transformed_vertices: []math.Vec3, transform: math.Mat4, light_dir: math.Vec3, pump: ?*const fn (*Renderer) bool, projection: ProjectionParams) !void {
         const grid = self.tile_grid.?;
         const tile_buffers = self.tile_buffers.?;
         for (tile_buffers) |*buf| buf.clear();
@@ -652,7 +922,7 @@ pub const Renderer = struct {
             for (grid.tiles, 0..) |*tile, tile_idx| {
                 if (pump) |p| if ((tile_idx & 7) == 0 and !p(self)) return error.RenderInterrupted;
 
-                tile_jobs[tile_idx] = TileRenderJob{ .tile = tile, .tile_buffer = &tile_buffers[tile_idx], .tri_list = &tile_lists[tile_idx], .mesh = mesh, .projected = projected, .transformed_vertices = transformed_vertices, .transform = transform, .light_dir = light_dir, .draw_wireframe = self.show_wireframe, .texture = self.texture, .base_color = lighting.DEFAULT_BASE_COLOR };
+                tile_jobs[tile_idx] = TileRenderJob{ .tile = tile, .tile_buffer = &tile_buffers[tile_idx], .tri_list = &tile_lists[tile_idx], .mesh = mesh, .projected = projected, .transformed_vertices = transformed_vertices, .transform = transform, .light_dir = light_dir, .draw_wireframe = self.show_wireframe, .texture = self.texture, .base_color = lighting.DEFAULT_BASE_COLOR, .projection = projection };
                 jobs[tile_idx] = Job.init(TileRenderJob.renderTileJob, @ptrCast(&tile_jobs[tile_idx]), null);
                 if (!js.submitJobAuto(&jobs[tile_idx])) {
                     std.log.err("Tile {} failed to submit to job system", .{tile_idx});
@@ -682,13 +952,14 @@ pub const Renderer = struct {
     }
 
     /// Renders the scene directly to the main bitmap (single-threaded).
-    fn renderDirect(self: *Renderer, mesh: *const Mesh, projected: [][2]i32, transformed_vertices: []math.Vec3, transform: math.Mat4, light_dir: math.Vec3) !void {
+    fn renderDirect(self: *Renderer, mesh: *const Mesh, projected: [][2]i32, transformed_vertices: []math.Vec3, transform: math.Mat4, light_dir: math.Vec3, projection: ProjectionParams) !void {
         _ = self;
         _ = mesh;
         _ = projected;
         _ = transformed_vertices;
         _ = transform;
         _ = light_dir;
+        _ = projection;
     }
 
     fn drawShadedTriangle(self: *Renderer, p0: [2]i32, p1: [2]i32, p2: [2]i32, shading: TileRenderer.ShadingParams) void {
