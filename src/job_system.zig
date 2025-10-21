@@ -1,25 +1,25 @@
 //! # A Multi-threaded Job System for Parallel Execution
-//! 
+//!
 //! This module implements a "work-stealing" job system. Its purpose is to take a large
 //! number of small tasks (jobs) and distribute them efficiently across all available CPU cores.
 //! This is the foundation for the renderer's high performance.
-//! 
+//!
 //! ## JavaScript Analogy: A Smart Web Worker Pool
-//! 
+//!
 //! Imagine you have a pool of Web Workers. A job system is like a manager for that pool.
-//! 
+//!
 //! 1.  **You define work**: You have a task, like `processImage(data)`, that you want to run in parallel.
 //! 2.  **You submit jobs**: You tell the job system, "run `processImage` with `data1`", "run `processImage` with `data2`", etc.
 //! 3.  **The system distributes work**: The job system automatically assigns these jobs to its pool of worker threads.
 //! 4.  **Work-Stealing**: Here's the clever part. If one worker finishes its to-do list, it doesn't sit idle.
 //!     It "steals" a job from the back of another worker's queue. This keeps all CPU cores busy.
-//! 
+//!
 //! This is far more efficient than manually managing workers with `postMessage` because the load balancing is automatic.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
-// ========== JOB STRUCTURE ========== 
+// ========== JOB STRUCTURE ==========
 
 /// A job function signature. All jobs are functions that take a single, generic pointer for context.
 /// JS Analogy: `(context) => { /* do work */ }`
@@ -89,7 +89,7 @@ pub const Job = struct {
     }
 };
 
-// ========== JOB QUEUE (DEQUE) ========== 
+// ========== JOB QUEUE (DEQUE) ==========
 
 /// A double-ended queue (deque) for jobs, guarded by a mutex.
 /// Each worker thread has its own deque.
@@ -167,7 +167,7 @@ pub const JobQueue = struct {
     }
 };
 
-// ========== WORKER THREAD ========== 
+// ========== WORKER THREAD ==========
 
 /// Represents a single worker thread that executes jobs.
 /// JS Analogy: An individual `Web Worker`.
@@ -200,7 +200,7 @@ const WorkerThread = struct {
     }
 };
 
-// ========== JOB SYSTEM ========== 
+// ========== JOB SYSTEM ==========
 
 /// The main JobSystem struct. It manages the pool of worker threads and job distribution.
 /// JS Analogy: The main class that manages your entire `Worker` pool.
@@ -309,7 +309,7 @@ pub const JobSystem = struct {
     }
 };
 
-// ========== HELPER FUNCTIONS ========== 
+// ========== HELPER FUNCTIONS ==========
 
 /// Helper to allocate a new job on the heap.
 pub fn allocateJob(allocator: std.mem.Allocator, function: JobFn, context: *anyopaque, parent: ?*Job) !*Job {

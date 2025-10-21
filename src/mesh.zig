@@ -368,8 +368,8 @@ pub const Mesh = struct {
             return;
         }
 
-    self.meshlets = try self.allocator.alloc(Meshlet, meshlets_temp.items.len);
-    std.mem.copyForwards(Meshlet, self.meshlets, meshlets_temp.items);
+        self.meshlets = try self.allocator.alloc(Meshlet, meshlets_temp.items.len);
+        std.mem.copyForwards(Meshlet, self.meshlets, meshlets_temp.items);
         release_meshlets = false;
     }
 };

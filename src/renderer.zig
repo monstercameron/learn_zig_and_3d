@@ -220,11 +220,11 @@ pub const Renderer = struct {
 
     /// Cleans up all renderer resources in the reverse order of creation.
     pub fn deinit(self: *Renderer) void {
-    self.mesh_work_cache.deinit(self.allocator);
-    if (self.job_system) |js| js.deinit();
-    if (self.job_buffer) |jobs| self.allocator.free(jobs);
-    if (self.tile_jobs_buffer) |tile_jobs| self.allocator.free(tile_jobs);
-    if (self.job_completion_buffer) |completion| self.allocator.free(completion);
+        self.mesh_work_cache.deinit(self.allocator);
+        if (self.job_system) |js| js.deinit();
+        if (self.job_buffer) |jobs| self.allocator.free(jobs);
+        if (self.tile_jobs_buffer) |tile_jobs| self.allocator.free(tile_jobs);
+        if (self.job_completion_buffer) |completion| self.allocator.free(completion);
         if (self.tile_buffers) |buffers| {
             for (buffers) |*buf| buf.deinit();
             self.allocator.free(buffers);
@@ -823,7 +823,7 @@ pub const Renderer = struct {
         right: math.Vec3,
         up: math.Vec3,
         forward: math.Vec3,
-    light_dir: math.Vec3,
+        light_dir: math.Vec3,
         projection: ProjectionParams,
         valid: bool,
 
