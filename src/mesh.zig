@@ -26,6 +26,7 @@
 const std = @import("std");
 const math = @import("math.zig");
 const Vec3 = math.Vec3;
+const Vec2 = math.Vec2;
 
 // ========== MESH STRUCTURE ==========
 
@@ -56,6 +57,7 @@ pub const Mesh = struct {
     vertices: []Vec3,
     triangles: []Triangle,
     normals: []Vec3, // Face normals (one per triangle)
+    tex_coords: []Vec2,
     allocator: std.mem.Allocator,
 
     /// Initialize an empty mesh
@@ -64,12 +66,13 @@ pub const Mesh = struct {
             .vertices = &[_]Vec3{},
             .triangles = &[_]Triangle{},
             .normals = &[_]Vec3{},
+            .tex_coords = &[_]Vec2{},
             .allocator = allocator,
         };
     }
 
     /// Calculate face normals for all triangles
-    fn calculateNormals(self: *Mesh) void {
+    pub fn recalculateNormals(self: *Mesh) void {
         for (self.triangles, 0..) |tri, i| {
             const v0 = self.vertices[tri.v0];
             const v1 = self.vertices[tri.v1];
@@ -141,15 +144,22 @@ pub const Mesh = struct {
         triangles[10] = Triangle.new(3, 7, 6);
         triangles[11] = Triangle.new(3, 6, 2);
 
+        const tex_coords = try allocator.alloc(Vec2, 8);
+        const zero_uv = Vec2.new(0.0, 0.0);
+        for (tex_coords) |*uv| {
+            uv.* = zero_uv;
+        }
+
         var mesh = Mesh{
             .vertices = vertices,
             .triangles = triangles,
             .normals = try allocator.alloc(Vec3, 12),
+            .tex_coords = tex_coords,
             .allocator = allocator,
         };
 
         // Calculate all face normals
-        mesh.calculateNormals();
+        mesh.recalculateNormals();
 
         return mesh;
     }
@@ -165,14 +175,21 @@ pub const Mesh = struct {
         const triangles = try allocator.alloc(Triangle, 1);
         triangles[0] = Triangle.new(0, 1, 2);
 
+        const tex_coords = try allocator.alloc(Vec2, 3);
+        const zero_uv = Vec2.new(0.0, 0.0);
+        for (tex_coords) |*uv| {
+            uv.* = zero_uv;
+        }
+
         var mesh = Mesh{
             .vertices = vertices,
             .triangles = triangles,
             .normals = try allocator.alloc(Vec3, 1),
+            .tex_coords = tex_coords,
             .allocator = allocator,
         };
 
-        mesh.calculateNormals();
+        mesh.recalculateNormals();
         return mesh;
     }
 
@@ -181,5 +198,6 @@ pub const Mesh = struct {
         self.allocator.free(self.vertices);
         self.allocator.free(self.triangles);
         self.allocator.free(self.normals);
+        self.allocator.free(self.tex_coords);
     }
 };

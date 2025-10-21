@@ -73,6 +73,8 @@ extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
 const Window = @import("window.zig").Window;
 const Renderer = @import("renderer.zig").Renderer;
 const Mesh = @import("mesh.zig").Mesh;
+const obj_loader = @import("obj_loader.zig");
+const texture = @import("texture.zig");
 const config = @import("app_config.zig");
 
 /// Application entry point
@@ -94,9 +96,12 @@ pub fn main() !void {
     var renderer = try Renderer.init(window.hwnd, 800, 600, allocator);
     defer renderer.deinit();
 
-    // Create a cube mesh with backface culling
-    var cube = try Mesh.cube(allocator);
+    var cube = try obj_loader.load(allocator, "resources/models/box.obj");
     defer cube.deinit();
+
+    var box_texture = try texture.loadBmp(allocator, "resources/textures/box-texture-1-sm.bmp");
+    defer box_texture.deinit();
+    renderer.setTexture(&box_texture);
 
     // ========== EVENT LOOP PHASE ==========
     // Continuous rendering loop with frame rate limiting

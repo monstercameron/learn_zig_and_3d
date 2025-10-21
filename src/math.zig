@@ -25,6 +25,28 @@ const std = @import("std");
 
 // ========== VECTOR TYPES ==========
 
+/// 2D vector for UV texture coordinates or screen positions
+pub const Vec2 = struct {
+    x: f32,
+    y: f32,
+
+    pub fn new(x: f32, y: f32) Vec2 {
+        return Vec2{ .x = x, .y = y };
+    }
+
+    pub fn add(a: Vec2, b: Vec2) Vec2 {
+        return Vec2.new(a.x + b.x, a.y + b.y);
+    }
+
+    pub fn sub(a: Vec2, b: Vec2) Vec2 {
+        return Vec2.new(a.x - b.x, a.y - b.y);
+    }
+
+    pub fn scale(v: Vec2, s: f32) Vec2 {
+        return Vec2.new(v.x * s, v.y * s);
+    }
+};
+
 /// 3D vector for positions and directions
 /// Can represent either a point or a direction in 3D space
 pub const Vec3 = struct {

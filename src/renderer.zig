@@ -37,6 +37,7 @@ const config = @import("app_config.zig");
 const input = @import("input.zig");
 const lighting = @import("lighting.zig");
 const scanline = @import("scanline.zig");
+const texture = @import("texture.zig");
 
 // ========== TYPES ==========
 /// HGDIOBJ - Handle to a GDI (Graphics Device Interface) object
@@ -139,6 +140,7 @@ pub const Renderer = struct {
     pending_fov_delta: f32, // Accumulates FOV changes requested between frames
     tile_grid: ?TileGrid, // Tile grid for tile-based rendering (optional)
     tile_buffers: ?[]TileBuffer, // Per-tile rendering buffers
+    texture: ?*const texture.Texture, // Active texture for shading
     show_tile_borders: bool, // Debug: show tile boundaries
     show_wireframe: bool, // Debug: draw triangle wireframes on top
     show_light_orb: bool, // Debug: draw the light position marker
@@ -209,6 +211,7 @@ pub const Renderer = struct {
             .pending_fov_delta = 0.0,
             .tile_grid = tile_grid,
             .tile_buffers = tile_buffers,
+            .texture = null,
             .show_tile_borders = false,
             .show_wireframe = false,
             .show_light_orb = true,
@@ -281,11 +284,14 @@ pub const Renderer = struct {
         tile_buffer: *TileBuffer,
         tri_list: *const BinningStage.TileTriangleList,
         mesh: *const Mesh,
+        tex_coords: []math.Vec2,
         projected: [][2]i32,
         transformed_vertices: []math.Vec3,
         transform: math.Mat4,
         light_dir: math.Vec3,
         draw_wireframe: bool,
+        texture: ?*const texture.Texture,
+        base_color: u32,
 
         /// Job function that renders one tile
         fn renderTileJob(ctx: *anyopaque) void {
@@ -331,10 +337,22 @@ pub const Renderer = struct {
 
                 // Calculate lighting
                 const brightness = normal_transformed.dot(job.light_dir);
-                const shaded_color = lighting.computeLitColor(brightness);
+                const intensity = lighting.computeIntensity(brightness);
 
-                // Rasterize triangle to tile buffer
-                TileRenderer.rasterizeTriangleToTile(job.tile, job.tile_buffer, p0, p1, p2, shaded_color);
+                const uv0 = if (tri.v0 < job.tex_coords.len) job.tex_coords[tri.v0] else math.Vec2.new(0.0, 0.0);
+                const uv1 = if (tri.v1 < job.tex_coords.len) job.tex_coords[tri.v1] else math.Vec2.new(0.0, 0.0);
+                const uv2 = if (tri.v2 < job.tex_coords.len) job.tex_coords[tri.v2] else math.Vec2.new(0.0, 0.0);
+
+                const shading = TileRenderer.ShadingParams{
+                    .base_color = job.base_color,
+                    .texture = job.texture,
+                    .uv0 = uv0,
+                    .uv1 = uv1,
+                    .uv2 = uv2,
+                    .intensity = intensity,
+                };
+
+                TileRenderer.rasterizeTriangleToTile(job.tile, job.tile_buffer, p0, p1, p2, shading);
             }
 
             // Draw wireframe for triangles in this tile
@@ -444,6 +462,10 @@ pub const Renderer = struct {
             },
             else => {},
         }
+    }
+
+    pub fn setTexture(self: *Renderer, tex: *const texture.Texture) void {
+        self.texture = tex;
     }
 
     /// Render a 3D mesh with rotation and projection
@@ -911,11 +933,14 @@ pub const Renderer = struct {
                     .tile_buffer = tile_buffer,
                     .tri_list = tri_list,
                     .mesh = mesh,
+                    .tex_coords = mesh.tex_coords,
                     .projected = projected,
                     .transformed_vertices = transformed_vertices,
                     .transform = transform,
                     .light_dir = light_dir,
                     .draw_wireframe = self.show_wireframe,
+                    .texture = self.texture,
+                    .base_color = lighting.DEFAULT_BASE_COLOR,
                 };
 
                 // Create job for this tile (no parent job)
@@ -1039,9 +1064,22 @@ pub const Renderer = struct {
 
             // Calculate lighting from light
             const brightness = normal_transformed.dot(light_dir);
-            const shaded_color = lighting.computeLitColor(brightness);
+            const intensity = lighting.computeIntensity(brightness);
 
-            self.drawFilledTriangle(p0[0], p0[1], p1[0], p1[1], p2[0], p2[1], shaded_color);
+            const uv0 = if (tri.v0 < mesh.tex_coords.len) mesh.tex_coords[tri.v0] else math.Vec2.new(0.0, 0.0);
+            const uv1 = if (tri.v1 < mesh.tex_coords.len) mesh.tex_coords[tri.v1] else math.Vec2.new(0.0, 0.0);
+            const uv2 = if (tri.v2 < mesh.tex_coords.len) mesh.tex_coords[tri.v2] else math.Vec2.new(0.0, 0.0);
+
+            const shading = TileRenderer.ShadingParams{
+                .base_color = lighting.DEFAULT_BASE_COLOR,
+                .texture = self.texture,
+                .uv0 = uv0,
+                .uv1 = uv1,
+                .uv2 = uv2,
+                .intensity = intensity,
+            };
+
+            self.drawShadedTriangle(p0, p1, p2, shading);
         }
 
         // ===== STEP 5: Optionally draw wireframe edges on top (white lines) =====
@@ -1203,6 +1241,67 @@ pub const Renderer = struct {
     /// ```
     fn drawLine(self: *Renderer, x0: i32, y0: i32, x1: i32, y1: i32) void {
         self.drawLineColored(x0, y0, x1, y1, 0xFFFFFFFF); // White by default
+    }
+
+    fn drawShadedTriangle(
+        self: *Renderer,
+        p0: [2]i32,
+        p1: [2]i32,
+        p2: [2]i32,
+        shading: TileRenderer.ShadingParams,
+    ) void {
+        const min_x = scanline.maxI32(0, scanline.minI32(p0[0], scanline.minI32(p1[0], p2[0])));
+        const min_y = scanline.maxI32(0, scanline.minI32(p0[1], scanline.minI32(p1[1], p2[1])));
+        const max_x = scanline.minI32(self.bitmap.width - 1, scanline.maxI32(p0[0], scanline.maxI32(p1[0], p2[0])));
+        const max_y = scanline.minI32(self.bitmap.height - 1, scanline.maxI32(p0[1], scanline.maxI32(p1[1], p2[1])));
+
+        if (min_x > max_x or min_y > max_y) return;
+
+        const v0x = @as(f32, @floatFromInt(p0[0]));
+        const v0y = @as(f32, @floatFromInt(p0[1]));
+        const v1x = @as(f32, @floatFromInt(p1[0]));
+        const v1y = @as(f32, @floatFromInt(p1[1]));
+        const v2x = @as(f32, @floatFromInt(p2[0]));
+        const v2y = @as(f32, @floatFromInt(p2[1]));
+
+        const denom = (v1y - v2y) * (v0x - v2x) + (v2x - v1x) * (v0y - v2y);
+        if (@abs(denom) < 1e-6) return;
+        const inv_denom = 1.0 / denom;
+
+        const epsilon: f32 = 0.0001;
+
+        var y = min_y;
+        while (y <= max_y) : (y += 1) {
+            const py = @as(f32, @floatFromInt(y)) + 0.5;
+
+            var x = min_x;
+            while (x <= max_x) : (x += 1) {
+                const px = @as(f32, @floatFromInt(x)) + 0.5;
+
+                const lambda0 = ((v1y - v2y) * (px - v2x) + (v2x - v1x) * (py - v2y)) * inv_denom;
+                const lambda1 = ((v2y - v0y) * (px - v2x) + (v0x - v2x) * (py - v2y)) * inv_denom;
+                const lambda2 = 1.0 - lambda0 - lambda1;
+
+                if (lambda0 < -epsilon or lambda1 < -epsilon or lambda2 < -epsilon) continue;
+                if (lambda0 > 1.0 + epsilon or lambda1 > 1.0 + epsilon or lambda2 > 1.0 + epsilon) continue;
+
+                const uv = math.Vec2.new(
+                    shading.uv0.x * lambda0 + shading.uv1.x * lambda1 + shading.uv2.x * lambda2,
+                    shading.uv0.y * lambda0 + shading.uv1.y * lambda1 + shading.uv2.y * lambda2,
+                );
+
+                var base_color = shading.base_color;
+                if (shading.texture) |tex| {
+                    base_color = tex.sample(uv);
+                }
+                const final_color = lighting.applyIntensity(base_color, shading.intensity);
+
+                const idx = @as(usize, @intCast(y * self.bitmap.width + x));
+                if (idx < self.bitmap.pixels.len) {
+                    self.bitmap.pixels[idx] = final_color;
+                }
+            }
+        }
     }
 
     /// Draw a filled triangle using scanline rasterization

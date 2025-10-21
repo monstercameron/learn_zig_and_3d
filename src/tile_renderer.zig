@@ -13,6 +13,9 @@
 const std = @import("std");
 const Bitmap = @import("bitmap.zig").Bitmap;
 const scanline = @import("scanline.zig");
+const math = @import("math.zig");
+const texture = @import("texture.zig");
+const lighting = @import("lighting.zig");
 
 // ========== CONSTANTS ==========
 
@@ -22,6 +25,15 @@ const scanline = @import("scanline.zig");
 /// - Parallelism granularity (enough tiles for many threads)
 /// - Overhead (not too many tiles to manage)
 pub const TILE_SIZE: i32 = 64;
+
+pub const ShadingParams = struct {
+    base_color: u32,
+    texture: ?*const texture.Texture,
+    uv0: math.Vec2,
+    uv1: math.Vec2,
+    uv2: math.Vec2,
+    intensity: f32,
+};
 
 // ========== TILE STRUCTURE ==========
 
@@ -248,90 +260,62 @@ pub fn rasterizeTriangleToTile(
     p0_screen: [2]i32,
     p1_screen: [2]i32,
     p2_screen: [2]i32,
-    color: u32,
+    shading: ShadingParams,
 ) void {
-    // Convert screen coordinates to tile-local coordinates
-    var v0 = [2]i32{ p0_screen[0] - tile.x, p0_screen[1] - tile.y };
-    var v1 = [2]i32{ p1_screen[0] - tile.x, p1_screen[1] - tile.y };
-    var v2 = [2]i32{ p2_screen[0] - tile.x, p2_screen[1] - tile.y };
+    const v0 = [2]i32{ p0_screen[0] - tile.x, p0_screen[1] - tile.y };
+    const v1 = [2]i32{ p1_screen[0] - tile.x, p1_screen[1] - tile.y };
+    const v2 = [2]i32{ p2_screen[0] - tile.x, p2_screen[1] - tile.y };
 
-    // Sort vertices by Y coordinate (bubble sort)
-    if (v0[1] > v1[1]) {
-        const temp = v0;
-        v0 = v1;
-        v1 = temp;
-    }
-    if (v1[1] > v2[1]) {
-        const temp = v1;
-        v1 = v2;
-        v2 = temp;
-    }
-    if (v0[1] > v1[1]) {
-        const temp = v0;
-        v0 = v1;
-        v1 = temp;
-    }
+    // Clamp to tile bounds early
+    const min_x = scanline.maxI32(0, scanline.minI32(v0[0], scanline.minI32(v1[0], v2[0])));
+    const min_y = scanline.maxI32(0, scanline.minI32(v0[1], scanline.minI32(v1[1], v2[1])));
+    const max_x = scanline.minI32(tile_buffer.width - 1, scanline.maxI32(v0[0], scanline.maxI32(v1[0], v2[0])));
+    const max_y = scanline.minI32(tile_buffer.height - 1, scanline.maxI32(v0[1], scanline.maxI32(v1[1], v2[1])));
 
-    const top_x = v0[0];
-    const top_y = v0[1];
-    const mid_x = v1[0];
-    const mid_y = v1[1];
-    const bot_x = v2[0];
-    const bot_y = v2[1];
+    if (min_x > max_x or min_y > max_y) return;
 
-    // Skip degenerate triangles
-    if (top_y == mid_y and mid_y == bot_y) return;
+    const v0x = @as(f32, @floatFromInt(v0[0]));
+    const v0y = @as(f32, @floatFromInt(v0[1]));
+    const v1x = @as(f32, @floatFromInt(v1[0]));
+    const v1y = @as(f32, @floatFromInt(v1[1]));
+    const v2x = @as(f32, @floatFromInt(v2[0]));
+    const v2y = @as(f32, @floatFromInt(v2[1]));
 
-    // Clamp Y range to tile bounds
-    const y_start = scanline.maxI32(0, top_y);
-    const y_end = scanline.minI32(tile_buffer.height - 1, bot_y);
+    const denom = (v1y - v2y) * (v0x - v2x) + (v2x - v1x) * (v0y - v2y);
+    if (@abs(denom) < 1e-6) return;
+    const inv_denom = 1.0 / denom;
 
-    // Draw upper half (from top to middle)
-    if (top_y < mid_y) {
-        var y = scanline.maxI32(y_start, top_y);
-        while (y <= scanline.minI32(y_end, mid_y)) : (y += 1) {
-            const x_left_edge = scanline.lineIntersectionX(top_x, top_y, mid_x, mid_y, y);
-            const x_right_edge = scanline.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
+    const epsilon: f32 = 0.0001;
 
-            var x_left = scanline.minI32(x_left_edge, x_right_edge);
-            var x_right = scanline.maxI32(x_left_edge, x_right_edge);
+    var y = min_y;
+    while (y <= max_y) : (y += 1) {
+        const py = @as(f32, @floatFromInt(y)) + 0.5;
 
-            // Clamp to tile bounds
-            x_left = scanline.maxI32(0, x_left);
-            x_right = scanline.minI32(tile_buffer.width - 1, x_right);
+        var x = min_x;
+        while (x <= max_x) : (x += 1) {
+            const px = @as(f32, @floatFromInt(x)) + 0.5;
 
-            // Fill scanline
-            var x = x_left;
-            while (x <= x_right) : (x += 1) {
-                const idx = @as(usize, @intCast(y * tile_buffer.width + x));
-                if (idx < tile_buffer.pixels.len) {
-                    tile_buffer.pixels[idx] = color;
-                }
+            const lambda0 = ((v1y - v2y) * (px - v2x) + (v2x - v1x) * (py - v2y)) * inv_denom;
+            const lambda1 = ((v2y - v0y) * (px - v2x) + (v0x - v2x) * (py - v2y)) * inv_denom;
+            const lambda2 = 1.0 - lambda0 - lambda1;
+
+            if (lambda0 < -epsilon or lambda1 < -epsilon or lambda2 < -epsilon) continue;
+            if (lambda0 > 1.0 + epsilon or lambda1 > 1.0 + epsilon or lambda2 > 1.0 + epsilon) continue;
+
+            const uv = math.Vec2.new(
+                shading.uv0.x * lambda0 + shading.uv1.x * lambda1 + shading.uv2.x * lambda2,
+                shading.uv0.y * lambda0 + shading.uv1.y * lambda1 + shading.uv2.y * lambda2,
+            );
+
+            var base_color = shading.base_color;
+            if (shading.texture) |tex| {
+                base_color = tex.sample(uv);
             }
-        }
-    }
+            const final_color = lighting.applyIntensity(base_color, shading.intensity);
 
-    // Draw lower half (from middle to bottom)
-    if (mid_y < bot_y) {
-        var y = scanline.maxI32(y_start, mid_y);
-        while (y <= scanline.minI32(y_end, bot_y)) : (y += 1) {
-            const x_left_edge = scanline.lineIntersectionX(mid_x, mid_y, bot_x, bot_y, y);
-            const x_right_edge = scanline.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
-
-            var x_left = scanline.minI32(x_left_edge, x_right_edge);
-            var x_right = scanline.maxI32(x_left_edge, x_right_edge);
-
-            // Clamp to tile bounds
-            x_left = scanline.maxI32(0, x_left);
-            x_right = scanline.minI32(tile_buffer.width - 1, x_right);
-
-            // Fill scanline
-            var x = x_left;
-            while (x <= x_right) : (x += 1) {
-                const idx = @as(usize, @intCast(y * tile_buffer.width + x));
-                if (idx < tile_buffer.pixels.len) {
-                    tile_buffer.pixels[idx] = color;
-                }
+            const idx = @as(usize, @intCast(y * tile_buffer.width + x));
+            if (idx < tile_buffer.pixels.len) {
+                tile_buffer.pixels[idx] = final_color;
             }
         }
     }
