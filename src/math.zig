@@ -1,31 +1,31 @@
-//! # Math Module
+//! # 3D Math Module
 //!
-//! This module provides 3D math utilities for graphics programming.
-//! Includes vector types, matrix types, and transformation operations.
+//! This module provides the fundamental data structures and operations for 3D graphics,
+//! including vectors and 4x4 matrices. It is a self-contained library for linear
+//! algebra, which is the foundation of all 3D transformations.
 //!
-//! **Single Concern**: Linear algebra for 3D graphics (vectors, matrices, transformations)
+//! ## JavaScript Analogy
 //!
-//! **JavaScript Equivalent**:
+//! This file is like a standalone 3D math library, such as `gl-matrix` or the
+//! `THREE.Math` module in three.js. It provides the tools to move, rotate, scale,
+//! and project objects in 3D space.
+//!
 //! ```javascript
-//! // Like a math library for graphics
-//! class Vec3 {
-//!   constructor(x, y, z) { this.x = x; this.y = y; this.z = z; }
-//!   static add(a, b) { return new Vec3(a.x+b.x, a.y+b.y, a.z+b.z); }
-//!   static dot(a, b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
-//! }
+//! // e.g., using gl-matrix
+//! import { vec3, mat4 } from 'gl-matrix';
 //!
-//! class Mat4 {
-//!   constructor(data) { this.data = data; } // 4x4 matrix stored as 16 floats
-//!   static identity() { /* ... */ }
-//!   static multiply(a, b) { /* ... */ }
-//! }
+//! const position = vec3.fromValues(1, 2, 3);
+//! const transform = mat4.create(); // Creates an identity matrix
+//! mat4.translate(transform, transform, [10, 0, 0]);
+//! vec3.transformMat4(position, position, transform);
 //! ```
 
 const std = @import("std");
 
 // ========== VECTOR TYPES ==========
 
-/// 2D vector for UV texture coordinates or screen positions
+/// A 2D vector of single-precision floats.
+/// Primarily used for 2D screen positions and UV texture coordinates.
 pub const Vec2 = struct {
     x: f32,
     y: f32,
@@ -47,41 +47,41 @@ pub const Vec2 = struct {
     }
 };
 
-/// 3D vector for positions and directions
-/// Can represent either a point or a direction in 3D space
+/// A 3D vector of single-precision floats.
+/// Can represent a point in 3D space or a direction/vector.
 pub const Vec3 = struct {
     x: f32,
     y: f32,
     z: f32,
 
-    /// Create a new 3D vector
     pub fn new(x: f32, y: f32, z: f32) Vec3 {
         return Vec3{ .x = x, .y = y, .z = z };
     }
 
-    /// Add two vectors
     pub fn add(a: Vec3, b: Vec3) Vec3 {
         return Vec3.new(a.x + b.x, a.y + b.y, a.z + b.z);
     }
 
-    /// Subtract two vectors
     pub fn sub(a: Vec3, b: Vec3) Vec3 {
         return Vec3.new(a.x - b.x, a.y - b.y, a.z - b.z);
     }
 
-    /// Multiply vector by scalar
     pub fn scale(v: Vec3, s: f32) Vec3 {
         return Vec3.new(v.x * s, v.y * s, v.z * s);
     }
 
-    /// Dot product (a · b)
-    /// Returns how "aligned" two vectors are (positive = same direction)
+    /// Calculates the dot product of two vectors (a · b).
+    /// The result indicates how much the two vectors point in the same direction.
+    /// > 0: Same general direction.
+    ///   0: Perpendicular.
+    /// < 0: Opposite general direction.
     pub fn dot(a: Vec3, b: Vec3) f32 {
         return a.x * b.x + a.y * b.y + a.z * b.z;
     }
 
-    /// Cross product (a × b)
-    /// Returns a vector perpendicular to both a and b
+    /// Calculates the cross product of two vectors (a × b).
+    /// The result is a new vector that is perpendicular to both input vectors.
+    /// This is essential for calculating surface normals.
     pub fn cross(a: Vec3, b: Vec3) Vec3 {
         return Vec3.new(
             a.y * b.z - a.z * b.y,
@@ -90,12 +90,13 @@ pub const Vec3 = struct {
         );
     }
 
-    /// Length (magnitude) of the vector
+    /// Calculates the length (magnitude) of the vector.
     pub fn length(v: Vec3) f32 {
         return @sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
     }
 
-    /// Normalize vector to unit length (length = 1)
+    /// Returns a new vector with the same direction as the input but with a length of 1.
+    /// This is called a "unit vector".
     pub fn normalize(v: Vec3) Vec3 {
         const len = v.length();
         if (len == 0) return Vec3.new(0, 0, 0);
@@ -103,25 +104,25 @@ pub const Vec3 = struct {
     }
 };
 
-/// 4D homogeneous vector (used for matrix transformations)
-/// The 4th component (w) is used for perspective division
+/// A 4D homogeneous vector. This is a `Vec3` with an added `w` component.
+/// This is a mathematical trick that allows a 4x4 matrix to perform perspective projection.
+/// The `w` component is used as a divisor to create the illusion of depth.
 pub const Vec4 = struct {
     x: f32,
     y: f32,
     z: f32,
     w: f32,
 
-    /// Create a new 4D vector
     pub fn new(x: f32, y: f32, z: f32, w: f32) Vec4 {
         return Vec4{ .x = x, .y = y, .z = z, .w = w };
     }
 
-    /// Convert 3D vector to 4D homogeneous vector (w = 1.0)
+    /// Converts a 3D point into a 4D vector for matrix math. `w` is set to 1.0 for points.
     pub fn from3D(v: Vec3) Vec4 {
         return Vec4.new(v.x, v.y, v.z, 1.0);
     }
 
-    /// Convert 4D homogeneous vector back to 3D (divide by w)
+    /// Converts a 4D vector back to a 3D point by dividing by `w` (perspective divide).
     pub fn to3D(v: Vec4) Vec3 {
         if (v.w == 0) return Vec3.new(v.x, v.y, v.z);
         return Vec3.new(v.x / v.w, v.y / v.w, v.z / v.w);
@@ -130,130 +131,126 @@ pub const Vec4 = struct {
 
 // ========== MATRIX TYPES ==========
 
-/// 4x4 matrix for 3D transformations
-/// Stored in row-major order: data[row * 4 + col]
-/// Used for: translation, rotation, scaling, projection
+/// A 4x4 matrix for 3D transformations, stored in row-major order.
+/// This single structure can be used to represent translation, rotation, scale,
+/// and projection transformations, which can be combined via multiplication.
 pub const Mat4 = struct {
-    // 16 elements in row-major order
+    // The 16 matrix elements, stored as a flat array in row-major order.
+    // data[row * 4 + col]
     data: [16]f32,
 
-    /// Create identity matrix (no transformation)
+    /// Returns an identity matrix. This matrix represents "no transformation".
     pub fn identity() Mat4 {
-        var m = Mat4{ .data = undefined };
-        for (0..16) |i| {
-            m.data[i] = 0;
-        }
-        m.data[0] = 1; // m[0][0]
-        m.data[5] = 1; // m[1][1]
-        m.data[10] = 1; // m[2][2]
-        m.data[15] = 1; // m[3][3]
-        return m;
+        return Mat4{ .data = [_]f32{
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1,
+        } };
     }
 
-    /// Create translation matrix
-    /// Moves an object by (tx, ty, tz)
+    /// Creates a translation matrix that moves an object by (tx, ty, tz).
     pub fn translate(tx: f32, ty: f32, tz: f32) Mat4 {
         var m = Mat4.identity();
-        m.data[12] = tx; // m[3][0]
-        m.data[13] = ty; // m[3][1]
-        m.data[14] = tz; // m[3][2]
+        m.data[12] = tx;
+        m.data[13] = ty;
+        m.data[14] = tz;
         return m;
     }
 
-    /// Create scale matrix
-    /// Scales an object by (sx, sy, sz)
+    /// Creates a scale matrix that resizes an object by factors (sx, sy, sz).
     pub fn scale(sx: f32, sy: f32, sz: f32) Mat4 {
         var m = Mat4.identity();
-        m.data[0] = sx; // m[0][0]
-        m.data[5] = sy; // m[1][1]
-        m.data[10] = sz; // m[2][2]
+        m.data[0] = sx;
+        m.data[5] = sy;
+        m.data[10] = sz;
         return m;
     }
 
-    /// Create rotation matrix around X axis
-    /// Angle in radians, positive = counterclockwise (right-hand rule)
+    /// Creates a rotation matrix around the X-axis.
+    /// `angle` is in radians.
     pub fn rotateX(angle: f32) Mat4 {
-        const cos_a = @cos(angle);
-        const sin_a = @sin(angle);
-        var m = Mat4.identity();
-        m.data[5] = cos_a; // m[1][1]
-        m.data[6] = sin_a; // m[1][2]
-        m.data[9] = -sin_a; // m[2][1]
-        m.data[10] = cos_a; // m[2][2]
-        return m;
+        const c = @cos(angle);
+        const s = @sin(angle);
+        return Mat4{ .data = [_]f32{
+            1, 0, 0, 0,
+            0, c, s, 0,
+            0, -s, c, 0,
+            0, 0, 0, 1,
+        } };
     }
 
-    /// Create rotation matrix around Y axis
+    /// Creates a rotation matrix around the Y-axis.
     pub fn rotateY(angle: f32) Mat4 {
-        const cos_a = @cos(angle);
-        const sin_a = @sin(angle);
-        var m = Mat4.identity();
-        m.data[0] = cos_a; // m[0][0]
-        m.data[2] = -sin_a; // m[0][2]
-        m.data[8] = sin_a; // m[2][0]
-        m.data[10] = cos_a; // m[2][2]
-        return m;
+        const c = @cos(angle);
+        const s = @sin(angle);
+        return Mat4{ .data = [_]f32{
+            c, 0, -s, 0,
+            0, 1, 0, 0,
+            s, 0, c, 0,
+            0, 0, 0, 1,
+        } };
     }
 
-    /// Create rotation matrix around Z axis
+    /// Creates a rotation matrix around the Z-axis.
     pub fn rotateZ(angle: f32) Mat4 {
-        const cos_a = @cos(angle);
-        const sin_a = @sin(angle);
-        var m = Mat4.identity();
-        m.data[0] = cos_a; // m[0][0]
-        m.data[1] = sin_a; // m[0][1]
-        m.data[4] = -sin_a; // m[1][0]
-        m.data[5] = cos_a; // m[1][1]
-        return m;
+        const c = @cos(angle);
+        const s = @sin(angle);
+        return Mat4{ .data = [_]f32{
+            c, s, 0, 0,
+            -s, c, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1,
+        } };
     }
 
-    /// Create perspective projection matrix
-    /// fov: field of view angle in radians (typically pi/4 for 45 degrees)
-    /// aspect: width / height
-    /// near, far: depth clipping planes
+    /// Creates a perspective projection matrix, which simulates a camera lens.
+    /// - `fov`: Vertical field of view, in radians.
+    /// - `aspect`: The aspect ratio of the viewport (width / height).
+    /// - `near`: The distance to the near clipping plane.
+    /// - `far`: The distance to the far clipping plane.
     pub fn perspective(fov: f32, aspect: f32, near: f32, far: f32) Mat4 {
-        var m = Mat4{ .data = undefined };
-        for (0..16) |i| {
-            m.data[i] = 0;
-        }
-
+        var m: Mat4 = std.mem.zeroes(Mat4);
         const f = 1.0 / @tan(fov / 2.0);
-        const range = 1.0 / (near - far);
+        const range_inv = 1.0 / (near - far);
 
-        m.data[0] = f / aspect; // m[0][0]
-        m.data[5] = f; // m[1][1]
-        m.data[10] = (near + far) * range; // m[2][2]
-        m.data[11] = -1.0; // m[2][3]
-        m.data[14] = 2.0 * near * far * range; // m[3][2]
+        m.data[0] = f / aspect;
+        m.data[5] = f;
+        m.data[10] = (far + near) * range_inv;
+        m.data[11] = -1.0;
+        m.data[14] = 2.0 * far * near * range_inv;
 
         return m;
     }
 
-    /// Create orthographic projection matrix (no perspective)
+    /// Creates an orthographic projection matrix (no perspective, like a 2D view).
     pub fn orthographic(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) Mat4 {
-        var m = Mat4{ .data = undefined };
-        for (0..16) |i| {
-            m.data[i] = 0;
-        }
+        var m = Mat4.identity();
+        const lr_inv = 1.0 / (right - left);
+        const tb_inv = 1.0 / (top - bottom);
+        const fn_inv = 1.0 / (far - near);
 
-        m.data[0] = 2.0 / (right - left); // m[0][0]
-        m.data[5] = 2.0 / (top - bottom); // m[1][1]
-        m.data[10] = -2.0 / (far - near); // m[2][2]
-        m.data[12] = -(right + left) / (right - left); // m[3][0]
-        m.data[13] = -(top + bottom) / (top - bottom); // m[3][1]
-        m.data[14] = -(far + near) / (far - near); // m[3][2]
-        m.data[15] = 1.0; // m[3][3]
+        m.data[0] = 2.0 * lr_inv;
+        m.data[5] = 2.0 * tb_inv;
+        m.data[10] = -2.0 * fn_inv;
+        m.data[12] = -(right + left) * lr_inv;
+        m.data[13] = -(top + bottom) * tb_inv;
+        m.data[14] = -(far + near) * fn_inv;
 
         return m;
     }
 
-    /// Multiply two 4x4 matrices: result = a * b
+    /// Multiplies two 4x4 matrices. Note: matrix multiplication is not commutative (A * B != B * A).
+    /// The order matters and typically corresponds to applying transformations in reverse order.
     pub fn multiply(a: Mat4, b: Mat4) Mat4 {
-        var result = Mat4{ .data = undefined };
-        for (0..4) |row| {
-            for (0..4) |col| {
+        var result: Mat4 = std.mem.zeroes(Mat4);
+        var row: usize = 0;
+        while (row < 4) : (row += 1) {
+            var col: usize = 0;
+            while (col < 4) : (col += 1) {
                 var sum: f32 = 0;
-                for (0..4) |k| {
+                var k: usize = 0;
+                while (k < 4) : (k += 1) {
                     sum += a.data[row * 4 + k] * b.data[k * 4 + col];
                 }
                 result.data[row * 4 + col] = sum;
@@ -262,17 +259,18 @@ pub const Mat4 = struct {
         return result;
     }
 
-    /// Multiply matrix by 4D vector: result = m * v
+    /// Multiplies a matrix by a 4D vector, applying the transformation.
     pub fn mulVec4(m: Mat4, v: Vec4) Vec4 {
-        var result = Vec4.new(0, 0, 0, 0);
-        result.x = m.data[0] * v.x + m.data[1] * v.y + m.data[2] * v.z + m.data[3] * v.w;
-        result.y = m.data[4] * v.x + m.data[5] * v.y + m.data[6] * v.z + m.data[7] * v.w;
-        result.z = m.data[8] * v.x + m.data[9] * v.y + m.data[10] * v.z + m.data[11] * v.w;
-        result.w = m.data[12] * v.x + m.data[13] * v.y + m.data[14] * v.z + m.data[15] * v.w;
-        return result;
+        return Vec4.new(
+            m.data[0] * v.x + m.data[1] * v.y + m.data[2] * v.z + m.data[3] * v.w,
+            m.data[4] * v.x + m.data[5] * v.y + m.data[6] * v.z + m.data[7] * v.w,
+            m.data[8] * v.x + m.data[9] * v.y + m.data[10] * v.z + m.data[11] * v.w,
+            m.data[12] * v.x + m.data[13] * v.y + m.data[14] * v.z + m.data[15] * v.w,
+        );
     }
 
-    /// Multiply matrix by 3D vector (implicitly w=1)
+    /// Multiplies a matrix by a 3D vector (point), applying the transformation.
+    /// This is a convenience function that implicitly converts the Vec3 to a Vec4 (with w=1) and back.
     pub fn mulVec3(m: Mat4, v: Vec3) Vec3 {
         const v4 = Vec4.from3D(v);
         const result = m.mulVec4(v4);

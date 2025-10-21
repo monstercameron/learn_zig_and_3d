@@ -1,115 +1,111 @@
-//! # Job System Module
-//!
-//! This module implements a work-stealing job system for parallel execution.
-//! Jobs are independent work units that can be executed on any thread.
-//!
-//! **Key Concepts**:
-//! - Job: Function pointer + data payload
-//! - Job Queue: Lock-free MPMC queue for work distribution
-//! - Worker Threads: Pool of threads that execute jobs
-//! - Work Stealing: Idle threads can steal work from busy threads
-//!
-//! **Architecture**:
-//! ```
-//! Main Thread                Worker Threads (N-1)
-//!     |                           |
-//!     v                           v
-//! [Submit Jobs] -------> [Job Queue] <------- [Steal Work]
-//!     |                           |
-//!     v                           v
-//! [Wait/Sync]            [Execute Jobs]
-//! ```
+//! # A Multi-threaded Job System for Parallel Execution
+//! 
+//! This module implements a "work-stealing" job system. Its purpose is to take a large
+//! number of small tasks (jobs) and distribute them efficiently across all available CPU cores.
+//! This is the foundation for the renderer's high performance.
+//! 
+//! ## JavaScript Analogy: A Smart Web Worker Pool
+//! 
+//! Imagine you have a pool of Web Workers. A job system is like a manager for that pool.
+//! 
+//! 1.  **You define work**: You have a task, like `processImage(data)`, that you want to run in parallel.
+//! 2.  **You submit jobs**: You tell the job system, "run `processImage` with `data1`", "run `processImage` with `data2`", etc.
+//! 3.  **The system distributes work**: The job system automatically assigns these jobs to its pool of worker threads.
+//! 4.  **Work-Stealing**: Here's the clever part. If one worker finishes its to-do list, it doesn't sit idle.
+//!     It "steals" a job from the back of another worker's queue. This keeps all CPU cores busy.
+//! 
+//! This is far more efficient than manually managing workers with `postMessage` because the load balancing is automatic.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
-// ========== JOB STRUCTURE ==========
+// ========== JOB STRUCTURE ========== 
 
-/// Job function signature - takes context pointer as parameter
+/// A job function signature. All jobs are functions that take a single, generic pointer for context.
+/// JS Analogy: `(context) => { /* do work */ }`
 pub const JobFn = *const fn (ctx: *anyopaque) void;
 
-/// A job represents a unit of work that can be executed on any thread
+/// A `Job` represents a single unit of work that can be executed by any worker thread.
+/// JS Analogy: This is the "message" you'd send to a Web Worker. It contains the function to run
+/// and the data to run it on.
 pub const Job = struct {
-    /// Function to execute
+    /// The function to be executed for this job.
     function: JobFn,
-    /// Opaque pointer to job-specific data
+    /// A generic ("opaque") pointer to the data this job needs. The job function knows how to interpret this.
     context: *anyopaque,
-    /// Parent job (for dependency tracking, null if top-level)
+    /// A pointer to a parent job. This allows for creating dependencies between jobs.
     parent: ?*Job,
-    /// Number of unfinished child jobs (atomic counter)
+    /// An atomic counter for tracking how many child jobs are left to be completed.
+    /// When this hits zero, the job is considered finished.
     unfinished_jobs: std.atomic.Value(u32),
 
-    /// Create a new job
+    /// Creates a new job.
     pub fn init(function: JobFn, context: *anyopaque, parent: ?*Job) Job {
         return Job{
             .function = function,
             .context = context,
             .parent = parent,
+            // A job starts with 1 unfinished task: itself.
             .unfinished_jobs = std.atomic.Value(u32).init(1),
         };
     }
 
-    /// Execute this job
+    /// Executes the job's function and marks it as finished.
     pub fn execute(self: *Job) void {
         self.function(self.context);
         self.finish();
     }
 
-    /// Mark job as finished and propagate to parent
+    /// Marks the job as finished. If this job has a parent, it decrements the parent's
+    /// unfinished job counter. This is how dependencies are resolved.
     fn finish(self: *Job) void {
-        // Decrement unfinished counter
+        // Atomically decrement the counter.
         const unfinished = self.unfinished_jobs.fetchSub(1, .release);
 
-        // If this was the last unfinished job (counter was 1, now 0)
+        // If the counter was 1 before we decremented it, it means this was the last task
+        // for this job to be completed.
         if (unfinished == 1) {
-            // Propagate completion to parent
+            // If we have a parent, we notify it that one of its children has finished.
             if (self.parent) |parent| {
                 parent.finish();
             }
         }
     }
 
-    /// Check if job and all children are complete
+    /// Checks if the job and all its potential children are complete.
     pub fn isComplete(self: *const Job) bool {
         return self.unfinished_jobs.load(.acquire) == 0;
     }
 
-    /// Wait for job to complete (spin wait)
+    /// Waits (by spinning) until the job is complete. This is a simple way to synchronize.
     pub fn wait(self: *const Job) void {
         while (!self.isComplete()) {
-            // Yield CPU to other threads
+            // Hint to the CPU that we are in a spin-wait loop.
             std.atomic.spinLoopHint();
         }
     }
 };
 
-// ========== JOB QUEUE (LOCK-FREE MPMC) ==========
+// ========== JOB QUEUE (DEQUE) ========== 
 
-/// Multi-producer multi-consumer job deque guarded by a mutex.
-/// Workers pop from the bottom (LIFO) while thieves steal from the top (FIFO).
+/// A double-ended queue (deque) for jobs, guarded by a mutex.
+/// Each worker thread has its own deque.
+/// - The worker `pop`s from the bottom (LIFO - Last-In, First-Out).
+/// - Other workers `steal` from the top (FIFO - First-In, First-Out).
+/// This strategy reduces contention and improves cache performance.
 pub const JobQueue = struct {
-    /// Circular buffer storing job pointers
     jobs: []?*Job,
-    /// Total capacity of the buffer
     capacity: u32,
-    /// Index of the next element to remove from the top (steal side)
-    head: u32,
-    /// Index of the next free slot at the bottom (push/pop side)
-    tail: u32,
-    /// Number of jobs currently stored
+    head: u32, // Index for stealing (top of the deque).
+    tail: u32, // Index for pushing/popping (bottom of the deque).
     len: u32,
-    /// Mutex protecting queue mutations
-    mutex: std.Thread.Mutex,
-    /// Allocator for queue memory
+    mutex: std.Thread.Mutex, // A lock to ensure only one thread can modify the queue at a time.
     allocator: std.mem.Allocator,
 
-    /// Create a new job queue
     pub fn init(capacity: u32, allocator: std.mem.Allocator) !JobQueue {
         if (capacity == 0) return error.InvalidCapacity;
-
         const jobs = try allocator.alloc(?*Job, capacity);
         @memset(jobs, null);
-
         return JobQueue{
             .jobs = jobs,
             .capacity = capacity,
@@ -121,35 +117,26 @@ pub const JobQueue = struct {
         };
     }
 
-    /// Clean up queue
     pub fn deinit(self: *JobQueue) void {
         self.allocator.free(self.jobs);
     }
 
-    /// Push a job onto the queue (any producer thread)
+    /// Pushes a job onto the bottom of the deque.
     pub fn push(self: *JobQueue, job: *Job) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
-
-        if (self.len == self.capacity) {
-            return false;
-        }
-
+        if (self.len == self.capacity) return false;
         self.jobs[self.tail] = job;
         self.tail = (self.tail + 1) % self.capacity;
         self.len += 1;
         return true;
     }
 
-    /// Pop a job from the queue (worker owning this deque)
+    /// Pops a job from the bottom of the deque (for the owner worker).
     pub fn pop(self: *JobQueue) ?*Job {
         self.mutex.lock();
         defer self.mutex.unlock();
-
-        if (self.len == 0) {
-            return null;
-        }
-
+        if (self.len == 0) return null;
         self.tail = (self.tail + self.capacity - 1) % self.capacity;
         const job = self.jobs[self.tail];
         self.jobs[self.tail] = null;
@@ -157,15 +144,11 @@ pub const JobQueue = struct {
         return job;
     }
 
-    /// Steal a job from the queue (thief threads)
+    /// Steals a job from the top of the deque (for other workers).
     pub fn steal(self: *JobQueue) ?*Job {
         self.mutex.lock();
         defer self.mutex.unlock();
-
-        if (self.len == 0) {
-            return null;
-        }
-
+        if (self.len == 0) return null;
         const job = self.jobs[self.head];
         self.jobs[self.head] = null;
         self.head = (self.head + 1) % self.capacity;
@@ -173,7 +156,6 @@ pub const JobQueue = struct {
         return job;
     }
 
-    /// Get number of jobs in queue (approximate)
     pub fn count(self: *const JobQueue) u32 {
         const queue = @constCast(self);
         queue.mutex.lock();
@@ -182,80 +164,61 @@ pub const JobQueue = struct {
     }
 };
 
-// ========== WORKER THREAD ==========
+// ========== WORKER THREAD ========== 
 
-/// Worker thread that executes jobs from the queue
+/// Represents a single worker thread that executes jobs.
+/// JS Analogy: An individual `Web Worker`.
 const WorkerThread = struct {
-    /// Thread handle
     thread: std.Thread,
-    /// Worker's local job queue
-    queue: JobQueue,
-    /// Reference to parent job system
-    system: *JobSystem,
-    /// Worker ID
+    queue: JobQueue, // The worker's own personal to-do list.
+    system: *JobSystem, // A reference back to the main system.
     id: u32,
-    /// Should worker continue running
     running: std.atomic.Value(bool),
 
-    /// Worker thread main loop
+    /// The main loop for a worker thread.
     fn run(self: *WorkerThread) void {
-        // std.debug.print("Worker {} starting...\n", .{self.id});
-        // var jobs_executed: usize = 0;
-        var iterations: usize = 0;
-
         while (self.running.load(.acquire)) {
-            iterations += 1;
-
-            // Try to get a job from our local queue
+            // 1. First, try to get a job from our own queue.
             var job = self.queue.pop();
 
-            // if (iterations <= 5 or (iterations % 10000 == 0)) {
-            //     const q_count = self.queue.count();
-            //     std.debug.print("Worker {} iter {}: queue has {} jobs, pop result: {}\n", .{self.id, iterations, q_count, job != null});
-            // }
-
-            // If no local work, try to steal from other workers
+            // 2. If our queue is empty, try to steal a job from another worker.
             if (job == null) {
                 job = self.system.stealJob(self.id);
             }
 
+            // 3. If we have a job, execute it.
             if (job) |j| {
-                // Execute the job
                 j.execute();
             } else {
-                // No work available - yield CPU
+                // 4. If there's no work anywhere, yield to the OS to avoid busy-waiting.
                 std.Thread.yield() catch {};
             }
         }
     }
 };
 
-// ========== JOB SYSTEM ==========
+// ========== JOB SYSTEM ========== 
 
-/// Main job system - manages worker threads and job distribution
+/// The main JobSystem struct. It manages the pool of worker threads and job distribution.
+/// JS Analogy: The main class that manages your entire `Worker` pool.
 pub const JobSystem = struct {
-    /// Worker threads
     workers: []WorkerThread,
-    /// Number of worker threads
     worker_count: u32,
-    /// Allocator
     allocator: std.mem.Allocator,
-    /// Is system running
     running: std.atomic.Value(bool),
-    /// Round-robin counter for job submission
-    next_worker: std.atomic.Value(u32),
+    next_worker: std.atomic.Value(u32), // Used for round-robin job submission.
 
-    /// Initialize job system with N-1 worker threads (leave 1 core for main thread)
+    /// Initializes the job system. It typically creates one worker thread per CPU core,
+    /// minus one for the main application thread.
     pub fn init(allocator: std.mem.Allocator) !*JobSystem {
-    const cpu_count = std.Thread.getCpuCount() catch 4;
-    const worker_count: u32 = if (cpu_count > 1) @as(u32, @intCast(cpu_count - 1)) else 1;
+        const cpu_count = std.Thread.getCpuCount() catch 4;
+        const worker_count: u32 = if (cpu_count > 1) @as(u32, @intCast(cpu_count - 1)) else 1;
 
-    std.debug.print("Job System: Detected {} CPUs, creating {} worker thread(s)\n", .{ cpu_count, worker_count });
+        std.debug.print("Job System: Detected {} CPUs, creating {} worker thread(s)\n", .{ cpu_count, worker_count });
 
         const workers = try allocator.alloc(WorkerThread, worker_count);
         errdefer allocator.free(workers);
 
-        // Allocate system on heap to get stable pointer
         const system = try allocator.create(JobSystem);
         errdefer allocator.destroy(system);
 
@@ -267,18 +230,18 @@ pub const JobSystem = struct {
             .next_worker = std.atomic.Value(u32).init(0),
         };
 
-        // Initialize worker threads
+        // Initialize each worker thread.
         for (workers, 0..) |*worker, i| {
             worker.* = WorkerThread{
-                .thread = undefined, // Will be set when thread starts
-                .queue = try JobQueue.init(1024, allocator),
+                .thread = undefined,
+                .queue = try JobQueue.init(1024, allocator), // Each worker gets its own queue.
                 .system = system,
                 .id = @intCast(i),
                 .running = std.atomic.Value(bool).init(true),
             };
         }
 
-        // Start worker threads
+        // Start the worker threads. They will immediately start looking for jobs.
         for (workers) |*worker| {
             worker.thread = try std.Thread.spawn(.{}, WorkerThread.run, .{worker});
         }
@@ -286,17 +249,15 @@ pub const JobSystem = struct {
         return system;
     }
 
-    /// Shut down job system and wait for all threads
+    /// Shuts down the job system, signaling all threads to stop and waiting for them to finish.
     pub fn deinit(self: *JobSystem) void {
         const allocator = self.allocator;
 
-        // Signal all workers to stop
         self.running.store(false, .release);
         for (self.workers) |*worker| {
             worker.running.store(false, .release);
         }
 
-        // Wait for all threads to finish
         for (self.workers) |*worker| {
             worker.thread.join();
             worker.queue.deinit();
@@ -306,45 +267,36 @@ pub const JobSystem = struct {
         allocator.destroy(self);
     }
 
-    /// Submit a job to a specific worker queue
-    pub fn submitJob(self: *JobSystem, job: *Job, worker_id: u32) bool {
-        const worker_index = worker_id % self.worker_count;
-        return self.workers[worker_index].queue.push(job);
-    }
-
-    /// Submit a job to the least busy worker
+    /// Submits a job to the system. It uses a simple round-robin approach to try and find
+    /// a worker queue that is not full.
     pub fn submitJobAuto(self: *JobSystem, job: *Job) bool {
-        // Try submitting to each worker in round-robin until one accepts
         var attempts: u32 = 0;
         while (attempts < self.worker_count) : (attempts += 1) {
             const worker_idx = (self.next_worker.fetchAdd(1, .monotonic)) % self.worker_count;
-            const result = self.workers[worker_idx].queue.push(job);
-            if (result) {
+            if (self.workers[worker_idx].queue.push(job)) {
                 return true;
             }
         }
-
         std.debug.print("ERROR: Failed to submit job after trying all {} workers\n", .{self.worker_count});
         return false;
     }
 
-    /// Try to steal a job from another worker (for work stealing)
-    fn stealJob(self: *JobSystem, worker_id: u32) ?*Job {
-        // Try to steal from each worker in round-robin order
-        // Start from the next worker to avoid checking ourselves
+    /// The core work-stealing logic. Called by an idle worker to try and steal a job
+    /// from another, potentially busy worker.
+    fn stealJob(self: *JobSystem, stealer_id: u32) ?*Job {
         var i: u32 = 1;
         while (i < self.worker_count) : (i += 1) {
-            const target = (worker_id + i) % self.worker_count;
-            // Double-check bounds to prevent race conditions
-            if (target >= self.worker_count) continue;
-            if (self.workers[target].queue.steal()) |job| {
+            const target_id = (stealer_id + i) % self.worker_count;
+            if (target_id >= self.worker_count) continue;
+
+            // Try to steal from the top of the target's queue.
+            if (self.workers[target_id].queue.steal()) |job| {
                 return job;
             }
         }
         return null;
     }
 
-    /// Get total number of pending jobs across all queues
     pub fn pendingJobs(self: *const JobSystem) u32 {
         var total: u32 = 0;
         for (self.workers) |*worker| {
@@ -354,16 +306,16 @@ pub const JobSystem = struct {
     }
 };
 
-// ========== HELPER FUNCTIONS ==========
+// ========== HELPER FUNCTIONS ========== 
 
-/// Allocate a job on the heap
+/// Helper to allocate a new job on the heap.
 pub fn allocateJob(allocator: std.mem.Allocator, function: JobFn, context: *anyopaque, parent: ?*Job) !*Job {
     const job = try allocator.create(Job);
     job.* = Job.init(function, context, parent);
     return job;
 }
 
-/// Free a heap-allocated job
+/// Helper to free a heap-allocated job.
 pub fn freeJob(allocator: std.mem.Allocator, job: *Job) void {
     allocator.destroy(job);
 }
