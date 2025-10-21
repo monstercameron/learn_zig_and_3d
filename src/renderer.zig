@@ -553,15 +553,15 @@ pub const Renderer = struct {
 
         const width_f = @as(f32, @floatFromInt(self.bitmap.width));
         const height_f = @as(f32, @floatFromInt(self.bitmap.height));
-        const center_x = width_f / 2.0;
-        const center_y = height_f / 2.0;
-        const z_offset = 4.0; // Push mesh forward so the camera sits at the origin
-        const aspect_ratio = if (height_f > 0.0) width_f / height_f else 1.0;
-        const fov_rad = self.camera_fov_deg * (std.math.pi / 180.0);
-        const half_fov = fov_rad * 0.5;
-        const tan_half_fov = std.math.tan(half_fov);
-        const y_scale = if (tan_half_fov > 0.0) 1.0 / tan_half_fov else 1.0;
-        const x_scale = y_scale / aspect_ratio;
+    const center_x = width_f / 2.0;
+    const center_y = height_f / 2.0;
+    const z_offset = 4.0; // Push mesh forward so the camera sits at the origin
+    const aspect_ratio = if (height_f > 0.0) width_f / height_f else 1.0;
+    const fov_rad = self.camera_fov_deg * (std.math.pi / 180.0);
+    const half_fov = fov_rad * 0.5;
+    const tan_half_fov = std.math.tan(half_fov);
+    const y_scale = if (tan_half_fov > 0.0) 1.0 / tan_half_fov else 1.0;
+    const x_scale = y_scale / aspect_ratio;
 
         for (mesh.vertices, 0..) |vertex, i| {
             // Transform vertex by rotation
@@ -602,8 +602,8 @@ pub const Renderer = struct {
 
         // ===== STEP 5.5: Project and draw light position as a cyan sphere =====
         // Project the light position to screen space
-        const light_camera_z = light_pos.z + z_offset;
-        self.drawLightMarker(light_pos, light_camera_z, center_x, center_y, x_scale, y_scale, mesh, projected, transformed_vertices, transform);
+    const light_camera_z = light_pos.z + z_offset;
+    self.drawLightMarker(light_pos, light_camera_z, center_x, center_y, x_scale, y_scale, mesh, projected, transformed_vertices, transform);
 
         // ===== STEP 6: Copy bitmap to screen =====
         self.drawBitmap();
@@ -752,7 +752,7 @@ pub const Renderer = struct {
         self: *Renderer,
         screen_x: f32,
         screen_y: f32,
-        point_depth: f32,
+    point_depth: f32,
         mesh: *const Mesh,
         projected: [][2]i32,
         transformed_vertices: []math.Vec3,

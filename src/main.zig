@@ -73,7 +73,6 @@ extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
 const Window = @import("window.zig").Window;
 const Renderer = @import("renderer.zig").Renderer;
 const Mesh = @import("mesh.zig").Mesh;
-const obj_loader = @import("obj_loader.zig");
 const texture = @import("texture.zig");
 const config = @import("app_config.zig");
 
@@ -96,12 +95,13 @@ pub fn main() !void {
     var renderer = try Renderer.init(window.hwnd, 800, 600, allocator);
     defer renderer.deinit();
 
-    var cube = try obj_loader.load(allocator, "resources/models/box.obj");
-    defer cube.deinit();
+    var ground = try Mesh.groundPlane(allocator, 80.0, 16.0, -2.0, 60.0);
+    defer ground.deinit();
 
-    var box_texture = try texture.loadBmp(allocator, "resources/textures/box-texture-1-sm.bmp");
-    defer box_texture.deinit();
-    renderer.setTexture(&box_texture);
+    var ground_texture = try texture.loadBmp(allocator, "resources/textures/box-texture-1-sm.bmp");
+    defer ground_texture.deinit();
+    renderer.setTexture(&ground_texture);
+    renderer.rotation_x = -0.3;
 
     // ========== EVENT LOOP PHASE ==========
     // Continuous rendering loop with frame rate limiting
@@ -161,7 +161,7 @@ pub fn main() !void {
             if (frame_count <= 3) {
                 std.debug.print("Rendering frame {}\n", .{frame_count});
             }
-            renderer.render3DMeshWithPump(&cube, MessagePump.pump) catch |err| {
+            renderer.render3DMeshWithPump(&ground, MessagePump.pump) catch |err| {
                 if (err == error.RenderInterrupted) {
                     std.debug.print("Render interrupted by shutdown request\n", .{});
                 } else {
