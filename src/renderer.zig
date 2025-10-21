@@ -646,6 +646,7 @@ pub const Renderer = struct {
         projection: ProjectionParams,
         light_dir: math.Vec3,
         output_start: usize,
+        written_count: usize = 0,
 
         fn process(job: *MeshletTaskJob) void {
             var writer = MeshWorkWriter.init(job.mesh_work);
@@ -673,6 +674,7 @@ pub const Renderer = struct {
                     std.log.err("Meshlet emit failed: {}", .{err});
                 };
             }
+            job.written_count = cursor - job.output_start;
         }
 
         fn run(ctx: *anyopaque) void {
@@ -817,6 +819,9 @@ pub const Renderer = struct {
         projected: [][2]i32,
         transformed_vertices: []math.Vec3,
         vertex_ready: []std.atomic.Value(VertexState),
+    meshlet_jobs: []MeshletTaskJob,
+    meshlet_job_handles: []Job,
+    meshlet_job_completion: []bool,
         work: MeshWork,
         mesh: ?*const Mesh,
         camera_position: math.Vec3,
@@ -832,6 +837,9 @@ pub const Renderer = struct {
                 .projected = &[_][2]i32{},
                 .transformed_vertices = &[_]math.Vec3{},
                 .vertex_ready = &[_]std.atomic.Value(VertexState){},
+                .meshlet_jobs = &[_]MeshletTaskJob{},
+                .meshlet_job_handles = &[_]Job{},
+                .meshlet_job_completion = &[_]bool{},
                 .work = MeshWork.init(),
                 .mesh = null,
                 .camera_position = math.Vec3.new(0.0, 0.0, 0.0),
@@ -855,9 +863,15 @@ pub const Renderer = struct {
             if (self.projected.len != 0) allocator.free(self.projected);
             if (self.transformed_vertices.len != 0) allocator.free(self.transformed_vertices);
             if (self.vertex_ready.len != 0) allocator.free(self.vertex_ready);
+            if (self.meshlet_jobs.len != 0) allocator.free(self.meshlet_jobs);
+            if (self.meshlet_job_handles.len != 0) allocator.free(self.meshlet_job_handles);
+            if (self.meshlet_job_completion.len != 0) allocator.free(self.meshlet_job_completion);
             self.projected = &[_][2]i32{};
             self.transformed_vertices = &[_]math.Vec3{};
             self.vertex_ready = &[_]std.atomic.Value(VertexState){};
+            self.meshlet_jobs = &[_]MeshletTaskJob{};
+            self.meshlet_job_handles = &[_]Job{};
+            self.meshlet_job_completion = &[_]bool{};
             self.mesh = null;
             self.light_dir = math.Vec3.new(0.0, 0.0, 0.0);
             self.valid = false;
@@ -890,6 +904,34 @@ pub const Renderer = struct {
                     break :blk states;
                 };
                 self.valid = false;
+            }
+        }
+
+        fn ensureMeshletJobCapacity(self: *MeshWorkCache, allocator: std.mem.Allocator, capacity: usize) !void {
+            if (capacity == 0) return;
+
+            if (self.meshlet_jobs.len < capacity) {
+                if (self.meshlet_jobs.len == 0) {
+                    self.meshlet_jobs = try allocator.alloc(MeshletTaskJob, capacity);
+                } else {
+                    self.meshlet_jobs = try allocator.realloc(self.meshlet_jobs, capacity);
+                }
+            }
+
+            if (self.meshlet_job_handles.len < capacity) {
+                if (self.meshlet_job_handles.len == 0) {
+                    self.meshlet_job_handles = try allocator.alloc(Job, capacity);
+                } else {
+                    self.meshlet_job_handles = try allocator.realloc(self.meshlet_job_handles, capacity);
+                }
+            }
+
+            if (self.meshlet_job_completion.len < capacity) {
+                if (self.meshlet_job_completion.len == 0) {
+                    self.meshlet_job_completion = try allocator.alloc(bool, capacity);
+                } else {
+                    self.meshlet_job_completion = try allocator.realloc(self.meshlet_job_completion, capacity);
+                }
             }
         }
 
@@ -1784,13 +1826,11 @@ pub const Renderer = struct {
                 work.finalize(0);
                 return;
             }
-
-            var meshlet_jobs = try self.allocator.alloc(MeshletTaskJob, visible_meshlet_count);
-            defer self.allocator.free(meshlet_jobs);
-            var jobs = try self.allocator.alloc(Job, visible_meshlet_count);
-            defer self.allocator.free(jobs);
-            var job_completion = try self.allocator.alloc(bool, visible_meshlet_count);
-            defer self.allocator.free(job_completion);
+            var cache_ptr = &self.mesh_work_cache;
+            try cache_ptr.ensureMeshletJobCapacity(self.allocator, visible_meshlet_count);
+            var meshlet_jobs = cache_ptr.meshlet_jobs[0..visible_meshlet_count];
+            var jobs = cache_ptr.meshlet_job_handles[0..visible_meshlet_count];
+            var job_completion = cache_ptr.meshlet_job_completion[0..visible_meshlet_count];
             @memset(job_completion, false);
 
             var job_idx: usize = 0;
@@ -1815,6 +1855,7 @@ pub const Renderer = struct {
                     .projection = projection,
                     .light_dir = light_dir,
                     .output_start = meshlet_offsets[job_idx],
+                    .written_count = 0,
                 };
                 jobs[job_idx] = Job.init(MeshletTaskJob.run, @ptrCast(&meshlet_jobs[job_idx]), null);
                 if (!js.submitJobAuto(&jobs[job_idx])) {
@@ -1838,7 +1879,21 @@ pub const Renderer = struct {
                 if (!progress) std.Thread.yield() catch {};
             }
 
-            work.next_triangle.store(visible_triangle_budget, .release);
+            var packed_offset: usize = 0;
+            for (meshlet_jobs[0..visible_meshlet_count], 0..) |job_info, idx| {
+                const original_start = meshlet_offsets[idx];
+                const count = job_info.written_count;
+                if (count != 0 and original_start != packed_offset) {
+                    const src = work.triangles[original_start .. original_start + count];
+                    const dest = work.triangles[packed_offset .. packed_offset + count];
+                    std.mem.copyForwards(TrianglePacket, dest, src);
+                }
+                work.meshlet_packets[idx].triangle_start = packed_offset;
+                work.meshlet_packets[idx].triangle_count = count;
+                packed_offset += count;
+            }
+
+            work.next_triangle.store(packed_offset, .release);
         } else {
             var writer = MeshWorkWriter.init(work);
             var cursor: usize = 0;
