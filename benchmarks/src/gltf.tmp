@@ -1,0 +1,1092 @@
+const std = @import("std");
+const math = @import("../src/math.zig");
+
+pub const Quat = struct {
+    x: f32,
+    y: f32,
+    z: f32,
+    w: f32,
+};
+
+const ComponentType = enum(u16) {
+    i8 = 5120,
+    u8 = 5121,
+    i16 = 5122,
+    u16 = 5123,
+    u32 = 5125,
+    f32 = 5126,
+};
+
+fn componentSize(ct: ComponentType) usize {
+    return switch (ct) {
+        .i8, .u8 => 1,
+        .i16, .u16 => 2,
+        .u32, .f32 => 4,
+    };
+}
+
+const ValueType = enum {
+    scalar,
+    vec2,
+    vec3,
+    vec4,
+    mat4,
+    mat3,
+    mat2,
+};
+
+fn elementComponentCount(vt: ValueType) usize {
+    return switch (vt) {
+        .scalar => 1,
+        .vec2 => 2,
+        .vec3 => 3,
+        .vec4 => 4,
+        .mat2 => 4,
+        .mat3 => 9,
+        .mat4 => 16,
+    };
+}
+
+fn elementSize(ct: ComponentType, vt: ValueType) usize {
+    return componentSize(ct) * elementComponentCount(vt);
+}
+
+pub const Buffer = struct {
+    data: []u8,
+};
+
+pub const BufferView = struct {
+    buffer: u32,
+    byte_offset: usize,
+    byte_length: usize,
+    byte_stride: ?usize,
+};
+
+pub const Accessor = struct {
+    name: ?[]u8,
+    buffer_view: ?u32,
+    byte_offset: usize,
+    component_type: ComponentType,
+    normalized: bool,
+    count: usize,
+    value_type: ValueType,
+};
+
+pub const Primitive = struct {
+    material: ?u32,
+    indices: ?u32,
+    mode: u32,
+    position: ?u32,
+    normal: ?u32,
+    tangent: ?u32,
+    texcoord0: ?u32,
+    color0: ?u32,
+    joints0: ?u32,
+    weights0: ?u32,
+};
+
+pub const Mesh = struct {
+    name: ?[]u8,
+    primitives: []Primitive,
+};
+
+pub const Node = struct {
+    name: ?[]u8,
+    mesh: ?u32,
+    skin: ?u32,
+    children: []u32,
+    translation: math.Vec3,
+    rotation: Quat,
+    scale: math.Vec3,
+    matrix: ?math.Mat4,
+    parent: ?u32,
+};
+
+pub const Skin = struct {
+    name: ?[]u8,
+    joints: []u32,
+    inverse_bind_matrices: ?u32,
+    skeleton: ?u32,
+};
+
+pub const AnimationSampler = struct {
+    input: u32,
+    output: u32,
+    interpolation: Interpolation,
+};
+
+pub const AnimationChannel = struct {
+    sampler: u32,
+    target_node: u32,
+    target_path: TargetPath,
+};
+
+pub const Animation = struct {
+    name: ?[]u8,
+    samplers: []AnimationSampler,
+    channels: []AnimationChannel,
+};
+
+pub const Scene = struct {
+    name: ?[]u8,
+    nodes: []u32,
+};
+
+pub const TargetPath = enum {
+    translation,
+    rotation,
+    scale,
+    weights,
+};
+
+pub const Interpolation = enum {
+    linear,
+    step,
+    cubicspline,
+};
+
+pub const AccessorView = struct {
+    bytes: []const u8,
+    stride: usize,
+    component_type: ComponentType,
+    value_type: ValueType,
+    count: usize,
+};
+
+pub const NodePose = struct {
+    translation: math.Vec3,
+    rotation: Quat,
+    scale: math.Vec3,
+};
+
+pub const Gltf = struct {
+    allocator: std.mem.Allocator,
+    buffers: []Buffer,
+    buffer_views: []BufferView,
+    accessors: []Accessor,
+    meshes: []Mesh,
+    nodes: []Node,
+    skins: []Skin,
+    animations: []Animation,
+    scenes: []Scene,
+    scene: ?u32,
+
+    pub fn deinit(self: *Gltf) void {
+        const allocator = self.allocator;
+        for (self.buffers) |buffer| allocator.free(buffer.data);
+        allocator.free(self.buffers);
+        allocator.free(self.buffer_views);
+
+        for (self.accessors) |accessor| if (accessor.name) |name| allocator.free(name);
+        allocator.free(self.accessors);
+
+        for (self.meshes) |mesh| {
+            if (mesh.name) |name| allocator.free(name);
+            allocator.free(mesh.primitives);
+        }
+        allocator.free(self.meshes);
+
+        for (self.nodes) |node| {
+            if (node.name) |name| allocator.free(name);
+            if (node.children.len != 0) allocator.free(node.children);
+        }
+        allocator.free(self.nodes);
+
+        for (self.skins) |skin| {
+            if (skin.name) |name| allocator.free(name);
+            allocator.free(skin.joints);
+        }
+        allocator.free(self.skins);
+
+        for (self.animations) |animation| {
+            if (animation.name) |name| allocator.free(name);
+            allocator.free(animation.samplers);
+            allocator.free(animation.channels);
+        }
+        allocator.free(self.animations);
+
+        for (self.scenes) |scene_value| {
+            if (scene_value.name) |name| allocator.free(name);
+            allocator.free(scene_value.nodes);
+        }
+        allocator.free(self.scenes);
+
+        self.* = undefined;
+    }
+};
+
+pub fn load(allocator: std.mem.Allocator, path: []const u8) !Gltf {
+    const ext = std.fs.path.extension(path);
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+
+    const bytes = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    errdefer allocator.free(bytes);
+
+    if (std.mem.eql(u8, ext, ".glb")) {
+        return parseGlb(allocator, bytes);
+    } else if (std.mem.eql(u8, ext, ".gltf")) {
+        const base_dir = try std.fs.path.dirnameAlloc(allocator, path);
+        defer allocator.free(base_dir);
+        return parseGltfJson(allocator, bytes, base_dir);
+    } else {
+        return error.UnsupportedExtension;
+    }
+}
+
+fn parseGlb(allocator: std.mem.Allocator, data: []u8) !Gltf {
+    if (data.len < 12) return error.InvalidGlb;
+    const magic = std.mem.bytesToValue(u32, data[0..4]);
+    if (magic != 0x46546C67) return error.InvalidGlb;
+    var offset: usize = 12;
+    if (offset + 8 > data.len) return error.InvalidGlb;
+    const json_length = std.mem.bytesToValue(u32, data[offset..offset + 4]);
+    const json_type = std.mem.bytesToValue(u32, data[offset + 4 .. offset + 8]);
+    if (json_type != 0x4E4F534A) return error.InvalidGlb;
+    offset += 8;
+    if (offset + json_length > data.len) return error.InvalidGlb;
+    const json_chunk = data[offset .. offset + json_length];
+    offset += json_length;
+
+    var bin_chunk: ?[]u8 = null;
+    if (offset + 8 <= data.len) {
+        const bin_length = std.mem.bytesToValue(u32, data[offset..offset + 4]);
+        const bin_type = std.mem.bytesToValue(u32, data[offset + 4 .. offset + 8]);
+        if (bin_type == 0x004E4942 and offset + 8 + bin_length <= data.len) {
+            bin_chunk = data[offset + 8 .. offset + 8 + bin_length];
+        }
+    }
+
+    return parseDocument(allocator, json_chunk, bin_chunk, null);
+}
+
+fn parseGltfJson(allocator: std.mem.Allocator, json_bytes: []u8, base_dir: []const u8) !Gltf {
+    return parseDocument(allocator, json_bytes, null, base_dir);
+}
+
+fn parseDocument(
+    allocator: std.mem.Allocator,
+    json_bytes: []const u8,
+    bin_chunk: ?[]u8,
+    base_dir: ?[]const u8,
+) !Gltf {
+    var parser = std.json.Parser.init(allocator, .{});
+    defer parser.deinit();
+    const tree = try parser.parse(json_bytes);
+    defer tree.deinit();
+
+    const root_value = tree.root;
+    if (root_value.getType() != .object) return error.InvalidGltf;
+    const root_obj = root_value.object;
+
+    var buffers = try parseBuffers(allocator, root_obj, bin_chunk, base_dir);
+    errdefer {
+        for (buffers) |buffer| allocator.free(buffer.data);
+        allocator.free(buffers);
+    }
+
+    var buffer_views = try parseBufferViews(allocator, root_obj);
+    errdefer allocator.free(buffer_views);
+
+    var accessors = try parseAccessors(allocator, root_obj, buffer_views.len);
+    errdefer {
+        for (accessors) |accessor| if (accessor.name) |name| allocator.free(name);
+        allocator.free(accessors);
+    }
+
+    var meshes = try parseMeshes(allocator, root_obj);
+    errdefer {
+        for (meshes) |mesh| {
+            if (mesh.name) |name| allocator.free(name);
+            allocator.free(mesh.primitives);
+        }
+        allocator.free(meshes);
+    }
+
+    var nodes = try parseNodes(allocator, root_obj);
+    errdefer {
+        for (nodes) |node| {
+            if (node.name) |name| allocator.free(name);
+            if (node.children.len != 0) allocator.free(node.children);
+        }
+        allocator.free(nodes);
+    }
+    setNodeParents(&nodes);
+
+    var skins = try parseSkins(allocator, root_obj);
+    errdefer {
+        for (skins) |skin| {
+            if (skin.name) |name| allocator.free(name);
+            allocator.free(skin.joints);
+        }
+        allocator.free(skins);
+    }
+
+    var animations = try parseAnimations(allocator, root_obj);
+    errdefer {
+        for (animations) |anim| {
+            if (anim.name) |name| allocator.free(name);
+            allocator.free(anim.samplers);
+            allocator.free(anim.channels);
+        }
+        allocator.free(animations);
+    }
+
+    var scenes = try parseScenes(allocator, root_obj);
+    errdefer {
+        for (scenes) |scene| {
+            if (scene.name) |name| allocator.free(name);
+            allocator.free(scene.nodes);
+        }
+        allocator.free(scenes);
+    }
+
+    const default_scene = if (root_obj.get("scene")) |scene_value| blk: {
+        break :blk @intCast(u32, try expectInteger(scene_value));
+    } else null;
+
+    return Gltf{
+        .allocator = allocator,
+        .buffers = buffers,
+        .buffer_views = buffer_views,
+        .accessors = accessors,
+        .meshes = meshes,
+        .nodes = nodes,
+        .skins = skins,
+        .animations = animations,
+        .scenes = scenes,
+        .scene = default_scene,
+    };
+}
+
+fn parseBuffers(
+    allocator: std.mem.Allocator,
+    root: std.json.Object,
+    bin_chunk: ?[]u8,
+    base_dir: ?[]const u8,
+) ![]Buffer {
+    const buffers_value = root.get("buffers") orelse return allocator.alloc(Buffer, 0);
+    const buffers_array = try expectArray(buffers_value);
+    var result = try allocator.alloc(Buffer, buffers_array.items.len);
+    var idx: usize = 0;
+    while (idx < buffers_array.items.len) : (idx += 1) {
+        const buffer_obj = try expectObject(buffers_array.items[idx]);
+        const byte_length = @intCast(usize, try expectInteger(buffer_obj.get("byteLength") orelse return error.InvalidGltf));
+        var data_slice: []u8 = undefined;
+        if (buffer_obj.get("uri")) |uri_value| {
+            const uri = try expectString(uri_value);
+            if (std.mem.startsWith(u8, uri, "data:")) {
+                data_slice = try decodeDataUri(allocator, uri);
+            } else {
+                const base = base_dir orelse return error.ExternalBuffersRequireBaseDir;
+                const joined = try std.fs.path.join(allocator, &[_][]const u8{ base, uri });
+                defer allocator.free(joined);
+                const file = try std.fs.cwd().openFile(joined, .{});
+                defer file.close();
+                data_slice = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+            }
+            if (data_slice.len < byte_length) return error.BufferTooSmall;
+        } else {
+            if (idx == 0 and bin_chunk != null) {
+                data_slice = try allocator.alloc(u8, byte_length);
+                std.mem.copy(u8, data_slice, bin_chunk.?[0..byte_length]);
+            } else {
+                return error.BufferUriMissing;
+            }
+        }
+        result[idx] = Buffer{ .data = data_slice };
+    }
+    return result;
+}
+
+fn parseBufferViews(allocator: std.mem.Allocator, root: std.json.Object) ![]BufferView {
+    const views_value = root.get("bufferViews") orelse return allocator.alloc(BufferView, 0);
+    const views_array = try expectArray(views_value);
+    var result = try allocator.alloc(BufferView, views_array.items.len);
+    for (views_array.items, 0..) |view_value, index| {
+        const view_obj = try expectObject(view_value);
+        const buffer_index = @intCast(u32, try expectInteger(view_obj.get("buffer") orelse return error.InvalidGltf));
+        const byte_offset = @intCast(usize, if (view_obj.get("byteOffset")) |v| try expectInteger(v) else 0);
+        const byte_length = @intCast(usize, try expectInteger(view_obj.get("byteLength") orelse return error.InvalidGltf));
+        const byte_stride = if (view_obj.get("byteStride")) |v| blk: {
+            const stride = try expectInteger(v);
+            break :blk @intCast(usize, stride);
+        } else null;
+        result[index] = BufferView{
+            .buffer = buffer_index,
+            .byte_offset = byte_offset,
+            .byte_length = byte_length,
+            .byte_stride = byte_stride,
+        };
+    }
+    return result;
+}
+
+fn parseAccessors(allocator: std.mem.Allocator, root: std.json.Object, buffer_view_count: usize) ![]Accessor {
+    const accessors_value = root.get("accessors") orelse return allocator.alloc(Accessor, 0);
+    const accessors_array = try expectArray(accessors_value);
+    var result = try allocator.alloc(Accessor, accessors_array.items.len);
+    for (accessors_array.items, 0..) |accessor_value, index| {
+        const accessor_obj = try expectObject(accessor_value);
+        const buffer_view_index = if (accessor_obj.get("bufferView")) |bv| blk: {
+            const idx_val = try expectInteger(bv);
+            if (idx_val < 0 or idx_val >= @intCast(i64, buffer_view_count)) return error.InvalidAccessor;
+            break :blk @intCast(u32, idx_val);
+        } else null;
+        const byte_offset = @intCast(usize, if (accessor_obj.get("byteOffset")) |value| try expectInteger(value) else 0);
+        const component_type_raw = try expectInteger(accessor_obj.get("componentType") orelse return error.InvalidGltf);
+        const component_type = switch (component_type_raw) {
+            5120 => ComponentType.i8,
+            5121 => ComponentType.u8,
+            5122 => ComponentType.i16,
+            5123 => ComponentType.u16,
+            5125 => ComponentType.u32,
+            5126 => ComponentType.f32,
+            else => return error.UnsupportedComponentType,
+        };
+        const count = @intCast(usize, try expectInteger(accessor_obj.get("count") orelse return error.InvalidGltf));
+        const type_str = try expectString(accessor_obj.get("type") orelse return error.InvalidGltf);
+        const value_type = if (std.mem.eql(u8, type_str, "SCALAR")) ValueType.scalar else if (std.mem.eql(u8, type_str, "VEC2")) ValueType.vec2 else if (std.mem.eql(u8, type_str, "VEC3")) ValueType.vec3 else if (std.mem.eql(u8, type_str, "VEC4")) ValueType.vec4 else if (std.mem.eql(u8, type_str, "MAT2")) ValueType.mat2 else if (std.mem.eql(u8, type_str, "MAT3")) ValueType.mat3 else if (std.mem.eql(u8, type_str, "MAT4")) ValueType.mat4 else return error.UnsupportedAccessorType;
+        const normalized = if (accessor_obj.get("normalized")) |n| try expectBoolean(n) else false;
+        const name = if (accessor_obj.get("name")) |name_value| blk: {
+            const str = try expectString(name_value);
+            break :blk try allocator.dupe(u8, str);
+        } else null;
+        result[index] = Accessor{
+            .name = name,
+            .buffer_view = buffer_view_index,
+            .byte_offset = byte_offset,
+            .component_type = component_type,
+            .normalized = normalized,
+            .count = count,
+            .value_type = value_type,
+        };
+    }
+    return result;
+}
+
+
+fn parseMeshes(allocator: std.mem.Allocator, root: std.json.Object) ![]Mesh {
+    const meshes_value = root.get("meshes") orelse return allocator.alloc(Mesh, 0);
+    const meshes_array = try expectArray(meshes_value);
+    var result = try allocator.alloc(Mesh, meshes_array.items.len);
+    for (meshes_array.items, 0..) |mesh_value, mesh_index| {
+        const mesh_obj = try expectObject(mesh_value);
+        const primitives_value = mesh_obj.get("primitives") orelse return error.InvalidGltf;
+        const primitives_array = try expectArray(primitives_value);
+        var primitives = try allocator.alloc(Primitive, primitives_array.items.len);
+        for (primitives_array.items, 0..) |primitive_value, prim_index| {
+            const primitive_obj = try expectObject(primitive_value);
+            const attributes_obj = try expectObject(primitive_obj.get("attributes") orelse return error.InvalidGltf);
+            const indices_accessor = if (primitive_obj.get("indices")) |val| @intCast(u32, try expectInteger(val)) else null;
+            const mode = @intCast(u32, if (primitive_obj.get("mode")) |val| try expectInteger(val) else 4);
+            const position_accessor = if (attributes_obj.get("POSITION")) |val| @intCast(u32, try expectInteger(val)) else null;
+            const normal_accessor = if (attributes_obj.get("NORMAL")) |val| @intCast(u32, try expectInteger(val)) else null;
+            const tangent_accessor = if (attributes_obj.get("TANGENT")) |val| @intCast(u32, try expectInteger(val)) else null;
+            const texcoord0_accessor = if (attributes_obj.get("TEXCOORD_0")) |val| @intCast(u32, try expectInteger(val)) else null;
+            const color0_accessor = if (attributes_obj.get("COLOR_0")) |val| @intCast(u32, try expectInteger(val)) else null;
+            const joints0_accessor = if (attributes_obj.get("JOINTS_0")) |val| @intCast(u32, try expectInteger(val)) else null;
+            const weights0_accessor = if (attributes_obj.get("WEIGHTS_0")) |val| @intCast(u32, try expectInteger(val)) else null;
+            const material_index = if (primitive_obj.get("material")) |val| @intCast(u32, try expectInteger(val)) else null;
+            primitives[prim_index] = Primitive{
+                .material = material_index,
+                .indices = indices_accessor,
+                .mode = mode,
+                .position = position_accessor,
+                .normal = normal_accessor,
+                .tangent = tangent_accessor,
+                .texcoord0 = texcoord0_accessor,
+                .color0 = color0_accessor,
+                .joints0 = joints0_accessor,
+                .weights0 = weights0_accessor,
+            };
+        }
+        const name = if (mesh_obj.get("name")) |name_value| blk: {
+            const str = try expectString(name_value);
+            break :blk try allocator.dupe(u8, str);
+        } else null;
+        result[mesh_index] = Mesh{ .name = name, .primitives = primitives };
+    }
+    return result;
+}
+
+
+fn parseNodes(allocator: std.mem.Allocator, root: std.json.Object) ![]Node {
+    const nodes_value = root.get("nodes") orelse return allocator.alloc(Node, 0);
+    const nodes_array = try expectArray(nodes_value);
+    var nodes = try allocator.alloc(Node, nodes_array.items.len);
+    for (nodes_array.items, 0..) |node_value, node_index| {
+        const node_obj = try expectObject(node_value);
+        const name = if (node_obj.get("name")) |name_value| blk: {
+            const str = try expectString(name_value);
+            break :blk try allocator.dupe(u8, str);
+        } else null;
+        const mesh_index = if (node_obj.get("mesh")) |val| @intCast(u32, try expectInteger(val)) else null;
+        const skin_index = if (node_obj.get("skin")) |val| @intCast(u32, try expectInteger(val)) else null;
+        const children = if (node_obj.get("children")) |val| blk: {
+            const arr = try expectArray(val);
+            var list = try allocator.alloc(u32, arr.items.len);
+            for (arr.items, 0..) |child_value, child_idx| {
+                list[child_idx] = @intCast(u32, try expectInteger(child_value));
+            }
+            break :blk list;
+        } else &[_]u32{};
+
+        var translation = math.Vec3.new(0.0, 0.0, 0.0);
+        if (node_obj.get("translation")) |val| {
+            const arr = try expectArray(val);
+            if (arr.items.len != 3) return error.InvalidNode;
+            translation = math.Vec3.new(
+                try expectFloat(arr.items[0]),
+                try expectFloat(arr.items[1]),
+                try expectFloat(arr.items[2]),
+            );
+        }
+
+        var rotation = Quat{ .x = 0.0, .y = 0.0, .z = 0.0, .w = 1.0 };
+        if (node_obj.get("rotation")) |val| {
+            const arr = try expectArray(val);
+            if (arr.items.len != 4) return error.InvalidNode;
+            rotation = quatNormalize(.{
+                .x = try expectFloat(arr.items[0]),
+                .y = try expectFloat(arr.items[1]),
+                .z = try expectFloat(arr.items[2]),
+                .w = try expectFloat(arr.items[3]),
+            });
+        }
+
+        var scale = math.Vec3.new(1.0, 1.0, 1.0);
+        if (node_obj.get("scale")) |val| {
+            const arr = try expectArray(val);
+            if (arr.items.len != 3) return error.InvalidNode;
+            scale = math.Vec3.new(
+                try expectFloat(arr.items[0]),
+                try expectFloat(arr.items[1]),
+                try expectFloat(arr.items[2]),
+            );
+        }
+
+        var node_matrix: ?math.Mat4 = null;
+        if (node_obj.get("matrix")) |val| {
+            const arr = try expectArray(val);
+            if (arr.items.len != 16) return error.InvalidNode;
+            var mat = math.Mat4.identity();
+            for (arr.items, 0..) |item, matrix_index| {
+                mat.data[matrix_index] = try expectFloat(item);
+            }
+            node_matrix = mat;
+            const trs = try matrixToTrs(mat);
+            translation = trs.translation;
+            rotation = trs.rotation;
+            scale = trs.scale;
+        }
+
+        nodes[node_index] = Node{
+            .name = name,
+            .mesh = mesh_index,
+            .skin = skin_index,
+            .children = children,
+            .translation = translation,
+            .rotation = rotation,
+            .scale = scale,
+            .matrix = node_matrix,
+            .parent = null,
+        };
+    }
+    return nodes;
+}
+
+fn setNodeParents(nodes: []Node) void {
+    for (nodes, 0..) |node, index| {
+        for (node.children) |child_index| {
+            nodes[child_index].parent = @intCast(u32, index);
+        }
+    }
+}
+
+
+fn parseSkins(allocator: std.mem.Allocator, root: std.json.Object) ![]Skin {
+    const skins_value = root.get("skins") orelse return allocator.alloc(Skin, 0);
+    const skins_array = try expectArray(skins_value);
+    var skins = try allocator.alloc(Skin, skins_array.items.len);
+    for (skins_array.items, 0..) |skin_value, skin_index| {
+        const skin_obj = try expectObject(skin_value);
+        const joints_value = skin_obj.get("joints") orelse return error.InvalidGltf;
+        const joints_array = try expectArray(joints_value);
+        var joints = try allocator.alloc(u32, joints_array.items.len);
+        for (joints_array.items, 0..) |joint_value, joint_idx| {
+            joints[joint_idx] = @intCast(u32, try expectInteger(joint_value));
+        }
+        const inverse_bind = if (skin_obj.get("inverseBindMatrices")) |val| @intCast(u32, try expectInteger(val)) else null;
+        const skeleton = if (skin_obj.get("skeleton")) |val| @intCast(u32, try expectInteger(val)) else null;
+        const name = if (skin_obj.get("name")) |name_value| blk: {
+            const str = try expectString(name_value);
+            break :blk try allocator.dupe(u8, str);
+        } else null;
+        skins[skin_index] = Skin{
+            .name = name,
+            .joints = joints,
+            .inverse_bind_matrices = inverse_bind,
+            .skeleton = skeleton,
+        };
+    }
+    return skins;
+}
+
+fn parseAnimations(allocator: std.mem.Allocator, root: std.json.Object) ![]Animation {
+    const animations_value = root.get("animations") orelse return allocator.alloc(Animation, 0);
+    const animations_array = try expectArray(animations_value);
+    var animations = try allocator.alloc(Animation, animations_array.items.len);
+    for (animations_array.items, 0..) |animation_value, animation_index| {
+        const animation_obj = try expectObject(animation_value);
+        const samplers_value = animation_obj.get("samplers") orelse return error.InvalidGltf;
+        const samplers_array = try expectArray(samplers_value);
+        var samplers = try allocator.alloc(AnimationSampler, samplers_array.items.len);
+        for (samplers_array.items, 0..) |sampler_value, sampler_index| {
+            const sampler_obj = try expectObject(sampler_value);
+            const input_index = @intCast(u32, try expectInteger(sampler_obj.get("input") orelse return error.InvalidGltf));
+            const output_index = @intCast(u32, try expectInteger(sampler_obj.get("output") orelse return error.InvalidGltf));
+            const interpolation = if (sampler_obj.get("interpolation")) |interp_value| blk: {
+                const str = try expectString(interp_value);
+                if (std.mem.eql(u8, str, "LINEAR")) break :blk Interpolation.linear;
+                if (std.mem.eql(u8, str, "STEP")) break :blk Interpolation.step;
+                if (std.mem.eql(u8, str, "CUBICSPLINE")) break :blk Interpolation.cubicspline;
+                return error.UnsupportedInterpolation;
+            } else Interpolation.linear;
+            samplers[sampler_index] = AnimationSampler{ .input = input_index, .output = output_index, .interpolation = interpolation };
+        }
+        const channels_value = animation_obj.get("channels") orelse return error.InvalidGltf;
+        const channels_array = try expectArray(channels_value);
+        var channels = try allocator.alloc(AnimationChannel, channels_array.items.len);
+        for (channels_array.items, 0..) |channel_value, channel_index| {
+            const channel_obj = try expectObject(channel_value);
+            const sampler_index = @intCast(u32, try expectInteger(channel_obj.get("sampler") orelse return error.InvalidGltf));
+            const target_obj = try expectObject(channel_obj.get("target") orelse return error.InvalidGltf);
+            const node_index = @intCast(u32, try expectInteger(target_obj.get("node") orelse return error.InvalidGltf));
+            const path_str = try expectString(target_obj.get("path") orelse return error.InvalidGltf);
+            const target_path = if (std.mem.eql(u8, path_str, "translation")) TargetPath.translation else if (std.mem.eql(u8, path_str, "rotation")) TargetPath.rotation else if (std.mem.eql(u8, path_str, "scale")) TargetPath.scale else if (std.mem.eql(u8, path_str, "weights")) TargetPath.weights else return error.UnsupportedAnimationPath;
+            channels[channel_index] = AnimationChannel{ .sampler = sampler_index, .target_node = node_index, .target_path = target_path };
+        }
+        const name = if (animation_obj.get("name")) |name_value| blk: {
+            const str = try expectString(name_value);
+            break :blk try allocator.dupe(u8, str);
+        } else null;
+        animations[animation_index] = Animation{ .name = name, .samplers = samplers, .channels = channels };
+    }
+    return animations;
+}
+
+fn parseScenes(allocator: std.mem.Allocator, root: std.json.Object) ![]Scene {
+    const scenes_value = root.get("scenes") orelse return allocator.alloc(Scene, 0);
+    const scenes_array = try expectArray(scenes_value);
+    var scenes = try allocator.alloc(Scene, scenes_array.items.len);
+    for (scenes_array.items, 0..) |scene_value, scene_index| {
+        const scene_obj = try expectObject(scene_value);
+        const nodes_value = scene_obj.get("nodes") orelse return error.InvalidGltf;
+        const nodes_array = try expectArray(nodes_value);
+        var nodes = try allocator.alloc(u32, nodes_array.items.len);
+        for (nodes_array.items, 0..) |node_value, node_idx| {
+            nodes[node_idx] = @intCast(u32, try expectInteger(node_value));
+        }
+        const name = if (scene_obj.get("name")) |name_value| blk: {
+            const str = try expectString(name_value);
+            break :blk try allocator.dupe(u8, str);
+        } else null;
+        scenes[scene_index] = Scene{ .name = name, .nodes = nodes };
+    }
+    return scenes;
+}
+
+
+fn decodeDataUri(allocator: std.mem.Allocator, uri: []const u8) ![]u8 {
+    const comma_index = std.mem.indexOfScalar(u8, uri, ",") orelse return error.InvalidDataUri;
+    const meta = uri[0..comma_index];
+    if (!std.mem.endsWith(u8, meta, ";base64")) return error.UnsupportedDataUri;
+    const encoded = uri[comma_index + 1 ..];
+    var decoder = std.base64.standard.Decoder;
+    var buffer = try allocator.alloc(u8, decoder.calcSize(encoded) catch return error.InvalidBase64);
+    const decoded = decoder.decode(buffer, encoded) catch return error.InvalidBase64;
+    if (decoded != buffer.len) buffer = buffer[0..decoded];
+    return buffer;
+}
+
+fn expectObject(value: std.json.Value) !std.json.Object {
+    if (value.getType() != .object) return error.InvalidGltf;
+    return value.object;
+}
+
+fn expectArray(value: std.json.Value) !std.json.Array {
+    if (value.getType() != .array) return error.InvalidGltf;
+    return value.array;
+}
+
+fn expectString(value: std.json.Value) ![]const u8 {
+    if (value.getType() != .string) return error.InvalidGltf;
+    return value.string;
+}
+
+fn expectInteger(value: std.json.Value) !i64 {
+    return value.toInteger() catch error.InvalidGltf;
+}
+
+fn expectFloat(value: std.json.Value) !f32 {
+    return @floatCast(f32, value.toFloat() catch return error.InvalidGltf);
+}
+
+fn expectBoolean(value: std.json.Value) !bool {
+    if (value.getType() != .bool) return error.InvalidGltf;
+    return value.bool;
+}
+
+
+fn quatNormalize(q: Quat) Quat {
+    const len_sq = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+    if (len_sq == 0.0) return Quat{ .x = 0, .y = 0, .z = 0, .w = 1 };
+    const inv_len = 1.0 / std.math.sqrt(len_sq);
+    return Quat{ .x = q.x * inv_len, .y = q.y * inv_len, .z = q.z * inv_len, .w = q.w * inv_len };
+}
+
+fn quatSlerp(a: Quat, b: Quat, t: f32) Quat {
+    var cos_theta = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    var end = b;
+    if (cos_theta < 0.0) {
+        cos_theta = -cos_theta;
+        end = Quat{ .x = -b.x, .y = -b.y, .z = -b.z, .w = -b.w };
+    }
+    if (cos_theta > 0.9995) {
+        return quatNormalize(Quat{
+            .x = std.math.lerp(a.x, end.x, t),
+            .y = std.math.lerp(a.y, end.y, t),
+            .z = std.math.lerp(a.z, end.z, t),
+            .w = std.math.lerp(a.w, end.w, t),
+        });
+    }
+    const theta = std.math.acos(cos_theta);
+    const sin_theta = std.math.sin(theta);
+    const w1 = std.math.sin((1.0 - t) * theta) / sin_theta;
+    const w2 = std.math.sin(t * theta) / sin_theta;
+    return Quat{
+        .x = a.x * w1 + end.x * w2,
+        .y = a.y * w1 + end.y * w2,
+        .z = a.z * w1 + end.z * w2,
+        .w = a.w * w1 + end.w * w2,
+    };
+}
+
+fn composeTRS(translation: math.Vec3, rotation: Quat, scale: math.Vec3) math.Mat4 {
+    const q = quatNormalize(rotation);
+    const x = q.x;
+    const y = q.y;
+    const z = q.z;
+    const w = q.w;
+    const xx = x * x;
+    const yy = y * y;
+    const zz = z * z;
+    const xy = x * y;
+    const xz = x * z;
+    const yz = y * z;
+    const wx = w * x;
+    const wy = w * y;
+    const wz = w * z;
+
+    var m = math.Mat4.identity();
+    m.data[0] = (1.0 - 2.0 * (yy + zz)) * scale.x;
+    m.data[1] = 2.0 * (xy + wz) * scale.x;
+    m.data[2] = 2.0 * (xz - wy) * scale.x;
+
+    m.data[4] = 2.0 * (xy - wz) * scale.y;
+    m.data[5] = (1.0 - 2.0 * (xx + zz)) * scale.y;
+    m.data[6] = 2.0 * (yz + wx) * scale.y;
+
+    m.data[8] = 2.0 * (xz + wy) * scale.z;
+    m.data[9] = 2.0 * (yz - wx) * scale.z;
+    m.data[10] = (1.0 - 2.0 * (xx + yy)) * scale.z;
+
+    m.data[12] = translation.x;
+    m.data[13] = translation.y;
+    m.data[14] = translation.z;
+    return m;
+}
+
+
+const TrsDecomposition = struct {
+    translation: math.Vec3,
+    rotation: Quat,
+    scale: math.Vec3,
+};
+
+fn matrixToTrs(m: math.Mat4) !TrsDecomposition {
+    const translation = math.Vec3.new(m.data[12], m.data[13], m.data[14]);
+    const sx = std.math.sqrt(m.data[0] * m.data[0] + m.data[1] * m.data[1] + m.data[2] * m.data[2]);
+    const sy = std.math.sqrt(m.data[4] * m.data[4] + m.data[5] * m.data[5] + m.data[6] * m.data[6]);
+    const sz = std.math.sqrt(m.data[8] * m.data[8] + m.data[9] * m.data[9] + m.data[10] * m.data[10]);
+    if (sx == 0.0 or sy == 0.0 or sz == 0.0) return error.NonInvertibleMatrix;
+
+    const scale = math.Vec3.new(sx, sy, sz);
+    var rot = math.Mat4.identity();
+    rot.data[0] = m.data[0] / sx;
+    rot.data[1] = m.data[1] / sx;
+    rot.data[2] = m.data[2] / sx;
+    rot.data[4] = m.data[4] / sy;
+    rot.data[5] = m.data[5] / sy;
+    rot.data[6] = m.data[6] / sy;
+    rot.data[8] = m.data[8] / sz;
+    rot.data[9] = m.data[9] / sz;
+    rot.data[10] = m.data[10] / sz;
+
+    const trace = rot.data[0] + rot.data[5] + rot.data[10];
+    var quat = Quat{ .x = 0, .y = 0, .z = 0, .w = 1 };
+    if (trace > 0.0) {
+        const s = std.math.sqrt(trace + 1.0) * 2.0;
+        quat.w = 0.25 * s;
+        quat.x = (rot.data[6] - rot.data[9]) / s;
+        quat.y = (rot.data[8] - rot.data[2]) / s;
+        quat.z = (rot.data[1] - rot.data[4]) / s;
+    } else if (rot.data[0] > rot.data[5] and rot.data[0] > rot.data[10]) {
+        const s = std.math.sqrt(1.0 + rot.data[0] - rot.data[5] - rot.data[10]) * 2.0;
+        quat.w = (rot.data[6] - rot.data[9]) / s;
+        quat.x = 0.25 * s;
+        quat.y = (rot.data[1] + rot.data[4]) / s;
+        quat.z = (rot.data[8] + rot.data[2]) / s;
+    } else if (rot.data[5] > rot.data[10]) {
+        const s = std.math.sqrt(1.0 + rot.data[5] - rot.data[0] - rot.data[10]) * 2.0;
+        quat.w = (rot.data[8] - rot.data[2]) / s;
+        quat.x = (rot.data[1] + rot.data[4]) / s;
+        quat.y = 0.25 * s;
+        quat.z = (rot.data[6] + rot.data[9]) / s;
+    } else {
+        const s = std.math.sqrt(1.0 + rot.data[10] - rot.data[0] - rot.data[5]) * 2.0;
+        quat.w = (rot.data[1] - rot.data[4]) / s;
+        quat.x = (rot.data[8] + rot.data[2]) / s;
+        quat.y = (rot.data[6] + rot.data[9]) / s;
+        quat.z = 0.25 * s;
+    }
+
+    return TrsDecomposition{
+        .translation = translation,
+        .rotation = quatNormalize(quat),
+        .scale = scale,
+    };
+}
+
+
+fn getAccessorView(gltf: *const Gltf, accessor_index: usize) !AccessorView {
+    if (accessor_index >= gltf.accessors.len) return error.AccessorOutOfRange;
+    const accessor = gltf.accessors[accessor_index];
+    if (accessor.buffer_view == null) return error.SparseAccessorsUnsupported;
+    const buffer_view_index = accessor.buffer_view.?;
+    if (buffer_view_index >= gltf.buffer_views.len) return error.BufferViewOutOfRange;
+    const buffer_view = gltf.buffer_views[buffer_view_index];
+    if (buffer_view.buffer >= gltf.buffers.len) return error.BufferOutOfRange;
+    const buffer = gltf.buffers[buffer_view.buffer];
+
+    const elem_size = elementSize(accessor.component_type, accessor.value_type);
+    const stride = if (buffer_view.byte_stride) |stride| stride else elem_size;
+    const byte_offset = buffer_view.byte_offset + accessor.byte_offset;
+    const total_size = stride * (accessor.count - 1) + elem_size;
+    if (byte_offset + total_size > buffer.data.len) return error.AccessorOutOfBounds;
+
+    return AccessorView{
+        .bytes = buffer.data[byte_offset .. byte_offset + total_size],
+        .stride = stride,
+        .component_type = accessor.component_type,
+        .value_type = accessor.value_type,
+        .count = accessor.count,
+    };
+}
+
+fn accessorAsFloatSlice(gltf: *const Gltf, accessor_index: usize) ![]const f32 {
+    const view = try getAccessorView(gltf, accessor_index);
+    if (view.component_type != ComponentType.f32) return error.UnsupportedComponentType;
+    const elem_count = elementComponentCount(view.value_type);
+    if (view.stride != elem_count * @sizeOf(f32)) return error.InterleavedAccessorUnsupported;
+    return std.mem.bytesAsSlice(f32, view.bytes);
+}
+
+fn accessorAsVec3Slice(gltf: *const Gltf, accessor_index: usize) ![]const math.Vec3 {
+    const view = try getAccessorView(gltf, accessor_index);
+    if (view.component_type != ComponentType.f32 or view.value_type != ValueType.vec3) return error.UnsupportedAccessorType;
+    if (view.stride != 3 * @sizeOf(f32)) return error.InterleavedAccessorUnsupported;
+    return std.mem.bytesAsSlice(math.Vec3, view.bytes);
+}
+
+fn accessorAsVec4Slice(gltf: *const Gltf, accessor_index: usize) ![]const Quat {
+    const view = try getAccessorView(gltf, accessor_index);
+    if (view.component_type != ComponentType.f32 or view.value_type != ValueType.vec4) return error.UnsupportedAccessorType;
+    if (view.stride != 4 * @sizeOf(f32)) return error.InterleavedAccessorUnsupported;
+    const floats = std.mem.bytesAsSlice(f32, view.bytes);
+    var result = try gltf.allocator.alloc(Quat, view.count);
+    for (result, 0..) |*item, idx| {
+        item.* = Quat{
+            .x = floats[idx * 4 + 0],
+            .y = floats[idx * 4 + 1],
+            .z = floats[idx * 4 + 2],
+            .w = floats[idx * 4 + 3],
+        };
+    }
+    return result;
+}
+
+
+pub fn initNodePoses(gltf: *const Gltf, poses: []NodePose) !void {
+    if (poses.len != gltf.nodes.len) return error.MismatchedPoseBuffer;
+    for (gltf.nodes, 0..) |node, idx| {
+        poses[idx] = NodePose{
+            .translation = node.translation,
+            .rotation = node.rotation,
+            .scale = node.scale,
+        };
+    }
+}
+
+pub fn sampleAnimation(gltf: *const Gltf, animation_index: usize, time: f32, poses: []NodePose) !void {
+    if (poses.len != gltf.nodes.len) return error.MismatchedPoseBuffer;
+    if (animation_index >= gltf.animations.len) return error.AnimationOutOfRange;
+    try initNodePoses(gltf, poses);
+    const animation = gltf.animations[animation_index];
+    for (animation.channels) |channel| {
+        const sampler = animation.samplers[channel.sampler];
+        switch (channel.target_path) {
+            .translation => {
+                const value = try sampleVec3(gltf, sampler, time);
+                poses[channel.target_node].translation = value;
+            },
+            .rotation => {
+                const value = try sampleQuat(gltf, sampler, time);
+                poses[channel.target_node].rotation = value;
+            },
+            .scale => {
+                const value = try sampleVec3(gltf, sampler, time);
+                poses[channel.target_node].scale = value;
+            },
+            .weights => {},
+        }
+    }
+}
+
+fn sampleVec3(gltf: *const Gltf, sampler: AnimationSampler, time: f32) !math.Vec3 {
+    const inputs = try accessorAsFloatSlice(gltf, sampler.input);
+    const outputs = try accessorAsVec3Slice(gltf, sampler.output);
+    return switch (sampler.interpolation) {
+        .linear => sampleVec3Linear(inputs, outputs, time),
+        .step => sampleVec3Step(inputs, outputs, time),
+        .cubicspline => error.CubicSplineUnsupported,
+    };
+}
+
+fn sampleQuat(gltf: *const Gltf, sampler: AnimationSampler, time: f32) !Quat {
+    const inputs = try accessorAsFloatSlice(gltf, sampler.input);
+    const outputs = try accessorAsVec4Slice(gltf, sampler.output);
+    defer gltf.allocator.free(outputs);
+    return switch (sampler.interpolation) {
+        .linear => sampleQuatLinear(inputs, outputs, time),
+        .step => sampleQuatStep(inputs, outputs, time),
+        .cubicspline => error.CubicSplineUnsupported,
+    };
+}
+
+fn findKeyframe(times: []const f32, time: f32) usize {
+    if (times.len == 0) return 0;
+    if (time <= times[0]) return 0;
+    var i: usize = 1;
+    while (i < times.len) : (i += 1) {
+        if (time < times[i]) return i - 1;
+    }
+    return times.len - 1;
+}
+
+fn sampleVec3Linear(times: []const f32, values: []const math.Vec3, time: f32) math.Vec3 {
+    if (times.len == 0 or values.len == 0) return math.Vec3.new(0, 0, 0);
+    if (times.len == 1 or time <= times[0]) return values[0];
+    if (time >= times[times.len - 1]) return values[values.len - 1];
+    const index = findKeyframe(times, time);
+    if (index + 1 >= values.len) return values[index];
+    const t0 = times[index];
+    const t1 = times[index + 1];
+    const factor = (time - t0) / (t1 - t0);
+    const v0 = values[index];
+    const v1 = values[index + 1];
+    return math.Vec3.new(
+        std.math.lerp(v0.x, v1.x, factor),
+        std.math.lerp(v0.y, v1.y, factor),
+        std.math.lerp(v0.z, v1.z, factor),
+    );
+}
+
+fn sampleVec3Step(times: []const f32, values: []const math.Vec3, time: f32) math.Vec3 {
+    if (times.len == 0 or values.len == 0) return math.Vec3.new(0, 0, 0);
+    const index = findKeyframe(times, time);
+    return values[std.math.min(index, values.len - 1)];
+}
+
+fn sampleQuatLinear(times: []const f32, values: []const Quat, time: f32) Quat {
+    if (times.len == 0 or values.len == 0) return Quat{ .x = 0, .y = 0, .z = 0, .w = 1 };
+    if (times.len == 1 or time <= times[0]) return values[0];
+    if (time >= times[times.len - 1]) return values[values.len - 1];
+    const index = findKeyframe(times, time);
+    if (index + 1 >= values.len) return values[index];
+    const t0 = times[index];
+    const t1 = times[index + 1];
+    const factor = (time - t0) / (t1 - t0);
+    return quatSlerp(values[index], values[index + 1], factor);
+}
+
+fn sampleQuatStep(times: []const f32, values: []const Quat, time: f32) Quat {
+    if (times.len == 0 or values.len == 0) return Quat{ .x = 0, .y = 0, .z = 0, .w = 1 };
+    const index = findKeyframe(times, time);
+    return values[std.math.min(index, values.len - 1)];
+}
+
+pub fn buildLocalMatrices(poses: []const NodePose, out_local: []math.Mat4) void {
+    std.debug.assert(poses.len == out_local.len);
+    for (poses, 0..) |pose, idx| {
+        out_local[idx] = composeTRS(pose.translation, pose.rotation, pose.scale);
+    }
+}
+
+pub fn computeWorldMatrices(gltf: *const Gltf, scene_index: usize, local: []const math.Mat4, out_world: []math.Mat4) !void {
+    if (local.len != gltf.nodes.len or out_world.len != gltf.nodes.len) return error.MismatchedPoseBuffer;
+    if (scene_index >= gltf.scenes.len) return error.SceneOutOfRange;
+    const scene = gltf.scenes[scene_index];
+    var stack = std.ArrayList(struct { node: u32, parent_matrix: math.Mat4 }).init(gltf.allocator);
+    defer stack.deinit();
+    for (scene.nodes) |root| {
+        try stack.append(.{ .node = root, .parent_matrix = math.Mat4.identity() });
+        while (stack.popOrNull()) |item| {
+            const node_index = item.node;
+            const parent_matrix = item.parent_matrix;
+            const world = math.Mat4.multiply(parent_matrix, local[node_index]);
+            out_world[node_index] = world;
+            const node = gltf.nodes[node_index];
+            for (node.children) |child| {
+                try stack.append(.{ .node = child, .parent_matrix = world });
+            }
+        }
+    }
+}
+
+pub fn computeSkinMatrices(
+    gltf: *const Gltf,
+    skin_index: usize,
+    node_matrices: []const math.Mat4,
+    out_skin: []math.Mat4,
+) !void {
+    if (skin_index >= gltf.skins.len) return error.SkinOutOfRange;
+    const skin = gltf.skins[skin_index];
+    if (out_skin.len != skin.joints.len) return error.MismatchedSkinBuffer;
+    const inverse_accessor = skin.inverse_bind_matrices orelse return error.SkinMissingInverseBinds;
+    const view = try getAccessorView(gltf, inverse_accessor);
+    if (view.component_type != ComponentType.f32 or view.value_type != ValueType.mat4) return error.UnsupportedAccessorType;
+    if (view.stride != 16 * @sizeOf(f32)) return error.InterleavedAccessorUnsupported;
+    for (skin.joints, 0..) |joint_index, idx| {
+        const joint_matrix = node_matrices[joint_index];
+        const offset = idx * 16 * @sizeOf(f32);
+        const slice = std.mem.bytesAsSlice(f32, view.bytes[offset .. offset + 16 * @sizeOf(f32)]);
+        var inverse = math.Mat4.identity();
+        for (slice, 0..) |value, element_index| {
+            inverse.data[element_index] = value;
+        }
+        out_skin[idx] = math.Mat4.multiply(joint_matrix, inverse);
+    }
+}
+

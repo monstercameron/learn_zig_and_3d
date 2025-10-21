@@ -198,7 +198,15 @@ pub fn drawTileBoundaries(grid: *const TileGrid, bitmap: *Bitmap) void {
 
 /// Rasterizes a single triangle into a specific tile's local buffer.
 /// This is the core "drawing" function for the tiled pipeline.
-pub fn rasterizeTriangleToTile(tile: *const Tile, tile_buffer: *TileBuffer, p0_screen: [2]i32, p1_screen: [2]i32, p2_screen: [2]i32, shading: ShadingParams) void {
+pub fn rasterizeTriangleToTile(
+    tile: *const Tile,
+    tile_buffer: *TileBuffer,
+    p0_screen: [2]i32,
+    p1_screen: [2]i32,
+    p2_screen: [2]i32,
+    depths: [3]f32,
+    shading: ShadingParams,
+) void {
     // 1. Convert vertex coordinates from screen space to tile-local space.
     const v0 = [2]i32{ p0_screen[0] - tile.x, p0_screen[1] - tile.y };
     const v1 = [2]i32{ p1_screen[0] - tile.x, p1_screen[1] - tile.y };
@@ -241,8 +249,7 @@ pub fn rasterizeTriangleToTile(tile: *const Tile, tile_buffer: *TileBuffer, p0_s
             // 6. Check if the pixel is inside the triangle.
             if (lambda0 < 0 or lambda1 < 0 or lambda2 < 0) continue;
 
-            // TODO: Implement Z-buffering here by interpolating vertex depths using
-            // the barycentric coordinates and comparing with the value in `tile_buffer.depth`.
+            const depth = depths[0] * lambda0 + depths[1] * lambda1 + depths[2] * lambda2;
 
             // 7. Interpolate UV coordinates using the barycentric weights.
             const uv = math.Vec2.new(
@@ -257,9 +264,10 @@ pub fn rasterizeTriangleToTile(tile: *const Tile, tile_buffer: *TileBuffer, p0_s
 
             // 9. Write the final color to the tile's local pixel buffer.
             const idx = @as(usize, @intCast(y * tile_buffer.width + x));
-            if (idx < tile_buffer.pixels.len) {
-                tile_buffer.pixels[idx] = final_color;
-            }
+            if (idx >= tile_buffer.pixels.len or idx >= tile_buffer.depth.len) continue;
+            if (depth >= tile_buffer.depth[idx]) continue;
+            tile_buffer.depth[idx] = depth;
+            tile_buffer.pixels[idx] = final_color;
         }
     }
 }

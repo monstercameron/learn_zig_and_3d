@@ -2,7 +2,7 @@ const std = @import("std");
 const compute = @import("compute.zig");
 const Vec2u = compute.Vec2u;
 const ComputeContext = compute.ComputeContext;
-const job_system = @import("../../job_system.zig"); // Import the main job system
+const job_system = @import("../job_system.zig"); // Import the main job system
 
 /// Context for a single group dispatch job.
 /// This struct holds the necessary information for a worker thread to process one group.
@@ -57,6 +57,10 @@ fn groupDispatchJobFn(ctx_ptr: *anyopaque) void {
     job_ctx.allocator.destroy(job_ctx);
 }
 
+fn noopJob(ctx: *anyopaque) void {
+    _ = ctx;
+}
+
 /// Dispatches a compute kernel across a grid of thread groups.
 /// This version uses the project's job system for multi-threaded execution.
 ///
@@ -69,7 +73,7 @@ pub fn dispatchKernel(comptime K: type, allocator: std.mem.Allocator, job_sys: *
     const gs = Vec2u{ .x = K.group_size_x, .y = K.group_size_y };
 
     // Create a parent job to track completion of all group dispatches
-    var parent_job = try job_system.allocateJob(allocator, job_system.emptyJobFn, null, null);
+    var parent_job = try job_system.allocateJob(allocator, noopJob, null, null);
     defer job_system.freeJob(allocator, parent_job);
 
     // Loop through the grid of groups and submit a job for each

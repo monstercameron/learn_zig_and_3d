@@ -1,12 +1,14 @@
 const std = @import("std");
 const compute = @import("compute.zig");
 const dispatcher = @import("dispatcher.zig");
+const job_system = @import("../job_system.zig");
 const InvertKernel = @import("invert_kernel.zig").InvertKernel;
 
 pub fn runInvertExample(
     allocator: std.mem.Allocator,
     src_rgba8: *const compute.Texture2D,
     dst_rgba8: *compute.RWTexture2D,
+    job_sys: *job_system.JobSystem,
 ) !void {
     var ctx = compute.ComputeContext{
         .group_size = .{ .x = 0, .y = 0 }, // filled by dispatcher
@@ -24,5 +26,5 @@ pub fn runInvertExample(
         .shared_mem = null,
     };
 
-    try dispatcher.dispatchKernel(InvertKernel, allocator, &ctx);
+    try dispatcher.dispatchKernel(InvertKernel, allocator, job_sys, &ctx);
 }

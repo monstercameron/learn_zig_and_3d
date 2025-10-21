@@ -253,4 +253,123 @@ pub const Mesh = struct {
             v.* = Vec3.sub(v.*, center);
         }
     }
+
+    pub fn generateMeshlets(self: *Mesh, max_vertices: usize, max_triangles: usize) !void {
+        const safe_vertex_limit = if (max_vertices < 3) 3 else max_vertices;
+        const safe_triangle_limit = if (max_triangles < 1) 1 else max_triangles;
+
+        self.clearMeshlets();
+        if (self.triangles.len == 0) {
+            self.meshlets = &[_]Meshlet{};
+            return;
+        }
+
+        var meshlets_temp = std.ArrayList(Meshlet){};
+        var release_meshlets = true;
+        defer {
+            if (release_meshlets) {
+                for (meshlets_temp.items) |*entry| {
+                    entry.deinit(self.allocator);
+                }
+            }
+            meshlets_temp.deinit(self.allocator);
+        }
+
+        var current_vertices = std.ArrayList(usize){};
+        defer current_vertices.deinit(self.allocator);
+
+        var current_triangles = std.ArrayList(usize){};
+        defer current_triangles.deinit(self.allocator);
+
+        var vertex_map = std.AutoHashMap(usize, bool).init(self.allocator);
+        defer vertex_map.deinit();
+
+        const Flush = struct {
+            fn emit(
+                mesh: *Mesh,
+                meshlets: *std.ArrayList(Meshlet),
+                vertex_indices: *std.ArrayList(usize),
+                triangle_indices: *std.ArrayList(usize),
+            ) !void {
+                if (triangle_indices.items.len == 0) return;
+
+                const vert_slice = try mesh.allocator.alloc(usize, vertex_indices.items.len);
+                errdefer mesh.allocator.free(vert_slice);
+                std.mem.copyForwards(usize, vert_slice, vertex_indices.items);
+
+                const tri_slice = try mesh.allocator.alloc(usize, triangle_indices.items.len);
+                errdefer mesh.allocator.free(tri_slice);
+                std.mem.copyForwards(usize, tri_slice, triangle_indices.items);
+
+                var centroid = Vec3.new(0.0, 0.0, 0.0);
+                if (vert_slice.len != 0) {
+                    for (vert_slice) |vi| {
+                        centroid = Vec3.add(centroid, mesh.vertices[vi]);
+                    }
+                    const inv = 1.0 / @as(f32, @floatFromInt(vert_slice.len));
+                    centroid = Vec3.scale(centroid, inv);
+                }
+
+                var radius: f32 = 0.0;
+                for (vert_slice) |vi| {
+                    const delta = Vec3.sub(mesh.vertices[vi], centroid);
+                    const distance = Vec3.length(delta);
+                    if (distance > radius) radius = distance;
+                }
+
+                const meshlet = Meshlet{
+                    .vertex_indices = vert_slice,
+                    .triangle_indices = tri_slice,
+                    .bounds_center = centroid,
+                    .bounds_radius = radius,
+                };
+                try meshlets.append(mesh.allocator, meshlet);
+            }
+        };
+
+        for (self.triangles, 0..) |tri, tri_idx| {
+            while (true) {
+                var additional_vertices: usize = 0;
+                const tri_vertices = [_]usize{ tri.v0, tri.v1, tri.v2 };
+                for (tri_vertices) |vi| {
+                    if (!vertex_map.contains(vi)) {
+                        additional_vertices += 1;
+                    }
+                }
+
+                const too_many_vertices = current_vertices.items.len + additional_vertices > safe_vertex_limit;
+                const too_many_tris = current_triangles.items.len >= safe_triangle_limit;
+
+                if ((too_many_vertices or too_many_tris) and current_triangles.items.len > 0) {
+                    try Flush.emit(self, &meshlets_temp, &current_vertices, &current_triangles);
+                    current_vertices.clearRetainingCapacity();
+                    current_triangles.clearRetainingCapacity();
+                    vertex_map.clearRetainingCapacity();
+                    continue;
+                }
+
+                try current_triangles.append(self.allocator, tri_idx);
+                for (tri_vertices) |vi| {
+                    const put_result = try vertex_map.getOrPut(vi);
+                    if (!put_result.found_existing) {
+                        put_result.value_ptr.* = true;
+                        try current_vertices.append(self.allocator, vi);
+                    }
+                }
+                break;
+            }
+        }
+
+        try Flush.emit(self, &meshlets_temp, &current_vertices, &current_triangles);
+
+        if (meshlets_temp.items.len == 0) {
+            self.meshlets = &[_]Meshlet{};
+            release_meshlets = false;
+            return;
+        }
+
+    self.meshlets = try self.allocator.alloc(Meshlet, meshlets_temp.items.len);
+    std.mem.copyForwards(Meshlet, self.meshlets, meshlets_temp.items);
+        release_meshlets = false;
+    }
 };

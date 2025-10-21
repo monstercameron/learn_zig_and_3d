@@ -119,13 +119,13 @@ This is a comprehensive list of potential improvements, new features, and refact
 
 ### Phase 1 – Offline Meshlet Generation
 
-- [ ] **Define Meshlet Data Structure**: Create a `Meshlet` struct containing a small number of vertex indices and primitive indices, along with a bounding sphere/box for culling.
-- [ ] **Implement Meshlet Builder**: Add an offline/loader step in `obj_loader.zig` (or a new tool) that partitions each mesh into meshlets using the target limits.
-- [ ] **Persist Meshlets**: Decide on in-memory vs serialized storage and update asset loading to populate meshlet arrays alongside the existing `Mesh`.
+- [x] **Define Meshlet Data Structure**: Create a `Meshlet` struct containing a small number of vertex indices and primitive indices, along with a bounding sphere/box for culling.
+- [x] **Implement Meshlet Builder**: Add an offline/loader step in `obj_loader.zig` (or a new tool) that partitions each mesh into meshlets using the target limits.
+- [x] **Persist Meshlets**: Decide on in-memory vs serialized storage and update asset loading to populate meshlet arrays alongside the existing `Mesh`.
 
 ### Phase 2 – Runtime Task Stage
 
-- [ ] **Task-Level Culling**: Implement frustum and view-dependent culling that accepts a meshlet's bounds and enqueues only visible meshlets (CPU analog of a task shader).
+- [x] **Task-Level Culling**: Implement frustum and view-dependent culling that accepts a meshlet's bounds and enqueues only visible meshlets (CPU analog of a task shader).
 - [ ] **Redesign Work Unit**: Replace `TileRenderJob` submissions with `MeshletRenderJob`s that own the meshlet’s vertex/primitive processing.
 - [ ] **Shared Vertex Cache**: Introduce a per-job scratch buffer for transformed vertices to cut redundant math across primitives inside a meshlet.
 

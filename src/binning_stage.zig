@@ -21,6 +21,8 @@ const std = @import("std");
 const TileRenderer = @import("tile_renderer.zig");
 const Tile = TileRenderer.Tile;
 const TileGrid = TileRenderer.TileGrid;
+const WorkTypes = @import("mesh_work_types.zig");
+const TrianglePacket = WorkTypes.TrianglePacket;
 
 // ========== TRIANGLE BOUNDS ==========
 
@@ -114,13 +116,10 @@ pub const TileTriangleList = struct {
 /// The main binning function. It takes all triangles and assigns them to the tiles they overlap.
 /// Returns an array of `TileTriangleList`, one for each tile on the screen.
 pub fn binTrianglesToTiles(
-    projected_vertices: [][2]i32,
-    triangle_vertices: []const [3]usize,
-    triangle_ids: []const usize,
+    triangle_packets: []const TrianglePacket,
     grid: *const TileGrid,
     allocator: std.mem.Allocator,
 ) ![]TileTriangleList {
-    std.debug.assert(triangle_vertices.len == triangle_ids.len);
     // 1. Create an empty to-do list for each tile.
     const tile_lists = try allocator.alloc(TileTriangleList, grid.tiles.len);
     for (tile_lists) |*list| {
@@ -128,10 +127,11 @@ pub fn binTrianglesToTiles(
     }
 
     // 2. Loop through every triangle in the scene.
-    for (triangle_vertices, 0..) |tri, tri_idx| {
-        const p0 = projected_vertices[tri[0]];
-        const p1 = projected_vertices[tri[1]];
-        const p2 = projected_vertices[tri[2]];
+    for (triangle_packets, 0..) |packet, tri_idx| {
+        const tri = packet.screen;
+        const p0 = tri[0];
+        const p1 = tri[1];
+        const p2 = tri[2];
 
         // 3. Calculate the triangle's 2D screen-space bounding box.
         const bounds = TriangleBounds.fromVertices(p0, p1, p2);
@@ -141,12 +141,29 @@ pub fn binTrianglesToTiles(
             continue;
         }
 
-        // 5. Test the triangle against every tile on the screen.
-        for (grid.tiles, 0..) |*tile, tile_idx| {
-            // 6. If the triangle's bounding box overlaps with the tile...
-            if (bounds.overlapsTile(tile)) {
-                // ...add this triangle's ID to the tile's to-do list.
-                try tile_lists[tile_idx].append(triangle_ids[tri_idx]);
+        const screen_max_x = grid.screen_width - 1;
+        const screen_max_y = grid.screen_height - 1;
+
+        const clamped_min_x = std.math.clamp(bounds.min_x, 0, screen_max_x);
+        const clamped_max_x = std.math.clamp(bounds.max_x, 0, screen_max_x);
+        const clamped_min_y = std.math.clamp(bounds.min_y, 0, screen_max_y);
+        const clamped_max_y = std.math.clamp(bounds.max_y, 0, screen_max_y);
+
+        const min_col = @as(usize, @intCast(std.math.clamp(@divTrunc(clamped_min_x, TileRenderer.TILE_SIZE), 0, @as(i32, @intCast(grid.cols)) - 1)));
+        const max_col = @as(usize, @intCast(std.math.clamp(@divTrunc(clamped_max_x, TileRenderer.TILE_SIZE), 0, @as(i32, @intCast(grid.cols)) - 1)));
+        const min_row = @as(usize, @intCast(std.math.clamp(@divTrunc(clamped_min_y, TileRenderer.TILE_SIZE), 0, @as(i32, @intCast(grid.rows)) - 1)));
+        const max_row = @as(usize, @intCast(std.math.clamp(@divTrunc(clamped_max_y, TileRenderer.TILE_SIZE), 0, @as(i32, @intCast(grid.rows)) - 1)));
+
+        var row = min_row;
+        while (row <= max_row) : (row += 1) {
+            const base_idx = row * grid.cols;
+            var col = min_col;
+            while (col <= max_col) : (col += 1) {
+                const tile_idx = base_idx + col;
+                const tile_ptr = &grid.tiles[tile_idx];
+                if (!bounds.overlapsTile(tile_ptr)) continue;
+                // Store the mesh-work triangle index; later stages look up full data from that slot.
+                try tile_lists[tile_idx].append(tri_idx);
             }
         }
     }

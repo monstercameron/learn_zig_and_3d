@@ -2,6 +2,34 @@
 
 This is a comprehensive list of potential improvements, new features, and refactoring opportunities for the Zig 3D CPU Rasterizer project.
 
+## Mesh Shader Follow-Up (High Priority)
+
+- [x] Generate meshlets for loaded meshes (partition triangles, compute vertex remapping, populate bounding spheres).
+- [x] Reuse cached per-meshlet vertex transforms to avoid reprojecting untouched geometry each frame.
+- [x] Tighten tile binning to scan only the intersecting tile range derived from triangle bounds.
+- [x] Extend benchmarking harnesses to exercise meshlet-enabled pipelines and capture mesh shader metrics.
+- [x] Cache per-triangle camera and screen-space vertices so raster stages can bypass mesh lookups.
+- [x] Parallelize meshlet task emission by dispatching meshlet jobs through the job system.
+- [ ] Persist meshlet work buffers across frames with fine-grained invalidation to avoid rebuilds.
+- [ ] Add runtime telemetry (meshlets culled/processed, triangles emitted) to validate task-stage performance.
+
+## Audio Engine (Native Windows)
+
+- [ ] **Phase 1: WASAPI Backend**
+    - [x] Define WASAPI COM interface bindings in Zig.
+    - [x] Implement audio device enumeration and initialization.
+    - [x] Create a dedicated audio thread for stream callbacks.
+- [ ] **Phase 2: Software Mixer**
+    - [x] Implement a "Voice" struct to represent a single playing sound.
+    - [x] Build the core mixer loop to combine/resample active voices.
+    - [x] Integrate the mixer with the WASAPI backend.
+- [ ] **Phase 3: Sound Decoders**
+    - [x] Implement `loadWav` using `std.wave` and a sample format converter.
+    - [ ] Integrate `dr_mp3` C library for `loadMp3` functionality.
+- [ ] **Phase 4: Public API Implementation**
+    - [ ] Connect the public `audio.zig` functions to the backend and mixer.
+    - [ ] Implement thread-safe command passing for playback control (play, stop, setVolume, etc.).
+
 ## Rendering Features
 
 - [ ] **Shading Models**:
@@ -36,13 +64,25 @@ This is a comprehensive list of potential improvements, new features, and refact
 ## Performance Optimizations
 
 - [ ] **SIMD Vectorization Candidates**:
-    - [ ] **`math.zig`**: Vectorize all core `Vec3`, `Vec4`, and `Mat4` operations. This is the highest priority for SIMD.
+    - [ ] **`math.zig`**: Vectorize all core `Vec2`, `Vec3`, `Vec4`, and `Mat4` operations. This is the highest priority for SIMD.
+        - `Vec2.add`, `Vec2.sub`, `Vec2.scale`.
+        - `Vec3.add`, `Vec3.sub`, `Vec3.scale`, `Vec3.dot`, `Vec3.cross`.
         - `Mat4.multiply`: Classic 4x4 matrix multiplication is highly parallelizable.
         - `Mat4.mulVec4`: Can be optimized using 4-wide dot products.
-        - `Vec3.dot`, `Vec3.cross`, `Vec3.add`, `Vec3.sub`, `Vec3.scale`.
+        - [x] Prototype SIMD implementations in benchmarks (`benchmarks/src/math_copy.zig`, `math_simd.zig`, `math_simd_optimized.zig`) for validation.
     - [ ] **`renderer.zig`**: Vectorize the main vertex transformation loop in `render3DMeshWithPump`. This involves processing multiple vertices (e.g., 4 or 8 at a time) through the series of dot products and matrix multiplications.
     - [ ] **`tile_renderer.zig`**: Optimize `rasterizeTriangleToTile` to calculate barycentric coordinates for 2x2 or 4x4 pixel blocks simultaneously. This is a standard advanced technique that maps well to SIMD operations.
     - [ ] **`lighting.zig`**: Vectorize the `applyIntensity` function to process 4 or 8 pixels at once. The unpack-multiply-repack sequence for RGBA colors is a perfect use case for byte-shuffling and parallel multiplication instructions.
+        - [x] Benchmark-only SIMD batch implementation available in `benchmarks/src/lighting_simd.zig` for reference.
+    - [ ] **`renderer.zig`**: Reuse per-frame scratch buffers in the meshlet pipeline (`renderer.zig:1505-1635`). The current code re-allocates `visibility`, `job` arrays, and completion flags every frame; promote them to cached slices on `Renderer` to eliminate allocator churn.
+    - [ ] **`tile_renderer.zig`**: Replace per-pixel barycentric recomputation in `rasterizeTriangleToTile` (`tile_renderer.zig:200-270`) with incremental half-space edge functions or block-based evaluation (e.g., 2×2 quads) to cut FLOPs and improve SIMD potential.
+    - [ ] **`renderer.zig`**: Remove per-frame atomic `resetVertexStates` (`renderer.zig:479-483`) by switching to a versioned/bitset scheme so vertices don’t require a full atomic sweep.
+    - [ ] **`renderer.zig`**: Batch `MeshWorkWriter` reservations (`renderer.zig:632-705`) to reduce atomic contention when emitting triangles—reserve chunks per meshlet or per thread.
+    - [ ] **`renderer.zig`**: Cache camera/light basis math (`render3DMeshWithPump`, `renderer.zig:988-1050`) to avoid recomputing sin/cos/matrix multiplies every frame.
+    - [ ] **`renderer.zig`**: Reuse meshlet-task job buffers (`renderer.zig:1685-1765`) instead of allocating `MeshletTaskJob`, `Job`, and completion arrays each frame.
+    - [ ] **`tile_renderer.zig`**: Introduce tile “dirty flags” so untouched tiles skip color/depth clears (`TileBuffer.clear`, `tile_renderer.zig:40-48`).
+    - [ ] **`binning_stage.zig`**: Replace per-tile `std.ArrayList` allocations with persistent buffers and length resets to eliminate allocator churn during binning.
+    - [ ] **`renderer.zig`**: Investigate pushing the back-buffer DIB directly with `SetDIBitsToDevice`/`StretchDIBits` instead of selecting into a compatible DC + `BitBlt` each frame (`drawBitmap`, `renderer.zig:1360-1390`). This removes the extra memory DC hop and cuts a GDI state change per present.
     - [ ] **`tile_renderer.zig`**: Speed up the `compositeTileToScreen` function by using SIMD instructions to copy larger blocks of pixel data from the tile buffer to the main framebuffer.
 - [ ] **Job System**:
     - [ ] Implement a truly lock-free work-stealing queue to reduce contention in the job system.
@@ -73,7 +113,7 @@ This is a comprehensive list of potential improvements, new features, and refact
 
 ## Bug Fixes & Robustness
 
-- [ ] **Critical Depth Buffer Bug**: The `rasterizeTriangleToTile` function in the tiled renderer does not perform a depth buffer check before writing a pixel. This is a critical bug that results in incorrect occlusion, where triangles will be drawn over closer ones simply because they were processed later.
+- [x] **Critical Depth Buffer Bug**: The `rasterizeTriangleToTile` function in the tiled renderer does not perform a depth buffer check before writing a pixel. This is a critical bug that results in incorrect occlusion, where triangles will be drawn over closer ones simply because they were processed later.
 - [ ] **No Window Resizing Support**: The application does not handle `WM_SIZE` events. If the user resizes the window, the bitmap, depth buffer, and camera aspect ratio are not updated, leading to visual distortion.
 - [ ] **Job System Mutex Bottleneck**: The job queue uses a single mutex for all operations. Under heavy contention, this lock can become a major performance bottleneck, negating the benefits of multi-threading.
 - [ ] **Inefficient OBJ Vertex Handling**: The OBJ loader creates a unique vertex for every face entry, which can massively inflate the vertex count for well-formed models that reuse vertices. It should use a map to cache and reuse unique `v/vt/vn` combinations.
@@ -120,15 +160,17 @@ This is a comprehensive list of potential improvements, new features, and refact
 
 ### Phase 2 – Runtime Task Stage
 
-- [ ] **Task-Level Culling**: Implement frustum and view-dependent culling that accepts a meshlet's bounds and enqueues only visible meshlets (CPU analog of a task shader).
+- [x] **Task-Level Culling**: Implement frustum and view-dependent culling that accepts a meshlet's bounds and enqueues only visible meshlets (CPU analog of a task shader).
 - [ ] **Redesign Work Unit**: Replace `TileRenderJob` submissions with `MeshletRenderJob`s that own the meshlet’s vertex/primitive processing.
 - [ ] **Shared Vertex Cache**: Introduce a per-job scratch buffer for transformed vertices to cut redundant math across primitives inside a meshlet.
+- [x] **Parallel Meshlet Submission**: Feed visible meshlets into the job system with deterministic output spans to unlock multi-core task processing.
 
 ### Phase 3 – Meshlet Processing & Output
 
 - [ ] **Integrate Vertex Transformation**: Move the current global vertex transform loop into the meshlet job so each job transforms only its local vertices.
-- [ ] **Per-Meshlet Primitive Culling**: Perform backface and near-plane clipping inside the meshlet job before emission.
-- [ ] **Emit Screen-Space Primitives**: Design an output structure for ready-to-raster triangles (clip-space positions, UVs, shading data) produced by each meshlet job.
+- [x] **Per-Meshlet Primitive Culling**: Perform backface and near-plane clipping inside the meshlet job before emission.
+- [x] **Emit Screen-Space Primitives**: Design an output structure for ready-to-raster triangles (clip-space positions, UVs, shading data) produced by each meshlet job.
+- [x] **Cache Expanded Attributes**: Extend meshlet outputs to include UVs, normals, and material IDs so raster stages remain mesh-agnostic.
 
 ### Phase 4 – Raster Backend Adaptation
 

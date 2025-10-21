@@ -4,22 +4,40 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const exe = b.addExecutable(.{
-        .name = "math_benchmarks",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+    const root_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
     });
 
-    // Add the main project's math.zig as a module so benchmarks can import it
     const math_module = b.createModule(.{
         .root_source_file = b.path("../src/math.zig"),
         .target = target,
         .optimize = optimize,
     });
-    exe.addModule("math", math_module);
+
+    const lighting_module = b.createModule(.{
+        .root_source_file = b.path("../src/lighting.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const mesh_module = b.createModule(.{
+        .root_source_file = b.path("../src/mesh.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    mesh_module.addImport("math.zig", math_module);
+
+    root_module.addImport("math3d", math_module);
+    root_module.addImport("mesh3d", mesh_module);
+    root_module.addImport("lighting", lighting_module);
+
+    const exe = b.addExecutable(.{
+        .name = "math_benchmarks",
+        .root_module = root_module,
+    });
 
     b.installArtifact(exe);
 
