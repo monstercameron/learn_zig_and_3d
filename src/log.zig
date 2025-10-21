@@ -1,11 +1,12 @@
 const std = @import("std");
+const SourceLocation = std.builtin.SourceLocation;
 
 /// Defines the severity of a log message.
 pub const LogLevel = enum(u8) {
     debug,
     info,
     warn,
-    error,
+    @"error",
     none, // Special level to disable logging for a namespace.
 
     pub fn shouldLog(self: LogLevel, min_level: LogLevel) bool {
@@ -17,7 +18,7 @@ pub const LogLevel = enum(u8) {
             .debug => "DEBUG",
             .info => "INFO",
             .warn => "WARN",
-            .error => "ERROR",
+            .@"error" => "ERROR",
             .none => "NONE",
         };
     }
@@ -51,7 +52,7 @@ const LogManager = struct {
     namespace_levels: std.StringHashMap(LogLevel),
 
     fn init(allocator: std.mem.Allocator) LogManager {
-        return .{ 
+        return .{
             .allocator = allocator,
             .global_level = .info,
             .namespace_levels = std.StringHashMap(LogLevel).init(allocator),
@@ -64,7 +65,7 @@ const LogManager = struct {
         while (it.next()) |key| {
             self.allocator.free(key.*);
         }
-        self.namespace_levels.deinit(self.allocator);
+        self.namespace_levels.deinit();
         self.* = undefined;
     }
 
@@ -72,7 +73,7 @@ const LogManager = struct {
         return self.namespace_levels.get(namespace) orelse self.global_level;
     }
 
-    fn log(self: *LogManager, level: LogLevel, namespace: []const u8, loc: *const @Src(), comptime format: []const u8, args: anytype) void {
+    fn log(self: *LogManager, level: LogLevel, namespace: []const u8, loc: SourceLocation, comptime format: []const u8, args: anytype) void {
         const effective_level = self.getEffectiveLevel(namespace);
         if (!level.shouldLog(effective_level)) {
             return;
@@ -81,7 +82,7 @@ const LogManager = struct {
         const file_name = getShortFileName(loc.file);
 
         // Format: [file:line] [function] [LEVEL] [namespace] message
-        std.debug.print("[{s}:{}] [{s}] [{s}] [{s}] " ++ format ++ "\n", .{ 
+        std.debug.print("[{s}:{}] [{s}] [{s}] [{s}] " ++ format ++ "\n", .{
             file_name,
             loc.line,
             loc.fn_name,
@@ -121,20 +122,20 @@ pub fn setLevelFor(namespace: []const u8, level: LogLevel) !void {
 pub const Logger = struct {
     namespace: []const u8,
 
-    pub fn debug(self: Logger, comptime format: []const u8, args: anytype, comptime loc: @Src() = @src()) void {
-        if (g_log_manager) |*manager| manager.log(.debug, self.namespace, &loc, format, args);
+    pub fn debug(self: Logger, comptime format: []const u8, args: anytype) void {
+        if (g_log_manager) |*manager| manager.log(.debug, self.namespace, @src(), format, args);
     }
 
-    pub fn info(self: Logger, comptime format: []const u8, args: anytype, comptime loc: @Src() = @src()) void {
-        if (g_log_manager) |*manager| manager.log(.info, self.namespace, &loc, format, args);
+    pub fn info(self: Logger, comptime format: []const u8, args: anytype) void {
+        if (g_log_manager) |*manager| manager.log(.info, self.namespace, @src(), format, args);
     }
 
-    pub fn warn(self: Logger, comptime format: []const u8, args: anytype, comptime loc: @Src() = @src()) void {
-        if (g_log_manager) |*manager| manager.log(.warn, self.namespace, &loc, format, args);
+    pub fn warn(self: Logger, comptime format: []const u8, args: anytype) void {
+        if (g_log_manager) |*manager| manager.log(.warn, self.namespace, @src(), format, args);
     }
 
-    pub fn error(self: Logger, comptime format: []const u8, args: anytype, comptime loc: @Src() = @src()) void {
-        if (g_log_manager) |*manager| manager.log(.error, self.namespace, &loc, format, args);
+    pub fn @"error"(self: Logger, comptime format: []const u8, args: anytype) void {
+        if (g_log_manager) |*manager| manager.log(.@"error", self.namespace, @src(), format, args);
     }
 };
 

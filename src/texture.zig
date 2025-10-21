@@ -18,7 +18,7 @@
 //!   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, myImage);
 //! };
 //! ```
-//! 
+//!
 //! This file is doing all of that work manually. The `loadBmp` function is like the
 //! browser's native code that decodes the image file, and the `Texture` struct is
 //! like the resulting WebGL texture object, holding the raw pixel data.

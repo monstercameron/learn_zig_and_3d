@@ -41,7 +41,7 @@ pub fn lineIntersectionX(x1: i32, y1: i32, x2: i32, y2: i32, y: i32) i32 {
     const dy = y2 - y1;
     const dx = x2 - x1;
     const t_num = y - y1;
-    
+
     // Using the formula for linear interpolation: x = x1 + t * (x2 - x1)
     // where t = (y - y1) / (y2 - y1). To avoid floating point math, we rearrange:
     // x = x1 + (y - y1) * (x2 - x1) / (y2 - y1)

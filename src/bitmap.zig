@@ -12,13 +12,13 @@
 //! const ctx = canvas.getContext('2d');
 //! const imageData = ctx.createImageData(width, height);
 //! // imageData.data is a Uint8ClampedArray - our `pixels` slice is like this.
-//! 
+//!
 //! // You can manipulate pixels directly:
 //! imageData.data[0] = 255; // R
 //! imageData.data[1] = 0;   // G
 //! imageData.data[2] = 0;   // B
 //! imageData.data[3] = 255; // A
-//! 
+//!
 //! // Then you put it on the canvas:
 //! ctx.putImageData(imageData, 0, 0);
 //! ```

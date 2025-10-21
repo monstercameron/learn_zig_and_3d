@@ -43,6 +43,8 @@ const WorkTypes = @import("mesh_work_types.zig");
 const TrianglePacket = WorkTypes.TrianglePacket;
 const TriangleFlags = WorkTypes.TriangleFlags;
 const MeshletPacket = WorkTypes.MeshletPacket;
+const log = @import("log.zig");
+const ground_logger = log.get("renderer.ground");
 
 const NEAR_CLIP: f32 = 0.01;
 const NEAR_EPSILON: f32 = 1e-4;
@@ -683,6 +685,109 @@ pub const Renderer = struct {
         }
     };
 
+    const MeshletContribution = struct {
+        const Entry = struct {
+            tile_index: usize,
+            triangles: std.ArrayList(usize),
+        };
+
+        allocator: std.mem.Allocator,
+        entries: std.ArrayList(Entry),
+
+        fn init(allocator: std.mem.Allocator) MeshletContribution {
+            return MeshletContribution{
+                .allocator = allocator,
+                .entries = std.ArrayList(Entry){},
+            };
+        }
+
+        fn deinit(self: *MeshletContribution) void {
+            for (self.entries.items) |*entry| {
+                entry.triangles.deinit(self.allocator);
+            }
+            self.entries.deinit(self.allocator);
+            self.entries = std.ArrayList(Entry){};
+        }
+
+        fn addTriangle(self: *MeshletContribution, tile_index: usize, tri_index: usize) !void {
+            for (self.entries.items) |*entry| {
+                if (entry.tile_index == tile_index) {
+                    try entry.triangles.append(self.allocator, tri_index);
+                    return;
+                }
+            }
+
+            var new_entry = Entry{
+                .tile_index = tile_index,
+                .triangles = std.ArrayList(usize){},
+            };
+            try new_entry.triangles.append(self.allocator, tri_index);
+            try self.entries.append(self.allocator, new_entry);
+        }
+    };
+
+    const MeshletBinningJob = struct {
+        mesh_work: *const MeshWork,
+        meshlet_packet: *const MeshletPacket,
+        grid: *const TileGrid,
+        contribution: *MeshletContribution,
+
+        fn process(job: *MeshletBinningJob) void {
+            const triangles = job.mesh_work.triangles;
+            const packet = job.meshlet_packet.*;
+
+            if (packet.triangle_count == 0) return;
+
+            const screen_width = job.grid.screen_width;
+            const screen_height = job.grid.screen_height;
+
+            var offset: usize = 0;
+            while (offset < packet.triangle_count) : (offset += 1) {
+                const tri_index = packet.triangle_start + offset;
+                if (tri_index >= triangles.len) continue;
+                const tri_packet = triangles[tri_index];
+                const screen_tri = tri_packet.screen;
+
+                const bounds = BinningStage.TriangleBounds.fromVertices(screen_tri[0], screen_tri[1], screen_tri[2]);
+                if (bounds.isOffscreen(screen_width, screen_height)) {
+                    continue;
+                }
+
+                const screen_max_x = screen_width - 1;
+                const screen_max_y = screen_height - 1;
+
+                const clamped_min_x = std.math.clamp(bounds.min_x, 0, screen_max_x);
+                const clamped_max_x = std.math.clamp(bounds.max_x, 0, screen_max_x);
+                const clamped_min_y = std.math.clamp(bounds.min_y, 0, screen_max_y);
+                const clamped_max_y = std.math.clamp(bounds.max_y, 0, screen_max_y);
+
+                const min_col = @as(usize, @intCast(std.math.clamp(@divTrunc(clamped_min_x, TileRenderer.TILE_SIZE), 0, @as(i32, @intCast(job.grid.cols)) - 1)));
+                const max_col = @as(usize, @intCast(std.math.clamp(@divTrunc(clamped_max_x, TileRenderer.TILE_SIZE), 0, @as(i32, @intCast(job.grid.cols)) - 1)));
+                const min_row = @as(usize, @intCast(std.math.clamp(@divTrunc(clamped_min_y, TileRenderer.TILE_SIZE), 0, @as(i32, @intCast(job.grid.rows)) - 1)));
+                const max_row = @as(usize, @intCast(std.math.clamp(@divTrunc(clamped_max_y, TileRenderer.TILE_SIZE), 0, @as(i32, @intCast(job.grid.rows)) - 1)));
+
+                var row = min_row;
+                while (row <= max_row) : (row += 1) {
+                    const base_idx = row * job.grid.cols;
+                    var col = min_col;
+                    while (col <= max_col) : (col += 1) {
+                        const tile_index = base_idx + col;
+                        const tile_ptr = &job.grid.tiles[tile_index];
+                        if (!bounds.overlapsTile(tile_ptr)) continue;
+                        job.contribution.addTriangle(tile_index, tri_index) catch |err| {
+                            std.log.err("Meshlet binning failed to record triangle {} for tile {}: {}", .{ tri_index, tile_index, err });
+                        };
+                    }
+                }
+            }
+        }
+
+        fn run(ctx: *anyopaque) void {
+            const job: *MeshletBinningJob = @ptrCast(@alignCast(ctx));
+            job.process();
+        }
+    };
+
     const MeshWork = struct {
         triangles: []TrianglePacket,
         meshlet_packets: []MeshletPacket,
@@ -819,9 +924,9 @@ pub const Renderer = struct {
         projected: [][2]i32,
         transformed_vertices: []math.Vec3,
         vertex_ready: []std.atomic.Value(VertexState),
-    meshlet_jobs: []MeshletTaskJob,
-    meshlet_job_handles: []Job,
-    meshlet_job_completion: []bool,
+        meshlet_jobs: []MeshletTaskJob,
+        meshlet_job_handles: []Job,
+        meshlet_job_completion: []bool,
         work: MeshWork,
         mesh: ?*const Mesh,
         camera_position: math.Vec3,
@@ -1373,14 +1478,14 @@ pub const Renderer = struct {
         self.ground_debug.last_mask = mask;
 
         if (mask == 0) {
-            std.debug.print("Ground plane visible (frame {})\n", .{self.frame_count});
+            ground_logger.debug("ground plane visible (frame {})", .{self.frame_count});
             return;
         }
 
         for (tri_debug[0..tri_debug_count]) |info| {
             if (info.dot) |d| {
-                std.debug.print(
-                    "Ground tri {} issue mask {b:0>3} z[{d:.3},{d:.3},{d:.3}] front[{},{},{}] crosses={} dot={d:.4}\n",
+                ground_logger.debug(
+                    "ground tri {} issue mask {b:0>3} z[{d:.3},{d:.3},{d:.3}] front[{},{},{}] crosses={} dot={d:.4}",
                     .{
                         info.index,
                         info.mask,
@@ -1395,8 +1500,8 @@ pub const Renderer = struct {
                     },
                 );
             } else {
-                std.debug.print(
-                    "Ground tri {} issue mask {b:0>3} z[{d:.3},{d:.3},{d:.3}] front[{},{},{}] crosses={} dot=n/a\n",
+                ground_logger.debug(
+                    "ground tri {} issue mask {b:0>3} z[{d:.3},{d:.3},{d:.3}] front[{},{},{}] crosses={} dot=n/a",
                     .{
                         info.index,
                         info.mask,
@@ -1522,6 +1627,22 @@ pub const Renderer = struct {
         }
         const tile_lists = try BinningStage.binTrianglesToTiles(triangles, &grid, self.allocator);
         defer BinningStage.freeTileTriangleLists(tile_lists, self.allocator);
+
+        // NOTE: Experimental meshlet-aware binning via job system proved much slower (FPS fell ~90 → 16)
+        // because it relied on per-triangle heap pushes and copied results back into the same tile lists.
+        // Leaving the prototype below for future reference; any revival needs fixed-size buffers and an
+        // actual culling benefit beyond the existing linear bin pass.
+        //
+        // var tile_lists = try BinningStage.createTileTriangleLists(&grid, self.allocator);
+        // defer BinningStage.freeTileTriangleLists(tile_lists, self.allocator);
+        // if (self.job_system != null and mesh_work.meshletSlice().len != 0) {
+        //     // ... meshlet binning prototype (see git history Oct 21, 2025) ...
+        // } else {
+        //     BinningStage.clearTileTriangleLists(tile_lists);
+        //     BinningStage.binTrianglesRangeToTiles(triangles, 0, triangles.len, &grid, tile_lists) catch |err| {
+        //         std.log.err("Triangle binning failed: {}", .{err});
+        //     };
+        // }
 
         const tile_jobs = self.tile_jobs_buffer.?;
         const jobs = self.job_buffer.?;

@@ -25,10 +25,10 @@ This is a comprehensive list of potential improvements, new features, and refact
     - [x] Integrate the mixer with the WASAPI backend.
 - [ ] **Phase 3: Sound Decoders**
     - [x] Implement `loadWav` using `std.wave` and a sample format converter.
-    - [ ] Integrate `dr_mp3` C library for `loadMp3` functionality.
+    - [x] Integrate `dr_mp3` C library for `loadMp3` functionality.
 - [ ] **Phase 4: Public API Implementation**
-    - [ ] Connect the public `audio.zig` functions to the backend and mixer.
-    - [ ] Implement thread-safe command passing for playback control (play, stop, setVolume, etc.).
+    - [x] Connect the public `audio.zig` functions to the backend and mixer.
+    - [x] Implement thread-safe command passing for playback control (play, stop, setVolume, etc.).
 
 ## Rendering Features
 
@@ -83,6 +83,7 @@ This is a comprehensive list of potential improvements, new features, and refact
     - [ ] **`tile_renderer.zig`**: Introduce tile “dirty flags” so untouched tiles skip color/depth clears (`TileBuffer.clear`, `tile_renderer.zig:40-48`).
     - [ ] **`binning_stage.zig`**: Replace per-tile `std.ArrayList` allocations with persistent buffers and length resets to eliminate allocator churn during binning.
     - [ ] **`renderer.zig`**: Investigate pushing the back-buffer DIB directly with `SetDIBitsToDevice`/`StretchDIBits` instead of selecting into a compatible DC + `BitBlt` each frame (`drawBitmap`, `renderer.zig:1360-1390`). This removes the extra memory DC hop and cuts a GDI state change per present.
+    - [ ] **`experiments/hotreload_demo`**: Build a standalone hot-reload test harness that loads multiple Zig-built shared libraries via `std.DynLib` and calls their exported functions, proving out the shared ABI + hot-swap workflow without touching the main engine.
     - [ ] **`tile_renderer.zig`**: Speed up the `compositeTileToScreen` function by using SIMD instructions to copy larger blocks of pixel data from the tile buffer to the main framebuffer.
 - [ ] **Job System**:
     - [ ] Implement a truly lock-free work-stealing queue to reduce contention in the job system.
@@ -177,6 +178,13 @@ This is a comprehensive list of potential improvements, new features, and refact
 - [ ] **Rework Binning Stage**: Feed the meshlet-emitted primitives into the existing tile binning step; evaluate if a two-pass (meshlet -> tile) pipeline is needed.
 - [ ] **Update Rasterizer Input Path**: Allow `rasterizeTriangleToTile` (and the direct path) to consume primitives that already carry transformed data instead of pulling from global mesh arrays.
 - [ ] **Depth Buffer Integration**: Introduce a depth buffer so overlapping meshlets composit correctly once triangles are no longer globally ordered.
+- [ ] **Meshlet→Tile Integration Plan**:
+    - [ ] Refactor `BinningStage` to operate on slices so a meshlet’s triangle span can be binned independently with thread-local buffers.
+    - [ ] Implement `MeshletBinningJob` using the job system to bin each visible meshlet in parallel and stage per-tile contributions.
+    - [ ] Merge job-local tile contributions into the renderer’s shared tile lists while preserving per-meshlet culling benefits.
+    - [ ] Wire tile render jobs to consume the merged lists and skip untouched tiles based on meshlet activity.
+    - [ ] Extend `MeshWorkCache` to reuse the temporary buffers required by the new binning jobs and merge step.
+    - [ ] Add debug counters/toggles to compare legacy and meshlet-driven binning paths during rollout.
 
 ### Phase 5 – Validation & Tooling
 

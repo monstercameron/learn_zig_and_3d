@@ -114,7 +114,7 @@ pub const Window = struct {
         title_wide[title_len] = 0;
 
         // --- STEP 2: Define and Register the Window Class (Blueprint) ---
-    var wc: WNDCLASSW = std.mem.zeroes(WNDCLASSW);
+        var wc: WNDCLASSW = std.mem.zeroes(WNDCLASSW);
         wc.lpfnWndProc = @ptrCast(@constCast(&WindowProc)); // Tell Windows to use our `WindowProc` function as the event handler.
         wc.hInstance = hinstance;
         wc.lpszClassName = &CLASS_NAME_WIDE;
@@ -131,9 +131,12 @@ pub const Window = struct {
             &CLASS_NAME_WIDE, // The name of the class we just registered.
             &title_wide, // The window title converted to UTF-16.
             WS_OVERLAPPEDWINDOW, // The visual style of the window.
-            100, 100, // Initial X, Y position.
-            width, height, // Initial width, height.
-            null, null, // No parent window or menu.
+            100,
+            100, // Initial X, Y position.
+            width,
+            height, // Initial width, height.
+            null,
+            null, // No parent window or menu.
             hinstance, // The application instance handle.
             null,
         ) orelse {

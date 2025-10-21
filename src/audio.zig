@@ -46,79 +46,69 @@ pub fn deinit() void {
     }
 }
 
+/// Starts the audio engine's backend thread. Must be called after init.
+pub fn start() !void {
+    if (g_audio_engine) |*audio_engine| {
+        return audio_engine.start();
+    }
+    return error.AudioEngineNotInitialized;
+}
+
 /// Sets the master volume for all sounds (0.0 to 1.0).
 pub fn setMasterVolume(volume: f32) void {
     if (g_audio_engine) |*audio_engine| {
-        // TODO: audio_engine.setMasterVolume(volume);
-        _ = audio_engine;
-        _ = volume;
+        audio_engine.setMasterVolume(volume);
     }
 }
+
 
 // --- Sound Loading & Unloading (Memory Management) ---
 
 pub fn loadWav(allocator: std.mem.Allocator, file_path: []const u8) !*Sound {
     if (g_audio_engine) |*audio_engine| {
-        // TODO: return audio_engine.loadWav(allocator, file_path);
-        _ = audio_engine;
-        _ = allocator;
-        _ = file_path;
-        return error.NotYetImplemented;
+        return audio_engine.loadWav(file_path);
     }
     return error.AudioEngineNotInitialized;
 }
 
 pub fn loadMp3(allocator: std.mem.Allocator, file_path: []const u8) !*Sound {
     if (g_audio_engine) |*audio_engine| {
-        // TODO: return audio_engine.loadMp3(allocator, file_path);
-        _ = audio_engine;
-        _ = allocator;
-        _ = file_path;
-        return error.NotYetImplemented;
+        return audio_engine.loadMp3(file_path);
     }
     return error.AudioEngineNotInitialized;
 }
 
-pub fn unload(allocator: std.mem.Allocator, sound: *Sound) void {
+pub fn unload(sound: *Sound) void {
      if (g_audio_engine) |*audio_engine| {
-        audio_engine.unload(allocator, sound);
+        audio_engine.unload(sound);
     }
 }
+
 
 // --- Playback Control ---
 
 pub fn play(sound: *const Sound, params: PlaybackParams) !PlaybackHandle {
     if (g_audio_engine) |*audio_engine| {
-        // TODO: return audio_engine.play(sound, params);
-        _ = audio_engine;
-        _ = sound;
-        _ = params;
-        return error.NotYetImplemented;
+        return audio_engine.play(sound, params);
     }
     return error.AudioEngineNotInitialized;
 }
 
 pub fn stop(handle: PlaybackHandle) void {
     if (g_audio_engine) |*audio_engine| {
-        // TODO: audio_engine.stop(handle);
-        _ = audio_engine;
-        _ = handle;
+        audio_engine.stop(handle);
     }
 }
 
 pub fn pause(handle: PlaybackHandle) void {
     if (g_audio_engine) |*audio_engine| {
-        // TODO: audio_engine.pause(handle);
-        _ = audio_engine;
-        _ = handle;
+        audio_engine.pause(handle);
     }
 }
 
 pub fn resume(handle: PlaybackHandle) void {
     if (g_audio_engine) |*audio_engine| {
-        // TODO: audio_engine.resume(handle);
-        _ = audio_engine;
-        _ = handle;
+        audio_engine.resume(handle);
     }
 }
 
@@ -126,27 +116,18 @@ pub fn resume(handle: PlaybackHandle) void {
 
 pub fn setVolume(handle: PlaybackHandle, volume: f32) void {
     if (g_audio_engine) |*audio_engine| {
-        // TODO: audio_engine.setVolume(handle, volume);
-        _ = audio_engine;
-        _ = handle;
-        _ = volume;
+        audio_engine.setVolume(handle, volume);
     }
 }
 
 pub fn setPitch(handle: PlaybackHandle, pitch: f32) void {
     if (g_audio_engine) |*audio_engine| {
-        // TODO: audio_engine.setPitch(handle, pitch);
-        _ = audio_engine;
-        _ = handle;
-        _ = pitch;
+        audio_engine.setPitch(handle, pitch);
     }
 }
 
 pub fn setSpeed(handle: PlaybackHandle, speed: f32) void {
     if (g_audio_engine) |*audio_engine| {
-        // TODO: audio_engine.setSpeed(handle, speed);
-        _ = audio_engine;
-        _ = handle;
-        _ = speed;
+        audio_engine.setSpeed(handle, speed);
     }
 }

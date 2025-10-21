@@ -120,14 +120,48 @@ pub fn binTrianglesToTiles(
     grid: *const TileGrid,
     allocator: std.mem.Allocator,
 ) ![]TileTriangleList {
-    // 1. Create an empty to-do list for each tile.
-    const tile_lists = try allocator.alloc(TileTriangleList, grid.tiles.len);
-    for (tile_lists) |*list| {
+    const tile_lists = try createTileTriangleLists(grid, allocator);
+    errdefer freeTileTriangleLists(tile_lists, allocator);
+    try binTrianglesRangeToTiles(triangle_packets, 0, triangle_packets.len, grid, tile_lists);
+    return tile_lists;
+}
+
+/// Allocates and initializes an empty tile-triangle list for every tile in the grid.
+pub fn createTileTriangleLists(grid: *const TileGrid, allocator: std.mem.Allocator) ![]TileTriangleList {
+    const lists = try allocator.alloc(TileTriangleList, grid.tiles.len);
+    for (lists) |*list| {
         list.* = TileTriangleList.init(allocator);
     }
+    return lists;
+}
 
-    // 2. Loop through every triangle in the scene.
-    for (triangle_packets, 0..) |packet, tri_idx| {
+/// Clears all tile lists so they can be reused without freeing their internal storage.
+pub fn clearTileTriangleLists(lists: []TileTriangleList) void {
+    for (lists) |*list| {
+        list.clear();
+    }
+}
+
+/// Bins a slice of the triangle array (defined by `start` and `count`) into the provided tile lists.
+/// The caller is responsible for clearing the lists beforehand if previous contents should be discarded.
+pub fn binTrianglesRangeToTiles(
+    triangle_packets: []const TrianglePacket,
+    start: usize,
+    count: usize,
+    grid: *const TileGrid,
+    tile_lists: []TileTriangleList,
+) !void {
+    std.debug.assert(tile_lists.len == grid.tiles.len);
+
+    if (count == 0 or triangle_packets.len == 0) return;
+
+    const clamped_start = @min(start, triangle_packets.len);
+    const clamped_end = @min(clamped_start + count, triangle_packets.len);
+
+    // 2. Loop through every triangle in the selected slice.
+    var tri_idx = clamped_start;
+    while (tri_idx < clamped_end) : (tri_idx += 1) {
+        const packet = triangle_packets[tri_idx];
         const tri = packet.screen;
         const p0 = tri[0];
         const p1 = tri[1];
@@ -167,9 +201,6 @@ pub fn binTrianglesToTiles(
             }
         }
     }
-
-    // 7. Return the array of to-do lists.
-    return tile_lists;
 }
 
 /// Frees the memory allocated for the tile-triangle lists.

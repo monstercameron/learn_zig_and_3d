@@ -66,12 +66,7 @@ pub const Job = struct {
         // for this job to be completed.
         if (unfinished == 1) {
             // If we have a parent, we notify it that one of its children has finished.
-            if (self.parent) |parent| {
-                const self_addr = @intFromPtr(self);
-                const parent_addr = @intFromPtr(parent);
-                std.log.err("Job {x} finishing with unexpected parent pointer {x}; skipping parent notification", .{ self_addr, parent_addr });
-                return;
-            }
+            if (self.parent) |_| return;
         }
     }
 

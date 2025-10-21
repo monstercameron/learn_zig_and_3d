@@ -178,10 +178,10 @@ pub const Mat4 = struct {
         const c = @cos(angle);
         const s = @sin(angle);
         return Mat4{ .data = [_]f32{
-            1, 0, 0, 0,
-            0, c, s, 0,
+            1, 0,  0, 0,
+            0, c,  s, 0,
             0, -s, c, 0,
-            0, 0, 0, 1,
+            0, 0,  0, 1,
         } };
     }
 
@@ -191,9 +191,9 @@ pub const Mat4 = struct {
         const s = @sin(angle);
         return Mat4{ .data = [_]f32{
             c, 0, -s, 0,
-            0, 1, 0, 0,
-            s, 0, c, 0,
-            0, 0, 0, 1,
+            0, 1, 0,  0,
+            s, 0, c,  0,
+            0, 0, 0,  1,
         } };
     }
 
@@ -202,10 +202,10 @@ pub const Mat4 = struct {
         const c = @cos(angle);
         const s = @sin(angle);
         return Mat4{ .data = [_]f32{
-            c, s, 0, 0,
+            c,  s, 0, 0,
             -s, c, 0, 0,
-            0, 0, 1, 0,
-            0, 0, 0, 1,
+            0,  0, 1, 0,
+            0,  0, 0, 1,
         } };
     }
 

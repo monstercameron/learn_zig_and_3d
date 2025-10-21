@@ -86,6 +86,9 @@ const Renderer = @import("renderer.zig").Renderer;
 const obj_loader = @import("obj_loader.zig");
 const mesh_module = @import("mesh.zig");
 const config = @import("app_config.zig");
+const log = @import("log.zig");
+
+const app_logger = log.get("app.main");
 
 /// # Application Entry Point
 /// This `main` function is where the program execution begins.
@@ -104,6 +107,9 @@ pub fn main() !void {
     // that `gpa.deinit()` is called at the end of the `main` function, cleaning up the allocator.
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    log.init(allocator);
+    defer log.deinit();
 
     // Create a window.
     // JS Analogy: `const window = new Window(800, 600);`
@@ -134,7 +140,7 @@ pub fn main() !void {
     // frames continuously even if there are no new user input events.
     var running = true;
 
-    std.debug.print("Starting main event loop...\n", .{});
+    app_logger.info("starting main event loop...", .{});
 
     // The MessagePump is a helper for processing all pending OS events.
     // JS Analogy: This is like the internal logic a browser runs between frames
@@ -158,7 +164,7 @@ pub fn main() !void {
             while (PeekMessageW(&m, null, 0, 0, PM_REMOVE) != 0) {
                 // If we get a quit message, signal the main loop to exit.
                 if (m.message == WM_QUIT) {
-                    std.debug.print("Received WM_QUIT message, exiting\n", .{});
+                    app_logger.info("received WM_QUIT message, exiting", .{});
                     return false; // Signal to exit.
                 }
 
@@ -193,7 +199,7 @@ pub fn main() !void {
     while (running) {
         // First, process all pending user input and window events.
         if (!MessagePump.pump(&renderer)) {
-            std.debug.print("MessagePump returned false, exiting main loop\n", .{});
+            app_logger.info("message pump requested shutdown", .{});
             running = false;
             break;
         }
@@ -202,22 +208,22 @@ pub fn main() !void {
         if (renderer.shouldRenderFrame()) {
             frame_count += 1;
             if (frame_count <= 3) {
-                std.debug.print("Rendering frame {}\n", .{frame_count});
+                app_logger.debug("rendering frame {}", .{frame_count});
             }
             // This is the main drawing call.
             // JS Analogy: `renderer.renderScene(scene);` inside a `requestAnimationFrame` callback.
             renderer.render3DMeshWithPump(&teapot, MessagePump.pump) catch |err| {
                 // If rendering fails, log the error and exit the loop.
                 if (err == error.RenderInterrupted) {
-                    std.debug.print("Render interrupted by shutdown request\n", .{});
+                    app_logger.info("render interrupted by shutdown request", .{});
                 } else {
-                    std.debug.print("ERROR during rendering: {}\n", .{err});
+                    app_logger.@"error"("rendering failed: {s}", .{@errorName(err)});
                 }
                 running = false;
                 break;
             };
             if (frame_count <= 3) {
-                std.debug.print("Frame {} complete\n", .{frame_count});
+                app_logger.debug("frame {} complete", .{frame_count});
             }
         }
 
@@ -227,7 +233,7 @@ pub fn main() !void {
         Sleep(0);
     }
 
-    std.debug.print("Exited main loop after {} frames\n", .{frame_count});
+    app_logger.info("exited main loop after {} frames", .{frame_count});
 }
 
 fn levelLiftMeshToGround(mesh: *mesh_module.Mesh) void {
