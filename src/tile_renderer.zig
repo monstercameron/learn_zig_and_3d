@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const Bitmap = @import("bitmap.zig").Bitmap;
+const scanline = @import("scanline.zig");
 
 // ========== CONSTANTS ==========
 
@@ -239,30 +240,6 @@ pub fn drawTileBoundaries(grid: *const TileGrid, bitmap: *Bitmap) void {
 
 // ========== TILE RASTERIZATION ==========
 
-/// Helper: min of two i32 values
-fn minI32(a: i32, b: i32) i32 {
-    return if (a < b) a else b;
-}
-
-/// Helper: max of two i32 values
-fn maxI32(a: i32, b: i32) i32 {
-    return if (a > b) a else b;
-}
-
-/// Helper: clamp value between min and max
-fn clampI32(val: i32, min_val: i32, max_val: i32) i32 {
-    return maxI32(min_val, minI32(max_val, val));
-}
-
-/// Calculate X intersection of line segment with horizontal scanline
-fn lineIntersectionX(x1: i32, y1: i32, x2: i32, y2: i32, y: i32) i32 {
-    if (y1 == y2) return x1;
-    const dy = y2 - y1;
-    const dx = x2 - x1;
-    const t_num = y - y1;
-    return x1 + @divTrunc(t_num * dx, dy);
-}
-
 /// Rasterize a filled triangle into a tile buffer
 /// Vertices are in SCREEN space, will be converted to tile-local coordinates
 pub fn rasterizeTriangleToTile(
@@ -306,22 +283,22 @@ pub fn rasterizeTriangleToTile(
     if (top_y == mid_y and mid_y == bot_y) return;
 
     // Clamp Y range to tile bounds
-    const y_start = maxI32(0, top_y);
-    const y_end = minI32(tile_buffer.height - 1, bot_y);
+    const y_start = scanline.maxI32(0, top_y);
+    const y_end = scanline.minI32(tile_buffer.height - 1, bot_y);
 
     // Draw upper half (from top to middle)
     if (top_y < mid_y) {
-        var y = maxI32(y_start, top_y);
-        while (y <= minI32(y_end, mid_y)) : (y += 1) {
-            const x_left_edge = lineIntersectionX(top_x, top_y, mid_x, mid_y, y);
-            const x_right_edge = lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
+        var y = scanline.maxI32(y_start, top_y);
+        while (y <= scanline.minI32(y_end, mid_y)) : (y += 1) {
+            const x_left_edge = scanline.lineIntersectionX(top_x, top_y, mid_x, mid_y, y);
+            const x_right_edge = scanline.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
 
-            var x_left = minI32(x_left_edge, x_right_edge);
-            var x_right = maxI32(x_left_edge, x_right_edge);
+            var x_left = scanline.minI32(x_left_edge, x_right_edge);
+            var x_right = scanline.maxI32(x_left_edge, x_right_edge);
 
             // Clamp to tile bounds
-            x_left = maxI32(0, x_left);
-            x_right = minI32(tile_buffer.width - 1, x_right);
+            x_left = scanline.maxI32(0, x_left);
+            x_right = scanline.minI32(tile_buffer.width - 1, x_right);
 
             // Fill scanline
             var x = x_left;
@@ -336,17 +313,17 @@ pub fn rasterizeTriangleToTile(
 
     // Draw lower half (from middle to bottom)
     if (mid_y < bot_y) {
-        var y = maxI32(y_start, mid_y);
-        while (y <= minI32(y_end, bot_y)) : (y += 1) {
-            const x_left_edge = lineIntersectionX(mid_x, mid_y, bot_x, bot_y, y);
-            const x_right_edge = lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
+        var y = scanline.maxI32(y_start, mid_y);
+        while (y <= scanline.minI32(y_end, bot_y)) : (y += 1) {
+            const x_left_edge = scanline.lineIntersectionX(mid_x, mid_y, bot_x, bot_y, y);
+            const x_right_edge = scanline.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
 
-            var x_left = minI32(x_left_edge, x_right_edge);
-            var x_right = maxI32(x_left_edge, x_right_edge);
+            var x_left = scanline.minI32(x_left_edge, x_right_edge);
+            var x_right = scanline.maxI32(x_left_edge, x_right_edge);
 
             // Clamp to tile bounds
-            x_left = maxI32(0, x_left);
-            x_right = minI32(tile_buffer.width - 1, x_right);
+            x_left = scanline.maxI32(0, x_left);
+            x_right = scanline.minI32(tile_buffer.width - 1, x_right);
 
             // Fill scanline
             var x = x_left;

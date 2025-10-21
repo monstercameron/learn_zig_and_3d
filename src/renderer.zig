@@ -33,6 +33,10 @@ const std = @import("std");
 const windows = std.os.windows;
 const math = @import("math.zig");
 const Mesh = @import("mesh.zig").Mesh;
+const config = @import("app_config.zig");
+const input = @import("input.zig");
+const lighting = @import("lighting.zig");
+const scanline = @import("scanline.zig");
 
 // ========== TYPES ==========
 /// HGDIOBJ - Handle to a GDI (Graphics Device Interface) object
@@ -108,29 +112,6 @@ const INITIAL_LIGHT_DIR = math.Vec3.new(0.0, 0.0, -1.0); // Pointing toward -Z (
 // ========== RENDERER STRUCT ==========
 /// Manages rendering operations: converting bitmap data to screen display
 /// Similar to a canvas context: ctx = canvas.getContext("2d")
-const BASE_COLOR = struct {
-    r: f32,
-    g: f32,
-    b: f32,
-}{ .r = 255.0, .g = 220.0, .b = 40.0 };
-const AMBIENT_LIGHT = 0.25;
-const CAMERA_FOV_STEP: f32 = 1.5;
-const CAMERA_FOV_MIN: f32 = 20.0;
-const CAMERA_FOV_MAX: f32 = 120.0;
-
-fn computeLitColor(brightness: f32) u32 {
-    const clamped_brightness = if (brightness < 0.0) 0.0 else if (brightness > 1.0) 1.0 else brightness;
-    const intensity = AMBIENT_LIGHT + clamped_brightness * (1.0 - AMBIENT_LIGHT);
-    const r_val = std.math.clamp(BASE_COLOR.r * intensity, 0.0, 255.0);
-    const g_val = std.math.clamp(BASE_COLOR.g * intensity, 0.0, 255.0);
-    const b_val = std.math.clamp(BASE_COLOR.b * intensity, 0.0, 255.0);
-
-    const r = @as(u32, @intFromFloat(r_val)) << 16;
-    const g = @as(u32, @intFromFloat(g_val)) << 8;
-    const b = @as(u32, @intFromFloat(b_val));
-    return 0xFF000000 | r | g | b;
-}
-
 // ========== RENDERER STRUCT ==========/// Manages rendering operations: converting bitmap data to screen display
 pub const Renderer = struct {
     hwnd: windows.HWND, // Window handle - where we'll draw
@@ -145,7 +126,6 @@ pub const Renderer = struct {
     light_distance: f32, // Distance of light from origin
     camera_fov_deg: f32, // Vertical field of view in degrees
     keys_pressed: u32, // Bitmask for currently pressed keys
-    keys_pressed_last_frame: u32, // Tracks key state from previous frame for edge detection
     frame_count: u32, // Number of frames rendered
     last_time: i128, // Last time we calculated FPS (in nanoseconds)
     last_frame_time: i128, // Last time a frame was rendered (in nanoseconds)
@@ -203,7 +183,7 @@ pub const Renderer = struct {
         // Initialize job system for parallel rendering
         const job_system = try JobSystem.init(allocator);
 
-    const renderer = Renderer{
+        const renderer = Renderer{
             .hwnd = hwnd,
             .bitmap = bitmap,
             .hdc = hdc,
@@ -213,19 +193,18 @@ pub const Renderer = struct {
             .rotation_x = 0,
             .light_orbit_x = 0.0,
             .light_orbit_y = 0.0,
-            .light_distance = 3.0,
-            .camera_fov_deg = 60.0,
+            .light_distance = config.LIGHT_DISTANCE_INITIAL,
+            .camera_fov_deg = config.CAMERA_FOV_INITIAL,
             .keys_pressed = 0,
-            .keys_pressed_last_frame = 0,
             .frame_count = 0,
             .last_time = current_time,
             .last_frame_time = current_time,
             .current_fps = 0,
-            .target_frame_time_ns = 8_333_333, // 1_000_000_000 / 120 = 8.333ms in nanoseconds
+            .target_frame_time_ns = config.targetFrameTimeNs(),
             .last_brightness_min = 0,
             .last_brightness_max = 0,
             .last_brightness_avg = 0,
-            .last_reported_fov_deg = 60.0,
+            .last_reported_fov_deg = config.CAMERA_FOV_INITIAL,
             .light_marker_visible_last_frame = true,
             .pending_fov_delta = 0.0,
             .tile_grid = tile_grid,
@@ -352,7 +331,7 @@ pub const Renderer = struct {
 
                 // Calculate lighting
                 const brightness = normal_transformed.dot(job.light_dir);
-                const shaded_color = computeLitColor(brightness);
+                const shaded_color = lighting.computeLitColor(brightness);
 
                 // Rasterize triangle to tile buffer
                 TileRenderer.rasterizeTriangleToTile(job.tile, job.tile_buffer, p0, p1, p2, shaded_color);
@@ -434,94 +413,13 @@ pub const Renderer = struct {
     }
     pub fn handleKeyInput(self: *Renderer, key: u32, is_down: bool) void {
         std.log.info("Key event: vk={d}, down={}", .{ key, is_down });
-        const VK_LEFT = 0x25;
-        const VK_RIGHT = 0x27;
-        const VK_UP = 0x26;
-        const VK_DOWN = 0x28;
-        const VK_W = 0x57;
-        const VK_A = 0x41;
-        const VK_S = 0x53;
-        const VK_D = 0x44;
-        const VK_Q = 0x51;
-        const VK_E = 0x45;
-        const KEY_LEFT_BIT: u32 = 1;
-        const KEY_RIGHT_BIT: u32 = 2;
-        const KEY_UP_BIT: u32 = 4;
-        const KEY_DOWN_BIT: u32 = 8;
-        const KEY_W_BIT: u32 = 16;
-        const KEY_A_BIT: u32 = 32;
-        const KEY_S_BIT: u32 = 64;
-        const KEY_D_BIT: u32 = 128;
-        const KEY_Q_BIT: u32 = 256;
-        const KEY_E_BIT: u32 = 512;
-
-        if (key == VK_LEFT) {
-            if (is_down) {
-                self.keys_pressed |= KEY_LEFT_BIT;
-            } else {
-                self.keys_pressed &= ~KEY_LEFT_BIT;
-            }
-        } else if (key == VK_RIGHT) {
-            if (is_down) {
-                self.keys_pressed |= KEY_RIGHT_BIT;
-            } else {
-                self.keys_pressed &= ~KEY_RIGHT_BIT;
-            }
-        } else if (key == VK_UP) {
-            if (is_down) {
-                self.keys_pressed |= KEY_UP_BIT;
-            } else {
-                self.keys_pressed &= ~KEY_UP_BIT;
-            }
-        } else if (key == VK_DOWN) {
-            if (is_down) {
-                self.keys_pressed |= KEY_DOWN_BIT;
-            } else {
-                self.keys_pressed &= ~KEY_DOWN_BIT;
-            }
-        } else if (key == VK_W) {
-            if (is_down) {
-                self.keys_pressed |= KEY_W_BIT;
-            } else {
-                self.keys_pressed &= ~KEY_W_BIT;
-            }
-        } else if (key == VK_A) {
-            if (is_down) {
-                self.keys_pressed |= KEY_A_BIT;
-            } else {
-                self.keys_pressed &= ~KEY_A_BIT;
-            }
-        } else if (key == VK_S) {
-            if (is_down) {
-                self.keys_pressed |= KEY_S_BIT;
-            } else {
-                self.keys_pressed &= ~KEY_S_BIT;
-            }
-        } else if (key == VK_D) {
-            if (is_down) {
-                self.keys_pressed |= KEY_D_BIT;
-            } else {
-                self.keys_pressed &= ~KEY_D_BIT;
-            }
-        } else if (key == VK_Q) {
-            if (is_down) {
-                if ((self.keys_pressed & KEY_Q_BIT) == 0) {
-                    self.pending_fov_delta -= CAMERA_FOV_STEP;
-                    std.log.info("Detected Q key down", .{});
+        if (input.updateKeyState(&self.keys_pressed, key, is_down)) |event| {
+            if (event.changed and event.pressed) {
+                switch (event.bit) {
+                    input.KeyBits.q => std.log.info("Detected Q key down", .{}),
+                    input.KeyBits.e => std.log.info("Detected E key down", .{}),
+                    else => {},
                 }
-                self.keys_pressed |= KEY_Q_BIT;
-            } else {
-                self.keys_pressed &= ~KEY_Q_BIT;
-            }
-        } else if (key == VK_E) {
-            if (is_down) {
-                if ((self.keys_pressed & KEY_E_BIT) == 0) {
-                    self.pending_fov_delta += CAMERA_FOV_STEP;
-                    std.log.info("Detected E key down", .{});
-                }
-                self.keys_pressed |= KEY_E_BIT;
-            } else {
-                self.keys_pressed &= ~KEY_E_BIT;
             }
         }
     }
@@ -538,11 +436,11 @@ pub const Renderer = struct {
         switch (char_code) {
             'q', 'Q' => {
                 std.log.info("Char event: {} (decrease FOV)", .{char_code});
-                self.pending_fov_delta -= CAMERA_FOV_STEP;
+                self.pending_fov_delta -= config.CAMERA_FOV_STEP;
             },
             'e', 'E' => {
                 std.log.info("Char event: {} (increase FOV)", .{char_code});
-                self.pending_fov_delta += CAMERA_FOV_STEP;
+                self.pending_fov_delta += config.CAMERA_FOV_STEP;
             },
             else => {},
         }
@@ -568,57 +466,35 @@ pub const Renderer = struct {
         @memset(self.bitmap.pixels, black);
 
         // ===== STEP 2: Update rotation based on currently pressed keys =====
-        const KEY_LEFT_BIT: u32 = 1;
-        const KEY_RIGHT_BIT: u32 = 2;
-        const KEY_UP_BIT: u32 = 4;
-        const KEY_DOWN_BIT: u32 = 8;
-        const KEY_W_BIT: u32 = 16;
-        const KEY_A_BIT: u32 = 32;
-        const KEY_S_BIT: u32 = 64;
-        const KEY_D_BIT: u32 = 128;
-        const KEY_Q_BIT: u32 = 256;
-        const KEY_E_BIT: u32 = 512;
         const rotation_speed = 0.02; // Radians per frame
         const auto_orbit_speed = 0.005; // Radians per frame for automatic light orbit (50% slower)
 
-        if ((self.keys_pressed & KEY_LEFT_BIT) != 0) {
+        if ((self.keys_pressed & input.KeyBits.left) != 0) {
             self.rotation_angle -= rotation_speed;
         }
-        if ((self.keys_pressed & KEY_RIGHT_BIT) != 0) {
+        if ((self.keys_pressed & input.KeyBits.right) != 0) {
             self.rotation_angle += rotation_speed;
         }
-        if ((self.keys_pressed & KEY_UP_BIT) != 0) {
+        if ((self.keys_pressed & input.KeyBits.up) != 0) {
             self.rotation_x -= rotation_speed;
         }
-        if ((self.keys_pressed & KEY_DOWN_BIT) != 0) {
+        if ((self.keys_pressed & input.KeyBits.down) != 0) {
             self.rotation_x += rotation_speed;
         }
-        if ((self.keys_pressed & KEY_W_BIT) != 0) {
+        if ((self.keys_pressed & input.KeyBits.w) != 0) {
             self.light_orbit_x += rotation_speed;
         }
-        if ((self.keys_pressed & KEY_S_BIT) != 0) {
+        if ((self.keys_pressed & input.KeyBits.s) != 0) {
             self.light_orbit_x -= rotation_speed;
         }
-        if ((self.keys_pressed & KEY_A_BIT) != 0) {
+        if ((self.keys_pressed & input.KeyBits.a) != 0) {
             self.light_orbit_y -= rotation_speed;
         }
-        if ((self.keys_pressed & KEY_D_BIT) != 0) {
+        if ((self.keys_pressed & input.KeyBits.d) != 0) {
             self.light_orbit_y += rotation_speed;
         }
 
-        var fov_delta = self.pending_fov_delta;
-        self.pending_fov_delta = 0.0;
-
-        const q_down = (self.keys_pressed & KEY_Q_BIT) != 0;
-        const e_down = (self.keys_pressed & KEY_E_BIT) != 0;
-
-        if (q_down and (self.keys_pressed_last_frame & KEY_Q_BIT) != 0) {
-            fov_delta -= CAMERA_FOV_STEP;
-        }
-        if (e_down and (self.keys_pressed_last_frame & KEY_E_BIT) != 0) {
-            fov_delta += CAMERA_FOV_STEP;
-        }
-
+        const fov_delta = self.consumePendingFovDelta();
         if (fov_delta != 0.0) {
             self.adjustCameraFov(fov_delta);
         }
@@ -705,7 +581,7 @@ pub const Renderer = struct {
         // ===== STEP 5.5: Project and draw light position as a cyan sphere =====
         // Project the light position to screen space
         const light_camera_z = light_pos.z + z_offset;
-    self.drawLightMarker(light_pos, light_camera_z, center_x, center_y, x_scale, y_scale, mesh, projected, transformed_vertices, transform);
+        self.drawLightMarker(light_pos, light_camera_z, center_x, center_y, x_scale, y_scale, mesh, projected, transformed_vertices, transform);
 
         // ===== STEP 6: Copy bitmap to screen =====
         self.drawBitmap();
@@ -716,33 +592,7 @@ pub const Renderer = struct {
         // ===== STEP 8: Update FPS counter and log =====
         self.frame_count += 1;
         const current_time = std.time.nanoTimestamp();
-        const elapsed_ns = current_time - self.last_time;
-
-        // Update FPS every 1 second (1_000_000_000 nanoseconds)
-        if (elapsed_ns >= 1_000_000_000) {
-            // Calculate FPS: frames * 1_000_000_000 ns/s / elapsed nanoseconds
-            const elapsed_us = @divTrunc(elapsed_ns, 1000); // Convert to microseconds
-            self.current_fps = @as(u32, @intCast((self.frame_count * 1_000_000) / @as(u32, @intCast(elapsed_us))));
-
-            // Calculate average frame time BEFORE resetting frame_count
-            const frame_count_f = @as(f32, @floatFromInt(self.frame_count));
-            const elapsed_ms = @as(f32, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-            const avg_frame_time_ms = elapsed_ms / frame_count_f;
-
-            self.frame_count = 0;
-            self.last_time = current_time;
-
-            // Update window title with FPS info
-            var title_buffer: [256]u8 = undefined;
-            const title = std.fmt.bufPrint(&title_buffer, "Zig 3D CPU Rasterizer | FPS: {} | Frame: {d:.2}ms", .{ self.current_fps, avg_frame_time_ms }) catch "Zig 3D CPU Rasterizer";
-
-            var title_wide: [256:0]u16 = undefined;
-            const title_len = std.unicode.utf8ToUtf16Le(&title_wide, title) catch 0;
-            title_wide[title_len] = 0;
-            _ = SetWindowTextW(self.hwnd, &title_wide);
-        }
-
-        self.keys_pressed_last_frame = self.keys_pressed;
+        self.finalizeFrame(current_time);
     }
 
     fn logFovChange(self: *Renderer) void {
@@ -757,11 +607,44 @@ pub const Renderer = struct {
         std.log.info("Camera FOV adjusted to {d:.1} degrees", .{self.camera_fov_deg});
     }
 
+    fn consumePendingFovDelta(self: *Renderer) f32 {
+        const delta = self.pending_fov_delta;
+        self.pending_fov_delta = 0.0;
+        return delta;
+    }
+
     fn adjustCameraFov(self: *Renderer, delta_deg: f32) void {
-        const new_fov = std.math.clamp(self.camera_fov_deg + delta_deg, CAMERA_FOV_MIN, CAMERA_FOV_MAX);
+        const new_fov = std.math.clamp(self.camera_fov_deg + delta_deg, config.CAMERA_FOV_MIN, config.CAMERA_FOV_MAX);
         if (std.math.approxEqAbs(f32, new_fov, self.camera_fov_deg, 0.0001)) return;
         self.camera_fov_deg = new_fov;
         self.logFovChange();
+    }
+
+    fn finalizeFrame(self: *Renderer, current_time: i128) void {
+        const elapsed_ns = current_time - self.last_time;
+        if (elapsed_ns < 1_000_000_000 or self.frame_count == 0) return;
+
+        const elapsed_us = @divTrunc(elapsed_ns, 1000);
+        self.current_fps = @as(u32, @intCast((self.frame_count * 1_000_000) / @as(u32, @intCast(elapsed_us))));
+
+        const frame_count_f = @as(f32, @floatFromInt(self.frame_count));
+        const elapsed_ms = @as(f32, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+        const avg_frame_time_ms = if (frame_count_f > 0.0) elapsed_ms / frame_count_f else 0.0;
+
+        self.frame_count = 0;
+        self.last_time = current_time;
+
+        self.updateWindowTitle(avg_frame_time_ms);
+    }
+
+    fn updateWindowTitle(self: *Renderer, avg_frame_time_ms: f32) void {
+        var title_buffer: [256]u8 = undefined;
+        const title = std.fmt.bufPrint(&title_buffer, "{s} | FPS: {} | Frame: {d:.2}ms", .{ config.WINDOW_TITLE, self.current_fps, avg_frame_time_ms }) catch config.WINDOW_TITLE;
+
+        var title_wide: [256:0]u16 = undefined;
+        const title_len = std.unicode.utf8ToUtf16Le(&title_wide, title) catch 0;
+        title_wide[title_len] = 0;
+        _ = SetWindowTextW(self.hwnd, &title_wide);
     }
 
     fn logLightMarkerVisibility(self: *Renderer, visible: bool) void {
@@ -1156,7 +1039,7 @@ pub const Renderer = struct {
 
             // Calculate lighting from light
             const brightness = normal_transformed.dot(light_dir);
-            const shaded_color = computeLitColor(brightness);
+            const shaded_color = lighting.computeLitColor(brightness);
 
             self.drawFilledTriangle(p0[0], p0[1], p1[0], p1[1], p2[0], p2[1], shaded_color);
         }
@@ -1210,33 +1093,7 @@ pub const Renderer = struct {
         // ===== STEP 8: Update FPS counter and log =====
         self.frame_count += 1;
         const current_time = std.time.nanoTimestamp();
-        const elapsed_ns = current_time - self.last_time;
-
-        // Update FPS every 1 second (1_000_000_000 nanoseconds)
-        if (elapsed_ns >= 1_000_000_000) {
-            // Calculate FPS: frames * 1_000_000_000 ns/s / elapsed nanoseconds
-            const elapsed_us = @divTrunc(elapsed_ns, 1000); // Convert to microseconds
-            self.current_fps = @as(u32, @intCast((self.frame_count * 1_000_000) / @as(u32, @intCast(elapsed_us))));
-
-            // Calculate average frame time BEFORE resetting frame_count
-            const frame_count_f = @as(f32, @floatFromInt(self.frame_count));
-            const elapsed_ms = @as(f32, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-            const avg_frame_time_ms = elapsed_ms / frame_count_f;
-
-            self.frame_count = 0;
-            self.last_time = current_time;
-
-            // Update window title with FPS info
-            var title_buffer: [256]u8 = undefined;
-            const title = std.fmt.bufPrint(&title_buffer, "Zig 3D CPU Rasterizer | FPS: {} | Frame: {d:.2}ms", .{ self.current_fps, avg_frame_time_ms }) catch "Zig 3D CPU Rasterizer";
-
-            var title_wide: [256:0]u16 = undefined;
-            const title_len = std.unicode.utf8ToUtf16Le(&title_wide, title) catch 0;
-            title_wide[title_len] = 0;
-            _ = SetWindowTextW(self.hwnd, &title_wide);
-        }
-
-        self.keys_pressed_last_frame = self.keys_pressed;
+        self.finalizeFrame(current_time);
     }
 
     /// Render initial "Hello World" - fills screen with black color
@@ -1395,14 +1252,14 @@ pub const Renderer = struct {
             var y = top_y;
             while (y <= mid_y) : (y += 1) {
                 if (y >= 0 and y < self.bitmap.height) {
-                    const x_left_edge = self.lineIntersectionX(top_x, top_y, mid_x, mid_y, y);
-                    const x_right_edge = self.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
+                    const x_left_edge = scanline.lineIntersectionX(top_x, top_y, mid_x, mid_y, y);
+                    const x_right_edge = scanline.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
 
-                    var x_left = minI32(x_left_edge, x_right_edge);
-                    var x_right = maxI32(x_left_edge, x_right_edge);
+                    var x_left = scanline.minI32(x_left_edge, x_right_edge);
+                    var x_right = scanline.maxI32(x_left_edge, x_right_edge);
 
-                    x_left = maxI32(x_left, 0);
-                    x_right = minI32(x_right, self.bitmap.width - 1);
+                    x_left = scanline.maxI32(x_left, 0);
+                    x_right = scanline.minI32(x_right, self.bitmap.width - 1);
 
                     if (x_left <= x_right) {
                         var x = x_left;
@@ -1422,14 +1279,14 @@ pub const Renderer = struct {
             var y = mid_y;
             while (y <= bot_y) : (y += 1) {
                 if (y >= 0 and y < self.bitmap.height) {
-                    const x_left_edge = self.lineIntersectionX(mid_x, mid_y, bot_x, bot_y, y);
-                    const x_right_edge = self.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
+                    const x_left_edge = scanline.lineIntersectionX(mid_x, mid_y, bot_x, bot_y, y);
+                    const x_right_edge = scanline.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
 
-                    var x_left = minI32(x_left_edge, x_right_edge);
-                    var x_right = maxI32(x_left_edge, x_right_edge);
+                    var x_left = scanline.minI32(x_left_edge, x_right_edge);
+                    var x_right = scanline.maxI32(x_left_edge, x_right_edge);
 
-                    x_left = maxI32(x_left, 0);
-                    x_right = minI32(x_right, self.bitmap.width - 1);
+                    x_left = scanline.maxI32(x_left, 0);
+                    x_right = scanline.minI32(x_right, self.bitmap.width - 1);
 
                     if (x_left <= x_right) {
                         var x = x_left;
@@ -1509,14 +1366,14 @@ pub const Renderer = struct {
         while (y <= mid_y) : (y += 1) {
             if (y < 0 or y >= self.bitmap.height) continue;
 
-            const x_left_edge = self.lineIntersectionX(top_x, top_y, mid_x, mid_y, y);
-            const x_right_edge = self.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
+            const x_left_edge = scanline.lineIntersectionX(top_x, top_y, mid_x, mid_y, y);
+            const x_right_edge = scanline.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
 
-            var x_left = minI32(x_left_edge, x_right_edge);
-            var x_right = maxI32(x_left_edge, x_right_edge);
+            var x_left = scanline.minI32(x_left_edge, x_right_edge);
+            var x_right = scanline.maxI32(x_left_edge, x_right_edge);
 
-            x_left = maxI32(x_left, 0);
-            x_right = minI32(x_right, self.bitmap.width - 1);
+            x_left = scanline.maxI32(x_left, 0);
+            x_right = scanline.minI32(x_right, self.bitmap.width - 1);
 
             var x = x_left;
             while (x <= x_right) : (x += 1) {
@@ -1532,14 +1389,14 @@ pub const Renderer = struct {
         while (y <= bot_y) : (y += 1) {
             if (y < 0 or y >= self.bitmap.height) continue;
 
-            const x_left_edge = self.lineIntersectionX(mid_x, mid_y, bot_x, bot_y, y);
-            const x_right_edge = self.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
+            const x_left_edge = scanline.lineIntersectionX(mid_x, mid_y, bot_x, bot_y, y);
+            const x_right_edge = scanline.lineIntersectionX(top_x, top_y, bot_x, bot_y, y);
 
-            var x_left = minI32(x_left_edge, x_right_edge);
-            var x_right = maxI32(x_left_edge, x_right_edge);
+            var x_left = scanline.minI32(x_left_edge, x_right_edge);
+            var x_right = scanline.maxI32(x_left_edge, x_right_edge);
 
-            x_left = maxI32(x_left, 0);
-            x_right = minI32(x_right, self.bitmap.width - 1);
+            x_left = scanline.maxI32(x_left, 0);
+            x_right = scanline.minI32(x_right, self.bitmap.width - 1);
 
             var x = x_left;
             while (x <= x_right) : (x += 1) {
@@ -1549,43 +1406,6 @@ pub const Renderer = struct {
                 }
             }
         }
-    }
-
-    /// Helper: return the minimum of two i32 values
-    fn minI32(a: i32, b: i32) i32 {
-        return if (a < b) a else b;
-    }
-
-    /// Helper: return the maximum of two i32 values
-    fn maxI32(a: i32, b: i32) i32 {
-        return if (a > b) a else b;
-    }
-
-    /// Calculate where a line segment intersects a horizontal scanline
-    /// Uses linear interpolation to find the x coordinate
-    ///
-    /// **How it works**:
-    /// - Given a line from (x1,y1) to (x2,y2)
-    /// - Find where it crosses a horizontal line at height y
-    /// - Uses the formula: x = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
-    ///
-    /// This is linear interpolation (lerp) - fundamental in graphics
-    fn lineIntersectionX(_: *Renderer, x1: i32, y1: i32, x2: i32, y2: i32, y: i32) i32 {
-        // Avoid division by zero
-        if (y1 == y2) return x1;
-
-        // Linear interpolation formula
-        // (x - x1) / (x2 - x1) = (y - y1) / (y2 - y1)
-        // Solve for x: x = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
-
-        const dy = y2 - y1;
-        const dx = x2 - x1;
-        const t_num = y - y1;
-
-        // Use integer arithmetic to avoid floating point
-        // Result: x1 + (t_num * dx) / dy
-        const result = x1 + @divTrunc(t_num * dx, dy);
-        return result;
     }
 
     /// Copy the bitmap to the window display using cached memory DC

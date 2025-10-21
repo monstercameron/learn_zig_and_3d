@@ -73,6 +73,7 @@ extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
 const Window = @import("window.zig").Window;
 const Renderer = @import("renderer.zig").Renderer;
 const Mesh = @import("mesh.zig").Mesh;
+const config = @import("app_config.zig");
 
 /// Application entry point
 /// This is where Zig starts execution when the program runs
@@ -86,7 +87,7 @@ pub fn main() !void {
     // Create a window - like document.createElement("canvas") in JavaScript
     // The 'defer' keyword ensures cleanup happens automatically when this scope ends
     // Similar to try/finally in JavaScript: resources are freed even if errors occur
-    var window = try Window.init("Zig 3D CPU Rasterizer", 800, 600);
+    var window = try Window.init(config.WINDOW_TITLE, 800, 600);
     defer window.deinit();
 
     // Create a renderer - like getting a 2D context: canvas.getContext("2d")
