@@ -39,6 +39,7 @@ const MSG = extern struct {
 // Windows message constants
 const WM_KEYDOWN = 0x0100;
 const WM_KEYUP = 0x0101;
+const WM_CHAR = 0x0102;
 const WM_QUIT = 0x12;
 
 // Windows API function declarations - these are the "system event handlers"
@@ -126,6 +127,9 @@ pub fn main() !void {
                 } else if (m.message == WM_KEYUP) {
                     const key_code: u32 = @intCast(m.wParam);
                     r.handleKeyInput(key_code, false);
+                } else if (m.message == WM_CHAR) {
+                    const char_code: u32 = @intCast(m.wParam);
+                    r.handleCharInput(char_code);
                 }
 
                 // Process the message

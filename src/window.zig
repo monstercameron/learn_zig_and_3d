@@ -105,10 +105,14 @@ extern "kernel32" fn GetModuleHandleW(lpModuleName: ?[*:0]const u16) windows.HIN
 
 /// Set the window title text
 extern "user32" fn SetWindowTextW(hWnd: windows.HWND, lpString: [*:0]const u16) i32;
+extern "user32" fn SetForegroundWindow(hWnd: windows.HWND) bool;
+extern "user32" fn SetFocus(hWnd: windows.HWND) ?windows.HWND;
 
 // Message constants
 const WM_KEYDOWN = 0x0100;
 const WM_KEYUP = 0x0101;
+const WM_SYSKEYDOWN = 0x0104;
+const WM_SYSKEYUP = 0x0105;
 
 // Virtual key codes
 const VK_LEFT = 0x25;
@@ -139,14 +143,19 @@ export fn WindowProc(
             return 0;
         },
         // Keyboard key pressed
-        WM_KEYDOWN => {
+        WM_KEYDOWN, WM_SYSKEYDOWN => {
             const vkey = wParam;
+            std.log.info("WindowProc key down: msg={d}, vk={d}", .{ msg, vkey });
             // ESC key exits the program
             if (vkey == VK_ESCAPE) {
                 PostQuitMessage(0);
                 return 0;
             }
             // Let the default handler process all other keys (will send to main loop)
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+        WM_KEYUP, WM_SYSKEYUP => {
+            std.log.info("WindowProc key up: msg={d}, vk={d}", .{ msg, wParam });
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         // Any other message - use default handling
@@ -220,6 +229,8 @@ pub const Window = struct {
         // Like: elem.style.display = "block"
         _ = ShowWindow(hwnd, SW_SHOW);
         _ = UpdateWindow(hwnd);
+        _ = SetForegroundWindow(hwnd);
+        _ = SetFocus(hwnd);
 
         return Window{ .hwnd = hwnd };
     }

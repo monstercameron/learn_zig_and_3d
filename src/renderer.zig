@@ -114,6 +114,9 @@ const BASE_COLOR = struct {
     b: f32,
 }{ .r = 255.0, .g = 220.0, .b = 40.0 };
 const AMBIENT_LIGHT = 0.25;
+const CAMERA_FOV_STEP: f32 = 1.5;
+const CAMERA_FOV_MIN: f32 = 20.0;
+const CAMERA_FOV_MAX: f32 = 120.0;
 
 fn computeLitColor(brightness: f32) u32 {
     const clamped_brightness = if (brightness < 0.0) 0.0 else if (brightness > 1.0) 1.0 else brightness;
@@ -140,16 +143,20 @@ pub const Renderer = struct {
     light_orbit_x: f32, // Light: orbit angle around X axis
     light_orbit_y: f32, // Light: orbit angle around Y axis
     light_distance: f32, // Distance of light from origin
+    camera_fov_deg: f32, // Vertical field of view in degrees
     keys_pressed: u32, // Bitmask for currently pressed keys
+    keys_pressed_last_frame: u32, // Tracks key state from previous frame for edge detection
     frame_count: u32, // Number of frames rendered
     last_time: i128, // Last time we calculated FPS (in nanoseconds)
     last_frame_time: i128, // Last time a frame was rendered (in nanoseconds)
     current_fps: u32, // Current FPS counter
     target_frame_time_ns: i128, // Target nanoseconds per frame (1_000_000_000 / 120)
-    last_log_time: i128, // Last time we logged rotation/shading info
     last_brightness_min: f32, // Minimum brightness from last frame
     last_brightness_max: f32, // Maximum brightness from last frame
     last_brightness_avg: f32, // Average brightness from last frame
+    last_reported_fov_deg: f32, // Tracks last FOV value we logged
+    light_marker_visible_last_frame: bool, // Tracks light marker visibility state for logging
+    pending_fov_delta: f32, // Accumulates FOV changes requested between frames
     tile_grid: ?TileGrid, // Tile grid for tile-based rendering (optional)
     tile_buffers: ?[]TileBuffer, // Per-tile rendering buffers
     show_tile_borders: bool, // Debug: show tile boundaries
@@ -196,7 +203,7 @@ pub const Renderer = struct {
         // Initialize job system for parallel rendering
         const job_system = try JobSystem.init(allocator);
 
-        return Renderer{
+    const renderer = Renderer{
             .hwnd = hwnd,
             .bitmap = bitmap,
             .hdc = hdc,
@@ -207,16 +214,20 @@ pub const Renderer = struct {
             .light_orbit_x = 0.0,
             .light_orbit_y = 0.0,
             .light_distance = 3.0,
+            .camera_fov_deg = 60.0,
             .keys_pressed = 0,
+            .keys_pressed_last_frame = 0,
             .frame_count = 0,
             .last_time = current_time,
             .last_frame_time = current_time,
             .current_fps = 0,
             .target_frame_time_ns = 8_333_333, // 1_000_000_000 / 120 = 8.333ms in nanoseconds
-            .last_log_time = current_time,
             .last_brightness_min = 0,
             .last_brightness_max = 0,
             .last_brightness_avg = 0,
+            .last_reported_fov_deg = 60.0,
+            .light_marker_visible_last_frame = true,
+            .pending_fov_delta = 0.0,
             .tile_grid = tile_grid,
             .tile_buffers = tile_buffers,
             .show_tile_borders = false,
@@ -228,35 +239,58 @@ pub const Renderer = struct {
             .previous_frame_jobs = null,
             .previous_frame_tile_jobs = null,
         };
+
+        std.log.info("Renderer initialized: tiled_rendering={}, light_orb_culling={}, camera_fov={d:.1}°", .{
+            renderer.use_tiled_rendering,
+            renderer.cull_light_orb,
+            renderer.camera_fov_deg,
+        });
+
+        return renderer;
     }
 
     /// Clean up renderer resources
     /// Called with 'defer renderer.deinit()' in main.zig
     pub fn deinit(self: *Renderer) void {
-        // Shut down job system first
         if (self.job_system) |js| {
             js.deinit();
+            self.job_system = null;
         }
-        // Free any remaining previous frame jobs
+
         if (self.previous_frame_jobs) |jobs| {
             self.allocator.free(jobs);
+            self.previous_frame_jobs = null;
         }
+
+        if (self.previous_frame_tile_jobs) |tile_jobs| {
+            self.allocator.free(tile_jobs);
+            self.previous_frame_tile_jobs = null;
+        }
+
         if (self.tile_buffers) |buffers| {
             for (buffers) |*buf| {
                 buf.deinit();
             }
             self.allocator.free(buffers);
+            self.tile_buffers = null;
         }
+
         if (self.tile_grid) |*grid| {
             grid.deinit();
+            self.tile_grid = null;
         }
+
+        self.bitmap.deinit();
+
         if (self.hdc_mem) |hdc_mem| {
             _ = DeleteDC(hdc_mem);
+            self.hdc_mem = null;
         }
+
         if (self.hdc) |hdc| {
             _ = ReleaseDC(self.hwnd, hdc);
+            self.hdc = null;
         }
-        self.bitmap.deinit();
     }
 
     // ========== TILE RENDER JOB ==========
@@ -399,6 +433,7 @@ pub const Renderer = struct {
         self.last_brightness_avg = if (non_black_count > 0) sum_brightness / @as(f32, @floatFromInt(non_black_count)) else 0;
     }
     pub fn handleKeyInput(self: *Renderer, key: u32, is_down: bool) void {
+        std.log.info("Key event: vk={d}, down={}", .{ key, is_down });
         const VK_LEFT = 0x25;
         const VK_RIGHT = 0x27;
         const VK_UP = 0x26;
@@ -470,12 +505,20 @@ pub const Renderer = struct {
             }
         } else if (key == VK_Q) {
             if (is_down) {
+                if ((self.keys_pressed & KEY_Q_BIT) == 0) {
+                    self.pending_fov_delta -= CAMERA_FOV_STEP;
+                    std.log.info("Detected Q key down", .{});
+                }
                 self.keys_pressed |= KEY_Q_BIT;
             } else {
                 self.keys_pressed &= ~KEY_Q_BIT;
             }
         } else if (key == VK_E) {
             if (is_down) {
+                if ((self.keys_pressed & KEY_E_BIT) == 0) {
+                    self.pending_fov_delta += CAMERA_FOV_STEP;
+                    std.log.info("Detected E key down", .{});
+                }
                 self.keys_pressed |= KEY_E_BIT;
             } else {
                 self.keys_pressed &= ~KEY_E_BIT;
@@ -489,6 +532,20 @@ pub const Renderer = struct {
     pub fn shouldRenderFrame(self: *Renderer) bool {
         _ = self;
         return true;
+    }
+
+    pub fn handleCharInput(self: *Renderer, char_code: u32) void {
+        switch (char_code) {
+            'q', 'Q' => {
+                std.log.info("Char event: {} (decrease FOV)", .{char_code});
+                self.pending_fov_delta -= CAMERA_FOV_STEP;
+            },
+            'e', 'E' => {
+                std.log.info("Char event: {} (increase FOV)", .{char_code});
+                self.pending_fov_delta += CAMERA_FOV_STEP;
+            },
+            else => {},
+        }
     }
 
     /// Render a 3D mesh with rotation and projection
@@ -522,7 +579,7 @@ pub const Renderer = struct {
         const KEY_Q_BIT: u32 = 256;
         const KEY_E_BIT: u32 = 512;
         const rotation_speed = 0.02; // Radians per frame
-    const auto_orbit_speed = 0.005; // Radians per frame for automatic light orbit (50% slower)
+        const auto_orbit_speed = 0.005; // Radians per frame for automatic light orbit (50% slower)
 
         if ((self.keys_pressed & KEY_LEFT_BIT) != 0) {
             self.rotation_angle -= rotation_speed;
@@ -549,15 +606,21 @@ pub const Renderer = struct {
             self.light_orbit_y += rotation_speed;
         }
 
-        // Handle light distance adjustment with Q and E keys
-        const distance_speed = 0.1; // Distance change per frame
-        if ((self.keys_pressed & KEY_Q_BIT) != 0) {
-            self.light_distance -= distance_speed;
-            if (self.light_distance < 0.5) self.light_distance = 0.5; // Minimum distance
+        var fov_delta = self.pending_fov_delta;
+        self.pending_fov_delta = 0.0;
+
+        const q_down = (self.keys_pressed & KEY_Q_BIT) != 0;
+        const e_down = (self.keys_pressed & KEY_E_BIT) != 0;
+
+        if (q_down and (self.keys_pressed_last_frame & KEY_Q_BIT) != 0) {
+            fov_delta -= CAMERA_FOV_STEP;
         }
-        if ((self.keys_pressed & KEY_E_BIT) != 0) {
-            self.light_distance += distance_speed;
-            if (self.light_distance > 10.0) self.light_distance = 10.0; // Maximum distance
+        if (e_down and (self.keys_pressed_last_frame & KEY_E_BIT) != 0) {
+            fov_delta += CAMERA_FOV_STEP;
+        }
+
+        if (fov_delta != 0.0) {
+            self.adjustCameraFov(fov_delta);
         }
 
         // Automatic light orbit: continuously rotate the light around the triangle on X axis only
@@ -583,25 +646,6 @@ pub const Renderer = struct {
         const transform_x = math.Mat4.rotateX(self.rotation_x);
         const transform = math.Mat4.multiply(transform_y, transform_x);
 
-        // DEBUG: Print transform matrix and culling info once per second
-        const current_time_ns = std.time.nanoTimestamp();
-        const should_log_debug = (current_time_ns - self.last_log_time) >= 1_000_000_000; // 1 second in nanoseconds
-
-        if (should_log_debug) {
-            const orbit_x_deg = self.light_orbit_x * 180.0 / 3.14159265359;
-            const orbit_y_deg = self.light_orbit_y * 180.0 / 3.14159265359;
-            std.debug.print("Light: X={d:.2}° Y={d:.2}° Pos:({d:.2}, {d:.2}, {d:.2}) Dir:({d:.2}, {d:.2}, {d:.2})\n", .{ orbit_x_deg, orbit_y_deg, light_pos.x, light_pos.y, light_pos.z, light_dir.x, light_dir.y, light_dir.z });
-
-            std.debug.print("\n=== TRANSFORM MATRIX ===\n", .{});
-            std.debug.print("Rotation Y: {d:.4} rad ({d:.2}°), Rotation X: {d:.4} rad ({d:.2}°)\n", .{ self.rotation_angle, self.rotation_angle * 180.0 / 3.14159265359, self.rotation_x, self.rotation_x * 180.0 / 3.14159265359 });
-            std.debug.print("Transform Matrix:\n", .{});
-            std.debug.print("  [{d:.4} {d:.4} {d:.4} {d:.4}]\n", .{ transform.data[0], transform.data[1], transform.data[2], transform.data[3] });
-            std.debug.print("  [{d:.4} {d:.4} {d:.4} {d:.4}]\n", .{ transform.data[4], transform.data[5], transform.data[6], transform.data[7] });
-            std.debug.print("  [{d:.4} {d:.4} {d:.4} {d:.4}]\n", .{ transform.data[8], transform.data[9], transform.data[10], transform.data[11] });
-            std.debug.print("  [{d:.4} {d:.4} {d:.4} {d:.4}]\n", .{ transform.data[12], transform.data[13], transform.data[14], transform.data[15] });
-            self.last_log_time = current_time_ns;
-        }
-
         // ===== STEP 3: Transform and project vertices =====
         const projected = try self.allocator.alloc([2]i32, mesh.vertices.len);
         defer self.allocator.free(projected);
@@ -609,9 +653,17 @@ pub const Renderer = struct {
         const transformed_vertices = try self.allocator.alloc(math.Vec3, mesh.vertices.len);
         defer self.allocator.free(transformed_vertices);
 
-        const center_x = @as(f32, @floatFromInt(self.bitmap.width)) / 2.0;
-        const center_y = @as(f32, @floatFromInt(self.bitmap.height)) / 2.0;
+        const width_f = @as(f32, @floatFromInt(self.bitmap.width));
+        const height_f = @as(f32, @floatFromInt(self.bitmap.height));
+        const center_x = width_f / 2.0;
+        const center_y = height_f / 2.0;
         const z_offset = 4.0; // Push mesh forward so the camera sits at the origin
+        const aspect_ratio = if (height_f > 0.0) width_f / height_f else 1.0;
+        const fov_rad = self.camera_fov_deg * (std.math.pi / 180.0);
+        const half_fov = fov_rad * 0.5;
+        const tan_half_fov = std.math.tan(half_fov);
+        const y_scale = if (tan_half_fov > 0.0) 1.0 / tan_half_fov else 1.0;
+        const x_scale = y_scale / aspect_ratio;
 
         for (mesh.vertices, 0..) |vertex, i| {
             // Transform vertex by rotation
@@ -630,9 +682,10 @@ pub const Renderer = struct {
             }
 
             // Perspective projection: divide by depth for perspective effect
-            const fov = 400.0; // Scale factor for field of view (larger = zoomed out)
-            const screen_x = (transformed.x / camera_z) * fov + center_x;
-            const screen_y = -(transformed.y / camera_z) * fov + center_y; // Negate Y because screen Y increases downward
+            const ndc_x = (transformed.x / camera_z) * x_scale;
+            const ndc_y = (transformed.y / camera_z) * y_scale;
+            const screen_x = ndc_x * center_x + center_x;
+            const screen_y = -ndc_y * center_y + center_y; // Negate Y because screen Y increases downward
 
             projected[i][0] = @as(i32, @intFromFloat(screen_x));
             projected[i][1] = @as(i32, @intFromFloat(screen_y));
@@ -641,22 +694,18 @@ pub const Renderer = struct {
         // ===== STEP 4: Draw filled triangles (flat shaded) =====
         // Use flat shading based on face normals and light direction
 
-        if (should_log_debug) {
-            std.debug.print("\n=== TRIANGLE CULLING STATUS ===\n", .{});
-        }
-
         // Choose rendering path: tiled or direct
         if (self.use_tiled_rendering and self.tile_grid != null and self.tile_buffers != null) {
-            try self.renderTiled(mesh, projected, transformed_vertices, transform, light_dir, should_log_debug, pump);
+            try self.renderTiled(mesh, projected, transformed_vertices, transform, light_dir, pump);
         } else {
             // Direct rendering to screen buffer (original method)
-            try self.renderDirect(mesh, projected, transformed_vertices, transform, light_dir, should_log_debug);
+            try self.renderDirect(mesh, projected, transformed_vertices, transform, light_dir);
         }
 
         // ===== STEP 5.5: Project and draw light position as a cyan sphere =====
         // Project the light position to screen space
         const light_camera_z = light_pos.z + z_offset;
-        self.drawLightMarker(light_pos, light_camera_z, center_x, center_y, mesh, projected, transformed_vertices, transform);
+    self.drawLightMarker(light_pos, light_camera_z, center_x, center_y, x_scale, y_scale, mesh, projected, transformed_vertices, transform);
 
         // ===== STEP 6: Copy bitmap to screen =====
         self.drawBitmap();
@@ -683,16 +732,6 @@ pub const Renderer = struct {
             self.frame_count = 0;
             self.last_time = current_time;
 
-            // Log rotation angle and shading information
-            const rotation_degrees = self.rotation_angle * 180.0 / 3.14159265359;
-            const light_orbit_x_degrees = self.light_orbit_x * 180.0 / 3.14159265359;
-            const light_orbit_y_degrees = self.light_orbit_y * 180.0 / 3.14159265359;
-            const sample_r = @as(u32, @intFromFloat(self.last_brightness_avg * 255));
-            const sample_g = @as(u32, @intFromFloat(self.last_brightness_avg * 200));
-            const sample_b = @as(u32, @intFromFloat(self.last_brightness_avg * 50));
-
-            std.debug.print("Rotation: {d:.2}° | Light Orbit: X={d:.2}° Y={d:.2}° | Brightness: min={d:.2} avg={d:.2} max={d:.2} | Sample RGB: ({}, {}, {}) | FPS: {}\n", .{ rotation_degrees, light_orbit_x_degrees, light_orbit_y_degrees, self.last_brightness_min, self.last_brightness_avg, self.last_brightness_max, sample_r, sample_g, sample_b, self.current_fps });
-
             // Update window title with FPS info
             var title_buffer: [256]u8 = undefined;
             const title = std.fmt.bufPrint(&title_buffer, "Zig 3D CPU Rasterizer | FPS: {} | Frame: {d:.2}ms", .{ self.current_fps, avg_frame_time_ms }) catch "Zig 3D CPU Rasterizer";
@@ -702,6 +741,38 @@ pub const Renderer = struct {
             title_wide[title_len] = 0;
             _ = SetWindowTextW(self.hwnd, &title_wide);
         }
+
+        self.keys_pressed_last_frame = self.keys_pressed;
+    }
+
+    fn logFovChange(self: *Renderer) void {
+        const diff = if (self.camera_fov_deg >= self.last_reported_fov_deg)
+            self.camera_fov_deg - self.last_reported_fov_deg
+        else
+            self.last_reported_fov_deg - self.camera_fov_deg;
+
+        if (diff < 0.1) return;
+
+        self.last_reported_fov_deg = self.camera_fov_deg;
+        std.log.info("Camera FOV adjusted to {d:.1} degrees", .{self.camera_fov_deg});
+    }
+
+    fn adjustCameraFov(self: *Renderer, delta_deg: f32) void {
+        const new_fov = std.math.clamp(self.camera_fov_deg + delta_deg, CAMERA_FOV_MIN, CAMERA_FOV_MAX);
+        if (std.math.approxEqAbs(f32, new_fov, self.camera_fov_deg, 0.0001)) return;
+        self.camera_fov_deg = new_fov;
+        self.logFovChange();
+    }
+
+    fn logLightMarkerVisibility(self: *Renderer, visible: bool) void {
+        if (visible == self.light_marker_visible_last_frame) return;
+        self.light_marker_visible_last_frame = visible;
+
+        if (visible) {
+            std.log.info("Light marker visible", .{});
+        } else {
+            std.log.info("Light marker occluded by scene geometry", .{});
+        }
     }
 
     fn drawLightMarker(
@@ -710,27 +781,40 @@ pub const Renderer = struct {
         light_camera_z: f32,
         center_x: f32,
         center_y: f32,
+        x_scale: f32,
+        y_scale: f32,
         mesh: *const Mesh,
         projected: [][2]i32,
         transformed_vertices: []math.Vec3,
         transform: math.Mat4,
     ) void {
-        if (!self.show_light_orb) return;
-        if (light_camera_z <= 0.1) return;
+        if (!self.show_light_orb) {
+            self.logLightMarkerVisibility(false);
+            return;
+        }
+        if (light_camera_z <= 0.1) {
+            self.logLightMarkerVisibility(false);
+            return;
+        }
 
-        const fov = 400.0;
-        const light_screen_x = (light_pos.x / light_camera_z) * fov + center_x;
-        const light_screen_y = -(light_pos.y / light_camera_z) * fov + center_y;
+        const ndc_x = (light_pos.x / light_camera_z) * x_scale;
+        const ndc_y = (light_pos.y / light_camera_z) * y_scale;
+        const light_screen_x = ndc_x * center_x + center_x;
+        const light_screen_y = -ndc_y * center_y + center_y;
 
+        var marker_visible = true;
         if (self.cull_light_orb) {
             const width_f = @as(f32, @floatFromInt(self.bitmap.width));
             const height_f = @as(f32, @floatFromInt(self.bitmap.height));
             if (light_screen_x >= 0.0 and light_screen_x < width_f and light_screen_y >= 0.0 and light_screen_y < height_f) {
                 if (self.isPointOccluded(light_screen_x, light_screen_y, light_camera_z, mesh, projected, transformed_vertices, transform)) {
-                    return;
+                    marker_visible = false;
                 }
             }
         }
+
+        self.logLightMarkerVisibility(marker_visible);
+        if (!marker_visible) return;
 
         const light_x = @as(i32, @intFromFloat(light_screen_x));
         const light_y = @as(i32, @intFromFloat(light_screen_y));
@@ -874,7 +958,6 @@ pub const Renderer = struct {
         transformed_vertices: []math.Vec3,
         transform: math.Mat4,
         light_dir: math.Vec3,
-        should_log_debug: bool,
         pump: ?*const fn (*Renderer) bool,
     ) !void {
         // Get tile grid and buffers
@@ -926,9 +1009,6 @@ pub const Renderer = struct {
         // Check if job system is available
         if (self.job_system) |js| {
             // Dispatch all tiles as parallel jobs
-            if (should_log_debug) {
-                std.debug.print("Dispatching {} tile jobs to workers...\n", .{grid.tiles.len});
-            }
             for (grid.tiles, 0..) |*tile, tile_idx| {
                 if (pump) |pump_fn| {
                     if ((tile_idx & 7) == 0 and !pump_fn(self)) {
@@ -965,15 +1045,11 @@ pub const Renderer = struct {
                 // Submit job to worker threads
                 const submitted = js.submitJobAuto(&jobs[tile_idx]);
                 if (!submitted) {
-                    std.debug.print("ERROR: Failed to submit job for tile {}\n", .{tile_idx});
+                    std.log.err("Tile {} failed to submit to job system", .{tile_idx});
                 }
             }
 
             // Wait for all tiles to complete with cooperative message pumping
-            if (should_log_debug) {
-                std.debug.print("Waiting for {} jobs to complete...\n", .{jobs.len});
-            }
-
             const job_done = try self.allocator.alloc(bool, jobs.len);
             defer self.allocator.free(job_done);
             @memset(job_done, false);
@@ -987,11 +1063,6 @@ pub const Renderer = struct {
                         job_done[idx] = true;
                         remaining -= 1;
                         progress = true;
-                        if (should_log_debug and idx < 3) {
-                            std.debug.print("Job {} completed\n", .{idx});
-                        }
-                    } else if (should_log_debug and idx < 3) {
-                        std.debug.print("Waiting for job {}... (complete=false)\n", .{idx});
                     }
                 }
 
@@ -1010,16 +1081,12 @@ pub const Renderer = struct {
                 }
             }
 
-            if (should_log_debug) {
-                std.debug.print("All jobs complete\n", .{});
-            }
-
             // Save jobs and tile_jobs for next frame - don't free yet to prevent use-after-free
             // Workers might still have references even after jobs complete
             self.previous_frame_jobs = jobs;
             self.previous_frame_tile_jobs = tile_jobs;
         } else {
-            std.debug.print("ERROR: Job system not initialized!\n", .{});
+            std.log.err("Job system not initialized; falling back without rendering this frame", .{});
             // If no job system, clean up allocated memory immediately
             self.allocator.free(jobs);
             self.allocator.free(tile_jobs);
@@ -1050,28 +1117,17 @@ pub const Renderer = struct {
         transformed_vertices: []math.Vec3,
         transform: math.Mat4,
         light_dir: math.Vec3,
-        should_log_debug: bool,
     ) !void {
         for (mesh.triangles, 0..) |tri, tri_idx| {
             // Skip if fill is culled
-            if (tri.cull_flags.cull_fill) {
-                if (should_log_debug) {
-                    std.debug.print("Triangle {}: CULLED (cull_fill flag set)\n", .{tri_idx});
-                }
-                continue;
-            }
+            if (tri.cull_flags.cull_fill) continue;
 
             const p0 = projected[tri.v0];
             const p1 = projected[tri.v1];
             const p2 = projected[tri.v2];
 
             // Check if triangle is completely off-screen
-            if (p0[0] < -1000 or p1[0] < -1000 or p2[0] < -1000) {
-                if (should_log_debug) {
-                    std.debug.print("Triangle {}: CULLED (off-screen)\n", .{tri_idx});
-                }
-                continue;
-            }
+            if (p0[0] < -1000 or p1[0] < -1000 or p2[0] < -1000) continue;
 
             // Transform the face normal using ONLY rotation (w=0 prevents translation)
             // We manually multiply by rotation part of matrix
@@ -1092,25 +1148,11 @@ pub const Renderer = struct {
             const face_center = math.Vec3.scale(face_center_unscaled, 1.0 / 3.0);
 
             const view_length = face_center.length();
-            if (view_length <= 0.0001) {
-                if (should_log_debug) {
-                    std.debug.print("Triangle {}: CULLED (view length too small)\n", .{tri_idx});
-                }
-                continue;
-            }
+            if (view_length <= 0.0001) continue;
             const view_vector = math.Vec3.scale(face_center, -1.0 / view_length);
 
             const camera_facing = normal_transformed.dot(view_vector);
-            if (camera_facing <= 0.0) {
-                if (should_log_debug) {
-                    std.debug.print("Triangle {}: CULLED (backface: dot={d:.4})\n", .{ tri_idx, camera_facing });
-                }
-                continue;
-            }
-
-            if (should_log_debug) {
-                std.debug.print("Triangle {}: RENDERED (frontface: dot={d:.4}, normal=({d:.4}, {d:.4}, {d:.4}))\n", .{ tri_idx, camera_facing, normal_transformed.x, normal_transformed.y, normal_transformed.z });
-            }
+            if (camera_facing <= 0.0) continue;
 
             // Calculate lighting from light
             const brightness = normal_transformed.dot(light_dir);
@@ -1123,9 +1165,7 @@ pub const Renderer = struct {
         if (self.show_wireframe) {
             for (mesh.triangles, 0..) |tri, tri_idx| {
                 // Skip if wireframe is culled
-                if (tri.cull_flags.cull_wireframe) {
-                    continue;
-                }
+                if (tri.cull_flags.cull_wireframe) continue;
 
                 // Apply the same backface culling as filled triangles
                 const normal = mesh.normals[tri_idx];
@@ -1144,15 +1184,11 @@ pub const Renderer = struct {
                 const face_center = math.Vec3.scale(face_center_unscaled, 1.0 / 3.0);
 
                 const view_length = face_center.length();
-                if (view_length <= 0.0001) {
-                    continue;
-                }
+                if (view_length <= 0.0001) continue;
                 const view_vector = math.Vec3.scale(face_center, -1.0 / view_length);
 
                 const camera_facing = normal_transformed.dot(view_vector);
-                if (camera_facing <= 0.0) {
-                    continue; // Skip back-facing wireframes
-                }
+                if (camera_facing <= 0.0) continue; // Skip back-facing wireframes
 
                 const p0 = projected[tri.v0];
                 const p1 = projected[tri.v1];
@@ -1190,16 +1226,6 @@ pub const Renderer = struct {
             self.frame_count = 0;
             self.last_time = current_time;
 
-            // Log rotation angle and shading information
-            const rotation_degrees = self.rotation_angle * 180.0 / 3.14159265359;
-            const light_orbit_x_degrees = self.light_orbit_x * 180.0 / 3.14159265359;
-            const light_orbit_y_degrees = self.light_orbit_y * 180.0 / 3.14159265359;
-            const sample_r = @as(u32, @intFromFloat(self.last_brightness_avg * 255));
-            const sample_g = @as(u32, @intFromFloat(self.last_brightness_avg * 200));
-            const sample_b = @as(u32, @intFromFloat(self.last_brightness_avg * 50));
-
-            std.debug.print("Rotation: {d:.2}° | Light Orbit: X={d:.2}° Y={d:.2}° | Brightness: min={d:.2} avg={d:.2} max={d:.2} | Sample RGB: ({}, {}, {}) | FPS: {}\n", .{ rotation_degrees, light_orbit_x_degrees, light_orbit_y_degrees, self.last_brightness_min, self.last_brightness_avg, self.last_brightness_max, sample_r, sample_g, sample_b, self.current_fps });
-
             // Update window title with FPS info
             var title_buffer: [256]u8 = undefined;
             const title = std.fmt.bufPrint(&title_buffer, "Zig 3D CPU Rasterizer | FPS: {} | Frame: {d:.2}ms", .{ self.current_fps, avg_frame_time_ms }) catch "Zig 3D CPU Rasterizer";
@@ -1209,6 +1235,8 @@ pub const Renderer = struct {
             title_wide[title_len] = 0;
             _ = SetWindowTextW(self.hwnd, &title_wide);
         }
+
+        self.keys_pressed_last_frame = self.keys_pressed;
     }
 
     /// Render initial "Hello World" - fills screen with black color
