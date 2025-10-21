@@ -20,5 +20,5 @@ Thumbs.db
 .directory
 
 # Dependencies
-zig-cache/*
-.zig-cache/h/2188519bee78493eb726836fec20aa4b.txt
+.zig-cache/*
+zig-out/*

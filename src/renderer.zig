@@ -108,6 +108,27 @@ const INITIAL_LIGHT_DIR = math.Vec3.new(0.0, 0.0, -1.0); // Pointing toward -Z (
 // ========== RENDERER STRUCT ==========
 /// Manages rendering operations: converting bitmap data to screen display
 /// Similar to a canvas context: ctx = canvas.getContext("2d")
+const BASE_COLOR = struct {
+    r: f32,
+    g: f32,
+    b: f32,
+}{ .r = 255.0, .g = 220.0, .b = 40.0 };
+const AMBIENT_LIGHT = 0.25;
+
+fn computeLitColor(brightness: f32) u32 {
+    const clamped_brightness = if (brightness < 0.0) 0.0 else if (brightness > 1.0) 1.0 else brightness;
+    const intensity = AMBIENT_LIGHT + clamped_brightness * (1.0 - AMBIENT_LIGHT);
+    const r_val = std.math.clamp(BASE_COLOR.r * intensity, 0.0, 255.0);
+    const g_val = std.math.clamp(BASE_COLOR.g * intensity, 0.0, 255.0);
+    const b_val = std.math.clamp(BASE_COLOR.b * intensity, 0.0, 255.0);
+
+    const r = @as(u32, @intFromFloat(r_val)) << 16;
+    const g = @as(u32, @intFromFloat(g_val)) << 8;
+    const b = @as(u32, @intFromFloat(b_val));
+    return 0xFF000000 | r | g | b;
+}
+
+// ========== RENDERER STRUCT ==========/// Manages rendering operations: converting bitmap data to screen display
 pub const Renderer = struct {
     hwnd: windows.HWND, // Window handle - where we'll draw
     bitmap: Bitmap, // The pixel buffer we draw to
@@ -132,6 +153,9 @@ pub const Renderer = struct {
     tile_grid: ?TileGrid, // Tile grid for tile-based rendering (optional)
     tile_buffers: ?[]TileBuffer, // Per-tile rendering buffers
     show_tile_borders: bool, // Debug: show tile boundaries
+    show_wireframe: bool, // Debug: draw triangle wireframes on top
+    show_light_orb: bool, // Debug: draw the light position marker
+    cull_light_orb: bool, // Hide the light marker when occluded
     use_tiled_rendering: bool, // Enable tile-based rendering (vs direct to screen)
     job_system: ?*JobSystem, // Job system for parallel execution
     previous_frame_jobs: ?[]Job, // Keep previous frame's jobs alive to prevent use-after-free
@@ -195,7 +219,10 @@ pub const Renderer = struct {
             .last_brightness_avg = 0,
             .tile_grid = tile_grid,
             .tile_buffers = tile_buffers,
-            .show_tile_borders = true, // Enable by default for visualization
+            .show_tile_borders = false,
+            .show_wireframe = false,
+            .show_light_orb = true,
+            .cull_light_orb = true,
             .use_tiled_rendering = true, // Enable tile-based rendering
             .job_system = job_system,
             .previous_frame_jobs = null,
@@ -245,6 +272,7 @@ pub const Renderer = struct {
         transformed_vertices: []math.Vec3,
         transform: math.Mat4,
         light_dir: math.Vec3,
+        draw_wireframe: bool,
 
         /// Job function that renders one tile
         fn renderTileJob(ctx: *anyopaque) void {
@@ -289,56 +317,51 @@ pub const Renderer = struct {
                 if (camera_facing <= 0.0) continue;
 
                 // Calculate lighting
-                var brightness = normal_transformed.dot(job.light_dir);
-                if (brightness < 0.0) brightness = 0.0;
-                if (brightness > 1.0) brightness = 1.0;
-
-                // Convert brightness to color
-                const r = @as(u32, @intFromFloat(brightness * 255)) << 16;
-                const g = @as(u32, @intFromFloat(brightness * 200)) << 8;
-                const b = @as(u32, @intFromFloat(brightness * 50));
-                const shaded_color = 0xFF000000 | r | g | b;
+                const brightness = normal_transformed.dot(job.light_dir);
+                const shaded_color = computeLitColor(brightness);
 
                 // Rasterize triangle to tile buffer
                 TileRenderer.rasterizeTriangleToTile(job.tile, job.tile_buffer, p0, p1, p2, shaded_color);
             }
 
             // Draw wireframe for triangles in this tile
-            for (job.tri_list.triangles.items) |tri_idx| {
-                const tri = job.mesh.triangles[tri_idx];
-                if (tri.cull_flags.cull_wireframe) continue;
+            if (job.draw_wireframe) {
+                for (job.tri_list.triangles.items) |tri_idx| {
+                    const tri = job.mesh.triangles[tri_idx];
+                    if (tri.cull_flags.cull_wireframe) continue;
 
-                const p0 = job.projected[tri.v0];
-                const p1 = job.projected[tri.v1];
-                const p2 = job.projected[tri.v2];
+                    const p0 = job.projected[tri.v0];
+                    const p1 = job.projected[tri.v1];
+                    const p2 = job.projected[tri.v2];
 
-                // Apply backface culling (same as filled)
-                const normal = job.mesh.normals[tri_idx];
-                const normal_transformed_raw = math.Vec3.new(
-                    job.transform.data[0] * normal.x + job.transform.data[1] * normal.y + job.transform.data[2] * normal.z,
-                    job.transform.data[4] * normal.x + job.transform.data[5] * normal.y + job.transform.data[6] * normal.z,
-                    job.transform.data[8] * normal.x + job.transform.data[9] * normal.y + job.transform.data[10] * normal.z,
-                );
-                const normal_transformed = normal_transformed_raw.normalize();
+                    // Apply backface culling (same as filled)
+                    const normal = job.mesh.normals[tri_idx];
+                    const normal_transformed_raw = math.Vec3.new(
+                        job.transform.data[0] * normal.x + job.transform.data[1] * normal.y + job.transform.data[2] * normal.z,
+                        job.transform.data[4] * normal.x + job.transform.data[5] * normal.y + job.transform.data[6] * normal.z,
+                        job.transform.data[8] * normal.x + job.transform.data[9] * normal.y + job.transform.data[10] * normal.z,
+                    );
+                    const normal_transformed = normal_transformed_raw.normalize();
 
-                const p0_cam = job.transformed_vertices[tri.v0];
-                const p1_cam = job.transformed_vertices[tri.v1];
-                const p2_cam = job.transformed_vertices[tri.v2];
+                    const p0_cam = job.transformed_vertices[tri.v0];
+                    const p1_cam = job.transformed_vertices[tri.v1];
+                    const p2_cam = job.transformed_vertices[tri.v2];
 
-                const face_center_unscaled = math.Vec3.add(math.Vec3.add(p0_cam, p1_cam), p2_cam);
-                const face_center = math.Vec3.scale(face_center_unscaled, 1.0 / 3.0);
+                    const face_center_unscaled = math.Vec3.add(math.Vec3.add(p0_cam, p1_cam), p2_cam);
+                    const face_center = math.Vec3.scale(face_center_unscaled, 1.0 / 3.0);
 
-                const view_length = face_center.length();
-                if (view_length <= 0.0001) continue;
-                const view_vector = math.Vec3.scale(face_center, -1.0 / view_length);
+                    const view_length = face_center.length();
+                    if (view_length <= 0.0001) continue;
+                    const view_vector = math.Vec3.scale(face_center, -1.0 / view_length);
 
-                const camera_facing = normal_transformed.dot(view_vector);
-                if (camera_facing <= 0.0) continue;
+                    const camera_facing = normal_transformed.dot(view_vector);
+                    if (camera_facing <= 0.0) continue;
 
-                // Draw wireframe edges
-                TileRenderer.drawLineToTile(job.tile, job.tile_buffer, p0, p1, 0xFFFFFFFF);
-                TileRenderer.drawLineToTile(job.tile, job.tile_buffer, p1, p2, 0xFFFFFFFF);
-                TileRenderer.drawLineToTile(job.tile, job.tile_buffer, p2, p0, 0xFFFFFFFF);
+                    // Draw wireframe edges
+                    TileRenderer.drawLineToTile(job.tile, job.tile_buffer, p0, p1, 0xFFFFFFFF);
+                    TileRenderer.drawLineToTile(job.tile, job.tile_buffer, p1, p2, 0xFFFFFFFF);
+                    TileRenderer.drawLineToTile(job.tile, job.tile_buffer, p2, p0, 0xFFFFFFFF);
+                }
             }
         }
     };
@@ -499,7 +522,7 @@ pub const Renderer = struct {
         const KEY_Q_BIT: u32 = 256;
         const KEY_E_BIT: u32 = 512;
         const rotation_speed = 0.02; // Radians per frame
-        const auto_orbit_speed = 0.01; // Radians per frame for automatic light orbit
+    const auto_orbit_speed = 0.005; // Radians per frame for automatic light orbit (50% slower)
 
         if ((self.keys_pressed & KEY_LEFT_BIT) != 0) {
             self.rotation_angle -= rotation_speed;
@@ -627,44 +650,13 @@ pub const Renderer = struct {
             try self.renderTiled(mesh, projected, transformed_vertices, transform, light_dir, should_log_debug, pump);
         } else {
             // Direct rendering to screen buffer (original method)
-            try self.renderDirect(mesh, projected, transformed_vertices, transform, light_dir, light_pos, z_offset, center_x, center_y, should_log_debug);
+            try self.renderDirect(mesh, projected, transformed_vertices, transform, light_dir, should_log_debug);
         }
 
         // ===== STEP 5.5: Project and draw light position as a cyan sphere =====
         // Project the light position to screen space
         const light_camera_z = light_pos.z + z_offset;
-        if (light_camera_z > 0.1) {
-            const fov = 400.0;
-            const light_screen_x = (light_pos.x / light_camera_z) * fov + center_x;
-            const light_screen_y = -(light_pos.y / light_camera_z) * fov + center_y;
-
-            const light_x = @as(i32, @intFromFloat(light_screen_x));
-            const light_y = @as(i32, @intFromFloat(light_screen_y));
-
-            // Draw a small circle (radius 5 pixels) in bright cyan to represent light 1
-            const light_radius: i32 = 5;
-            const light_color = 0xFF00FFFF; // Cyan: ARGB format
-
-            var py = light_y - light_radius;
-            while (py <= light_y + light_radius) : (py += 1) {
-                if (py < 0 or py >= @as(i32, @intCast(self.bitmap.height))) continue;
-                var px = light_x - light_radius;
-                while (px <= light_x + light_radius) : (px += 1) {
-                    if (px < 0 or px >= @as(i32, @intCast(self.bitmap.width))) continue;
-
-                    const dx = @as(f32, @floatFromInt(px)) - @as(f32, @floatFromInt(light_x));
-                    const dy = @as(f32, @floatFromInt(py)) - @as(f32, @floatFromInt(light_y));
-                    const dist = @sqrt(dx * dx + dy * dy);
-
-                    if (dist <= @as(f32, @floatFromInt(light_radius))) {
-                        const idx = @as(usize, @intCast(py)) * @as(usize, @intCast(self.bitmap.width)) + @as(usize, @intCast(px));
-                        if (idx < self.bitmap.pixels.len) {
-                            self.bitmap.pixels[idx] = light_color;
-                        }
-                    }
-                }
-            }
-        }
+        self.drawLightMarker(light_pos, light_camera_z, center_x, center_y, mesh, projected, transformed_vertices, transform);
 
         // ===== STEP 6: Copy bitmap to screen =====
         self.drawBitmap();
@@ -710,6 +702,168 @@ pub const Renderer = struct {
             title_wide[title_len] = 0;
             _ = SetWindowTextW(self.hwnd, &title_wide);
         }
+    }
+
+    fn drawLightMarker(
+        self: *Renderer,
+        light_pos: math.Vec3,
+        light_camera_z: f32,
+        center_x: f32,
+        center_y: f32,
+        mesh: *const Mesh,
+        projected: [][2]i32,
+        transformed_vertices: []math.Vec3,
+        transform: math.Mat4,
+    ) void {
+        if (!self.show_light_orb) return;
+        if (light_camera_z <= 0.1) return;
+
+        const fov = 400.0;
+        const light_screen_x = (light_pos.x / light_camera_z) * fov + center_x;
+        const light_screen_y = -(light_pos.y / light_camera_z) * fov + center_y;
+
+        if (self.cull_light_orb) {
+            const width_f = @as(f32, @floatFromInt(self.bitmap.width));
+            const height_f = @as(f32, @floatFromInt(self.bitmap.height));
+            if (light_screen_x >= 0.0 and light_screen_x < width_f and light_screen_y >= 0.0 and light_screen_y < height_f) {
+                if (self.isPointOccluded(light_screen_x, light_screen_y, light_camera_z, mesh, projected, transformed_vertices, transform)) {
+                    return;
+                }
+            }
+        }
+
+        const light_x = @as(i32, @intFromFloat(light_screen_x));
+        const light_y = @as(i32, @intFromFloat(light_screen_y));
+        const light_radius: i32 = 5;
+        const light_color = 0xFF00FFFF;
+
+        var py = light_y - light_radius;
+        while (py <= light_y + light_radius) : (py += 1) {
+            if (py < 0 or py >= @as(i32, @intCast(self.bitmap.height))) continue;
+
+            var px = light_x - light_radius;
+            while (px <= light_x + light_radius) : (px += 1) {
+                if (px < 0 or px >= @as(i32, @intCast(self.bitmap.width))) continue;
+
+                const dx = @as(f32, @floatFromInt(px)) - @as(f32, @floatFromInt(light_x));
+                const dy = @as(f32, @floatFromInt(py)) - @as(f32, @floatFromInt(light_y));
+                const dist = @sqrt(dx * dx + dy * dy);
+
+                if (dist <= @as(f32, @floatFromInt(light_radius))) {
+                    const idx = @as(usize, @intCast(py)) * @as(usize, @intCast(self.bitmap.width)) + @as(usize, @intCast(px));
+                    if (idx < self.bitmap.pixels.len) {
+                        self.bitmap.pixels[idx] = light_color;
+                    }
+                }
+            }
+        }
+    }
+
+    fn isPointOccluded(
+        self: *Renderer,
+        screen_x: f32,
+        screen_y: f32,
+        point_depth: f32,
+        mesh: *const Mesh,
+        projected: [][2]i32,
+        transformed_vertices: []math.Vec3,
+        transform: math.Mat4,
+    ) bool {
+        const epsilon: f32 = 0.001;
+
+        for (mesh.triangles, 0..) |tri, tri_idx| {
+            if (tri.cull_flags.cull_fill) continue;
+
+            const p0 = projected[tri.v0];
+            const p1 = projected[tri.v1];
+            const p2 = projected[tri.v2];
+
+            if (p0[0] == -1000 or p1[0] == -1000 or p2[0] == -1000) continue;
+            if (p0[1] == -1000 or p1[1] == -1000 or p2[1] == -1000) continue;
+
+            const p0x = @as(f32, @floatFromInt(p0[0]));
+            const p0y = @as(f32, @floatFromInt(p0[1]));
+            const p1x = @as(f32, @floatFromInt(p1[0]));
+            const p1y = @as(f32, @floatFromInt(p1[1]));
+            const p2x = @as(f32, @floatFromInt(p2[0]));
+            const p2y = @as(f32, @floatFromInt(p2[1]));
+
+            var min_x = p0x;
+            if (p1x < min_x) min_x = p1x;
+            if (p2x < min_x) min_x = p2x;
+            var max_x = p0x;
+            if (p1x > max_x) max_x = p1x;
+            if (p2x > max_x) max_x = p2x;
+            var min_y = p0y;
+            if (p1y < min_y) min_y = p1y;
+            if (p2y < min_y) min_y = p2y;
+            var max_y = p0y;
+            if (p1y > max_y) max_y = p1y;
+            if (p2y > max_y) max_y = p2y;
+
+            if (screen_x < min_x - 0.5 or screen_x > max_x + 0.5) continue;
+            if (screen_y < min_y - 0.5 or screen_y > max_y + 0.5) continue;
+
+            const denom = (p1y - p2y) * (p0x - p2x) + (p2x - p1x) * (p0y - p2y);
+            const denom_abs = if (denom < 0.0) -denom else denom;
+            if (denom_abs < 1e-6) continue;
+            const inv_denom = 1.0 / denom;
+
+            const lambda0 = ((p1y - p2y) * (screen_x - p2x) + (p2x - p1x) * (screen_y - p2y)) * inv_denom;
+            const lambda1 = ((p2y - p0y) * (screen_x - p2x) + (p0x - p2x) * (screen_y - p2y)) * inv_denom;
+            const lambda2 = 1.0 - lambda0 - lambda1;
+
+            if (lambda0 < -epsilon or lambda1 < -epsilon or lambda2 < -epsilon) continue;
+            if (lambda0 > 1.0 + epsilon or lambda1 > 1.0 + epsilon or lambda2 > 1.0 + epsilon) continue;
+
+            if (!self.triangleFacesCamera(transform, transformed_vertices, mesh, tri_idx)) continue;
+
+            const depth0 = transformed_vertices[tri.v0].z;
+            const depth1 = transformed_vertices[tri.v1].z;
+            const depth2 = transformed_vertices[tri.v2].z;
+
+            const interpolated_depth = lambda0 * depth0 + lambda1 * depth1 + lambda2 * depth2;
+            if (interpolated_depth <= 0.0) continue;
+
+            if (interpolated_depth < point_depth - 0.01) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    fn triangleFacesCamera(
+        self: *Renderer,
+        transform: math.Mat4,
+        transformed_vertices: []math.Vec3,
+        mesh: *const Mesh,
+        tri_idx: usize,
+    ) bool {
+        _ = self;
+        const tri = mesh.triangles[tri_idx];
+        const normal = mesh.normals[tri_idx];
+
+        const normal_transformed_raw = math.Vec3.new(
+            transform.data[0] * normal.x + transform.data[1] * normal.y + transform.data[2] * normal.z,
+            transform.data[4] * normal.x + transform.data[5] * normal.y + transform.data[6] * normal.z,
+            transform.data[8] * normal.x + transform.data[9] * normal.y + transform.data[10] * normal.z,
+        );
+        const normal_transformed = normal_transformed_raw.normalize();
+
+        const p0_cam = transformed_vertices[tri.v0];
+        const p1_cam = transformed_vertices[tri.v1];
+        const p2_cam = transformed_vertices[tri.v2];
+
+        const face_center_unscaled = math.Vec3.add(math.Vec3.add(p0_cam, p1_cam), p2_cam);
+        const face_center = math.Vec3.scale(face_center_unscaled, 1.0 / 3.0);
+
+        const view_length = face_center.length();
+        if (view_length <= 0.0001) return false;
+
+        const view_vector = math.Vec3.scale(face_center, -1.0 / view_length);
+        const camera_facing = normal_transformed.dot(view_vector);
+        return camera_facing > 0.0;
     }
 
     /// Render using tile-based method (new, for parallelization)
@@ -798,6 +952,7 @@ pub const Renderer = struct {
                     .transformed_vertices = transformed_vertices,
                     .transform = transform,
                     .light_dir = light_dir,
+                    .draw_wireframe = self.show_wireframe,
                 };
 
                 // Create job for this tile (no parent job)
@@ -895,10 +1050,6 @@ pub const Renderer = struct {
         transformed_vertices: []math.Vec3,
         transform: math.Mat4,
         light_dir: math.Vec3,
-        light_pos: math.Vec3,
-        z_offset: f32,
-        center_x: f32,
-        center_y: f32,
         should_log_debug: bool,
     ) !void {
         for (mesh.triangles, 0..) |tri, tri_idx| {
@@ -962,98 +1113,55 @@ pub const Renderer = struct {
             }
 
             // Calculate lighting from light
-            var brightness = normal_transformed.dot(light_dir);
-
-            // Clamp to 0-1 range
-            if (brightness < 0.0) brightness = 0.0;
-            if (brightness > 1.0) brightness = 1.0;
-
-            // Convert brightness to color (yellow-orange gradient for high contrast)
-            const r = @as(u32, @intFromFloat(brightness * 255)) << 16;
-            const g = @as(u32, @intFromFloat(brightness * 200)) << 8;
-            const b = @as(u32, @intFromFloat(brightness * 50));
-            const shaded_color = 0xFF000000 | r | g | b;
+            const brightness = normal_transformed.dot(light_dir);
+            const shaded_color = computeLitColor(brightness);
 
             self.drawFilledTriangle(p0[0], p0[1], p1[0], p1[1], p2[0], p2[1], shaded_color);
         }
 
-        // ===== STEP 5: Draw wireframe edges on top (white lines) =====
-        for (mesh.triangles, 0..) |tri, tri_idx| {
-            // Skip if wireframe is culled
-            if (tri.cull_flags.cull_wireframe) {
-                continue;
-            }
-
-            // Apply the same backface culling as filled triangles
-            const normal = mesh.normals[tri_idx];
-            const normal_transformed_raw = math.Vec3.new(
-                transform.data[0] * normal.x + transform.data[1] * normal.y + transform.data[2] * normal.z,
-                transform.data[4] * normal.x + transform.data[5] * normal.y + transform.data[6] * normal.z,
-                transform.data[8] * normal.x + transform.data[9] * normal.y + transform.data[10] * normal.z,
-            );
-            const normal_transformed = normal_transformed_raw.normalize();
-
-            const p0_cam = transformed_vertices[tri.v0];
-            const p1_cam = transformed_vertices[tri.v1];
-            const p2_cam = transformed_vertices[tri.v2];
-
-            const face_center_unscaled = math.Vec3.add(math.Vec3.add(p0_cam, p1_cam), p2_cam);
-            const face_center = math.Vec3.scale(face_center_unscaled, 1.0 / 3.0);
-
-            const view_length = face_center.length();
-            if (view_length <= 0.0001) {
-                continue;
-            }
-            const view_vector = math.Vec3.scale(face_center, -1.0 / view_length);
-
-            const camera_facing = normal_transformed.dot(view_vector);
-            if (camera_facing <= 0.0) {
-                continue; // Skip back-facing wireframes
-            }
-
-            const p0 = projected[tri.v0];
-            const p1 = projected[tri.v1];
-            const p2 = projected[tri.v2];
-
-            // Draw three edges of the triangle with white color
-            self.drawLineColored(p0[0], p0[1], p1[0], p1[1], 0xFFFFFFFF);
-            self.drawLineColored(p1[0], p1[1], p2[0], p2[1], 0xFFFFFFFF);
-            self.drawLineColored(p2[0], p2[1], p0[0], p0[1], 0xFFFFFFFF);
-        }
-
-        // ===== STEP 5.5: Project and draw light position as a cyan sphere =====
-        // Project the light position to screen space
-        const light_camera_z = light_pos.z + z_offset;
-        if (light_camera_z > 0.1) {
-            const fov = 400.0;
-            const light_screen_x = (light_pos.x / light_camera_z) * fov + center_x;
-            const light_screen_y = -(light_pos.y / light_camera_z) * fov + center_y;
-
-            const light_x = @as(i32, @intFromFloat(light_screen_x));
-            const light_y = @as(i32, @intFromFloat(light_screen_y));
-
-            // Draw a small circle (radius 5 pixels) in bright cyan to represent light 1
-            const light_radius: i32 = 5;
-            const light_color = 0xFF00FFFF; // Cyan: ARGB format
-
-            var py = light_y - light_radius;
-            while (py <= light_y + light_radius) : (py += 1) {
-                if (py < 0 or py >= @as(i32, @intCast(self.bitmap.height))) continue;
-                var px = light_x - light_radius;
-                while (px <= light_x + light_radius) : (px += 1) {
-                    if (px < 0 or px >= @as(i32, @intCast(self.bitmap.width))) continue;
-
-                    const dx = @as(f32, @floatFromInt(px)) - @as(f32, @floatFromInt(light_x));
-                    const dy = @as(f32, @floatFromInt(py)) - @as(f32, @floatFromInt(light_y));
-                    const dist = @sqrt(dx * dx + dy * dy);
-
-                    if (dist <= @as(f32, @floatFromInt(light_radius))) {
-                        const idx = @as(usize, @intCast(py)) * @as(usize, @intCast(self.bitmap.width)) + @as(usize, @intCast(px));
-                        if (idx < self.bitmap.pixels.len) {
-                            self.bitmap.pixels[idx] = light_color;
-                        }
-                    }
+        // ===== STEP 5: Optionally draw wireframe edges on top (white lines) =====
+        if (self.show_wireframe) {
+            for (mesh.triangles, 0..) |tri, tri_idx| {
+                // Skip if wireframe is culled
+                if (tri.cull_flags.cull_wireframe) {
+                    continue;
                 }
+
+                // Apply the same backface culling as filled triangles
+                const normal = mesh.normals[tri_idx];
+                const normal_transformed_raw = math.Vec3.new(
+                    transform.data[0] * normal.x + transform.data[1] * normal.y + transform.data[2] * normal.z,
+                    transform.data[4] * normal.x + transform.data[5] * normal.y + transform.data[6] * normal.z,
+                    transform.data[8] * normal.x + transform.data[9] * normal.y + transform.data[10] * normal.z,
+                );
+                const normal_transformed = normal_transformed_raw.normalize();
+
+                const p0_cam = transformed_vertices[tri.v0];
+                const p1_cam = transformed_vertices[tri.v1];
+                const p2_cam = transformed_vertices[tri.v2];
+
+                const face_center_unscaled = math.Vec3.add(math.Vec3.add(p0_cam, p1_cam), p2_cam);
+                const face_center = math.Vec3.scale(face_center_unscaled, 1.0 / 3.0);
+
+                const view_length = face_center.length();
+                if (view_length <= 0.0001) {
+                    continue;
+                }
+                const view_vector = math.Vec3.scale(face_center, -1.0 / view_length);
+
+                const camera_facing = normal_transformed.dot(view_vector);
+                if (camera_facing <= 0.0) {
+                    continue; // Skip back-facing wireframes
+                }
+
+                const p0 = projected[tri.v0];
+                const p1 = projected[tri.v1];
+                const p2 = projected[tri.v2];
+
+                // Draw three edges of the triangle with white color
+                self.drawLineColored(p0[0], p0[1], p1[0], p1[1], 0xFFFFFFFF);
+                self.drawLineColored(p1[0], p1[1], p2[0], p2[1], 0xFFFFFFFF);
+                self.drawLineColored(p2[0], p2[1], p0[0], p0[1], 0xFFFFFFFF);
             }
         }
 
