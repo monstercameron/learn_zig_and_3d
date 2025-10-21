@@ -1,27 +1,27 @@
 //! # Wavefront .obj File Loader
-//! 
+//!
 //! This module is responsible for parsing 3D models from the Wavefront .obj file format.
 //! The .obj format is a simple, text-based format that defines the geometry of a 3D model.
-//! 
+//!
 //! ## The Challenge: De-indexing Vertex Data
-//! 
+//!
 //! A key challenge with the .obj format is that it uses separate indices for vertex
 //! positions, texture coordinates (UVs), and normals. For example:
-//! 
+//!
 //! ```
 //! # List of all vertex positions
 //! v 1.0 1.0 0.0
 //! v 1.0 0.0 0.0
-//! 
+//!
 //! # List of all texture coordinates
 //! vt 0.5 0.5
 //! vt 0.5 0.0
-//! 
+//!
 //! # A face is defined by indexing into the above lists
 //! # f v1/vt1/vn1 v2/vt2/vn2 v3/vt3/vn3
 //! f 1/1/1 2/2/1 ...
 //! ```
-//! 
+//!
 //! Modern graphics hardware (and our `Mesh` struct) expects a single, unified index.
 //! Each vertex must have a unique combination of position, UV, and normal.
 //! This loader's main job is to "de-index" the .obj data, creating a final list of
@@ -29,8 +29,11 @@
 
 const std = @import("std");
 const math = @import("math.zig");
-const Mesh = @import("mesh.zig").Mesh;
-const Triangle = @import("mesh.zig").Triangle;
+const MeshModule = @import("mesh.zig");
+const Mesh = MeshModule.Mesh;
+const Triangle = MeshModule.Triangle;
+const meshlet_builder = @import("meshlet_builder.zig");
+const meshlet_cache = @import("meshlet_cache.zig");
 const Vec3 = math.Vec3;
 const Vec2 = math.Vec2;
 
@@ -96,8 +99,8 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
                 bounds_max = Vec3.new(@max(bounds_max.x, pos.x), @max(bounds_max.y, pos.y), @max(bounds_max.z, pos.z));
             }
             mesh_center = Vec3.scale(Vec3.add(bounds_min, bounds_max), 0.5);
-        
-        // --- Parse Texture Coordinate --- (e.g., "vt 0.5 0.5")
+
+            // --- Parse Texture Coordinate --- (e.g., "vt 0.5 0.5")
         } else if (std.mem.startsWith(u8, line, "vt ")) {
             var parts = std.mem.tokenizeScalar(u8, line[3..], ' ');
             var values: [2]f32 = undefined;
@@ -114,7 +117,7 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
             const v = Vec2.new(values[0], 1.0 - values[1]);
             try texcoords.append(allocator, v);
 
-        // --- Parse Vertex Normal --- (e.g., "vn 0.0 1.0 0.0")
+            // --- Parse Vertex Normal --- (e.g., "vn 0.0 1.0 0.0")
         } else if (std.mem.startsWith(u8, line, "vn ")) {
             var parts = std.mem.tokenizeScalar(u8, line[3..], ' ');
             var values: [3]f32 = undefined;
@@ -129,7 +132,7 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
             const normal = Vec3.normalize(Vec3.new(values[0], values[1], values[2]));
             try normals.append(allocator, normal);
 
-        // --- Parse Face --- (e.g., "f 1/1/1 2/2/1 3/3/1")
+            // --- Parse Face --- (e.g., "f 1/1/1 2/2/1 3/3/1")
         } else if (std.mem.startsWith(u8, line, "f ")) {
             var parts = std.mem.tokenizeScalar(u8, line[2..], ' ');
             var face_indices = std.ArrayList(usize){};
@@ -256,11 +259,27 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
         .triangles = triangle_slice,
         .normals = try allocator.alloc(Vec3, triangle_slice.len), // Will be calculated next.
         .tex_coords = texcoord_slice,
+        .meshlets = &[_]MeshModule.Meshlet{},
         .allocator = allocator,
     };
 
     // Now that we have the final triangles, calculate the face normals.
     mesh.recalculateNormals();
+
+    // Try to hydrate meshlets from disk cache before falling back to on-the-fly generation.
+    const cache_hit = meshlet_cache.loadCachedMeshlets(allocator, &mesh, path) catch |err| blk: {
+        std.log.warn("Meshlet cache load failed for {s}: {s}", .{ path, @errorName(err) });
+        break :blk false;
+    };
+
+    if (!cache_hit) {
+        // Generate an initial meshlet partition so downstream stages have data to consume.
+        try meshlet_builder.buildMeshlets(allocator, &mesh, .{});
+
+        meshlet_cache.storeMeshlets(&mesh, path) catch |err| {
+            std.log.warn("Meshlet cache store failed for {s}: {s}", .{ path, @errorName(err) });
+        };
+    }
 
     return mesh;
 }

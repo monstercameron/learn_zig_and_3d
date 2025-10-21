@@ -115,10 +115,12 @@ pub const TileTriangleList = struct {
 /// Returns an array of `TileTriangleList`, one for each tile on the screen.
 pub fn binTrianglesToTiles(
     projected_vertices: [][2]i32,
-    triangle_indices: [][3]usize, // Array of [v0, v1, v2] index triplets
+    triangle_vertices: []const [3]usize,
+    triangle_ids: []const usize,
     grid: *const TileGrid,
     allocator: std.mem.Allocator,
 ) ![]TileTriangleList {
+    std.debug.assert(triangle_vertices.len == triangle_ids.len);
     // 1. Create an empty to-do list for each tile.
     const tile_lists = try allocator.alloc(TileTriangleList, grid.tiles.len);
     for (tile_lists) |*list| {
@@ -126,7 +128,7 @@ pub fn binTrianglesToTiles(
     }
 
     // 2. Loop through every triangle in the scene.
-    for (triangle_indices, 0..) |tri, tri_idx| {
+    for (triangle_vertices, 0..) |tri, tri_idx| {
         const p0 = projected_vertices[tri[0]];
         const p1 = projected_vertices[tri[1]];
         const p2 = projected_vertices[tri[2]];
@@ -144,7 +146,7 @@ pub fn binTrianglesToTiles(
             // 6. If the triangle's bounding box overlaps with the tile...
             if (bounds.overlapsTile(tile)) {
                 // ...add this triangle's ID to the tile's to-do list.
-                try tile_lists[tile_idx].append(tri_idx);
+                try tile_lists[tile_idx].append(triangle_ids[tri_idx]);
             }
         }
     }

@@ -34,4 +34,15 @@ pub fn build(b: *std.Build) void {
     run_cmd.step.dependOn(b.getInstallStep());
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    // Optional benchmark subproject
+    const benchmarks_step = b.step("benchmarks", "Build the math benchmark suite");
+    const benchmarks_build_cmd = b.addSystemCommand(&[_][]const u8{ "zig", "build" });
+    benchmarks_build_cmd.cwd = b.path("benchmarks");
+    benchmarks_step.dependOn(&benchmarks_build_cmd.step);
+
+    const run_benchmarks_step = b.step("run-benchmarks", "Run the math benchmarks");
+    const benchmarks_run_cmd = b.addSystemCommand(&[_][]const u8{ "zig", "build", "run" });
+    benchmarks_run_cmd.cwd = b.path("benchmarks");
+    run_benchmarks_step.dependOn(&benchmarks_run_cmd.step);
 }

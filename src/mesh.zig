@@ -11,15 +11,15 @@
 //!
 //! ```javascript
 //! const geometry = new THREE.BufferGeometry();
-//! 
+//!
 //! // 1. Vertex positions (x, y, z, x, y, z, ...)
 //! const vertices = new Float32Array([ ... ]);
 //! geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
-//! 
+//!
 //! // 2. Triangle indices (which vertices make up each face)
 //! const indices = [ 0, 1, 2,  0, 2, 3, ... ];
 //! geometry.setIndex(indices);
-//! 
+//!
 //! // 3. Normals (for lighting)
 //! geometry.computeVertexNormals();
 //! ```
@@ -29,6 +29,23 @@ const std = @import("std");
 const math = @import("math.zig");
 const Vec3 = math.Vec3;
 const Vec2 = math.Vec2;
+
+/// A compact cluster of triangles processed together in the mesh-shader pipeline.
+/// Stores the subset of vertex indices and triangle indices that belong to the meshlet
+/// as well as a bounding sphere for quick culling tests.
+pub const Meshlet = struct {
+    vertex_indices: []usize,
+    triangle_indices: []usize,
+    bounds_center: Vec3,
+    bounds_radius: f32,
+
+    pub fn deinit(self: *Meshlet, allocator: std.mem.Allocator) void {
+        allocator.free(self.vertex_indices);
+        allocator.free(self.triangle_indices);
+        self.vertex_indices = &[_]usize{};
+        self.triangle_indices = &[_]usize{};
+    }
+};
 
 // ========== MESH STRUCTURE ==========
 
@@ -92,6 +109,8 @@ pub const Mesh = struct {
     normals: []Vec3,
     /// The list of 2D texture coordinates (UVs). Each entry corresponds to a vertex.
     tex_coords: []Vec2,
+    /// Meshlets generated for this mesh. Empty until meshlet generation runs.
+    meshlets: []Meshlet,
     /// The allocator used to manage the memory for the mesh data.
     allocator: std.mem.Allocator,
 
@@ -101,6 +120,7 @@ pub const Mesh = struct {
             .triangles = &[_]Triangle{},
             .normals = &[_]Vec3{},
             .tex_coords = &[_]Vec2{},
+            .meshlets = &[_]Meshlet{},
             .allocator = allocator,
         };
     }
@@ -161,6 +181,7 @@ pub const Mesh = struct {
             .triangles = triangles,
             .normals = try allocator.alloc(Vec3, 12),
             .tex_coords = tex_coords,
+            .meshlets = &[_]Meshlet{},
             .allocator = allocator,
         };
 
@@ -186,6 +207,7 @@ pub const Mesh = struct {
             .triangles = triangles,
             .normals = try allocator.alloc(Vec3, 1),
             .tex_coords = tex_coords,
+            .meshlets = &[_]Meshlet{},
             .allocator = allocator,
         };
 
@@ -195,10 +217,21 @@ pub const Mesh = struct {
 
     /// Frees all memory allocated for the mesh's data.
     pub fn deinit(self: *Mesh) void {
+        self.clearMeshlets();
         self.allocator.free(self.vertices);
         self.allocator.free(self.triangles);
         self.allocator.free(self.normals);
         self.allocator.free(self.tex_coords);
+    }
+
+    /// Releases all generated meshlets and associated buffers.
+    pub fn clearMeshlets(self: *Mesh) void {
+        if (self.meshlets.len == 0) return;
+        for (self.meshlets) |*meshlet| {
+            meshlet.deinit(self.allocator);
+        }
+        self.allocator.free(self.meshlets);
+        self.meshlets = &[_]Meshlet{};
     }
 
     /// Calculates the mesh's bounding box and translates its vertices so that the

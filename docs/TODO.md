@@ -105,6 +105,11 @@ This is a comprehensive list of potential improvements, new features, and refact
 - [x] **Code Comments**: Add more detailed comments to complex parts of the code, such as the job system and the rasterizer.
 - [ ] **API Documentation**: Generate API documentation from the source code using Zig's documentation generation tools.
 
+## Advanced Rendering Techniques
+
+- [ ] **Implement Ray Tracing**: Explore integrating a basic ray tracing pipeline for more realistic lighting and reflections.
+- [ ] **Implement Path Tracing**: Develop a path tracing renderer for physically accurate global illumination.
+
 ## Mesh Shader Conversion Plan
 
 ### Phase 0 – Research & Tooling
@@ -114,9 +119,9 @@ This is a comprehensive list of potential improvements, new features, and refact
 
 ### Phase 1 – Offline Meshlet Generation
 
-- [x] **Define Meshlet Data Structure**: Create a `Meshlet` struct containing a small number of vertex indices and primitive indices, along with a bounding sphere/box for culling.
-- [x] **Implement Meshlet Builder**: Add an offline/loader step in `obj_loader.zig` (or a new tool) that partitions each mesh into meshlets using the target limits.
-- [x] **Persist Meshlets**: Decide on in-memory vs serialized storage and update asset loading to populate meshlet arrays alongside the existing `Mesh`.
+- [ ] **Define Meshlet Data Structure**: Create a `Meshlet` struct containing a small number of vertex indices and primitive indices, along with a bounding sphere/box for culling.
+- [ ] **Implement Meshlet Builder**: Add an offline/loader step in `obj_loader.zig` (or a new tool) that partitions each mesh into meshlets using the target limits.
+- [ ] **Persist Meshlets**: Decide on in-memory vs serialized storage and update asset loading to populate meshlet arrays alongside the existing `Mesh`.
 
 ### Phase 2 – Runtime Task Stage
 

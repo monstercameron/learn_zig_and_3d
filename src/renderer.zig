@@ -31,7 +31,9 @@
 const std = @import("std");
 const windows = std.os.windows;
 const math = @import("math.zig");
-const Mesh = @import("mesh.zig").Mesh;
+const MeshModule = @import("mesh.zig");
+const Mesh = MeshModule.Mesh;
+const Meshlet = MeshModule.Meshlet;
 const config = @import("app_config.zig");
 const input = @import("input.zig");
 const lighting = @import("lighting.zig");
@@ -885,6 +887,30 @@ pub const Renderer = struct {
         }
     }
 
+    fn meshletVisible(
+        self: *const Renderer,
+        meshlet: *const Meshlet,
+        right: math.Vec3,
+        up: math.Vec3,
+        forward: math.Vec3,
+        projection: ProjectionParams,
+    ) bool {
+        const relative_center = math.Vec3.sub(meshlet.bounds_center, self.camera_position);
+        const center_cam = math.Vec3.new(
+            math.Vec3.dot(relative_center, right),
+            math.Vec3.dot(relative_center, up),
+            math.Vec3.dot(relative_center, forward),
+        );
+
+        const radius = meshlet.bounds_radius;
+        const safety_margin = radius * 0.5 + 1.0; // generous guard against over-eager clipping near the screen edges
+        const sphere_radius = radius + safety_margin;
+
+        if (center_cam.z + sphere_radius <= projection.near_plane - NEAR_EPSILON) return false;
+
+        return true;
+    }
+
     /// Renders the scene using the parallel, tile-based pipeline.
     fn renderTiled(self: *Renderer, mesh: *const Mesh, projected: [][2]i32, transformed_vertices: []math.Vec3, transform: math.Mat4, light_dir: math.Vec3, pump: ?*const fn (*Renderer) bool, projection: ProjectionParams) !void {
         const grid = self.tile_grid.?;
@@ -900,11 +926,57 @@ pub const Renderer = struct {
             self.previous_frame_tile_jobs = null;
         }
 
-        // 1. Binning: Assign triangles to the tiles they overlap.
-        const triangle_indices = try self.allocator.alloc([3]usize, mesh.triangles.len);
-        defer self.allocator.free(triangle_indices);
-        for (mesh.triangles, 0..) |tri, i| triangle_indices[i] = .{ tri.v0, tri.v1, tri.v2 };
-        const tile_lists = try BinningStage.binTrianglesToTiles(projected, triangle_indices, &grid, self.allocator);
+        var triangle_vertices = std.ArrayList([3]usize){};
+        defer triangle_vertices.deinit(self.allocator);
+        var triangle_ids = std.ArrayList(usize){};
+        defer triangle_ids.deinit(self.allocator);
+
+        const basis_right = math.Vec3.new(transform.data[0], transform.data[1], transform.data[2]);
+        const basis_up = math.Vec3.new(transform.data[4], transform.data[5], transform.data[6]);
+        const basis_forward = math.Vec3.new(transform.data[8], transform.data[9], transform.data[10]);
+
+        if (mesh.meshlets.len == 0) {
+            for (mesh.triangles, 0..) |tri, idx| {
+                try triangle_vertices.append(self.allocator, .{ tri.v0, tri.v1, tri.v2 });
+                try triangle_ids.append(self.allocator, idx);
+            }
+        } else {
+            const meshlet_count = mesh.meshlets.len;
+            var visibility = try self.allocator.alloc(bool, meshlet_count);
+            defer self.allocator.free(visibility);
+            var visible_triangle_budget: usize = 0;
+            for (mesh.meshlets, 0..) |_, meshlet_idx| {
+                const meshlet_ptr = &mesh.meshlets[meshlet_idx];
+                const visible = self.meshletVisible(meshlet_ptr, basis_right, basis_up, basis_forward, projection);
+                visibility[meshlet_idx] = visible;
+                if (visible) visible_triangle_budget += meshlet_ptr.triangle_indices.len;
+            }
+            if (visible_triangle_budget == 0) {
+                for (grid.tiles, 0..) |*tile, tile_idx| {
+                    TileRenderer.compositeTileToScreen(tile, &tile_buffers[tile_idx], &self.bitmap);
+                }
+                return;
+            }
+            for (mesh.meshlets, 0..) |_, meshlet_idx| {
+                if (!visibility[meshlet_idx]) continue;
+                const meshlet_ptr = &mesh.meshlets[meshlet_idx];
+                for (meshlet_ptr.triangle_indices) |tri_idx| {
+                    const tri = mesh.triangles[tri_idx];
+                    try triangle_vertices.append(self.allocator, .{ tri.v0, tri.v1, tri.v2 });
+                    try triangle_ids.append(self.allocator, tri_idx);
+                }
+            }
+        }
+
+        if (triangle_vertices.items.len == 0) {
+            for (grid.tiles, 0..) |*tile, tile_idx| {
+                TileRenderer.compositeTileToScreen(tile, &tile_buffers[tile_idx], &self.bitmap);
+            }
+            return;
+        }
+        std.debug.assert(triangle_ids.items.len == triangle_vertices.items.len);
+
+        const tile_lists = try BinningStage.binTrianglesToTiles(projected, triangle_vertices.items, triangle_ids.items, &grid, self.allocator);
         defer BinningStage.freeTileTriangleLists(tile_lists, self.allocator);
 
         // (Memory management for job data omitted for clarity)
