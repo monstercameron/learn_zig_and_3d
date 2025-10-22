@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub const VERSION: u32 = 1;
 
-pub const HostPrintFn = *const fn (ctx: ?*anyopaque, message: []const u8) callconv(.c) void;
+pub const HostPrintFn = *const fn (ctx: ?*anyopaque, message_ptr: [*]const u8, message_len: usize) callconv(.c) void;
 
 pub const PluginRunFn = *const fn (ctx: *anyopaque) callconv(.c) void;
 pub const PluginShutdownFn = *const fn (ctx: *anyopaque) callconv(.c) void;

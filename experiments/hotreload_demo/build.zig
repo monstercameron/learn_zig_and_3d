@@ -37,5 +37,8 @@ pub fn build(b: *std.Build) void {
         lib.root_module.link_libc = true;
         lib.root_module.addImport("iface", iface_mod);
         b.installArtifact(lib);
+
+        const step = b.step(name, std.fmt.comptimePrint("Build plugin {s}", .{name}));
+        step.dependOn(&lib.step);
     }
 }
