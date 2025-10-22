@@ -1,5 +1,7 @@
 # Zig 3D CPU Rasterizer
 
+![Vibecoding](vibecoding.jpg)
+
 A high-performance, CPU-based 3D rasterizer built from scratch in Zig. This project showcases advanced rendering techniques, including a multi-threaded, tile-based pipeline, real-time lighting, texture mapping, and interactive controls. It serves as a comprehensive example of systems programming in Zig for graphics applications.
 
 ## Key Features

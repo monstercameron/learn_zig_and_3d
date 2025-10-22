@@ -110,18 +110,23 @@ pub fn main() !void {
 
     log.init(allocator);
     defer log.deinit();
+    app_logger.infoSub("bootstrap", "log manager initialized", .{});
 
     // Create a window.
     // JS Analogy: `const window = new Window(800, 600);`
     // The `try` keyword is like `await` for a function that might fail. If `Window.init`
     // returns an error, `main` will immediately stop and report the error.
-    var window = try Window.init(config.WINDOW_TITLE, 800, 600);
+    const initial_width = 800;
+    const initial_height = 600;
+    var window = try Window.init(config.WINDOW_TITLE, initial_width, initial_height);
     defer window.deinit(); // Guarantees the window is destroyed on exit.
+    app_logger.infoSub("bootstrap", "window created {d}x{d}", .{ initial_width, initial_height });
 
     // Create a renderer.
     // JS Analogy: `const renderer = canvas.getContext('2d');`
-    var renderer = try Renderer.init(window.hwnd, 800, 600, allocator);
+    var renderer = try Renderer.init(window.hwnd, initial_width, initial_height, allocator);
     defer renderer.deinit(); // Guarantees the renderer is cleaned up on exit.
+    app_logger.infoSub("bootstrap", "renderer initialized backbuffer={d}x{d}", .{ renderer.bitmap.width, renderer.bitmap.height });
 
     // Load a 3D model from an .obj file.
     var teapot = try obj_loader.load(allocator, "resources/models/teapot.obj");
@@ -129,6 +134,11 @@ pub fn main() !void {
     teapot.centerToOrigin(); // Center the model at (0,0,0).
     levelLiftMeshToGround(&teapot);
     try levelAppendGroundPlane(&teapot, allocator);
+    app_logger.infoSub(
+        "assets",
+        "loaded teapot mesh vertices={} triangles={} meshlets={}",
+        .{ teapot.vertices.len, teapot.triangles.len, teapot.meshlets.len },
+    );
 
     renderer.setCameraPosition(math.Vec3.new(0.0, 2.0, -10.0));
     renderer.setCameraOrientation(-0.1, 0.0);

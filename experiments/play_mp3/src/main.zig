@@ -8,6 +8,7 @@ pub fn main() !void {
 
     std.debug.print("Initializing audio engine...\n", .{});
     try audio.init(allocator);
+    try audio.start();
     defer audio.deinit();
 
     const file_path = "resources\\music\\udio.mp3";

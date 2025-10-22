@@ -32,8 +32,8 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             }),
             .version = .{ .major = 0, .minor = 0, .patch = 1 },
+            .linkage = .dynamic,
         });
-        lib.linkage = .dynamic;
         lib.root_module.link_libc = true;
         lib.root_module.addImport("iface", iface_mod);
         b.installArtifact(lib);

@@ -1,8 +1,7 @@
 const std = @import("std");
 const wasapi = @import("wasapi.zig");
 const windows = std.os.windows;
-const audio_api = @import("../audio.zig");
-const drmp3 = @import("drmp3.zig");
+const audio_api = @import("audio.zig");
 const SpscQueue = @import("spsc_queue.zig").SpscQueue;
 
 const MAX_VOICES = 64;
@@ -217,31 +216,6 @@ pub const AudioEngine = struct {
     pub fn unload(self: *AudioEngine, sound: *audio_api.Sound) void {
         self.allocator.free(sound.samples);
         self.allocator.destroy(sound);
-    }
-
-    pub fn loadMp3(self: *AudioEngine, file_path: []const u8) !*audio_api.Sound {
-        var mp3: drmp3.drmp3 = undefined;
-        if (drmp3.drmp3_init_file(&mp3, file_path.ptr, null) == 0) {
-            return error.Mp3InitFailed;
-        }
-        defer drmp3.drmp3_uninit(&mp3);
-
-        const frame_count = drmp3.drmp3_get_pcm_frame_count(&mp3);
-        if (frame_count == 0) return error.Mp3NoFrames;
-
-        const sound = try self.allocator.create(audio_api.Sound);
-        sound.sample_rate = mp3.sampleRate;
-        sound.channels = mp3.channels;
-        sound.samples = try self.allocator.alloc(f32, frame_count * sound.channels);
-
-        const frames_read = drmp3.drmp3_read_pcm_frames_f32(&mp3, frame_count, sound.samples.ptr);
-        if (frames_read != frame_count) {
-            self.allocator.free(sound.samples);
-            self.allocator.destroy(sound);
-            return error.Mp3FrameReadFailed;
-        }
-
-        return sound;
     }
 
     pub fn start(self: *AudioEngine) !void {

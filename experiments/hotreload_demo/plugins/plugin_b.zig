@@ -8,7 +8,7 @@ const State = struct {
 var g_host: *const iface.HostAPI = undefined;
 var g_state = State{};
 
-fn run(ctx: *anyopaque) void {
+fn run(ctx: *anyopaque) callconv(.c) void {
     _ = ctx;
     g_state.accumulated += 0.5;
     var buffer: [64]u8 = undefined;
@@ -16,12 +16,12 @@ fn run(ctx: *anyopaque) void {
     g_host.print(g_host.user_data, msg);
 }
 
-fn shutdown(ctx: *anyopaque) void {
+fn shutdown(ctx: *anyopaque) callconv(.c) void {
     _ = ctx;
     g_host.print(g_host.user_data, "[plugin-b] shutdown");
 }
 
-pub export fn plugin_entry(out_api: *iface.PluginAPI, host_api: *const iface.HostAPI) ?*anyopaque {
+pub export fn plugin_entry callconv(.c)(out_api: *iface.PluginAPI, host_api: *const iface.HostAPI) ?*anyopaque {
     g_host = host_api;
     out_api.* = iface.PluginAPI{
         .run = run,

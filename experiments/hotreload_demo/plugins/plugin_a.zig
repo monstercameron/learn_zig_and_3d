@@ -21,7 +21,7 @@ fn shutdown(ctx: *anyopaque) void {
     g_host.print(g_host.user_data, "[plugin-a] shutdown");
 }
 
-pub export fn plugin_entry(out_api: *iface.PluginAPI, host_api: *const iface.HostAPI) ?*anyopaque {
+pub export fn plugin_entry callconv(.c)(out_api: *iface.PluginAPI, host_api: *const iface.HostAPI) ?*anyopaque {
     g_host = host_api;
     out_api.* = iface.PluginAPI{
         .run = run,

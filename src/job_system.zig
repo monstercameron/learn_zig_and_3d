@@ -18,6 +18,9 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const log = @import("log.zig");
+
+const job_logger = log.get("jobs.core");
 
 // ========== JOB STRUCTURE ==========
 
@@ -212,7 +215,11 @@ pub const JobSystem = struct {
         const cpu_count = std.Thread.getCpuCount() catch 4;
         const worker_count: u32 = if (cpu_count > 1) @as(u32, @intCast(cpu_count - 1)) else 1;
 
-        std.debug.print("Job System: Detected {} CPUs, creating {} worker thread(s)\n", .{ cpu_count, worker_count });
+        job_logger.infoSub(
+            "init",
+            "detected {} cpu(s), creating {} worker thread(s)",
+            .{ cpu_count, worker_count },
+        );
 
         const workers = try allocator.alloc(WorkerThread, worker_count);
         errdefer allocator.free(workers);
@@ -242,14 +249,18 @@ pub const JobSystem = struct {
         // Start the worker threads. They will immediately start looking for jobs.
         for (workers) |*worker| {
             worker.thread = try std.Thread.spawn(.{}, WorkerThread.run, .{worker});
+            job_logger.debugSub("init", "worker {} online queue_capacity={}", .{ worker.id, worker.queue.capacity });
         }
 
+        job_logger.infoSub("init", "job system ready workers={}", .{worker_count});
         return system;
     }
 
     /// Shuts down the job system, signaling all threads to stop and waiting for them to finish.
     pub fn deinit(self: *JobSystem) void {
         const allocator = self.allocator;
+
+        job_logger.infoSub("shutdown", "stopping job system workers={}", .{self.worker_count});
 
         self.running.store(false, .release);
         for (self.workers) |*worker| {
@@ -275,7 +286,7 @@ pub const JobSystem = struct {
                 return true;
             }
         }
-        std.debug.print("ERROR: Failed to submit job after trying all {} workers\n", .{self.worker_count});
+        job_logger.errorSub("submit", "failed to submit job after {} worker attempts", .{self.worker_count});
         return false;
     }
 

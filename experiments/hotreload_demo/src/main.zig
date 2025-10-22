@@ -7,7 +7,7 @@ const PluginHandle = struct {
     ctx: *anyopaque,
 };
 
-fn hostPrint(ctx: ?*anyopaque, message: []const u8) void {
+fn hostPrint(ctx: ?*anyopaque, message: []const u8) callconv(.c) void {
     _ = ctx;
     std.debug.print("{s}\n", .{message});
 }
@@ -19,7 +19,7 @@ fn loadPlugin(
 ) !PluginHandle {
     var zpath = try allocator.alloc(u8, path.len + 1);
     defer allocator.free(zpath);
-    std.mem.copy(u8, zpath[0..path.len], path);
+    std.mem.copyForwards(u8, zpath[0..path.len], path);
     zpath[path.len] = 0;
     const zslice = std.mem.sliceTo(zpath, 0);
 

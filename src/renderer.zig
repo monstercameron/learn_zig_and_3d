@@ -44,6 +44,9 @@ const TrianglePacket = WorkTypes.TrianglePacket;
 const TriangleFlags = WorkTypes.TriangleFlags;
 const MeshletPacket = WorkTypes.MeshletPacket;
 const log = @import("log.zig");
+const renderer_logger = log.get("renderer.core");
+const pipeline_logger = log.get("renderer.pipeline");
+const meshlet_logger = log.get("renderer.meshlet");
 const ground_logger = log.get("renderer.ground");
 
 const NEAR_CLIP: f32 = 0.01;
@@ -179,6 +182,19 @@ pub const Renderer = struct {
 
         const job_system = try JobSystem.init(allocator);
 
+        renderer_logger.infoSub(
+            "init",
+            "initialized renderer {d}x{d} tiles={} grid={}x{} workers={}",
+            .{
+                width,
+                height,
+                tile_count,
+                tile_grid.cols,
+                tile_grid.rows,
+                job_system.worker_count,
+            },
+        );
+
         return Renderer{
             .hwnd = hwnd,
             .bitmap = bitmap,
@@ -222,6 +238,7 @@ pub const Renderer = struct {
 
     /// Cleans up all renderer resources in the reverse order of creation.
     pub fn deinit(self: *Renderer) void {
+        renderer_logger.infoSub("shutdown", "deinitializing renderer frame_counter={}", .{self.frame_count});
         self.mesh_work_cache.deinit(self.allocator);
         if (self.job_system) |js| js.deinit();
         if (self.job_buffer) |jobs| self.allocator.free(jobs);
@@ -493,7 +510,7 @@ pub const Renderer = struct {
         projection_params: ProjectionParams,
         light_dir: math.Vec3,
         output_cursor: ?*usize,
-    ) !void {
+    ) !?usize {
         ensureVertex(tri.v0, states, mesh_vertices, camera_position, basis_right, basis_up, basis_forward, vertex_cache, projected_slice, projection_params);
         ensureVertex(tri.v1, states, mesh_vertices, camera_position, basis_right, basis_up, basis_forward, vertex_cache, projected_slice, projection_params);
         ensureVertex(tri.v2, states, mesh_vertices, camera_position, basis_right, basis_up, basis_forward, vertex_cache, projected_slice, projection_params);
@@ -505,7 +522,7 @@ pub const Renderer = struct {
         const front0 = p0_cam.z >= projection_params.near_plane - NEAR_EPSILON;
         const front1 = p1_cam.z >= projection_params.near_plane - NEAR_EPSILON;
         const front2 = p2_cam.z >= projection_params.near_plane - NEAR_EPSILON;
-        if (!front0 and !front1 and !front2) return;
+        if (!front0 and !front1 and !front2) return null;
 
         const crosses_near = (front0 or front1 or front2) and !(front0 and front1 and front2);
 
@@ -544,7 +561,7 @@ pub const Renderer = struct {
                 if (math.Vec3.dot(normal_cam, view_vector) < -1e-4) backface = true;
             }
         }
-        if (backface) return;
+        if (backface) return null;
 
         const brightness = math.Vec3.dot(normal_cam, light_dir);
         const intensity = lighting.computeIntensity(brightness);
@@ -580,6 +597,7 @@ pub const Renderer = struct {
             intensity,
             flags,
         );
+        return write_index;
     }
 
     fn projectCameraPosition(position: math.Vec3, projection: ProjectionParams) [2]i32 {
@@ -634,7 +652,7 @@ pub const Renderer = struct {
         }
     };
 
-    const MeshletTaskJob = struct {
+    const MeshletRenderJob = struct {
         mesh: *const Mesh,
         meshlet: *const Meshlet,
         mesh_work: *MeshWork,
@@ -649,14 +667,17 @@ pub const Renderer = struct {
         light_dir: math.Vec3,
         output_start: usize,
         written_count: usize = 0,
+        grid: ?*const TileRenderer.TileGrid,
+        contribution: *MeshletContribution,
 
-        fn process(job: *MeshletTaskJob) void {
+        fn process(job: *MeshletRenderJob) void {
+            job.contribution.clear();
             var writer = MeshWorkWriter.init(job.mesh_work);
             const mesh_vertices = job.mesh.vertices;
             var cursor = job.output_start;
             for (job.meshlet.triangle_indices) |tri_idx| {
                 const tri = job.mesh.triangles[tri_idx];
-                emitTriangleToWork(
+                const result = emitTriangleToWork(
                     &writer,
                     job.mesh,
                     tri_idx,
@@ -673,14 +694,59 @@ pub const Renderer = struct {
                     job.light_dir,
                     &cursor,
                 ) catch |err| {
-                    std.log.err("Meshlet emit failed: {}", .{err});
+                    meshlet_logger.errorSub("emit", "meshlet emit failed: {s}", .{@errorName(err)});
+                    continue;
                 };
+                if (result) |write_index| {
+                    job.recordTriangleContribution(write_index);
+                }
             }
             job.written_count = cursor - job.output_start;
         }
 
+        fn recordTriangleContribution(job: *MeshletRenderJob, tri_index: usize) void {
+            const grid_ptr = job.grid orelse return;
+            if (tri_index >= job.mesh_work.triangles.len) return;
+            const packet = job.mesh_work.triangles[tri_index];
+            const screen_tri = packet.screen;
+
+            const bounds = BinningStage.TriangleBounds.fromVertices(screen_tri[0], screen_tri[1], screen_tri[2]);
+            if (bounds.isOffscreen(grid_ptr.screen_width, grid_ptr.screen_height)) return;
+
+            const screen_max_x = grid_ptr.screen_width - 1;
+            const screen_max_y = grid_ptr.screen_height - 1;
+
+            const clamped_min_x = std.math.clamp(bounds.min_x, 0, screen_max_x);
+            const clamped_max_x = std.math.clamp(bounds.max_x, 0, screen_max_x);
+            const clamped_min_y = std.math.clamp(bounds.min_y, 0, screen_max_y);
+            const clamped_max_y = std.math.clamp(bounds.max_y, 0, screen_max_y);
+
+            const min_col = @as(usize, @intCast(std.math.clamp(@divTrunc(clamped_min_x, TileRenderer.TILE_SIZE), 0, @as(i32, @intCast(grid_ptr.cols)) - 1)));
+            const max_col = @as(usize, @intCast(std.math.clamp(@divTrunc(clamped_max_x, TileRenderer.TILE_SIZE), 0, @as(i32, @intCast(grid_ptr.cols)) - 1)));
+            const min_row = @as(usize, @intCast(std.math.clamp(@divTrunc(clamped_min_y, TileRenderer.TILE_SIZE), 0, @as(i32, @intCast(grid_ptr.rows)) - 1)));
+            const max_row = @as(usize, @intCast(std.math.clamp(@divTrunc(clamped_max_y, TileRenderer.TILE_SIZE), 0, @as(i32, @intCast(grid_ptr.rows)) - 1)));
+
+            var row = min_row;
+            while (row <= max_row) : (row += 1) {
+                const base_idx = row * grid_ptr.cols;
+                var col = min_col;
+                while (col <= max_col) : (col += 1) {
+                    const tile_index = base_idx + col;
+                    const tile_ptr = &grid_ptr.tiles[tile_index];
+                    if (!bounds.overlapsTile(tile_ptr)) continue;
+                    job.contribution.addTriangle(tile_index, tri_index) catch |err| {
+                        meshlet_logger.errorSub(
+                            "contrib",
+                            "meshlet contribution failed triangle {} tile {}: {s}",
+                            .{ tri_index, tile_index, @errorName(err) },
+                        );
+                    };
+                }
+            }
+        }
+
         fn run(ctx: *anyopaque) void {
-            const job: *MeshletTaskJob = @ptrCast(@alignCast(ctx));
+            const job: *MeshletRenderJob = @ptrCast(@alignCast(ctx));
             job.process();
         }
     };
@@ -693,28 +759,49 @@ pub const Renderer = struct {
 
         allocator: std.mem.Allocator,
         entries: std.ArrayList(Entry),
+        active_count: usize,
 
         fn init(allocator: std.mem.Allocator) MeshletContribution {
             return MeshletContribution{
                 .allocator = allocator,
                 .entries = std.ArrayList(Entry){},
+                .active_count = 0,
             };
         }
 
         fn deinit(self: *MeshletContribution) void {
-            for (self.entries.items) |*entry| {
+            const storage = self.entries.items;
+            for (storage) |*entry| {
                 entry.triangles.deinit(self.allocator);
             }
             self.entries.deinit(self.allocator);
             self.entries = std.ArrayList(Entry){};
+            self.active_count = 0;
+        }
+
+        fn clear(self: *MeshletContribution) void {
+            var idx: usize = 0;
+            while (idx < self.active_count) : (idx += 1) {
+                self.entries.items[idx].triangles.clearRetainingCapacity();
+            }
+            self.active_count = 0;
         }
 
         fn addTriangle(self: *MeshletContribution, tile_index: usize, tri_index: usize) !void {
-            for (self.entries.items) |*entry| {
+            for (self.entries.items[0..self.active_count]) |*entry| {
                 if (entry.tile_index == tile_index) {
                     try entry.triangles.append(self.allocator, tri_index);
                     return;
                 }
+            }
+
+            if (self.active_count < self.entries.items.len) {
+                var reuse_entry = &self.entries.items[self.active_count];
+                reuse_entry.tile_index = tile_index;
+                reuse_entry.triangles.clearRetainingCapacity();
+                try reuse_entry.triangles.append(self.allocator, tri_index);
+                self.active_count += 1;
+                return;
             }
 
             var new_entry = Entry{
@@ -723,6 +810,25 @@ pub const Renderer = struct {
             };
             try new_entry.triangles.append(self.allocator, tri_index);
             try self.entries.append(self.allocator, new_entry);
+            self.active_count += 1;
+        }
+
+        fn remapRange(self: *MeshletContribution, original_start: usize, count: usize, new_start: usize) void {
+            if (count == 0) {
+                self.clear();
+                return;
+            }
+
+            const original_end = original_start + count;
+            for (self.entries.items[0..self.active_count]) |*entry| {
+                var idx: usize = 0;
+                while (idx < entry.triangles.items.len) : (idx += 1) {
+                    const tri_idx = entry.triangles.items[idx];
+                    if (tri_idx < original_start or tri_idx >= original_end) continue;
+                    const offset = tri_idx - original_start;
+                    entry.triangles.items[idx] = new_start + offset;
+                }
+            }
         }
     };
 
@@ -775,7 +881,11 @@ pub const Renderer = struct {
                         const tile_ptr = &job.grid.tiles[tile_index];
                         if (!bounds.overlapsTile(tile_ptr)) continue;
                         job.contribution.addTriangle(tile_index, tri_index) catch |err| {
-                            std.log.err("Meshlet binning failed to record triangle {} for tile {}: {}", .{ tri_index, tile_index, err });
+                            meshlet_logger.errorSub(
+                                "binning",
+                                "meshlet binning failed triangle {} tile {}: {s}",
+                                .{ tri_index, tile_index, @errorName(err) },
+                            );
                         };
                     }
                 }
@@ -924,9 +1034,10 @@ pub const Renderer = struct {
         projected: [][2]i32,
         transformed_vertices: []math.Vec3,
         vertex_ready: []std.atomic.Value(VertexState),
-        meshlet_jobs: []MeshletTaskJob,
+        meshlet_jobs: []MeshletRenderJob,
         meshlet_job_handles: []Job,
         meshlet_job_completion: []bool,
+        meshlet_contributions: []MeshletContribution,
         work: MeshWork,
         mesh: ?*const Mesh,
         camera_position: math.Vec3,
@@ -942,9 +1053,10 @@ pub const Renderer = struct {
                 .projected = &[_][2]i32{},
                 .transformed_vertices = &[_]math.Vec3{},
                 .vertex_ready = &[_]std.atomic.Value(VertexState){},
-                .meshlet_jobs = &[_]MeshletTaskJob{},
+                .meshlet_jobs = &[_]MeshletRenderJob{},
                 .meshlet_job_handles = &[_]Job{},
                 .meshlet_job_completion = &[_]bool{},
+                .meshlet_contributions = &[_]MeshletContribution{},
                 .work = MeshWork.init(),
                 .mesh = null,
                 .camera_position = math.Vec3.new(0.0, 0.0, 0.0),
@@ -971,12 +1083,17 @@ pub const Renderer = struct {
             if (self.meshlet_jobs.len != 0) allocator.free(self.meshlet_jobs);
             if (self.meshlet_job_handles.len != 0) allocator.free(self.meshlet_job_handles);
             if (self.meshlet_job_completion.len != 0) allocator.free(self.meshlet_job_completion);
+            if (self.meshlet_contributions.len != 0) {
+                for (self.meshlet_contributions) |*contrib| contrib.deinit();
+                allocator.free(self.meshlet_contributions);
+            }
             self.projected = &[_][2]i32{};
             self.transformed_vertices = &[_]math.Vec3{};
             self.vertex_ready = &[_]std.atomic.Value(VertexState){};
-            self.meshlet_jobs = &[_]MeshletTaskJob{};
+            self.meshlet_jobs = &[_]MeshletRenderJob{};
             self.meshlet_job_handles = &[_]Job{};
             self.meshlet_job_completion = &[_]bool{};
+            self.meshlet_contributions = &[_]MeshletContribution{};
             self.mesh = null;
             self.light_dir = math.Vec3.new(0.0, 0.0, 0.0);
             self.valid = false;
@@ -1017,7 +1134,7 @@ pub const Renderer = struct {
 
             if (self.meshlet_jobs.len < capacity) {
                 if (self.meshlet_jobs.len == 0) {
-                    self.meshlet_jobs = try allocator.alloc(MeshletTaskJob, capacity);
+                    self.meshlet_jobs = try allocator.alloc(MeshletRenderJob, capacity);
                 } else {
                     self.meshlet_jobs = try allocator.realloc(self.meshlet_jobs, capacity);
                 }
@@ -1036,6 +1153,18 @@ pub const Renderer = struct {
                     self.meshlet_job_completion = try allocator.alloc(bool, capacity);
                 } else {
                     self.meshlet_job_completion = try allocator.realloc(self.meshlet_job_completion, capacity);
+                }
+            }
+
+            if (self.meshlet_contributions.len < capacity) {
+                const old_len = self.meshlet_contributions.len;
+                if (old_len == 0) {
+                    self.meshlet_contributions = try allocator.alloc(MeshletContribution, capacity);
+                    for (self.meshlet_contributions) |*contrib| contrib.* = MeshletContribution.init(allocator);
+                } else {
+                    const new_slice = try allocator.realloc(self.meshlet_contributions, capacity);
+                    for (new_slice[old_len..capacity]) |*contrib| contrib.* = MeshletContribution.init(allocator);
+                    self.meshlet_contributions = new_slice;
                 }
             }
         }
@@ -1166,6 +1295,18 @@ pub const Renderer = struct {
 
         const delta_seconds = self.beginFrame();
 
+        renderer_logger.debugSub(
+            "frame",
+            "begin frame {} camera=({d:.2},{d:.2},{d:.2}) fov={d:.1}",
+            .{
+                self.frame_count + 1,
+                self.camera_position.x,
+                self.camera_position.y,
+                self.camera_position.z,
+                self.camera_fov_deg,
+            },
+        );
+
         const rotation_speed = 2.0;
         if ((self.keys_pressed & input.KeyBits.left) != 0) self.rotation_angle -= rotation_speed * delta_seconds;
         if ((self.keys_pressed & input.KeyBits.right) != 0) self.rotation_angle += rotation_speed * delta_seconds;
@@ -1295,6 +1436,11 @@ pub const Renderer = struct {
             projection,
         );
         if (needs_update) {
+            meshlet_logger.debugSub(
+                "work",
+                "refreshing mesh work cache (vertices={} triangles={})",
+                .{ mesh.vertices.len, mesh.triangles.len },
+            );
             cache.beginUpdate();
             try self.generateMeshWork(
                 mesh,
@@ -1309,6 +1455,8 @@ pub const Renderer = struct {
                 light_dir,
             );
             cache.finalizeUpdate(mesh, self.camera_position, right, up, forward, light_dir, projection);
+        } else {
+            meshlet_logger.debugSub("work", "reusing cached mesh work", .{});
         }
 
         if (cache.transformed_vertices.len == mesh.vertices.len) {
@@ -1318,8 +1466,12 @@ pub const Renderer = struct {
         const mesh_work = &cache.work;
 
         if (self.use_tiled_rendering and self.tile_grid != null and self.tile_buffers != null) {
+            const tri_count = mesh_work.triangleSlice().len;
+            pipeline_logger.debugSub("dispatch", "rendering tiled path triangles={} meshlets={}", .{ tri_count, mesh_work.*.meshlet_len });
             try self.renderTiled(mesh, view_rotation, light_dir, pump, projection, mesh_work);
         } else {
+            const tri_count = mesh_work.triangleSlice().len;
+            pipeline_logger.debugSub("dispatch", "rendering direct path triangles={} meshlets={}", .{ tri_count, mesh_work.*.meshlet_len });
             try self.renderDirect(mesh, view_rotation, light_dir, projection, mesh_work);
         }
 
@@ -1331,10 +1483,21 @@ pub const Renderer = struct {
         }
 
         self.drawBitmap();
+        pipeline_logger.debugSub("present", "bitmap presented", .{});
 
         self.frame_count += 1;
         const current_time = std.time.nanoTimestamp();
         self.finalizeFrame(current_time);
+
+        renderer_logger.debugSub(
+            "frame",
+            "finish frame {} delta={d:.3}ms fps={}",
+            .{
+                self.frame_count,
+                delta_seconds * 1000.0,
+                self.current_fps,
+            },
+        );
     }
 
     fn beginFrame(self: *Renderer) f32 {
@@ -1620,123 +1783,90 @@ pub const Renderer = struct {
         const triangles = mesh_work.triangleSlice();
 
         if (triangles.len == 0) {
+            pipeline_logger.debugSub("tiled", "no triangles; compositing {} tiles", .{grid.tiles.len});
             for (grid.tiles, 0..) |*tile, tile_idx| {
                 TileRenderer.compositeTileToScreen(tile, &tile_buffers[tile_idx], &self.bitmap);
             }
             return;
         }
-        const tile_lists = try BinningStage.binTrianglesToTiles(triangles, &grid, self.allocator);
+        const tile_lists = try BinningStage.createTileTriangleLists(&grid, self.allocator);
         defer BinningStage.freeTileTriangleLists(tile_lists, self.allocator);
 
-        // NOTE: Experimental meshlet-aware binning via job system proved much slower (FPS fell ~90 → 16)
-        // because it relied on per-triangle heap pushes and copied results back into the same tile lists.
-        // Leaving the prototype below for future reference; any revival needs fixed-size buffers and an
-        // actual culling benefit beyond the existing linear bin pass.
-        //
-        // var tile_lists = try BinningStage.createTileTriangleLists(&grid, self.allocator);
-        // defer BinningStage.freeTileTriangleLists(tile_lists, self.allocator);
-        // if (self.job_system != null and mesh_work.meshletSlice().len != 0) {
-        //     // ... meshlet binning prototype (see git history Oct 21, 2025) ...
-        // } else {
-        //     BinningStage.clearTileTriangleLists(tile_lists);
-        //     BinningStage.binTrianglesRangeToTiles(triangles, 0, triangles.len, &grid, tile_lists) catch |err| {
-        //         std.log.err("Triangle binning failed: {}", .{err});
-        //     };
-        // }
+        if (self.job_system != null and mesh_work.*.meshlet_len != 0) {
+            self.populateTilesFromMeshlets(tile_lists, mesh_work);
+        } else {
+            BinningStage.binTrianglesRangeToTiles(triangles, 0, triangles.len, &grid, tile_lists) catch |err| {
+                pipeline_logger.errorSub("binning", "triangle binning failed: {s}", .{@errorName(err)});
+            };
+        }
 
         const tile_jobs = self.tile_jobs_buffer.?;
-        const jobs = self.job_buffer.?;
-        var job_completion = self.job_completion_buffer.?;
         std.debug.assert(tile_jobs.len == grid.tiles.len);
-        std.debug.assert(jobs.len == grid.tiles.len);
-        std.debug.assert(job_completion.len == grid.tiles.len);
-        @memset(job_completion, false);
 
-        if (self.job_system) |js| {
-            var pump_ok = true;
-            var submitted_jobs: usize = 0;
-            for (grid.tiles, 0..) |*tile, tile_idx| {
-                if (pump_ok) {
-                    if (pump) |p| {
-                        if ((tile_idx & 7) == 0 and !p(self)) {
-                            pump_ok = false;
-                        }
-                    }
-                }
-
-                tile_jobs[tile_idx] = TileRenderJob{
-                    .tile = tile,
-                    .tile_buffer = &tile_buffers[tile_idx],
-                    .tri_list = &tile_lists[tile_idx],
-                    .packets = triangles,
-                    .draw_wireframe = self.show_wireframe,
-                    .texture = self.texture,
-                    .projection = projection,
-                };
-                jobs[tile_idx] = Job.init(TileRenderJob.renderTileJob, @ptrCast(&tile_jobs[tile_idx]), null);
-                if (!js.submitJobAuto(&jobs[tile_idx])) {
-                    std.log.err("Tile {} failed to submit to job system", .{tile_idx});
-                    jobs[tile_idx].execute();
-                    job_completion[tile_idx] = true;
-                }
-                submitted_jobs = tile_idx + 1;
+        for (grid.tiles, 0..) |*tile, tile_idx| {
+            if (pump) |p| {
+                if ((tile_idx & 7) == 0 and !p(self)) return error.RenderInterrupted;
             }
-
-            if (submitted_jobs != 0) {
-                var remaining: usize = 0;
-                var idx_count: usize = 0;
-                while (idx_count < submitted_jobs) : (idx_count += 1) {
-                    if (!job_completion[idx_count]) remaining += 1;
-                }
-
-                while (remaining > 0) {
-                    var progress = false;
-                    for (jobs[0..submitted_jobs], 0..) |*job, idx| {
-                        if (job_completion[idx]) continue;
-                        if (job.isComplete()) {
-                            job_completion[idx] = true;
-                            remaining -= 1;
-                            progress = true;
-                        }
-                    }
-                    if (pump_ok) {
-                        if (pump) |p| {
-                            if (!p(self)) {
-                                pump_ok = false;
-                            }
-                        }
-                    }
-                    if (!progress) std.Thread.yield() catch {};
-                }
-            }
-
-            if (!pump_ok) {
-                while (js.pendingJobs() != 0) {
-                    std.Thread.yield() catch {};
-                }
-                return error.RenderInterrupted;
-            }
-        } else {
-            for (grid.tiles, 0..) |*tile, tile_idx| {
-                if (pump) |p| {
-                    if ((tile_idx & 7) == 0 and !p(self)) return error.RenderInterrupted;
-                }
-                tile_jobs[tile_idx] = TileRenderJob{
-                    .tile = tile,
-                    .tile_buffer = &tile_buffers[tile_idx],
-                    .tri_list = &tile_lists[tile_idx],
-                    .packets = triangles,
-                    .draw_wireframe = self.show_wireframe,
-                    .texture = self.texture,
-                    .projection = projection,
-                };
-                TileRenderJob.renderTileJob(@ptrCast(&tile_jobs[tile_idx]));
-            }
+            tile_jobs[tile_idx] = TileRenderJob{
+                .tile = tile,
+                .tile_buffer = &tile_buffers[tile_idx],
+                .tri_list = &tile_lists[tile_idx],
+                .packets = triangles,
+                .draw_wireframe = self.show_wireframe,
+                .texture = self.texture,
+                .projection = projection,
+            };
+            TileRenderJob.renderTileJob(@ptrCast(&tile_jobs[tile_idx]));
         }
 
         // 4. Compositing: Copy the pixels from each completed tile buffer to the main screen bitmap.
         for (grid.tiles, 0..) |*tile, tile_idx| {
             TileRenderer.compositeTileToScreen(tile, &tile_buffers[tile_idx], &self.bitmap);
+        }
+    }
+
+    fn populateTilesFromMeshlets(
+        self: *Renderer,
+        tile_lists: []BinningStage.TileTriangleList,
+        mesh_work: *const MeshWork,
+    ) void {
+        const meshlet_count = mesh_work.*.meshlet_len;
+        if (meshlet_count == 0) return;
+
+        const contributions = self.mesh_work_cache.meshlet_contributions;
+        if (contributions.len < meshlet_count) {
+            meshlet_logger.errorSub(
+                "contrib",
+                "meshlet contribution capacity {} insufficient for packets {}",
+                .{ contributions.len, meshlet_count },
+            );
+            return;
+        }
+
+        const triangles = mesh_work.triangleSlice();
+
+        for (contributions[0..meshlet_count]) |contrib| {
+            for (contrib.entries.items[0..contrib.active_count]) |entry| {
+                if (entry.tile_index >= tile_lists.len) {
+                    meshlet_logger.errorSub(
+                        "contrib",
+                        "meshlet contribution tile {} outside tile list {}",
+                        .{ entry.tile_index, tile_lists.len },
+                    );
+                    continue;
+                }
+
+                for (entry.triangles.items) |tri_idx| {
+                    if (tri_idx >= triangles.len) continue;
+                    tile_lists[entry.tile_index].append(tri_idx) catch |err| {
+                        meshlet_logger.errorSub(
+                            "contrib",
+                            "failed to append triangle {} to tile {}: {s}",
+                            .{ tri_idx, entry.tile_index, @errorName(err) },
+                        );
+                    };
+                }
+            }
         }
     }
 
@@ -1777,7 +1907,7 @@ pub const Renderer = struct {
         if (mesh.meshlets.len == 0) {
             const mesh_mut: *Mesh = @constCast(mesh);
             mesh_mut.generateMeshlets(64, 126) catch |err| {
-                std.log.err("generateMeshlets failed: {}", .{err});
+                meshlet_logger.errorSub("build", "generateMeshlets failed: {s}", .{@errorName(err)});
             };
             self.mesh_work_cache.invalidate();
         }
@@ -1788,7 +1918,7 @@ pub const Renderer = struct {
             try work.beginWrite(self.allocator, packet_count, reserve);
             var writer = MeshWorkWriter.init(work);
             for (mesh.triangles, 0..) |tri, tri_idx| {
-                try emitTriangleToWork(
+                _ = try emitTriangleToWork(
                     &writer,
                     mesh,
                     tri_idx,
@@ -1921,10 +2051,18 @@ pub const Renderer = struct {
                 fill += 1;
             }
             if (fill != visible_meshlet_count) {
-                std.log.err("Visible meshlet fill mismatch: fill {} expected {}", .{ fill, visible_meshlet_count });
+                meshlet_logger.errorSub(
+                    "visibility",
+                    "visible meshlet fill mismatch fill={} expected={}",
+                    .{ fill, visible_meshlet_count },
+                );
             }
             if (running != visible_triangle_budget) {
-                std.log.err("Visible triangle budget mismatch: running {} expected {}", .{ running, visible_triangle_budget });
+                meshlet_logger.errorSub(
+                    "visibility",
+                    "triangle budget mismatch running={} expected={}",
+                    .{ running, visible_triangle_budget },
+                );
             }
         }
 
@@ -1952,17 +2090,23 @@ pub const Renderer = struct {
             var meshlet_jobs = cache_ptr.meshlet_jobs[0..visible_meshlet_count];
             var jobs = cache_ptr.meshlet_job_handles[0..visible_meshlet_count];
             var job_completion = cache_ptr.meshlet_job_completion[0..visible_meshlet_count];
+            var contributions = cache_ptr.meshlet_contributions[0..visible_meshlet_count];
             @memset(job_completion, false);
+            for (contributions) |*contrib| contrib.clear();
 
             var job_idx: usize = 0;
             while (job_idx < visible_meshlet_count) : (job_idx += 1) {
                 const meshlet_index = visible_indices[job_idx];
                 if (meshlet_index >= meshlet_count) {
-                    std.log.err("Visible meshlet index {} out of range (count {})", .{ meshlet_index, meshlet_count });
+                    meshlet_logger.errorSub(
+                        "dispatch",
+                        "visible meshlet index {} out of range (count {})",
+                        .{ meshlet_index, meshlet_count },
+                    );
                     continue;
                 }
                 const meshlet_ptr = &meshlets[meshlet_index];
-                meshlet_jobs[job_idx] = MeshletTaskJob{
+                meshlet_jobs[job_idx] = MeshletRenderJob{
                     .mesh = mesh,
                     .meshlet = meshlet_ptr,
                     .mesh_work = work,
@@ -1977,10 +2121,12 @@ pub const Renderer = struct {
                     .light_dir = light_dir,
                     .output_start = meshlet_offsets[job_idx],
                     .written_count = 0,
+                    .grid = if (self.tile_grid) |*grid_ref| grid_ref else null,
+                    .contribution = &contributions[job_idx],
                 };
-                jobs[job_idx] = Job.init(MeshletTaskJob.run, @ptrCast(&meshlet_jobs[job_idx]), null);
+                jobs[job_idx] = Job.init(MeshletRenderJob.run, @ptrCast(&meshlet_jobs[job_idx]), null);
                 if (!js.submitJobAuto(&jobs[job_idx])) {
-                    std.log.err("Meshlet job {} failed to submit", .{job_idx});
+                    meshlet_logger.errorSub("dispatch", "meshlet job {} failed to submit", .{job_idx});
                     meshlet_jobs[job_idx].process();
                     job_completion[job_idx] = true;
                 }
@@ -2009,6 +2155,7 @@ pub const Renderer = struct {
                     const dest = work.triangles[packed_offset .. packed_offset + count];
                     std.mem.copyForwards(TrianglePacket, dest, src);
                 }
+                contributions[idx].remapRange(original_start, count, packed_offset);
                 work.meshlet_packets[idx].triangle_start = packed_offset;
                 work.meshlet_packets[idx].triangle_count = count;
                 packed_offset += count;
@@ -2022,13 +2169,17 @@ pub const Renderer = struct {
             while (visible_idx < visible_meshlet_count) : (visible_idx += 1) {
                 const meshlet_index = visible_indices[visible_idx];
                 if (meshlet_index >= meshlet_count) {
-                    std.log.err("Sequential meshlet index {} out of range (count {})", .{ meshlet_index, meshlet_count });
+                    meshlet_logger.errorSub(
+                        "dispatch",
+                        "sequential meshlet index {} out of range (count {})",
+                        .{ meshlet_index, meshlet_count },
+                    );
                     continue;
                 }
                 const meshlet_ptr = &meshlets[meshlet_index];
                 for (meshlet_ptr.triangle_indices) |tri_idx| {
                     const tri = mesh.triangles[tri_idx];
-                    emitTriangleToWork(
+                    _ = emitTriangleToWork(
                         &writer,
                         mesh,
                         tri_idx,
@@ -2045,7 +2196,8 @@ pub const Renderer = struct {
                         light_dir,
                         &cursor,
                     ) catch |err| {
-                        std.log.err("Meshlet emit failed: {}", .{err});
+                        meshlet_logger.errorSub("emit", "meshlet emit failed: {s}", .{@errorName(err)});
+                        continue;
                     };
                 }
             }

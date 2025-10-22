@@ -24,3 +24,5 @@ Thumbs.db
 zig-out/*
 benchmarks/.zig-cache/*
 experiments/hotreload_demo/.zig-cache/*
+experiments/play_mp3/.zig-cache/*
+*/.zig-cache/*
