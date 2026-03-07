@@ -247,6 +247,118 @@ const DepthOfFieldScratch = struct {
     height: usize,
 };
 
+
+const SSGIJobContext = struct {
+    renderer: *Renderer,
+    scene_pixels: []u32,
+    scratch_pixels: []u32,
+    scene_camera: []const math.Vec3,
+    start_row: usize,
+    end_row: usize,
+
+    fn run(ctx_ptr: *anyopaque) void {
+        const ctx: *SSGIJobContext = @ptrCast(@alignCast(ctx_ptr));
+        const pixels = ctx.scene_pixels;
+        const out_pixels = ctx.scratch_pixels;
+        const camera = ctx.scene_camera;
+        const width = ctx.renderer.bitmap.width;
+        const height = ctx.renderer.bitmap.height;
+
+        const max_dist = config.POST_SSGI_RADIUS;
+        const intensity = config.POST_SSGI_INTENSITY;
+        const bounce_decay = config.POST_SSGI_BOUNCE_ATTENUATION;
+
+        var y: usize = ctx.start_row;
+        while (y < ctx.end_row) : (y += 1) {
+            var x: usize = 0;
+            while (x < width) : (x += 1) {
+                const idx = y * width + x;
+                const pos = camera[idx];
+                
+                if (!validSceneCameraSample(pos)) {
+                    out_pixels[idx] = pixels[idx];
+                    continue;
+                }
+
+                const normal = estimateSceneNormal(
+                    camera, width, height, pos, @intCast(x), @intCast(y), 1
+                );
+
+                const seed = @as(u32, @intCast(x)) *% 73856093 ^ @as(u32, @intCast(y)) *% 19349663;
+                var rand = std.rand.DefaultPrng.init(seed);
+                
+                var accum_r: f32 = 0;
+                var accum_g: f32 = 0;
+                var accum_b: f32 = 0;
+                var valid_samples: f32 = 0;
+
+                var s: i32 = 0;
+                while (s < config.POST_SSGI_SAMPLES) : (s += 1) {
+                    const angle = rand.random().float(f32) * 2.0 * std.math.pi;
+                    const r = rand.random().float(f32) * @as(f32, @floatFromInt(max_dist));
+                    
+                    const dx = @as(i32, @intFromFloat(@cos(angle) * r));
+                    const dy = @as(i32, @intFromFloat(@sin(angle) * r));
+                    
+                    const nx = @as(i32, @intCast(x)) + dx;
+                    const ny = @as(i32, @intCast(y)) + dy;
+                    
+                    if (nx < 0 or ny < 0 or nx >= width or ny >= height) continue;
+                    
+                    const n_idx = @as(usize, @intCast(ny)) * width + @as(usize, @intCast(nx));
+                    const n_pos = camera[n_idx];
+                    if (!validSceneCameraSample(n_pos)) continue;
+                    
+                    const delta = math.Vec3.sub(n_pos, pos);
+                    const dist_sq = math.Vec3.lengthSq(delta);
+                    if (dist_sq < 0.001) continue;
+                    
+                    const dist = @sqrt(dist_sq);
+                    const dir = math.Vec3.scale(delta, 1.0 / dist);
+                    const ndot = math.Vec3.dot(normal, dir);
+                    
+                    // Only points in front of the normal can bounce light
+                    if (ndot > 0.0) {
+                        const neighbor_color = pixels[n_idx];
+                        const r_val = @as(f32, @floatFromInt((neighbor_color >> 16) & 0xFF)) / 255.0;
+                        const g_val = @as(f32, @floatFromInt((neighbor_color >> 8) & 0xFF)) / 255.0;
+                        const b_val = @as(f32, @floatFromInt(neighbor_color & 0xFF)) / 255.0;
+                        
+                        // Inverse square falloff bounded by max bounce dist
+                        const falloff = 1.0 / (1.0 + dist_sq * bounce_decay);
+                        const weight = ndot * falloff;
+                        
+                        accum_r += r_val * weight;
+                        accum_g += g_val * weight;
+                        accum_b += b_val * weight;
+                        valid_samples += 1.0;
+                    }
+                }
+
+                const base_color = pixels[idx];
+                if (valid_samples > 0) {
+                    const avg_r = accum_r / valid_samples * intensity;
+                    const avg_g = accum_g / valid_samples * intensity;
+                    const avg_b = accum_b / valid_samples * intensity;
+                    
+                    const br = @as(f32, @floatFromInt((base_color >> 16) & 0xFF)) / 255.0;
+                    const bg = @as(f32, @floatFromInt((base_color >> 8) & 0xFF)) / 255.0;
+                    const bb = @as(f32, @floatFromInt(base_color & 0xFF)) / 255.0;
+                    
+                    // Add indirect light to base color (assuming base color is surface albedo approx)
+                    const fr = std.math.clamp(br + br * avg_r, 0.0, 1.0) * 255.0;
+                    const fg = std.math.clamp(bg + bg * avg_g, 0.0, 1.0) * 255.0;
+                    const fb = std.math.clamp(bb + bb * avg_b, 0.0, 1.0) * 255.0;
+                    
+                    out_pixels[idx] = (0xFF << 24) | (@as(u32, @intFromFloat(fr)) << 16) | (@as(u32, @intFromFloat(fg)) << 8) | @as(u32, @intFromFloat(fb));
+                } else {
+                    out_pixels[idx] = base_color;
+                }
+            }
+        }
+    }
+};
+
 const SSRJobContext = struct {
     renderer: *Renderer,
     scene_pixels: []u32,
@@ -2533,6 +2645,8 @@ pub const Renderer = struct {
     dof_scratch: DepthOfFieldScratch,
     ssr_job_contexts: []SSRJobContext,
     ssr_scratch_pixels: []u32,
+    ssgi_scratch_pixels: []u32,
+    ssgi_job_contexts: []SSGIJobContext,
     dof_job_contexts: []DepthOfFieldJobContext,
     dof_focal_distance: f32,
     dof_target_focal_distance: f32,
@@ -2635,6 +2749,10 @@ pub const Renderer = struct {
         errdefer allocator.free(dof_scratch_pixels);
         const ssr_scratch_pixels = try allocator.alloc(u32, fb_pix_count);
         errdefer allocator.free(ssr_scratch_pixels);
+        const ssgi_scratch_pixels = try allocator.alloc(u32, fb_pix_count);
+        errdefer allocator.free(ssgi_scratch_pixels);
+        const ssgi_job_contexts = try allocator.alloc(SSGIJobContext, color_grade_job_count);
+        errdefer allocator.free(ssgi_job_contexts);
         const dof_job_contexts = try allocator.alloc(DepthOfFieldJobContext, color_grade_job_count);
         const ssr_job_contexts = try allocator.alloc(SSRJobContext, color_grade_job_count);
         errdefer allocator.free(ssr_job_contexts);
@@ -2859,6 +2977,8 @@ pub const Renderer = struct {
             .dof_job_contexts = dof_job_contexts,
             .ssr_job_contexts = ssr_job_contexts,
             .ssr_scratch_pixels = ssr_scratch_pixels,
+            .ssgi_scratch_pixels = ssgi_scratch_pixels,
+            .ssgi_job_contexts = ssgi_job_contexts,
             .dof_focal_distance = config.POST_DOF_FOCAL_DISTANCE,
             .dof_target_focal_distance = config.POST_DOF_FOCAL_DISTANCE,
             .taa_job_contexts = taa_job_contexts,
@@ -2925,6 +3045,8 @@ pub const Renderer = struct {
         self.allocator.free(self.bloom_job_contexts);
         self.allocator.free(self.dof_scratch.pixels);
         self.allocator.free(self.ssr_scratch_pixels);
+        self.allocator.free(self.ssgi_scratch_pixels);
+        self.allocator.free(self.ssgi_job_contexts);
         self.allocator.free(self.ssr_job_contexts);
         self.allocator.free(self.dof_job_contexts);
         self.allocator.free(self.taa_job_contexts);

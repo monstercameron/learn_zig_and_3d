@@ -77,6 +77,12 @@ pub var POST_HYBRID_SHADOW_EDGE_MAX_COVERAGE: f32 = 0.78;
 pub var POST_HYBRID_SHADOW_EDGE_BLEND: f32 = 0.4;
 /// Enables Screen Space Ambient Occlusion for realistic corner shading.
 /// Screen Space Reflections (SSR)
+
+pub var POST_SSGI_ENABLED: bool = true;
+pub var POST_SSGI_SAMPLES: i32 = 16;
+pub var POST_SSGI_RADIUS: i32 = 12; // Pixel radius
+pub var POST_SSGI_INTENSITY: f32 = 1.2;
+pub var POST_SSGI_BOUNCE_ATTENUATION: f32 = 0.5;
 pub var POST_SSR_ENABLED: bool = true;
 pub var POST_SSR_MAX_SAMPLES: i32 = 16;
 pub var POST_SSR_STEP: f32 = 0.1;
