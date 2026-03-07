@@ -42,13 +42,13 @@ pub var TEXTURE_FILTERING_BILINEAR: bool = true;
 /// Enables a color grading pass on the final image.
 pub var POST_COLOR_CORRECTION_ENABLED: bool = true;
 /// Enables the bloom effect for overly bright pixels simulating glowing lights.
-pub var POST_BLOOM_ENABLED: bool = true;
+pub var POST_BLOOM_ENABLED: bool = false;
 /// Enables depth-aware atmospheric fog to simulate distance.
-pub var POST_DEPTH_FOG_ENABLED: bool = true;
+pub var POST_DEPTH_FOG_ENABLED: bool = false;
 /// Enables HDR skybox rendering
 pub var POST_SKYBOX_ENABLED: bool = true;
 /// Enables the primary generic shadow mapping pass.
-pub var POST_SHADOW_ENABLED: bool = true;
+pub var POST_SHADOW_ENABLED: bool = false;
 /// Square dimension resolution of the shadow depth map target.
 pub var POST_SHADOW_MAP_SIZE: usize = 1024;
 /// Controls the opacity intensity of standard shadows (0-100).
@@ -78,19 +78,19 @@ pub var POST_HYBRID_SHADOW_EDGE_BLEND: f32 = 0.4;
 /// Enables Screen Space Ambient Occlusion for realistic corner shading.
 /// Screen Space Reflections (SSR)
 
-pub var POST_SSGI_ENABLED: bool = true;
+pub var POST_SSGI_ENABLED: bool = false;
 pub var POST_SSGI_SAMPLES: i32 = 16;
 pub var POST_SSGI_RADIUS: i32 = 12; // Pixel radius
 pub var POST_SSGI_INTENSITY: f32 = 1.2;
 pub var POST_SSGI_BOUNCE_ATTENUATION: f32 = 0.5;
-pub var POST_SSR_ENABLED: bool = true;
+pub var POST_SSR_ENABLED: bool = false;
 pub var POST_SSR_MAX_SAMPLES: i32 = 16;
 pub var POST_SSR_STEP: f32 = 0.1;
 pub var POST_SSR_MAX_DISTANCE: f32 = 100.0;
 pub var POST_SSR_THICKNESS: f32 = 0.5;
 pub var POST_SSR_INTENSITY: f32 = 0.8;
 
-pub var POST_SSAO_ENABLED: bool = true;
+pub var POST_SSAO_ENABLED: bool = false;
 /// SSAO rendering resolution divisor (higher = lower res & faster).
 pub var POST_SSAO_DOWNSAMPLE: i32 = 4;
 /// The sampling spread radius in screen space for SSAO.
@@ -102,7 +102,7 @@ pub var POST_SSAO_BIAS: f32 = 0.08;
 /// Blurring threshold difference between sampling depths.
 pub var POST_SSAO_BLUR_DEPTH_THRESHOLD: f32 = 0.55;
 /// Enables Temporal Anti-Aliasing (TAA) to smooth out jagged edges across frames.
-pub var POST_TAA_ENABLED: bool = true;
+pub var POST_TAA_ENABLED: bool = false;
 /// Percentage mix of historic frame data blended into current image.
 pub var POST_TAA_HISTORY_PERCENT: i32 = 92;
 /// A depth threshold allowing TAA to discard historic data to prevent ghosting.
@@ -125,7 +125,7 @@ pub var POST_BLOOM_THRESHOLD: i32 = 168;
 pub var POST_BLOOM_INTENSITY_PERCENT: i32 = 55;
 
 /// Enables Depth of Field (DoF) to blur background and foreground objects outside the focal range.
-pub var POST_DOF_ENABLED: bool = true;
+pub var POST_DOF_ENABLED: bool = false;
 /// The distance from the camera that is perfectly in focus.
 pub var POST_DOF_FOCAL_DISTANCE: f32 = 4.0;
 /// The depth range around the focal distance that remains in focus.
@@ -134,7 +134,7 @@ pub var POST_DOF_FOCAL_RANGE: f32 = 2.0;
 pub var POST_DOF_BLUR_RADIUS: i32 = 1;
 
 /// Enables Motion Blur based on pixel velocity from previous frames.
-pub var POST_MOTION_BLUR_ENABLED: bool = true;
+pub var POST_MOTION_BLUR_ENABLED: bool = false;
 /// The number of samples gathered along the velocity vector for motion blur.
 pub var POST_MOTION_BLUR_SAMPLES: i32 = 6;
 /// The intensity multiplier for motion blur trail length. (0.5 simulates a cinematic 180-degree shutter)
@@ -142,18 +142,18 @@ pub var POST_MOTION_BLUR_INTENSITY: f32 = 0.5;
 
 
 // --- Cinematic Effects ---
-pub var POST_LENS_FLARE_ENABLED: bool = true;
+pub var POST_LENS_FLARE_ENABLED: bool = false;
 pub var POST_LENS_FLARE_THRESHOLD: i32 = 200;
 pub var POST_LENS_FLARE_INTENSITY_PERCENT: i32 = 40;
 
-pub var POST_CHROMATIC_ABERRATION_ENABLED: bool = true;
+pub var POST_CHROMATIC_ABERRATION_ENABLED: bool = false;
 pub var POST_CHROMATIC_ABERRATION_STRENGTH: f32 = 1.0; 
 
-pub var POST_FILM_GRAIN_VIGNETTE_ENABLED: bool = true;
+pub var POST_FILM_GRAIN_VIGNETTE_ENABLED: bool = false;
 pub var POST_FILM_GRAIN_STRENGTH: f32 = 0.10;
 pub var POST_VIGNETTE_STRENGTH: f32 = 0.10;
 
-pub var POST_GOD_RAYS_ENABLED: bool = true;
+pub var POST_GOD_RAYS_ENABLED: bool = false;
 pub var POST_GOD_RAYS_SAMPLES: i32 = 16;
 pub var POST_GOD_RAYS_DENSITY: f32 = 1.0;
 pub var POST_GOD_RAYS_WEIGHT: f32 = 0.02;

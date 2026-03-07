@@ -376,6 +376,7 @@ const SSRJobContext = struct {
     scene_pixels: []u32,
     scratch_pixels: []u32,
     scene_camera: []math.Vec3,
+    scene_normal: []math.Vec3,
     scene_depth: []f32,
     width: usize,
     height: usize,
@@ -2620,6 +2621,7 @@ pub const Renderer = struct {
     depth_fog_config: DepthFogConfig,
     scene_depth: []f32,
     scene_camera: []math.Vec3,
+    scene_normal: []math.Vec3,
     taa_scratch: TemporalAAScratch,
     taa_previous_view: TemporalAAViewState,
     hybrid_shadow_coarse_cache: []u8,
@@ -2775,6 +2777,8 @@ pub const Renderer = struct {
         errdefer allocator.free(scene_depth);
         const scene_camera = try allocator.alloc(math.Vec3, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(scene_camera);
+        const scene_normal = try allocator.alloc(math.Vec3, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        errdefer allocator.free(scene_normal);
         const taa_history_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(taa_history_pixels);
         const taa_resolve_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
@@ -2921,6 +2925,7 @@ pub const Renderer = struct {
             },
             .scene_depth = scene_depth,
             .scene_camera = scene_camera,
+            .scene_normal = scene_normal,
             .taa_scratch = .{
                 .history_pixels = taa_history_pixels,
                 .resolve_pixels = taa_resolve_pixels,
@@ -3030,6 +3035,7 @@ pub const Renderer = struct {
         if (self.active_tile_indices) |indices| self.allocator.free(indices);
         self.allocator.free(self.scene_depth);
         self.allocator.free(self.scene_camera);
+        self.allocator.free(self.scene_normal);
         self.allocator.free(self.taa_scratch.history_pixels);
         self.allocator.free(self.taa_scratch.resolve_pixels);
         self.allocator.free(self.taa_scratch.history_depth);
@@ -3103,6 +3109,7 @@ pub const Renderer = struct {
         const ClipVertex = struct {
             position: math.Vec3,
             uv: math.Vec2,
+            normal: math.Vec3,
         };
 
         fn interpolateClipVertex(a: ClipVertex, b: ClipVertex, near_plane: f32) ClipVertex {
@@ -3113,7 +3120,9 @@ pub const Renderer = struct {
             const position = math.Vec3.add(a.position, math.Vec3.scale(direction, t));
             const uv_delta = math.Vec2.sub(b.uv, a.uv);
             const uv = math.Vec2.add(a.uv, math.Vec2.scale(uv_delta, t));
-            return ClipVertex{ .position = position, .uv = uv };
+            const normal_delta = math.Vec3.sub(b.normal, a.normal);
+            const normal = math.Vec3.normalize(math.Vec3.add(a.normal, math.Vec3.scale(normal_delta, t)));
+            return ClipVertex{ .position = position, .uv = uv, .normal = normal };
         }
 
         fn textureForIndex(job: *const TileRenderJob, texture_index: u16) ?*const texture.Texture {
@@ -3200,6 +3209,9 @@ pub const Renderer = struct {
                 const shading = TileRenderer.ShadingParams{
                     .base_color = base_color,
                     .texture = job.textureForIndex(texture_index),
+                    .normals = [3]math.Vec3{ vertices[0].normal, vertices[tri_idx].normal, vertices[tri_idx + 1].normal },
+                    .metallic = 0.0,
+                    .roughness = 1.0,
                     .uv0 = vertices[0].uv,
                     .uv1 = vertices[tri_idx].uv,
                     .uv2 = vertices[tri_idx + 1].uv,
@@ -3236,9 +3248,9 @@ pub const Renderer = struct {
                 if (!front0 and !front1 and !front2) continue;
 
                 var clip_input = [_]ClipVertex{
-                    ClipVertex{ .position = camera_positions[0], .uv = packet.uv[0] },
-                    ClipVertex{ .position = camera_positions[1], .uv = packet.uv[1] },
-                    ClipVertex{ .position = camera_positions[2], .uv = packet.uv[2] },
+                    ClipVertex{ .position = camera_positions[0], .uv = packet.uv[0], .normal = packet.normals[0] },
+                    ClipVertex{ .position = camera_positions[1], .uv = packet.uv[1], .normal = packet.normals[1] },
+                    ClipVertex{ .position = camera_positions[2], .uv = packet.uv[2], .normal = packet.normals[2] },
                 };
 
                 var clipped: [max_clipped_vertices]ClipVertex = undefined;
@@ -3426,7 +3438,10 @@ pub const Renderer = struct {
             p0_cam,
             p1_cam,
             p2_cam,
+            [3]math.Vec3{ normal_cam, normal_cam, normal_cam },
             uv,
+            0.0, // metallic
+            1.0, // roughness
             tri.base_color,
             tri.texture_index,
             intensity,
@@ -4064,7 +4079,10 @@ pub const Renderer = struct {
             p0: math.Vec3,
             p1: math.Vec3,
             p2: math.Vec3,
+            normals: [3]math.Vec3,
             uv: [3]math.Vec2,
+            metallic: f32,
+            roughness: f32,
             base_color: u32,
             texture_index: u16,
             intensity: f32,
@@ -4076,7 +4094,10 @@ pub const Renderer = struct {
             self.work.triangles[idx] = TrianglePacket{
                 .screen = .{ screen0, screen1, screen2 },
                 .camera = .{ p0, p1, p2 },
+                .normals = normals,
                 .uv = uv,
+                .metallic = metallic,
+                .roughness = roughness,
                 .base_color = base_color,
                 .texture_index = texture_index,
                 .intensity = intensity,
@@ -5726,14 +5747,19 @@ pub const Renderer = struct {
 
                 const hdr_color = ctx.hdri_map.sampleEquirectangularFast(dir_world);
 
-                // Extremely simple basic tonemap (reinhard) just to get it to 8-bit ARGB
-                const r_ldr = hdr_color.x / (1.0 + hdr_color.x);
-                const g_ldr = hdr_color.y / (1.0 + hdr_color.y);
-                const b_ldr = hdr_color.z / (1.0 + hdr_color.z);
+                // Tonemap with exposure and gamma correction
+                const exposure: f32 = 2.5;
+                const r_ldr = (hdr_color.x * exposure) / (1.0 + (hdr_color.x * exposure));
+                const g_ldr = (hdr_color.y * exposure) / (1.0 + (hdr_color.y * exposure));
+                const b_ldr = (hdr_color.z * exposure) / (1.0 + (hdr_color.z * exposure));
 
-                const r = @as(u32, @intFromFloat(std.math.clamp(r_ldr * 255.0, 0.0, 255.0)));
-                const g = @as(u32, @intFromFloat(std.math.clamp(g_ldr * 255.0, 0.0, 255.0)));
-                const b = @as(u32, @intFromFloat(std.math.clamp(b_ldr * 255.0, 0.0, 255.0)));
+                const r_gamma = std.math.sqrt(r_ldr);
+                const g_gamma = std.math.sqrt(g_ldr);
+                const b_gamma = std.math.sqrt(b_ldr);
+
+                const r = @as(u32, @intFromFloat(std.math.clamp(r_gamma * 255.0, 0.0, 255.0)));
+                const g = @as(u32, @intFromFloat(std.math.clamp(g_gamma * 255.0, 0.0, 255.0)));
+                const b = @as(u32, @intFromFloat(std.math.clamp(b_gamma * 255.0, 0.0, 255.0)));
 
                 ctx.renderer.bitmap.pixels[idx] = (0xFF << 24) | (r << 16) | (g << 8) | b;
             }
@@ -6780,6 +6806,7 @@ pub const Renderer = struct {
                 .scene_pixels = self.bitmap.pixels,
                 .scratch_pixels = self.ssr_scratch_pixels,
                 .scene_camera = self.scene_camera,
+                .scene_normal = self.scene_normal,
                 .scene_depth = self.scene_depth,
                 .width = scene_width,
                 .height = scene_height,
@@ -6806,6 +6833,7 @@ pub const Renderer = struct {
                     .scene_pixels = self.bitmap.pixels,
                     .scratch_pixels = self.ssr_scratch_pixels,
                     .scene_camera = self.scene_camera,
+                    .scene_normal = self.scene_normal,
                     .scene_depth = self.scene_depth,
                     .width = scene_width,
                     .height = scene_height,
@@ -7384,7 +7412,7 @@ pub const Renderer = struct {
         // 4. Compositing: Copy the pixels from each completed tile buffer to the main screen bitmap.
         for (active_indices[0..active_tile_count]) |tile_idx| {
             const tile = &grid.tiles[tile_idx];
-            TileRenderer.compositeTileToScreen(tile, &tile_buffers[tile_idx], &self.bitmap, self.scene_depth, self.scene_camera);
+            TileRenderer.compositeTileToScreen(tile, &tile_buffers[tile_idx], &self.bitmap, self.scene_depth, self.scene_camera, self.scene_normal);
         }
     }
 

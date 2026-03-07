@@ -39,6 +39,9 @@ pub const ShadingParams = struct {
     uv1: math.Vec2,
     uv2: math.Vec2,
     intensity: f32,
+    normals: [3]math.Vec3,
+    metallic: f32,
+    roughness: f32,
 };
 
 // ========== TILE STRUCTURES ==========
@@ -67,35 +70,39 @@ pub const Tile = struct {
 /// A per-tile rendering buffer. Each worker thread renders into one of these.
 /// JS Analogy: This is like a small, off-screen `<canvas>` for a single worker.
 pub const TileBuffer = struct {
-    pixels: []u32, // The local pixel buffer for this tile.
+    pixels: []math.Vec4, // The local pixel buffer for this tile.
     depth: []f32, // The local depth buffer (z-buffer) for this tile.
     camera: []math.Vec3, // Per-pixel camera-space position for post passes.
+    normal: []math.Vec3, // Per-pixel normal for deferred shading.
     width: i32,
     height: i32,
     allocator: std.mem.Allocator,
 
     pub fn init(width: i32, height: i32, allocator: std.mem.Allocator) !TileBuffer {
         const pixel_count = @as(usize, @intCast(width * height));
-        const pixels = try allocator.alloc(u32, pixel_count);
+        const pixels = try allocator.alloc(math.Vec4, pixel_count);
         errdefer allocator.free(pixels);
         const depth = try allocator.alloc(f32, pixel_count);
         errdefer allocator.free(depth);
         const camera = try allocator.alloc(math.Vec3, pixel_count);
-        return TileBuffer{ .pixels = pixels, .depth = depth, .camera = camera, .width = width, .height = height, .allocator = allocator };
+        const normal = try allocator.alloc(math.Vec3, pixel_count);
+        return TileBuffer{ .pixels = pixels, .depth = depth, .camera = camera, .normal = normal, .width = width, .height = height, .allocator = allocator };
     }
 
     /// Clears the tile for a new frame. Fills with a background color and resets the depth buffer.
     pub fn clear(self: *TileBuffer) void {
-        @memset(self.pixels, 0xFF000000); // Black background.
+        @memset(self.pixels, math.Vec4.new(0.0, 0.0, 0.0, 1.0)); // Black background.
         // Reset all depth values to infinity. The first pixel drawn at any location will always be closer.
         @memset(self.depth, std.math.inf(f32));
         @memset(self.camera, math.Vec3.new(0.0, 0.0, 0.0));
+        @memset(self.normal, math.Vec3.new(0.0, 0.0, 0.0));
     }
 
     pub fn deinit(self: *TileBuffer) void {
         self.allocator.free(self.pixels);
         self.allocator.free(self.depth);
         self.allocator.free(self.camera);
+        self.allocator.free(self.normal);
     }
 };
 
@@ -141,7 +148,7 @@ pub const TileGrid = struct {
 
 /// Copies the pixels and geometry buffers from a completed tile buffer to the main screen surfaces.
 /// JS Analogy: `main_context.drawImage(tile_canvas, tile.x, tile.y);`
-pub fn compositeTileToScreen(tile: *const Tile, tile_buffer: *const TileBuffer, bitmap: *Bitmap, depth_buffer: ?[]f32, camera_buffer: ?[]math.Vec3) void {
+pub fn compositeTileToScreen(tile: *const Tile, tile_buffer: *const TileBuffer, bitmap: *Bitmap, depth_buffer: ?[]f32, camera_buffer: ?[]math.Vec3, normal_buffer: ?[]math.Vec3) void {
     var y: i32 = 0;
     while (y < tile.height) : (y += 1) {
         const tile_row_start = @as(usize, @intCast(y * tile_buffer.width));
@@ -149,11 +156,23 @@ pub fn compositeTileToScreen(tile: *const Tile, tile_buffer: *const TileBuffer, 
         const screen_row_start = @as(usize, @intCast((tile.y + y) * bitmap.width + tile.x));
         const screen_row_end = screen_row_start + @as(usize, @intCast(tile.width));
 
-        std.mem.copyForwards(u32, bitmap.pixels[screen_row_start..screen_row_end], tile_buffer.pixels[tile_row_start..tile_row_end]);
+        var cx: usize = 0;
+        const width_usize = @as(usize, @intCast(tile.width));
+        while (cx < width_usize) : (cx += 1) {
+            const final_color_hdr = tile_buffer.pixels[tile_row_start + cx];
+            const final_color_rgb = math.Vec3.new(final_color_hdr.x, final_color_hdr.y, final_color_hdr.z);
+            const a = @as(u32, @intFromFloat(final_color_hdr.w * 255.0));
+            // pack and tonemap to sRGB
+            const packed_u32 = lighting.packColorTonemapped(final_color_rgb, a);
+            bitmap.pixels[screen_row_start + cx] = packed_u32;
+        }
         if (depth_buffer) |buffer| {
             std.mem.copyForwards(f32, buffer[screen_row_start..screen_row_end], tile_buffer.depth[tile_row_start..tile_row_end]);
             if (camera_buffer) |camera_out| {
                 std.mem.copyForwards(math.Vec3, camera_out[screen_row_start..screen_row_end], tile_buffer.camera[tile_row_start..tile_row_end]);
+            }
+            if (normal_buffer) |normal_out| {
+                std.mem.copyForwards(math.Vec3, normal_out[screen_row_start..screen_row_end], tile_buffer.normal[tile_row_start..tile_row_end]);
             }
         }
     }
@@ -282,17 +301,37 @@ pub fn rasterizeTriangleToTile(
             );
 
             // 8. Sample the texture and apply lighting to get the final pixel color.
-            var base_color = shading.base_color;
-            if (shading.texture) |tex| base_color = tex.sample(uv);
-            const final_color = lighting.applyIntensity(base_color, shading.intensity);
+            var base_color_u32 = shading.base_color;
+            if (shading.texture) |tex| base_color_u32 = tex.sample(uv);
+            const a = (base_color_u32 >> 24) & 0xFF;
+            if (a == 0) continue;
+
+            const base_color_linear = lighting.unpackColorLinear(base_color_u32);
+
+            const n0 = shading.normals[0];
+            const n1 = shading.normals[1];
+            const n2 = shading.normals[2];
+            const normal = math.Vec3.new(
+                n0.x * weight0 + n1.x * weight1 + n2.x * weight2,
+                n0.y * weight0 + n1.y * weight1 + n2.y * weight2,
+                n0.z * weight0 + n1.z * weight1 + n2.z * weight2,
+            ).normalize();
+
+            // hardcoded light for now, or we can use shading.intensity later
+            const light_dir = math.Vec3.new(0.5, 0.5, -1.0).normalize();
+            const light_color = math.Vec3.new(4.0, 4.0, 4.0);
+            
+            const view_dir = math.Vec3.scale(camera_pos, -1.0).normalize();
+            
+            const final_color_rgb = lighting.computePBR(
+                base_color_linear, normal, view_dir, light_dir, light_color,
+                shading.metallic, shading.roughness
+            );
+            const final_color = math.Vec4.new(final_color_rgb.x, final_color_rgb.y, final_color_rgb.z, @as(f32, @floatFromInt(a)) / 255.0);
 
             // 9. Write the final color to the tile's local pixel buffer.
             const idx = @as(usize, @intCast(y * tile_buffer.width + x));
             if (idx >= tile_buffer.pixels.len or idx >= tile_buffer.depth.len or idx >= tile_buffer.camera.len) continue;
-
-            // 10. Alpha Blending Pass & Depth Testing
-            const a = (final_color >> 24) & 0xFF;
-            if (a == 0) continue; // Fully transparent pixel, skip depth/write entirely
 
             if (depth >= tile_buffer.depth[idx]) continue;
 
@@ -301,17 +340,20 @@ pub fn rasterizeTriangleToTile(
                 tile_buffer.depth[idx] = depth;
                 tile_buffer.camera[idx] = camera_pos;
                 tile_buffer.pixels[idx] = final_color;
+                tile_buffer.normal[idx] = normal;
             } else {
                 // Alpha blend with background
-                const bg = tile_buffer.pixels[idx];
-                const inv_a = 255 - a;
-                const r = (((final_color >> 16) & 0xFF) * a + ((bg >> 16) & 0xFF) * inv_a) / 255;
-                const g = (((final_color >> 8) & 0xFF) * a + ((bg >> 8) & 0xFF) * inv_a) / 255;
-                const b = ((final_color & 0xFF) * a + (bg & 0xFF) * inv_a) / 255;
-                tile_buffer.pixels[idx] = (bg & 0xFF000000) | (r << 16) | (g << 8) | b;
-                // Note: We don't write depth for partial transparency to allow back-to-front layering to succeed
+                const dst_c = tile_buffer.pixels[idx];
+                const alpha = final_color.w;
+                const inv_alpha = 1.0 - alpha;
+                tile_buffer.pixels[idx] = math.Vec4.new(
+                    final_color.x * alpha + dst_c.x * inv_alpha,
+                    final_color.y * alpha + dst_c.y * inv_alpha,
+                    final_color.z * alpha + dst_c.z * inv_alpha,
+                    1.0
+                );
             }
-        }
+}
     }
 }
 
@@ -337,7 +379,13 @@ pub fn drawLineToTile(tile: *const Tile, tile_buffer: *TileBuffer, p0_screen: ma
     while (true) {
         if (clamp.inBounds(x0, y0, tile_buffer.width, tile_buffer.height)) {
             const idx = @as(usize, @intCast(y0 * tile_buffer.width + x0));
-            if (idx < tile_buffer.pixels.len) tile_buffer.pixels[idx] = color;
+            if (idx < tile_buffer.pixels.len) {
+                const r = @as(f32, @floatFromInt((color >> 16) & 0xFF)) / 255.0;
+                const g = @as(f32, @floatFromInt((color >> 8) & 0xFF)) / 255.0;
+                const b = @as(f32, @floatFromInt(color & 0xFF)) / 255.0;
+                const a = @as(f32, @floatFromInt((color >> 24) & 0xFF)) / 255.0;
+                tile_buffer.pixels[idx] = math.Vec4.new(r, g, b, a);
+            }
         }
 
         if (x0 == x1 and y0 == y1) break;

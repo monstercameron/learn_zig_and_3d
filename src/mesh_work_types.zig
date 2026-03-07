@@ -10,9 +10,12 @@ pub const TriangleFlags = packed struct(u8) {
 pub const TrianglePacket = struct {
     screen: [3][2]i32,
     camera: [3]math.Vec3,
+    normals: [3]math.Vec3,
     uv: [3]math.Vec2,
     base_color: u32,
     texture_index: u16,
+    metallic: f32 = 0.0,
+    roughness: f32 = 0.5,
     intensity: f32,
     flags: TriangleFlags,
     triangle_id: usize,
