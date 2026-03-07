@@ -47,9 +47,9 @@ pub var POST_BLOOM_ENABLED: bool = false;
 pub var POST_DEPTH_FOG_ENABLED: bool = false;
 /// Enables HDR skybox rendering
 pub var POST_SKYBOX_ENABLED: bool = true;
-  /// Enables the primary generic shadow mapping pass.
-  /// Disabled in favor of hybrid shadows as requested
-  pub var POST_SHADOW_ENABLED: bool = false;
+/// Enables the primary generic shadow mapping pass.
+/// Disabled in favor of hybrid shadows as requested
+pub var POST_SHADOW_ENABLED: bool = false;
 /// Square dimension resolution of the shadow depth map target.
 pub var POST_SHADOW_MAP_SIZE: usize = 4096;
 /// Controls the opacity intensity of standard shadows (0-100).
@@ -78,7 +78,6 @@ pub var POST_HYBRID_SHADOW_EDGE_MAX_COVERAGE: f32 = 0.78;
 pub var POST_HYBRID_SHADOW_EDGE_BLEND: f32 = 0.4;
 /// Enables Screen Space Ambient Occlusion for realistic corner shading.
 /// Screen Space Reflections (SSR)
-
 pub var POST_SSGI_ENABLED: bool = false;
 pub var POST_SSGI_SAMPLES: i32 = 16;
 pub var POST_SSGI_RADIUS: i32 = 12; // Pixel radius
@@ -141,14 +140,13 @@ pub var POST_MOTION_BLUR_SAMPLES: i32 = 6;
 /// The intensity multiplier for motion blur trail length. (0.5 simulates a cinematic 180-degree shutter)
 pub var POST_MOTION_BLUR_INTENSITY: f32 = 0.5;
 
-
 // --- Cinematic Effects ---
 pub var POST_LENS_FLARE_ENABLED: bool = false;
 pub var POST_LENS_FLARE_THRESHOLD: i32 = 200;
 pub var POST_LENS_FLARE_INTENSITY_PERCENT: i32 = 40;
 
 pub var POST_CHROMATIC_ABERRATION_ENABLED: bool = false;
-pub var POST_CHROMATIC_ABERRATION_STRENGTH: f32 = 1.0; 
+pub var POST_CHROMATIC_ABERRATION_STRENGTH: f32 = 1.0;
 
 pub var POST_FILM_GRAIN_VIGNETTE_ENABLED: bool = false;
 pub var POST_FILM_GRAIN_STRENGTH: f32 = 0.10;
