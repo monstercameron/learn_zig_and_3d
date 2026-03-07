@@ -1803,19 +1803,37 @@ const AdaptiveShadowTileJob = struct {
         if (!coarse.valid) return coarse;
         if (coarse.coverage <= config.POST_HYBRID_SHADOW_EDGE_MIN_COVERAGE or coarse.coverage >= config.POST_HYBRID_SHADOW_EDGE_MAX_COVERAGE) return coarse;
 
-        const edge = ctx.sampleShadowCacheNearest(
-            ctx.renderer.hybrid_shadow_edge_cache,
-            ctx.renderer.hybrid_shadow_edge_cache_width,
-            ctx.renderer.hybrid_shadow_edge_cache_height,
-            @max(1, config.POST_HYBRID_SHADOW_EDGE_DOWNSAMPLE),
-            screen_x,
-            screen_y,
-        );
-        if (!edge.valid) return coarse;
+        // Apply a small 3x3 PCF-style box filter in the edge cache to anti-alias the outline
+        var coverage_sum: f32 = 0.0;
+        var valid_count: f32 = 0.0;
+        
+        var dy: i32 = -1;
+        while (dy <= 1) : (dy += 1) {
+            var dx: i32 = -1;
+            while (dx <= 1) : (dx += 1) {
+                const sample = ctx.sampleShadowCacheNearest(
+                    ctx.renderer.hybrid_shadow_edge_cache,
+                    ctx.renderer.hybrid_shadow_edge_cache_width,
+                    ctx.renderer.hybrid_shadow_edge_cache_height,
+                    @max(1, config.POST_HYBRID_SHADOW_EDGE_DOWNSAMPLE),
+                    screen_x + dx,
+                    screen_y + dy,
+                );
+                if (sample.valid) {
+                    coverage_sum += sample.coverage;
+                    valid_count += 1.0;
+                }
+            }
+        }
+        
+        if (valid_count == 0.0) return coarse;
+        
+        const avg_coverage = coverage_sum / valid_count;
         const blend = std.math.clamp(config.POST_HYBRID_SHADOW_EDGE_BLEND, 0.0, 1.0);
+        
         return .{
             .valid = true,
-            .coverage = edge.coverage * (1.0 - blend) + coarse.coverage * blend,
+            .coverage = avg_coverage * (1.0 - blend) + coarse.coverage * blend,
         };
     }
 
