@@ -46,7 +46,7 @@ pub var POST_BLOOM_ENABLED: bool = true;
 /// Enables depth-aware atmospheric fog to simulate distance.
 pub var POST_DEPTH_FOG_ENABLED: bool = true;
 /// Enables the primary generic shadow mapping pass.
-pub var POST_SHADOW_ENABLED: bool = false;
+pub var POST_SHADOW_ENABLED: bool = true;
 /// Square dimension resolution of the shadow depth map target.
 pub var POST_SHADOW_MAP_SIZE: usize = 1024;
 /// Controls the opacity intensity of standard shadows (0-100).
@@ -54,7 +54,7 @@ pub var POST_SHADOW_STRENGTH_PERCENT: i32 = 38;
 /// A depth offset to prevent shadow acne artifacts on lit surfaces.
 pub var POST_SHADOW_DEPTH_BIAS: f32 = 0.07;
 /// Enables the advanced hybrid ray-traced shadow pass for high fidelity shadows.
-pub var POST_HYBRID_SHADOW_ENABLED: bool = true;
+pub var POST_HYBRID_SHADOW_ENABLED: bool = false;
 /// Tile dimension constraint used during hybrid shadow evaluation.
 pub var POST_HYBRID_SHADOW_MIN_BLOCK_SIZE: i32 = 24;
 /// The maximum recursion or ray bounce depth for hybrid shadows.
@@ -74,11 +74,10 @@ pub var POST_HYBRID_SHADOW_EDGE_MAX_COVERAGE: f32 = 0.78;
 /// The interpolation blend mapping for hybrid shadow penumbras.
 pub var POST_HYBRID_SHADOW_EDGE_BLEND: f32 = 0.4;
 /// Enables Screen Space Ambient Occlusion for realistic corner shading.
-
 /// Screen Space Reflections (SSR)
 pub var POST_SSR_ENABLED: bool = true;
-pub var POST_SSR_MAX_SAMPLES: i32 = 32;
-pub var POST_SSR_STEP: f32 = 0.05;
+pub var POST_SSR_MAX_SAMPLES: i32 = 16;
+pub var POST_SSR_STEP: f32 = 0.1;
 pub var POST_SSR_MAX_DISTANCE: f32 = 100.0;
 pub var POST_SSR_THICKNESS: f32 = 0.5;
 pub var POST_SSR_INTENSITY: f32 = 0.8;
@@ -132,6 +131,26 @@ pub var POST_MOTION_BLUR_ENABLED: bool = true;
 pub var POST_MOTION_BLUR_SAMPLES: i32 = 6;
 /// The intensity multiplier for motion blur trail length. (0.5 simulates a cinematic 180-degree shutter)
 pub var POST_MOTION_BLUR_INTENSITY: f32 = 0.5;
+
+
+// --- Cinematic Effects ---
+pub var POST_LENS_FLARE_ENABLED: bool = true;
+pub var POST_LENS_FLARE_THRESHOLD: i32 = 200;
+pub var POST_LENS_FLARE_INTENSITY_PERCENT: i32 = 40;
+
+pub var POST_CHROMATIC_ABERRATION_ENABLED: bool = true;
+pub var POST_CHROMATIC_ABERRATION_STRENGTH: f32 = 1.0; 
+
+pub var POST_FILM_GRAIN_VIGNETTE_ENABLED: bool = true;
+pub var POST_FILM_GRAIN_STRENGTH: f32 = 0.10;
+pub var POST_VIGNETTE_STRENGTH: f32 = 0.10;
+
+pub var POST_GOD_RAYS_ENABLED: bool = true;
+pub var POST_GOD_RAYS_SAMPLES: i32 = 16;
+pub var POST_GOD_RAYS_DENSITY: f32 = 1.0;
+pub var POST_GOD_RAYS_WEIGHT: f32 = 0.02;
+pub var POST_GOD_RAYS_DECAY: f32 = 0.90;
+pub var POST_GOD_RAYS_EXPOSURE: f32 = 0.8;
 
 // --- Global Color Profile ---
 /// The name of the LUT or graded preset mapped onto the final output color.

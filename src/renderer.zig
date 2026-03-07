@@ -306,8 +306,8 @@ const SSRJobContext = struct {
 
                     if (ray_pos.z < 0.1) break;
 
-                    const dist_vec = math.Vec3.sub(ray_pos, p);
-                    if (math.Vec3.length(dist_vec) > ctx.max_distance) break;
+                    // Use step count to avoid sqrt
+                    if (@as(f32, @floatFromInt(s + 1)) * ctx.step_size > ctx.max_distance) break;
 
                     const proj = projectCameraPositionFloat(ray_pos, ctx.projection);
                     const sx_float = proj.x;
@@ -2537,6 +2537,14 @@ pub const Renderer = struct {
     dof_target_focal_distance: f32,
     taa_job_contexts: []TAAJobContext,
     color_grade_job_contexts: []ColorGradeJobContext,
+    moblur_job_contexts: []MotionBlurJobContext,
+    moblur_scratch_pixels: []u32,
+    god_rays_job_contexts: []GodRaysJobContext,
+    god_rays_scratch_pixels: []u32,
+    chromatic_aberration_job_contexts: []ChromaticAberrationJobContext,
+    film_grain_job_contexts: []FilmGrainVignetteJobContext,
+    lens_flare_job_contexts: []LensFlareJobContext,
+    lens_flare_scratch_pixels: []u32,
     color_grade_jobs: []Job,
 
     // Unused state from previous versions
@@ -2589,6 +2597,26 @@ pub const Renderer = struct {
         const color_grade_job_count = @max(@as(usize, 1), @as(usize, @intCast(job_system.worker_count * 2)));
         const color_grade_job_contexts = try allocator.alloc(ColorGradeJobContext, color_grade_job_count);
         errdefer allocator.free(color_grade_job_contexts);
+        const moblur_job_contexts = try allocator.alloc(MotionBlurJobContext, color_grade_job_count);
+        errdefer allocator.free(moblur_job_contexts);
+        const moblur_scratch_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        errdefer allocator.free(moblur_scratch_pixels);
+        
+        const god_rays_job_contexts = try allocator.alloc(GodRaysJobContext, color_grade_job_count);
+        errdefer allocator.free(god_rays_job_contexts);
+        const god_rays_scratch_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        errdefer allocator.free(god_rays_scratch_pixels);
+        
+        const chromatic_aberration_job_contexts = try allocator.alloc(ChromaticAberrationJobContext, color_grade_job_count);
+        errdefer allocator.free(chromatic_aberration_job_contexts);
+        
+        const film_grain_job_contexts = try allocator.alloc(FilmGrainVignetteJobContext, color_grade_job_count);
+        errdefer allocator.free(film_grain_job_contexts);
+
+        const lens_flare_job_contexts = try allocator.alloc(LensFlareJobContext, color_grade_job_count);
+        errdefer allocator.free(lens_flare_job_contexts);
+        const lens_flare_scratch_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        errdefer allocator.free(lens_flare_scratch_pixels);
         const ao_job_contexts = try allocator.alloc(AOJobContext, color_grade_job_count);
         errdefer allocator.free(ao_job_contexts);
         const fog_job_contexts = try allocator.alloc(FogJobContext, color_grade_job_count);
@@ -2834,6 +2862,14 @@ pub const Renderer = struct {
             .dof_target_focal_distance = config.POST_DOF_FOCAL_DISTANCE,
             .taa_job_contexts = taa_job_contexts,
             .color_grade_job_contexts = color_grade_job_contexts,
+            .moblur_job_contexts = moblur_job_contexts,
+            .moblur_scratch_pixels = moblur_scratch_pixels,
+            .god_rays_job_contexts = god_rays_job_contexts,
+            .god_rays_scratch_pixels = god_rays_scratch_pixels,
+            .chromatic_aberration_job_contexts = chromatic_aberration_job_contexts,
+            .film_grain_job_contexts = film_grain_job_contexts,
+            .lens_flare_job_contexts = lens_flare_job_contexts,
+            .lens_flare_scratch_pixels = lens_flare_scratch_pixels,
             .color_grade_jobs = color_grade_jobs,
         };
     }
@@ -2892,6 +2928,14 @@ pub const Renderer = struct {
         self.allocator.free(self.dof_job_contexts);
         self.allocator.free(self.taa_job_contexts);
         self.allocator.free(self.color_grade_job_contexts);
+        self.allocator.free(self.moblur_job_contexts);
+        self.allocator.free(self.moblur_scratch_pixels);
+        self.allocator.free(self.god_rays_job_contexts);
+        self.allocator.free(self.god_rays_scratch_pixels);
+        self.allocator.free(self.chromatic_aberration_job_contexts);
+        self.allocator.free(self.film_grain_job_contexts);
+        self.allocator.free(self.lens_flare_job_contexts);
+        self.allocator.free(self.lens_flare_scratch_pixels);
         self.allocator.free(self.color_grade_jobs);
         if (self.tile_buffers) |buffers| {
             for (buffers) |*buf| buf.deinit();
@@ -5517,8 +5561,13 @@ pub const Renderer = struct {
         if (config.POST_SSR_ENABLED) self.applySSRPass(projection);
         if (config.POST_DEPTH_FOG_ENABLED) self.applyDepthFogPass();
         if (config.POST_TAA_ENABLED) self.applyTemporalAAPass(current_view);
+        if (config.POST_MOTION_BLUR_ENABLED) self.applyMotionBlurPass(current_view);
+        if (config.POST_GOD_RAYS_ENABLED) self.applyGodRaysPass(projection, light_dir_world);
         if (config.POST_BLOOM_ENABLED) self.applyBloomPass();
+        if (config.POST_LENS_FLARE_ENABLED) self.applyLensFlarePass();
         if (config.POST_DOF_ENABLED) self.applyDepthOfFieldPass();
+        if (config.POST_CHROMATIC_ABERRATION_ENABLED) self.applyChromaticAberrationPass();
+        if (config.POST_FILM_GRAIN_VIGNETTE_ENABLED) self.applyFilmGrainVignettePass();
         if (!config.POST_COLOR_CORRECTION_ENABLED) return;
         self.applyBlockbusterColorGradePass();
     }
@@ -5728,6 +5777,646 @@ pub const Renderer = struct {
                 const previous_color = sampleHistoryColor(self.taa_scratch.history_pixels, width, height, previous_screen) orelse continue;
                 const clamped_history = clampHistoryToNeighborhood(self.bitmap.pixels, width, height, x, y, previous_color);
                 self.taa_scratch.resolve_pixels[idx] = blendTemporalColor(current_pixel, clamped_history, self.temporal_aa_config.history_weight);
+            }
+        }
+    }
+
+
+const GodRaysJobContext = struct {
+    renderer: *Renderer,
+    start_row: usize,
+    end_row: usize,
+    width: usize,
+    height: usize,
+    light_screen_pos: math.Vec2,
+
+    pub fn run(ctx_ptr: *anyopaque) void {
+        const ctx: *GodRaysJobContext = @ptrCast(@alignCast(ctx_ptr));
+        ctx.renderer.applyGodRaysRows(
+            ctx.start_row,
+            ctx.end_row,
+            ctx.width,
+            ctx.height,
+            ctx.light_screen_pos,
+        );
+    }
+};
+
+const ChromaticAberrationJobContext = struct {
+    renderer: *Renderer,
+    start_row: usize,
+    end_row: usize,
+    width: usize,
+    height: usize,
+
+    pub fn run(ctx_ptr: *anyopaque) void {
+        const ctx: *ChromaticAberrationJobContext = @ptrCast(@alignCast(ctx_ptr));
+        ctx.renderer.applyChromaticAberrationRows(ctx.start_row, ctx.end_row, ctx.width, ctx.height);
+    }
+};
+
+const FilmGrainVignetteJobContext = struct {
+    renderer: *Renderer,
+    start_row: usize,
+    end_row: usize,
+    width: usize,
+    height: usize,
+
+    pub fn run(ctx_ptr: *anyopaque) void {
+        const ctx: *FilmGrainVignetteJobContext = @ptrCast(@alignCast(ctx_ptr));
+        ctx.renderer.applyFilmGrainVignetteRows(ctx.start_row, ctx.end_row, ctx.width, ctx.height);
+    }
+};
+
+const LensFlareJobContext = struct {
+    renderer: *Renderer,
+    start_row: usize,
+    end_row: usize,
+    width: usize,
+    height: usize,
+
+    pub fn run(ctx_ptr: *anyopaque) void {
+        const ctx: *LensFlareJobContext = @ptrCast(@alignCast(ctx_ptr));
+        ctx.renderer.applyLensFlareRows(ctx.start_row, ctx.end_row, ctx.width, ctx.height);
+    }
+};
+
+const MotionBlurJobContext = struct {
+    renderer: *Renderer,
+    current_view: TemporalAAViewState,
+    previous_view: TemporalAAViewState,
+    start_row: usize,
+    end_row: usize,
+    width: usize,
+    height: usize,
+
+    pub fn run(ctx_ptr: *anyopaque) void {
+        const ctx: *MotionBlurJobContext = @ptrCast(@alignCast(ctx_ptr));
+        ctx.renderer.applyMotionBlurRows(
+            ctx.current_view,
+            ctx.previous_view,
+            ctx.start_row,
+            ctx.end_row,
+            ctx.width,
+            ctx.height,
+        );
+    }
+};
+
+
+    // --- God Rays ---
+    fn applyGodRaysPass(self: *Renderer, projection: ProjectionParams, light_dir_world: math.Vec3) void {
+        if (self.bitmap.pixels.len == 0) return;
+        const pass_start = std.time.nanoTimestamp();
+        const width: usize = @intCast(self.bitmap.width);
+        const height: usize = @intCast(self.bitmap.height);
+
+
+        // actually we can just project the light_dir_world as a point relative to camera since it's directional.
+        // Actually, we already have self.scene_camera setup, so we know our view.
+        // But for god rays we usually just want a screen coordinate where the light is. Let's simplify.
+        const light_pos_view = math.Vec3.new(
+            math.Vec3.dot(light_dir_world, self.taa_previous_view.basis_right), // just using any active view basis
+            math.Vec3.dot(light_dir_world, self.taa_previous_view.basis_up),
+            math.Vec3.dot(light_dir_world, self.taa_previous_view.basis_forward)
+        );
+        
+        var light_screen_pos = math.Vec2.new(-1000, -1000);
+        if (light_pos_view.z > 0.0) {
+            // Light is in front
+            const light_proj = projectCameraPositionFloat(math.Vec3.scale(light_pos_view, 1000.0), projection);
+            light_screen_pos = math.Vec2.new(light_proj.x, light_proj.y);
+        }
+
+        const stripe_count = computeStripeCount(self.god_rays_job_contexts.len, height);
+        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
+
+        if (stripe_count <= 1 or self.job_system == null) {
+            self.applyGodRaysRows(0, height, width, height, light_screen_pos);
+        } else {
+            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+            var stripe_index: usize = 0;
+            while (stripe_index < stripe_count) : (stripe_index += 1) {
+                const start_row = stripe_index * rows_per_job;
+                if (start_row >= height) break;
+                const end_row = @min(height, start_row + rows_per_job);
+
+                self.god_rays_job_contexts[stripe_index] = .{
+                    .renderer = self,
+                    .start_row = start_row,
+                    .end_row = end_row,
+                    .width = width,
+                    .height = height,
+                    .light_screen_pos = light_screen_pos,
+                };
+                if (stripe_index == 0) continue;
+                self.color_grade_jobs[stripe_index] = Job.init(
+                    GodRaysJobContext.run,
+                    @ptrCast(&self.god_rays_job_contexts[stripe_index]),
+                    &parent_job,
+                );
+                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+                    GodRaysJobContext.run(@ptrCast(&self.god_rays_job_contexts[stripe_index]));
+                }
+            }
+            GodRaysJobContext.run(@ptrCast(&self.god_rays_job_contexts[0]));
+            parent_job.complete();
+            parent_job.wait();
+        }
+
+        @memcpy(self.bitmap.pixels, self.god_rays_scratch_pixels);
+        self.recordRenderPassTiming("god_rays", pass_start);
+    }
+
+    fn applyGodRaysRows(self: *Renderer, start_row: usize, end_row: usize, width: usize, height: usize, light_screen_pos: math.Vec2) void {
+        if (light_screen_pos.x == -1000) {
+            const start_idx = start_row * width;
+            const end_idx = end_row * width;
+            @memcpy(self.god_rays_scratch_pixels[start_idx..end_idx], self.bitmap.pixels[start_idx..end_idx]);
+            return;
+        }
+
+        const samples = config.POST_GOD_RAYS_SAMPLES;
+        const decay = config.POST_GOD_RAYS_DECAY;
+        const density = config.POST_GOD_RAYS_DENSITY;
+        const weight = config.POST_GOD_RAYS_WEIGHT;
+        const exposure = config.POST_GOD_RAYS_EXPOSURE;
+
+        var y = start_row;
+        while (y < end_row) : (y += 1) {
+            const row_start = y * width;
+            var x: usize = 0;
+            while (x < width) : (x += 1) {
+                const idx = row_start + x;
+                const original_px = self.bitmap.pixels[idx];
+
+                // Calculate vector from pixel to light on screen
+                const delta_x = (@as(f32, @floatFromInt(x)) - light_screen_pos.x);
+                const delta_y = (@as(f32, @floatFromInt(y)) - light_screen_pos.y);
+                const vec_x = delta_x * density / @as(f32, @floatFromInt(samples));
+                const vec_y = delta_y * density / @as(f32, @floatFromInt(samples));
+
+                var r_sum: f32 = 0;
+                var g_sum: f32 = 0;
+                var b_sum: f32 = 0;
+                var illumination_decay: f32 = 1.0;
+
+                var cur_x = @as(f32, @floatFromInt(x));
+                var cur_y = @as(f32, @floatFromInt(y));
+
+                var s: i32 = 0;
+                while (s < samples) : (s += 1) {
+                    cur_x -= vec_x;
+                    cur_y -= vec_y;
+
+                    const sx = @as(i32, @intFromFloat(cur_x));
+                    const sy = @as(i32, @intFromFloat(cur_y));
+
+                    if (sx >= 0 and sx < @as(i32, @intCast(width)) and sy >= 0 and sy < @as(i32, @intCast(height))) {
+                        const s_idx = @as(usize, @intCast(sy)) * width + @as(usize, @intCast(sx));
+                        const px = self.bitmap.pixels[s_idx];
+                        
+                        // Treat bright pixels as scattering objects (poor man's occlusion/sun proxy)
+                        r_sum += @as(f32, @floatFromInt((px >> 16) & 0xFF)) * illumination_decay * weight;
+                        g_sum += @as(f32, @floatFromInt((px >> 8) & 0xFF)) * illumination_decay * weight;
+                        b_sum += @as(f32, @floatFromInt(px & 0xFF)) * illumination_decay * weight;
+                    }
+
+                    illumination_decay *= decay;
+                }
+
+                const orig_r = @as(f32, @floatFromInt((original_px >> 16) & 0xFF));
+                const orig_g = @as(f32, @floatFromInt((original_px >> 8) & 0xFF));
+                const orig_b = @as(f32, @floatFromInt(original_px & 0xFF));
+
+                const final_r = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(orig_r + r_sum * exposure))))));
+                const final_g = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(orig_g + g_sum * exposure))))));
+                const final_b = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(orig_b + b_sum * exposure))))));
+
+                self.god_rays_scratch_pixels[idx] = 0xFF000000 | (final_r << 16) | (final_g << 8) | final_b;
+            }
+        }
+    }
+
+    // --- Lens Flare ---
+    fn applyLensFlarePass(self: *Renderer) void {
+        if (self.bitmap.pixels.len == 0) return;
+        const pass_start = std.time.nanoTimestamp();
+        const width: usize = @intCast(self.bitmap.width);
+        const height: usize = @intCast(self.bitmap.height);
+
+        const stripe_count = computeStripeCount(self.lens_flare_job_contexts.len, height);
+        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
+
+        if (stripe_count <= 1 or self.job_system == null) {
+            self.applyLensFlareRows(0, height, width, height);
+        } else {
+            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+            var stripe_index: usize = 0;
+            while (stripe_index < stripe_count) : (stripe_index += 1) {
+                const start_row = stripe_index * rows_per_job;
+                if (start_row >= height) break;
+                const end_row = @min(height, start_row + rows_per_job);
+
+                self.lens_flare_job_contexts[stripe_index] = .{
+                    .renderer = self,
+                    .start_row = start_row,
+                    .end_row = end_row,
+                    .width = width,
+                    .height = height,
+                };
+                if (stripe_index == 0) continue;
+                self.color_grade_jobs[stripe_index] = Job.init(
+                    LensFlareJobContext.run,
+                    @ptrCast(&self.lens_flare_job_contexts[stripe_index]),
+                    &parent_job,
+                );
+                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+                    LensFlareJobContext.run(@ptrCast(&self.lens_flare_job_contexts[stripe_index]));
+                }
+            }
+            LensFlareJobContext.run(@ptrCast(&self.lens_flare_job_contexts[0]));
+            parent_job.complete();
+            parent_job.wait();
+        }
+
+        @memcpy(self.bitmap.pixels, self.lens_flare_scratch_pixels);
+        self.recordRenderPassTiming("lens_flare", pass_start);
+    }
+
+    fn applyLensFlareRows(self: *Renderer, start_row: usize, end_row: usize, width: usize, _height: usize) void {
+        _ = _height;
+        const threshold = config.POST_LENS_FLARE_THRESHOLD;
+        const intensity = @as(f32, @floatFromInt(config.POST_LENS_FLARE_INTENSITY_PERCENT)) / 100.0;
+        
+        var y = start_row;
+        while (y < end_row) : (y += 1) {
+            const row_start = y * width;
+            var x: usize = 0;
+            while (x < width) : (x += 1) {
+                const idx = row_start + x;
+                const current_px = self.bitmap.pixels[idx];
+                
+                var r_sum: f32 = 0;
+                var g_sum: f32 = 0;
+                var b_sum: f32 = 0;
+
+                // Simple horizontal anamorphic streak sample
+                const signed_x = @as(i32, @intCast(x));
+                const min_sx = @max(0, signed_x - 60);
+                const max_sx = @min(@as(i32, @intCast(width)) - 1, signed_x + 60);
+                                
+                var s_x: i32 = min_sx;
+                // Align step so it still hops the same points roughly
+                if (@rem((s_x - (signed_x - 60)), @as(i32, 4)) != 0) {
+                    s_x += @as(i32, 4) - @rem((s_x - (signed_x - 60)), @as(i32, 4));
+                }
+                while (s_x <= max_sx) : (s_x += 4) {
+                    const s_idx = y * width + @as(usize, @intCast(s_x));
+                    const px = self.bitmap.pixels[s_idx];
+                    const pr = @as(i32, @intCast((px >> 16) & 0xFF));
+                    const pg = @as(i32, @intCast((px >> 8) & 0xFF));
+                    const pb = @as(i32, @intCast(px & 0xFF));
+
+                    const lumen = @divTrunc(pr * 299 + pg * 587 + pb * 114, 1000);
+                    if (lumen > threshold) {
+                        const dist = @abs(s_x - signed_x);
+                        const falloff = 1.0 - (@as(f32, @floatFromInt(dist)) * 0.0166666); // /60
+                        const base_w = falloff * 0.1 * intensity;
+                        const factor_r = base_w * (if (pr > pb) @as(f32, 1.2) else 0.5);
+                        
+                        r_sum += @as(f32, @floatFromInt(pr)) * factor_r;
+                        g_sum += @as(f32, @floatFromInt(pg)) * base_w * 0.8;
+                        b_sum += @as(f32, @floatFromInt(pb)) * base_w * 1.5;
+                    }
+                }
+
+                const orig_r = @as(f32, @floatFromInt((current_px >> 16) & 0xFF));
+                const orig_g = @as(f32, @floatFromInt((current_px >> 8) & 0xFF));
+                const orig_b = @as(f32, @floatFromInt(current_px & 0xFF));
+
+                const final_r = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(orig_r + r_sum))))));
+                const final_g = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(orig_g + g_sum))))));
+                const final_b = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(orig_b + b_sum))))));
+
+                self.lens_flare_scratch_pixels[idx] = 0xFF000000 | (final_r << 16) | (final_g << 8) | final_b;
+            }
+        }
+    }
+
+    // --- Chromatic Aberration ---
+    fn applyChromaticAberrationPass(self: *Renderer) void {
+        if (self.bitmap.pixels.len == 0) return;
+        const pass_start = std.time.nanoTimestamp();
+        const width: usize = @intCast(self.bitmap.width);
+        const height: usize = @intCast(self.bitmap.height);
+
+        // We can do this in-place or need a scratch buffer. It's safe to use the moblur_scratch_pixels temporary!
+        const stripe_count = computeStripeCount(self.chromatic_aberration_job_contexts.len, height);
+        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
+
+        if (stripe_count <= 1 or self.job_system == null) {
+            self.applyChromaticAberrationRows(0, height, width, height);
+        } else {
+            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+            var stripe_index: usize = 0;
+            while (stripe_index < stripe_count) : (stripe_index += 1) {
+                const start_row = stripe_index * rows_per_job;
+                if (start_row >= height) break;
+                const end_row = @min(height, start_row + rows_per_job);
+
+                self.chromatic_aberration_job_contexts[stripe_index] = .{
+                    .renderer = self,
+                    .start_row = start_row,
+                    .end_row = end_row,
+                    .width = width,
+                    .height = height,
+                };
+                if (stripe_index == 0) continue;
+                self.color_grade_jobs[stripe_index] = Job.init(
+                    ChromaticAberrationJobContext.run,
+                    @ptrCast(&self.chromatic_aberration_job_contexts[stripe_index]),
+                    &parent_job,
+                );
+                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+                    ChromaticAberrationJobContext.run(@ptrCast(&self.chromatic_aberration_job_contexts[stripe_index]));
+                }
+            }
+            ChromaticAberrationJobContext.run(@ptrCast(&self.chromatic_aberration_job_contexts[0]));
+            parent_job.complete();
+            parent_job.wait();
+        }
+
+        @memcpy(self.bitmap.pixels, self.moblur_scratch_pixels);
+        self.recordRenderPassTiming("chromatic_aberration", pass_start);
+    }
+
+    fn applyChromaticAberrationRows(self: *Renderer, start_row: usize, end_row: usize, width: usize, height: usize) void {
+        const strong = config.POST_CHROMATIC_ABERRATION_STRENGTH;
+        const cx = @as(f32, @floatFromInt(width)) * 0.5;
+        const cy = @as(f32, @floatFromInt(height)) * 0.5;
+        
+        var y = start_row;
+        while (y < end_row) : (y += 1) {
+            const row_start = y * width;
+            var x: usize = 0;
+            while (x < width) : (x += 1) {
+                const idx = row_start + x;
+                
+                // Vector from center
+                const dx = (@as(f32, @floatFromInt(x)) - cx) / cx;
+                const dy = (@as(f32, @floatFromInt(y)) - cy) / cy;
+                const dist = dx * dx + dy * dy; // squared dist to push mostly to edges
+                
+                const shift = dist * strong;
+                
+                const r_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(x)) + shift));
+                const b_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(x)) - shift));
+                
+                const safe_r_x = @max(0, @min(@as(i32, @intCast(width)) - 1, r_x));
+                const safe_b_x = @max(0, @min(@as(i32, @intCast(width)) - 1, b_x));
+                
+                const px_r = self.bitmap.pixels[y * width + @as(usize, @intCast(safe_r_x))];
+                const px_g = self.bitmap.pixels[idx];
+                const px_b = self.bitmap.pixels[y * width + @as(usize, @intCast(safe_b_x))];
+
+                const final_r = (px_r >> 16) & 0xFF;
+                const final_g = (px_g >> 8) & 0xFF;
+                const final_b = px_b & 0xFF;
+
+                self.moblur_scratch_pixels[idx] = 0xFF000000 | (final_r << 16) | (final_g << 8) | final_b;
+            }
+        }
+    }
+
+    // --- Film Grain & Vignette ---
+    fn applyFilmGrainVignettePass(self: *Renderer) void {
+        if (self.bitmap.pixels.len == 0) return;
+        const pass_start = std.time.nanoTimestamp();
+        const width: usize = @intCast(self.bitmap.width);
+        const height: usize = @intCast(self.bitmap.height);
+
+        const stripe_count = computeStripeCount(self.film_grain_job_contexts.len, height);
+        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
+
+        if (stripe_count <= 1 or self.job_system == null) {
+            self.applyFilmGrainVignetteRows(0, height, width, height);
+        } else {
+            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+            var stripe_index: usize = 0;
+            while (stripe_index < stripe_count) : (stripe_index += 1) {
+                const start_row = stripe_index * rows_per_job;
+                if (start_row >= height) break;
+                const end_row = @min(height, start_row + rows_per_job);
+
+                self.film_grain_job_contexts[stripe_index] = .{
+                    .renderer = self,
+                    .start_row = start_row,
+                    .end_row = end_row,
+                    .width = width,
+                    .height = height,
+                };
+                if (stripe_index == 0) continue;
+                self.color_grade_jobs[stripe_index] = Job.init(
+                    FilmGrainVignetteJobContext.run,
+                    @ptrCast(&self.film_grain_job_contexts[stripe_index]),
+                    &parent_job,
+                );
+                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+                    FilmGrainVignetteJobContext.run(@ptrCast(&self.film_grain_job_contexts[stripe_index]));
+                }
+            }
+            FilmGrainVignetteJobContext.run(@ptrCast(&self.film_grain_job_contexts[0]));
+            parent_job.complete();
+            parent_job.wait();
+        }
+        self.recordRenderPassTiming("film_grain_vignette", pass_start);
+    }
+
+    fn applyFilmGrainVignetteRows(self: *Renderer, start_row: usize, end_row: usize, width: usize, height: usize) void {
+        const grain_str = config.POST_FILM_GRAIN_STRENGTH;
+        const vig_str = config.POST_VIGNETTE_STRENGTH;
+        const cx = @as(f32, @floatFromInt(width)) * 0.5;
+        const cy = @as(f32, @floatFromInt(height)) * 0.5;
+
+        // pseudo-random seed based on frame so it moves
+        const seed = @as(u32, @intCast(self.total_frames_rendered % 1000));
+        
+        var y = start_row;
+        while (y < end_row) : (y += 1) {
+            const row_start = y * width;
+            var x: usize = 0;
+            while (x < width) : (x += 1) {
+                const idx = row_start + x;
+                const px = self.bitmap.pixels[idx];
+
+                var r = @as(f32, @floatFromInt((px >> 16) & 0xFF));
+                var g = @as(f32, @floatFromInt((px >> 8) & 0xFF));
+                var b = @as(f32, @floatFromInt(px & 0xFF));
+
+                // --- Vignette ---
+                const dx = (@as(f32, @floatFromInt(x)) - cx) / cx;
+                const dy = (@as(f32, @floatFromInt(y)) - cy) / cy;
+                const dist = @sqrt(dx * dx + dy * dy);
+                const vig_factor = 1.0 - @max(0, @min(1.0, dist * vig_str));
+                
+                r *= vig_factor;
+                g *= vig_factor;
+                b *= vig_factor;
+
+                // --- Film Grain ---
+                // Cheap hash for pseudo-random noise
+                var hash = (@as(u32, @intCast(x)) *% 73856093) ^ (@as(u32, @intCast(y)) *% 19349663) ^ (seed *% 83492791);
+                hash = (hash ^ (hash >> 16)) *% 2654435769;
+                hash = hash ^ (hash >> 16);
+                
+                const noise = (@as(f32, @floatFromInt(hash & 0xFF)) / 255.0) - 0.5; // -0.5 to 0.5
+                const grain_factor = 1.0 + (noise * grain_str);
+
+                const final_r = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(r * grain_factor))))));
+                const final_g = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(g * grain_factor))))));
+                const final_b = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(b * grain_factor))))));
+
+                self.bitmap.pixels[idx] = 0xFF000000 | (final_r << 16) | (final_g << 8) | final_b;
+            }
+        }
+    }
+
+    fn applyMotionBlurPass(self: *Renderer, current_view: TemporalAAViewState) void {
+        if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
+        const pass_start = std.time.nanoTimestamp();
+        const width: usize = @intCast(self.bitmap.width);
+        const height: usize = @intCast(self.bitmap.height);
+
+        // If TAA isn't populated, we can't reliably do motion blur
+        if (!self.taa_scratch.valid) return;
+
+        const stripe_count = computeStripeCount(self.moblur_job_contexts.len, height);
+        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
+
+        if (stripe_count <= 1 or self.job_system == null) {
+            self.applyMotionBlurRows(current_view, self.taa_previous_view, 0, height, width, height);
+        } else {
+            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+            var stripe_index: usize = 0;
+            while (stripe_index < stripe_count) : (stripe_index += 1) {
+                const start_row = stripe_index * rows_per_job;
+                if (start_row >= height) break;
+                const end_row = @min(height, start_row + rows_per_job);
+
+                self.moblur_job_contexts[stripe_index] = .{
+                    .renderer = self,
+                    .current_view = current_view,
+                    .previous_view = self.taa_previous_view,
+                    .start_row = start_row,
+                    .end_row = end_row,
+                    .width = width,
+                    .height = height,
+                };
+                if (stripe_index == 0) continue;
+
+                self.color_grade_jobs[stripe_index] = Job.init(
+                    MotionBlurJobContext.run,
+                    @ptrCast(&self.moblur_job_contexts[stripe_index]),
+                    &parent_job,
+                );
+                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+                    MotionBlurJobContext.run(@ptrCast(&self.moblur_job_contexts[stripe_index]));
+                }
+            }
+            MotionBlurJobContext.run(@ptrCast(&self.moblur_job_contexts[0]));
+            parent_job.complete();
+            parent_job.wait();
+        }
+
+        // Copy scratch back to main pixels
+        @memcpy(self.bitmap.pixels, self.moblur_scratch_pixels);
+
+        self.recordRenderPassTiming("motion_blur", pass_start);
+    }
+
+    fn applyMotionBlurRows(
+        self: *Renderer,
+        current_view: TemporalAAViewState,
+        previous_view: TemporalAAViewState,
+        start_row: usize,
+        end_row: usize,
+        width: usize,
+        height: usize,
+    ) void {
+        const samples = config.POST_MOTION_BLUR_SAMPLES;
+        const intensity = config.POST_MOTION_BLUR_INTENSITY;
+        const inv_samples_plus_one = 1.0 / (@as(f32, @floatFromInt(samples)) + 1.0);
+
+        var y = start_row;
+        while (y < end_row) : (y += 1) {
+            const row_start = y * width;
+            var x: usize = 0;
+            while (x < width) : (x += 1) {
+                const idx = row_start + x;
+                const current_pixel = self.bitmap.pixels[idx];
+                self.moblur_scratch_pixels[idx] = current_pixel;
+
+                const current_camera = self.scene_camera[idx];
+                if (!validSceneCameraSample(current_camera)) continue;
+
+                // Recover world position
+                const world_pos = cameraToWorldPosition(
+                    current_view.camera_position,
+                    current_view.basis_right,
+                    current_view.basis_up,
+                    current_view.basis_forward,
+                    current_camera,
+                );
+                
+                // Project back into previous frame
+                const previous_relative = math.Vec3.sub(world_pos, previous_view.camera_position);
+                const previous_camera = math.Vec3.new(
+                    math.Vec3.dot(previous_relative, previous_view.basis_right),
+                    math.Vec3.dot(previous_relative, previous_view.basis_up),
+                    math.Vec3.dot(previous_relative, previous_view.basis_forward),
+                );
+                if (previous_camera.z <= previous_view.projection.near_plane + NEAR_EPSILON) continue;
+
+                const previous_screen_raw = projectCameraPositionFloat(previous_camera, previous_view.projection);
+                // Note: Not stripping jitter here so velocity matches the exact TAA camera shift if wanted.
+                // The actual velocity vector in screen pixels:
+                const vec_x = previous_screen_raw.x - @as(f32, @floatFromInt(x));
+                const vec_y = previous_screen_raw.y - @as(f32, @floatFromInt(y));
+                
+                const vel_mag_sq = vec_x * vec_x + vec_y * vec_y;
+                if (vel_mag_sq < 0.25) continue; // Skip sub-pixel blur
+
+                var r_sum: f32 = @as(f32, @floatFromInt((current_pixel >> 16) & 0xFF));
+                var g_sum: f32 = @as(f32, @floatFromInt((current_pixel >> 8) & 0xFF));
+                var b_sum: f32 = @as(f32, @floatFromInt(current_pixel & 0xFF));
+
+                var s: i32 = 1;
+                while (s <= samples) : (s += 1) {
+                    const t = @as(f32, @floatFromInt(s)) / @as(f32, @floatFromInt(samples + 1));
+                    
+                    const p_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(x)) + vec_x * t * intensity));
+                    const p_y = @as(i32, @intFromFloat(@as(f32, @floatFromInt(y)) + vec_y * t * intensity));
+                    
+                    if (p_x >= 0 and p_x < @as(i32, @intCast(width)) and p_y >= 0 and p_y < @as(i32, @intCast(height))) {
+                        const s_idx = @as(usize, @intCast(p_y)) * width + @as(usize, @intCast(p_x));
+                        const sample_px = self.bitmap.pixels[s_idx];
+                        r_sum += @as(f32, @floatFromInt((sample_px >> 16) & 0xFF));
+                        g_sum += @as(f32, @floatFromInt((sample_px >> 8) & 0xFF));
+                        b_sum += @as(f32, @floatFromInt(sample_px & 0xFF));
+                    } else {
+                        // edge of screen, duplicate own pixel
+                        r_sum += @as(f32, @floatFromInt((current_pixel >> 16) & 0xFF));
+                        g_sum += @as(f32, @floatFromInt((current_pixel >> 8) & 0xFF));
+                        b_sum += @as(f32, @floatFromInt(current_pixel & 0xFF));
+                    }
+                }
+                
+                const final_r = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(r_sum * inv_samples_plus_one))))));
+                const final_g = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(g_sum * inv_samples_plus_one))))));
+                const final_b = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(b_sum * inv_samples_plus_one))))));
+                
+                self.moblur_scratch_pixels[idx] = 0xFF000000 | (final_r << 16) | (final_g << 8) | final_b;
             }
         }
     }
