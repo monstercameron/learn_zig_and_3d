@@ -29,6 +29,7 @@
 //! ```
 
 const std = @import("std");
+const profiler = @import("profiler.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 const math = @import("math.zig");
@@ -1925,11 +1926,11 @@ const AdaptiveShadowTileJob = struct {
 
         if (!any_valid) return .{ .mixed = false, .shadowed = false };
         if (any_invalid) return .{ .mixed = true, .shadowed = false };
-        
+
         // FIX: Sparse 9-point check is prone to false positives for deep shadows on complex silhouettes.
         // Always subdivide if there's any shadow to ensure sharp pixel edge evaluation.
         if (any_occluded) return .{ .mixed = true, .shadowed = false };
-        
+
         return .{ .mixed = false, .shadowed = false };
     }
 
@@ -4554,6 +4555,14 @@ pub const Renderer = struct {
     /// The main render loop function, with an added callback to process OS messages.
     /// This is the heart of the engine, executing the full 3D pipeline each frame.
     pub fn render3DMeshWithPump(self: *Renderer, mesh: *const Mesh, pump: ?*const fn (*Renderer) bool) !void {
+        if (self.total_frames_rendered == self.profile_capture_frame and profiler.Profiler.instance.?.active) {
+            profiler.Profiler.stopCaptureAndSave("profile.json") catch {};
+        }
+        if (self.total_frames_rendered + 1 == self.profile_capture_frame) {
+            profiler.Profiler.startCapture();
+        }
+        const _zone = profiler.zone("Renderer.render");
+        defer if (_zone) |z| z.end();
         @memset(self.bitmap.pixels, 0xFF000000);
         self.resetRenderPassTimings();
 
@@ -4818,6 +4827,7 @@ pub const Renderer = struct {
     }
 
     fn maybeEmitSingleFrameProfile(self: *Renderer) void {
+
         if (self.profile_capture_emitted or self.profile_capture_frame == 0) return;
         if (self.total_frames_rendered != self.profile_capture_frame) return;
 
@@ -6116,7 +6126,7 @@ pub const Renderer = struct {
         const p_near = previous_view.projection.near_plane + NEAR_EPSILON;
         const jitter_x_diff = current_view.projection.jitter_x - previous_view.projection.jitter_x;
         const jitter_y_diff = current_view.projection.jitter_y - previous_view.projection.jitter_y;
-        
+
         const p_cx = previous_view.projection.center_x;
         const p_cy = previous_view.projection.center_y;
         const p_jx = previous_view.projection.jitter_x;
@@ -6802,7 +6812,10 @@ pub const Renderer = struct {
     }
 
     fn applyTemporalAAPass(self: *Renderer, current_view: TemporalAAViewState) void {
-        if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
+        
+        const _zone = profiler.zone("applyTemporalAAPass");
+        defer if (_zone) |z| z.end();
+if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
         const height: usize = @intCast(self.bitmap.height);

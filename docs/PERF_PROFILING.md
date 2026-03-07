@@ -120,3 +120,15 @@ For any serious performance review:
 ## 6. Visual Validation
 
 If a change affects image quality, capture a screenshot before and after profiling. Performance-only changes are not enough if they break shadow edges, SSAO, textures, or model loading.
+
+## 7. Chrome Tracing Profiler
+There is a custom Chrome Tracing-compatible, thread-safe profiler built into the engine right now. It generates a `profile.json` that you can drag and drop into `chrome://tracing` or [Perfetto](https://ui.perfetto.dev/).
+
+To generate the Chrome Trace, compile and run with the environment variable `ZIG_RENDER_PROFILE_FRAME` set:
+
+```powershell
+$env:ZIG_RENDER_PROFILE_FRAME = '120'
+zig build run -Doptimize=ReleaseFast
+```
+
+This will run the trace starting on frame 119 and stop on frame 120, logging output to `profile.json` in the workspace root. You can wrap `profiler.zone("YourFunctionName");` around any function or block for fine-grained stack visibility.

@@ -28,6 +28,7 @@
 //! ```
 //!
 const std = @import("std");
+const profiler = @import("profiler.zig");
 const windows = std.os.windows;
 const math = @import("math.zig");
 const zphysics = @import("zphysics");
@@ -109,6 +110,8 @@ const SceneAsset = struct {
 /// as soon as the script loads. The `!void` means it can return an error but
 /// doesn't return a value on success.
 pub fn main() !void {
+    profiler.Profiler.init(std.heap.page_allocator);
+    defer profiler.Profiler.deinit();
     // ========== INITIALIZATION PHASE ==========
 
     // Set up a general-purpose allocator for dynamic memory.
