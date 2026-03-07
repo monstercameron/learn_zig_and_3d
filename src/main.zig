@@ -30,6 +30,8 @@
 const std = @import("std");
 const windows = std.os.windows;
 const math = @import("math.zig");
+const zphysics = @import("zphysics");
+const physics_utils = @import("physics_utils.zig");
 
 // Windows message structure.
 // JS Analogy: This is the raw event object from the operating system. A browser
@@ -131,7 +133,7 @@ pub fn main() !void {
         app_logger.errSub("bootstrap", "Failed to load config: {any}", .{err});
     };
     defer config.deinit();
-    
+
     const initial_width = @as(i32, @intCast(config.WINDOW_WIDTH));
     const initial_height = @as(i32, @intCast(config.WINDOW_HEIGHT));
     var window = try Window.init(config.WINDOW_TITLE, initial_width, initial_height);
@@ -165,7 +167,34 @@ pub fn main() !void {
     }
 
     scene_asset.mesh.centerToOrigin(); // Center the model at (0,0,0).
-    levelLiftMeshToGround(&scene_asset.mesh);
+
+    // Calculate exact bounds
+    var gun_min_b = scene_asset.mesh.vertices[0];
+    var gun_max_b = scene_asset.mesh.vertices[0];
+    for (scene_asset.mesh.vertices[1..scene_asset.mesh.vertices.len]) |v| {
+        gun_min_b.x = @min(gun_min_b.x, v.x);
+        gun_min_b.y = @min(gun_min_b.y, v.y);
+        gun_min_b.z = @min(gun_min_b.z, v.z);
+        gun_max_b.x = @max(gun_max_b.x, v.x);
+        gun_max_b.y = @max(gun_max_b.y, v.y);
+        gun_max_b.z = @max(gun_max_b.z, v.z);
+    }
+    const gun_hx = (gun_max_b.x - gun_min_b.x) * 0.5;
+    const gun_hy = (gun_max_b.y - gun_min_b.y) * 0.5;
+    const gun_hz = (gun_max_b.z - gun_min_b.z) * 0.5;
+
+    const num_gun_vertices = scene_asset.mesh.vertices.len;
+    const num_gun_triangles = scene_asset.mesh.triangles.len;
+
+    const original_gun_vertices = try allocator.alloc(math.Vec3, num_gun_vertices);
+    defer allocator.free(original_gun_vertices);
+    @memcpy(original_gun_vertices, scene_asset.mesh.vertices[0..num_gun_vertices]);
+
+    const original_gun_normals = try allocator.alloc(math.Vec3, num_gun_triangles);
+    defer allocator.free(original_gun_normals);
+    @memcpy(original_gun_normals, scene_asset.mesh.normals[0..num_gun_triangles]);
+
+
     try levelAppendGroundPlane(&scene_asset.mesh, allocator);
     app_logger.infoSub(
         "assets",
@@ -176,12 +205,61 @@ pub fn main() !void {
     renderer.setCameraPosition(math.Vec3.new(0.0, 2.0, -10.0));
     renderer.setCameraOrientation(-0.1, 0.0);
 
+
+    // ==== PHYSICS INIT ====
+    try zphysics.init(allocator, .{});
+    app_logger.info("zphysics.init done", .{});
+    defer zphysics.deinit();
+    var pw = try physics_utils.PhysicsWorld.init(allocator);
+    app_logger.info("PhysicsWorld.init done", .{});
+    defer pw.deinit(allocator);
+
+    const body_interface = pw.system.getBodyInterfaceMut();
+
+    // floor
+    const floor_shape_settings = try zphysics.BoxShapeSettings.create(.{ 100.0, 1.0, 100.0 });
+    defer floor_shape_settings.asShapeSettings().release();
+    const floor_shape = try floor_shape_settings.asShapeSettings().createShape();
+    defer floor_shape.release();
+
+    const floor_body_settings = zphysics.BodyCreationSettings{
+        .shape = floor_shape,
+        .position = .{ 0.0, -2.0, 0.0, 0.0 },
+        .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
+        .motion_type = .static,
+        .object_layer = physics_utils.object_layers.non_moving,
+    };
+    const floor_body_id = try body_interface.createAndAddBody(floor_body_settings, .activate);
+    _ = floor_body_id;
+
+    // gun
+    const gun_shape_settings = try zphysics.BoxShapeSettings.create(.{ gun_hx, gun_hy, gun_hz });
+    defer gun_shape_settings.asShapeSettings().release();
+    const gun_shape = try gun_shape_settings.asShapeSettings().createShape();
+    defer gun_shape.release();
+
+    var gun_body_settings = zphysics.BodyCreationSettings{
+        .shape = gun_shape,
+        .position = .{ 0.0, 5.0, 0.0, 0.0 },
+        .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
+        .motion_type = .dynamic,
+        .object_layer = physics_utils.object_layers.moving,
+    };
+    // Add angular velocity and initial bounce
+    gun_body_settings.angular_velocity = .{ 2.0, 1.0, 3.0, 0.0 };
+    gun_body_settings.restitution = 0.5;
+
+    const gun_body_id = try body_interface.createAndAddBody(gun_body_settings, .activate);
+    app_logger.info("gun body created!", .{});
+
     // ========== EVENT LOOP PHASE ==========
+
 
     // This is the main application loop, similar to `requestAnimationFrame` in JS.
     // We use `PeekMessageW` for a non-blocking loop, which allows us to render
     // frames continuously even if there are no new user input events.
     var running = true;
+
 
     app_logger.info("starting main event loop...", .{});
 
@@ -247,7 +325,37 @@ pub fn main() !void {
             break;
         }
 
+
+        // Physics Step
+        pw.system.update(1.0 / 60.0, .{ .collision_steps = 1 }) catch {};
+        
+        // Update Gun Mesh Vertices
+        const lock_iface = pw.system.getBodyLockInterfaceNoLock();
+        var read_lock: zphysics.BodyLockRead = .{};
+        read_lock.lock(lock_iface, gun_body_id);
+        const body = read_lock.body.?;
+        const xform = body.getWorldTransform();
+        const rot = xform.rotation;
+        const pos = xform.position;
+
+        for (scene_asset.mesh.vertices[0..num_gun_vertices], 0..) |*v, i| {
+            const ov = original_gun_vertices[i];
+            v.x = rot[0]*ov.x + rot[3]*ov.y + rot[6]*ov.z + pos[0];
+            v.y = rot[1]*ov.x + rot[4]*ov.y + rot[7]*ov.z + pos[1];
+            v.z = rot[2]*ov.x + rot[5]*ov.y + rot[8]*ov.z + pos[2];
+        }
+
+        for (scene_asset.mesh.normals[0..num_gun_triangles], 0..) |*n, i| {
+            const on = original_gun_normals[i];
+            n.x = rot[0]*on.x + rot[3]*on.y + rot[6]*on.z;
+            n.y = rot[1]*on.x + rot[4]*on.y + rot[7]*on.z;
+            n.z = rot[2]*on.x + rot[5]*on.y + rot[8]*on.z;
+        }
+
+        scene_asset.mesh.clearMeshlets();
+
         // Check if it's time to render a new frame, based on our target FPS.
+
         if (!renderer.shouldRenderFrame()) {
             Sleep(1);
             continue;

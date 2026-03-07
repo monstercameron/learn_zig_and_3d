@@ -63,14 +63,14 @@ pub const Texture = struct {
     pub fn sample(self: *const Texture, uv: math.Vec2) u32 {
         return self.sampleLod(uv, 0.0);
     }
-    
+
     pub fn sampleLod(self: *const Texture, uv: math.Vec2, lod: f32) u32 {
         if (self.width == 0 or self.height == 0) return 0xFF000000;
-        
+
         var target_pixels = self.pixels;
         var target_w = self.width;
         var target_h = self.height;
-        
+
         const mip_level = @as(usize, @intFromFloat(lod));
         if (mip_level > 0 and self.mip_levels.items.len > 0) {
             const level = @min(mip_level - 1, self.mip_levels.items.len - 1);
@@ -100,7 +100,7 @@ pub const Texture = struct {
 
         return pixels[y * w + x];
     }
-    
+
     fn sampleBilinearImpl(pixels: []const u32, w: usize, h: usize, uv: math.Vec2) u32 {
         const u = std.math.clamp(uv.x, 0.0, 1.0);
         const v = std.math.clamp(uv.y, 0.0, 1.0);
@@ -231,21 +231,24 @@ pub fn loadBmp(allocator: std.mem.Allocator, path: []const u8) !Texture {
     var current_w = width;
     var current_h = height;
     var current_pixels = pixels;
-    
+
     // Generate mipmaps down to 1x1
     while (current_w > 1 or current_h > 1) {
         const next_w = @max(1, current_w / 2);
         const next_h = @max(1, current_h / 2);
         const next_pixels = allocator.alloc(u32, next_w * next_h) catch break; // Break out if memory fails
-        
+
         // Simple box filter
         for (0..next_h) |ny| {
             for (0..next_w) |nx| {
                 const px0 = nx * 2;
                 const py0 = ny * 2;
-                var sum_r: u32 = 0; var sum_g: u32 = 0; var sum_b: u32 = 0; var sum_a: u32 = 0;
+                var sum_r: u32 = 0;
+                var sum_g: u32 = 0;
+                var sum_b: u32 = 0;
+                var sum_a: u32 = 0;
                 var count: u32 = 0;
-                
+
                 for (0..2) |dy| {
                     for (0..2) |dx| {
                         const px = px0 + dx;

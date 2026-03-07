@@ -27,8 +27,8 @@ pub const DeferredLightingKernel = struct {
     pub fn main(ctx: *ComputeContext) void {
         const albedo_tex = ctx.ro_textures[0]; // Albedo (RGBA32F)
         const normal_tex = ctx.ro_textures[1]; // Normals (RGBA32F)
-        const depth_tex = ctx.ro_textures[2];  // Depth (R32F)
-        const dst = ctx.rw_textures[0];        // Lit color output (RGBA32F)
+        const depth_tex = ctx.ro_textures[2]; // Depth (R32F)
+        const dst = ctx.rw_textures[0]; // Lit color output (RGBA32F)
         const pc = getPC(ctx);
 
         const x = ctx.global_id.x;
@@ -51,15 +51,12 @@ pub const DeferredLightingKernel = struct {
         const diffuse_r = albedo[0] * pc.light_color[0] * NdotL;
         const diffuse_g = albedo[1] * pc.light_color[1] * NdotL;
         const diffuse_b = albedo[2] * pc.light_color[2] * NdotL;
-        
+
         // Specular highlight (Blinn-Phong)
         // Note: For full accuracy we'd reconstruct world space from depth,
         // but here we estimate view_dir directly opposite to camera_pos for a placeholder
-        const view_dir = std.math.normalize(std.math.Vec3.new(
-            pc.camera_position[0] - (@as(f32, @floatFromInt(x)) / 1000.0), // very rough placeholder
-            pc.camera_position[1] - (@as(f32, @floatFromInt(y)) / 1000.0), 
-            pc.camera_position[2] - depth
-        ));
+        const view_dir = std.math.normalize(std.math.Vec3.new(pc.camera_position[0] - (@as(f32, @floatFromInt(x)) / 1000.0), // very rough placeholder
+            pc.camera_position[1] - (@as(f32, @floatFromInt(y)) / 1000.0), pc.camera_position[2] - depth));
         const half_vec = std.math.normalize(std.math.Vec3.new(
             view_dir.x + light_dir_vec.x,
             view_dir.y + light_dir_vec.y,

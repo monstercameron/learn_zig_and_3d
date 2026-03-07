@@ -1,0 +1,12 @@
+﻿.{
+    .name = .learn_zig_and_3d,
+    .version = "0.15.2",
+    .dependencies = .{
+        .zphysics = .{
+            .url = "git+https://github.com/zig-gamedev/zphysics.git#9797d7bd08e4341410104876eb1896a71714277d",
+            .hash = "zphysics-0.2.0-dev-nZDEANvfQgD04nOPqL9KMokfgjzs_wPtHpoLscZScaOa",
+        },
+    },
+    .paths = .{""},
+    .fingerprint = 0x749c113fcc7b19fa,
+}

@@ -2057,6 +2057,16 @@ fn clampByte(value: i32) u8 {
 
 /// The `Renderer` struct holds the entire state of the rendering engine.
 /// It manages the window connection, the pixel buffer, the rendering pipeline, and application state.
+pub const LightInfo = struct {
+    orbit_x: f32,
+    orbit_speed: f32,
+    distance: f32,
+    elevation: f32,
+    color: math.Vec3,
+    direction: math.Vec3 = math.Vec3.new(0, -1, 0),
+    shadow_map: ShadowMap,
+};
+
 pub const Renderer = struct {
     // Core rendering resources
     hwnd: windows.HWND, // Handle to the window we are drawing to.
@@ -2076,9 +2086,7 @@ pub const Renderer = struct {
     mouse_last_pos: windows.POINT, // Last mouse position in client coordinates.
 
     // Light state
-    light_orbit_x: f32,
-    light_orbit_y: f32,
-    light_distance: f32,
+    lights: std.ArrayList(LightInfo),
 
     // Input and timing state
     keys_pressed: u32, // Bitmask of currently pressed keys.
@@ -2151,7 +2159,6 @@ pub const Renderer = struct {
     hybrid_shadow_cached_meshlet_primitive_count: usize,
     hybrid_shadow_stats: HybridShadowStats = .{},
     hybrid_shadow_debug: HybridShadowDebugState = .{},
-    shadow_map: ShadowMap,
     ao_scratch: AOScratch,
     bloom_scratch: BloomScratch,
     ao_job_contexts: []AOJobContext,
@@ -2249,8 +2256,30 @@ pub const Renderer = struct {
         const hybrid_shadow_edge_cache_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + hybrid_shadow_edge_downsample - 1, hybrid_shadow_edge_downsample))));
         const hybrid_shadow_edge_cache = try allocator.alloc(u8, hybrid_shadow_edge_cache_width * hybrid_shadow_edge_cache_height);
         errdefer allocator.free(hybrid_shadow_edge_cache);
-        const shadow_depth = try allocator.alloc(f32, config.POST_SHADOW_MAP_SIZE * config.POST_SHADOW_MAP_SIZE);
-        errdefer allocator.free(shadow_depth);
+        var lights = std.ArrayList(LightInfo){};
+        for (0..2) |light_idx| {
+            const sm_depth = try allocator.alloc(f32, config.POST_SHADOW_MAP_SIZE * config.POST_SHADOW_MAP_SIZE);
+            errdefer allocator.free(sm_depth);
+            try lights.append(allocator, LightInfo{ .orbit_x = @as(f32, @floatFromInt(light_idx)) * 3.14159, .orbit_speed = 0.5 + @as(f32, @floatFromInt(light_idx)) * 0.2, .distance = config.LIGHT_DISTANCE_INITIAL, .elevation = 0.65, .color = if (light_idx == 0) math.Vec3.new(1.0, 0.9, 0.8) else math.Vec3.new(0.5, 0.6, 1.0), .shadow_map = .{
+                .width = config.POST_SHADOW_MAP_SIZE,
+                .height = config.POST_SHADOW_MAP_SIZE,
+                .depth = sm_depth,
+                .basis_right = math.Vec3.new(1.0, 0.0, 0.0),
+                .basis_up = math.Vec3.new(0.0, 1.0, 0.0),
+                .basis_forward = math.Vec3.new(0.0, 0.0, 1.0),
+                .min_x = -1.0,
+                .max_x = 1.0,
+                .min_y = -1.0,
+                .max_y = 1.0,
+                .min_z = -1.0,
+                .max_z = 1.0,
+                .inv_extent_x = 1.0,
+                .inv_extent_y = 1.0,
+                .depth_bias = config.POST_SHADOW_DEPTH_BIAS,
+                .texel_bias = 0.0,
+                .active = false,
+            } });
+        }
         const ao_downsample = @max(1, config.POST_SSAO_DOWNSAMPLE);
         const ao_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + ao_downsample - 1, ao_downsample))));
         const ao_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + ao_downsample - 1, ao_downsample))));
@@ -2296,9 +2325,7 @@ pub const Renderer = struct {
             .pending_mouse_delta = math.Vec2.new(0.0, 0.0),
             .mouse_initialized = false,
             .mouse_last_pos = .{ .x = 0, .y = 0 },
-            .light_orbit_x = 0.0,
-            .light_orbit_y = 0.0,
-            .light_distance = config.LIGHT_DISTANCE_INITIAL,
+            .lights = lights,
             .camera_fov_deg = config.CAMERA_FOV_INITIAL,
             .keys_pressed = 0,
             .frame_count = 0,
@@ -2403,25 +2430,6 @@ pub const Renderer = struct {
             .hybrid_shadow_cached_meshlet_primitive_count = 0,
             .hybrid_shadow_stats = .{},
             .hybrid_shadow_debug = .{},
-            .shadow_map = .{
-                .width = config.POST_SHADOW_MAP_SIZE,
-                .height = config.POST_SHADOW_MAP_SIZE,
-                .depth = shadow_depth,
-                .basis_right = math.Vec3.new(1.0, 0.0, 0.0),
-                .basis_up = math.Vec3.new(0.0, 1.0, 0.0),
-                .basis_forward = math.Vec3.new(0.0, 0.0, 1.0),
-                .min_x = -1.0,
-                .max_x = 1.0,
-                .min_y = -1.0,
-                .max_y = 1.0,
-                .min_z = -1.0,
-                .max_z = 1.0,
-                .inv_extent_x = 1.0,
-                .inv_extent_y = 1.0,
-                .depth_bias = config.POST_SHADOW_DEPTH_BIAS,
-                .texel_bias = 0.0,
-                .active = false,
-            },
             .ao_scratch = .{
                 .width = ao_width,
                 .height = ao_height,
@@ -2482,7 +2490,10 @@ pub const Renderer = struct {
         if (self.hybrid_shadow_tile_candidates.len != 0) self.allocator.free(self.hybrid_shadow_tile_candidates);
         if (self.hybrid_shadow_grid_candidates.len != 0) self.allocator.free(self.hybrid_shadow_grid_candidates);
         if (self.hybrid_shadow_candidate_marks.len != 0) self.allocator.free(self.hybrid_shadow_candidate_marks);
-        self.allocator.free(self.shadow_map.depth);
+        for (self.lights.items) |light| {
+            self.allocator.free(light.shadow_map.depth);
+        }
+        self.lights.deinit(self.allocator);
         self.allocator.free(self.ao_scratch.ping);
         self.allocator.free(self.ao_scratch.pong);
         self.allocator.free(self.ao_scratch.depth);
@@ -3975,20 +3986,22 @@ pub const Renderer = struct {
         const fov_delta = self.consumePendingFovDelta();
         if (fov_delta != 0.0) self.adjustCameraFov(fov_delta);
 
-        const auto_orbit_speed = 0.5;
         const sweep_half_angle = std.math.pi / 2.0;
-        const light_elevation = 0.65;
-        const min_light_height = 0.35;
-        self.light_orbit_x += auto_orbit_speed * simulation_delta_seconds;
-        const sweep_angle = @sin(self.light_orbit_x) * sweep_half_angle;
-        const horizontal_radius = self.light_distance * @cos(light_elevation);
-        const light_height = @max(min_light_height, self.light_distance * @sin(light_elevation));
-        const light_pos_world = math.Vec3.new(
-            @sin(sweep_angle) * horizontal_radius,
-            light_height,
-            @cos(sweep_angle) * horizontal_radius,
-        );
-        const light_dir_world = math.Vec3.normalize(light_pos_world);
+        for (self.lights.items) |*light| {
+            light.orbit_x += light.orbit_speed * simulation_delta_seconds;
+            const sweep_angle = @sin(light.orbit_x) * sweep_half_angle;
+            const horizontal_radius = light.distance * @cos(light.elevation);
+            const light_height = @max(0.35, light.distance * @sin(light.elevation));
+            const light_pos = math.Vec3.new(
+                @sin(sweep_angle) * horizontal_radius,
+                light_height,
+                @cos(sweep_angle) * horizontal_radius,
+            );
+            light.direction = math.Vec3.normalize(light_pos);
+        }
+        const light_distance_0 = if (self.lights.items.len > 0) self.lights.items[0].distance else 10.0;
+        const light_dir_world = if (self.lights.items.len > 0) self.lights.items[0].direction else math.Vec3.new(0, -1, 0);
+        const light_pos_world = math.Vec3.scale(light_dir_world, light_distance_0);
 
         const yaw = self.rotation_angle;
         const pitch = self.rotation_x;
@@ -4142,7 +4155,12 @@ pub const Renderer = struct {
         }
 
         const mesh_work = &cache.work;
-        const shadow_elapsed_ns: i128 = if (config.POST_SHADOW_ENABLED) self.buildShadowMap(mesh, light_dir_world) else 0;
+        var shadow_elapsed_ns: i128 = 0;
+        if (config.POST_SHADOW_ENABLED) {
+            for (self.lights.items) |*light| {
+                shadow_elapsed_ns += self.buildShadowMap(mesh, light.direction, &light.shadow_map);
+            }
+        }
 
         const scene_pass_start = std.time.nanoTimestamp();
         if (self.use_tiled_rendering and self.tile_grid != null and self.tile_buffers != null) {
@@ -4486,9 +4504,9 @@ pub const Renderer = struct {
         }
     }
 
-    fn buildShadowMap(self: *Renderer, mesh: *const Mesh, light_dir_world: math.Vec3) i128 {
+    fn buildShadowMap(self: *Renderer, mesh: *const Mesh, light_dir_world: math.Vec3, target_shadow_map: *ShadowMap) i128 {
         if (!config.POST_SHADOW_ENABLED or mesh.meshlets.len == 0) {
-            self.shadow_map.active = false;
+            target_shadow_map.*.active = false;
             return 0;
         }
 
@@ -4514,7 +4532,7 @@ pub const Renderer = struct {
         }
 
         if (!std.math.isFinite(min_x) or !std.math.isFinite(max_x)) {
-            self.shadow_map.active = false;
+            target_shadow_map.*.active = false;
             return std.time.nanoTimestamp() - pass_start;
         }
 
@@ -4523,33 +4541,33 @@ pub const Renderer = struct {
         const range_z = @max(0.001, max_z - min_z);
         const margin = @max(0.25, @max(range_x, @max(range_y, range_z)) * 0.08);
 
-        self.shadow_map.basis_right = basis.right;
-        self.shadow_map.basis_up = basis.up;
-        self.shadow_map.basis_forward = basis.forward;
-        self.shadow_map.min_x = min_x - margin;
-        self.shadow_map.max_x = max_x + margin;
-        self.shadow_map.min_y = min_y - margin;
-        self.shadow_map.max_y = max_y + margin;
-        self.shadow_map.min_z = min_z - margin;
-        self.shadow_map.max_z = max_z + margin;
-        self.shadow_map.inv_extent_x = 1.0 / @max(0.001, self.shadow_map.max_x - self.shadow_map.min_x);
-        self.shadow_map.inv_extent_y = 1.0 / @max(0.001, self.shadow_map.max_y - self.shadow_map.min_y);
-        self.shadow_map.depth_bias = config.POST_SHADOW_DEPTH_BIAS;
-        self.shadow_map.texel_bias = @max(
+        target_shadow_map.*.basis_right = basis.right;
+        target_shadow_map.*.basis_up = basis.up;
+        target_shadow_map.*.basis_forward = basis.forward;
+        target_shadow_map.*.min_x = min_x - margin;
+        target_shadow_map.*.max_x = max_x + margin;
+        target_shadow_map.*.min_y = min_y - margin;
+        target_shadow_map.*.max_y = max_y + margin;
+        target_shadow_map.*.min_z = min_z - margin;
+        target_shadow_map.*.max_z = max_z + margin;
+        target_shadow_map.*.inv_extent_x = 1.0 / @max(0.001, target_shadow_map.*.max_x - target_shadow_map.*.min_x);
+        target_shadow_map.*.inv_extent_y = 1.0 / @max(0.001, target_shadow_map.*.max_y - target_shadow_map.*.min_y);
+        target_shadow_map.*.depth_bias = config.POST_SHADOW_DEPTH_BIAS;
+        target_shadow_map.*.texel_bias = @max(
             0.001,
             @max(
-                (self.shadow_map.max_x - self.shadow_map.min_x) / @as(f32, @floatFromInt(self.shadow_map.width)),
-                (self.shadow_map.max_y - self.shadow_map.min_y) / @as(f32, @floatFromInt(self.shadow_map.height)),
+                (target_shadow_map.*.max_x - target_shadow_map.*.min_x) / @as(f32, @floatFromInt(target_shadow_map.*.width)),
+                (target_shadow_map.*.max_y - target_shadow_map.*.min_y) / @as(f32, @floatFromInt(target_shadow_map.*.height)),
             ) * 0.35,
         );
-        self.shadow_map.active = true;
-        @memset(self.shadow_map.depth, std.math.inf(f32));
+        target_shadow_map.*.active = true;
+        @memset(target_shadow_map.*.depth, std.math.inf(f32));
 
-        const stripe_count = computeStripeCount(self.shadow_raster_job_contexts.len, self.shadow_map.height);
-        const rows_per_job = if (stripe_count <= 1) self.shadow_map.height else (self.shadow_map.height + stripe_count - 1) / stripe_count;
+        const stripe_count = computeStripeCount(self.shadow_raster_job_contexts.len, target_shadow_map.*.height);
+        const rows_per_job = if (stripe_count <= 1) target_shadow_map.*.height else (target_shadow_map.*.height + stripe_count - 1) / stripe_count;
 
         if (stripe_count <= 1 or self.job_system == null) {
-            rasterizeShadowMeshRange(mesh, &self.shadow_map, 0, self.shadow_map.height, light_dir_world);
+            rasterizeShadowMeshRange(mesh, target_shadow_map, 0, target_shadow_map.*.height, light_dir_world);
             return std.time.nanoTimestamp() - pass_start;
         }
 
@@ -4557,12 +4575,12 @@ pub const Renderer = struct {
         var stripe_index: usize = 0;
         while (stripe_index < stripe_count) : (stripe_index += 1) {
             const start_row = stripe_index * rows_per_job;
-            if (start_row >= self.shadow_map.height) break;
-            const end_row = @min(self.shadow_map.height, start_row + rows_per_job);
+            if (start_row >= target_shadow_map.*.height) break;
+            const end_row = @min(target_shadow_map.*.height, start_row + rows_per_job);
 
             self.shadow_raster_job_contexts[stripe_index] = .{
                 .mesh = mesh,
-                .shadow = &self.shadow_map,
+                .shadow = target_shadow_map,
                 .start_row = start_row,
                 .end_row = end_row,
                 .light_dir_world = light_dir_world,
@@ -4595,8 +4613,10 @@ pub const Renderer = struct {
         basis_forward: math.Vec3,
         projection: ProjectionParams,
         build_elapsed_ns: i128,
+        target_shadow_map: *const ShadowMap,
+        pass_index: usize,
     ) void {
-        if (!self.shadow_map.active or self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
+        if (!target_shadow_map.*.active or self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
 
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
@@ -4617,8 +4637,8 @@ pub const Renderer = struct {
         };
 
         if (stripe_count <= 1 or self.job_system == null) {
-            applyShadowRows(self.bitmap.pixels, self.scene_camera, width, 0, height, resolve_config, &self.shadow_map);
-            self.recordRenderPassDuration("shadow_pass", build_elapsed_ns + (std.time.nanoTimestamp() - pass_start));
+            applyShadowRows(self.bitmap.pixels, self.scene_camera, width, 0, height, resolve_config, target_shadow_map);
+            self.recordRenderPassDuration(if (pass_index == 0) "shadow_pass_0" else "shadow_pass_1", build_elapsed_ns + (std.time.nanoTimestamp() - pass_start));
             return;
         }
 
@@ -4636,7 +4656,7 @@ pub const Renderer = struct {
                 .start_row = start_row,
                 .end_row = end_row,
                 .config = resolve_config,
-                .shadow = &self.shadow_map,
+                .shadow = target_shadow_map,
             };
 
             if (stripe_index == 0) continue;
@@ -4654,7 +4674,7 @@ pub const Renderer = struct {
         ShadowResolveJobContext.run(@ptrCast(&self.shadow_resolve_job_contexts[0]));
         parent_job.complete();
         parent_job.wait();
-        self.recordRenderPassDuration("shadow_pass", build_elapsed_ns + (std.time.nanoTimestamp() - pass_start));
+        self.recordRenderPassDuration(if (pass_index == 0) "shadow_pass_0" else "shadow_pass_1", build_elapsed_ns + (std.time.nanoTimestamp() - pass_start));
     }
 
     fn ensureHybridShadowScratch(self: *Renderer, caster_capacity: usize, tile_candidate_capacity: usize, grid_candidate_capacity: usize) !void {
@@ -5101,7 +5121,11 @@ pub const Renderer = struct {
         light_dir_world: math.Vec3,
         shadow_elapsed_ns: i128,
     ) void {
-        if (config.POST_SHADOW_ENABLED) self.applyShadowPass(camera_position, basis_right, basis_up, basis_forward, projection, shadow_elapsed_ns);
+        if (config.POST_SHADOW_ENABLED) {
+            for (self.lights.items, 0..) |*light, pass_index| {
+                self.applyShadowPass(camera_position, basis_right, basis_up, basis_forward, projection, shadow_elapsed_ns, &light.shadow_map, pass_index);
+            }
+        }
         if (config.POST_HYBRID_SHADOW_ENABLED) self.applyAdaptiveShadowPass(mesh, camera_position, basis_right, basis_up, basis_forward, light_dir_world);
         if (config.POST_SSAO_ENABLED) self.applyAmbientOcclusionPass();
         if (config.POST_DEPTH_FOG_ENABLED) self.applyDepthFogPass();
@@ -5553,7 +5577,7 @@ pub const Renderer = struct {
                 if (self.show_render_overlay or self.hybrid_shadow_debug.enabled) {
                     self.drawRenderPassOverlay(hdc_mem);
                 }
-                
+
                 const window_w = @as(i32, @intCast(config.WINDOW_WIDTH));
                 const window_h = @as(i32, @intCast(config.WINDOW_HEIGHT));
                 if (window_w != self.bitmap.width or window_h != self.bitmap.height) {

@@ -287,13 +287,13 @@ pub fn rasterizeTriangleToTile(
             // 9. Write the final color to the tile's local pixel buffer.
             const idx = @as(usize, @intCast(y * tile_buffer.width + x));
             if (idx >= tile_buffer.pixels.len or idx >= tile_buffer.depth.len or idx >= tile_buffer.camera.len) continue;
-            
+
             // 10. Alpha Blending Pass & Depth Testing
             const a = (final_color >> 24) & 0xFF;
             if (a == 0) continue; // Fully transparent pixel, skip depth/write entirely
-            
+
             if (depth >= tile_buffer.depth[idx]) continue;
-            
+
             if (a == 255) {
                 // Opaque: Overwrite and update depth
                 tile_buffer.depth[idx] = depth;

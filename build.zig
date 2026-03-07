@@ -13,6 +13,12 @@ pub fn build(b: *std.Build) void {
     const profile = b.option(bool, "profile", "Enable frame pointers for native sampling profilers") orelse false;
 
     // Create an executable with the specified name and root source file
+    const zphysics_dep = b.dependency("zphysics", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Create an executable with the specified name and root source file
     const exe = b.addExecutable(.{
         .name = "zig-windows-app",
         .root_module = b.createModule(.{
@@ -28,6 +34,8 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("gdi32"); // For graphics device interface functions
     exe.linkSystemLibrary("kernel32"); // For kernel functions
     exe.linkSystemLibrary("winmm"); // For timer resolution control
+    exe.root_module.addImport("zphysics", zphysics_dep.module("root"));
+    exe.linkLibrary(zphysics_dep.artifact("joltc"));
 
     // Install the executable so it can be run with 'zig build run'
     b.installArtifact(exe);

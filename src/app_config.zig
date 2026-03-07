@@ -195,12 +195,12 @@ pub fn load(allocator: std.mem.Allocator, filepath: []const u8) !void {
     const arena = config_arena.?.allocator();
 
     const file_contents = std.fs.cwd().readFileAlloc(arena, filepath, 1024 * 1024) catch |err| {
-        std.debug.print("Failed to read config {s}: {any}, using defaults\n", .{filepath, err});
+        std.debug.print("Failed to read config {s}: {any}, using defaults\n", .{ filepath, err });
         return;
     };
 
     const parsed = std.json.parseFromSlice(ConfigFile, arena, file_contents, .{ .ignore_unknown_fields = true }) catch |err| {
-        std.debug.print("Failed to parse config json {s}: {any}\n", .{filepath, err});
+        std.debug.print("Failed to parse config json {s}: {any}\n", .{ filepath, err });
         return;
     };
 
@@ -211,7 +211,7 @@ pub fn load(allocator: std.mem.Allocator, filepath: []const u8) !void {
     if (c.window.height) |v| WINDOW_HEIGHT = v;
     if (c.window.fullscreen) |v| WINDOW_FULLSCREEN = v;
     if (c.window.vsync) |v| WINDOW_VSYNC = v;
-    
+
     if (c.rendering.renderResolutionScalePercent) |v| RENDER_RESOLUTION_SCALE_PERCENT = v;
     if (c.rendering.fpsLimit) |v| TARGET_FPS = v;
     if (c.rendering.textureFilteringBilinear) |v| TEXTURE_FILTERING_BILINEAR = v;
@@ -274,6 +274,3 @@ pub fn deinit() void {
         config_arena = null;
     }
 }
-
-
-
