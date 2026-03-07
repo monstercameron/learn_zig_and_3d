@@ -14,7 +14,7 @@ pub var WINDOW_VSYNC: bool = true;
 
 // --- Rendering & Camera Settings ---
 /// The percentage scale of the window resolution to use for the internal rendering backbuffer (e.g., 50 for 50% width/height). Maintains aspect ratio.
-pub var RENDER_RESOLUTION_SCALE_PERCENT: u32 = 50;
+pub var RENDER_RESOLUTION_SCALE_PERCENT: u32 = 100;
 /// The desired maximum frame rate. Used to calculate targetFrameTimeNs.
 pub var TARGET_FPS: u32 = 120;
 /// The initial Field of View (FOV) for the camera in degrees.
@@ -47,26 +47,27 @@ pub var POST_BLOOM_ENABLED: bool = false;
 pub var POST_DEPTH_FOG_ENABLED: bool = false;
 /// Enables HDR skybox rendering
 pub var POST_SKYBOX_ENABLED: bool = true;
-/// Enables the primary generic shadow mapping pass.
-pub var POST_SHADOW_ENABLED: bool = false;
+  /// Enables the primary generic shadow mapping pass.
+  /// Disabled in favor of hybrid shadows as requested
+  pub var POST_SHADOW_ENABLED: bool = false;
 /// Square dimension resolution of the shadow depth map target.
-pub var POST_SHADOW_MAP_SIZE: usize = 1024;
+pub var POST_SHADOW_MAP_SIZE: usize = 4096;
 /// Controls the opacity intensity of standard shadows (0-100).
 pub var POST_SHADOW_STRENGTH_PERCENT: i32 = 38;
 /// A depth offset to prevent shadow acne artifacts on lit surfaces.
 pub var POST_SHADOW_DEPTH_BIAS: f32 = 0.07;
 /// Enables the advanced hybrid ray-traced shadow pass for high fidelity shadows.
-pub var POST_HYBRID_SHADOW_ENABLED: bool = false;
+pub var POST_HYBRID_SHADOW_ENABLED: bool = true;
 /// Tile dimension constraint used during hybrid shadow evaluation.
-pub var POST_HYBRID_SHADOW_MIN_BLOCK_SIZE: i32 = 24;
+pub var POST_HYBRID_SHADOW_MIN_BLOCK_SIZE: i32 = 1;
 /// The maximum recursion or ray bounce depth for hybrid shadows.
 pub var POST_HYBRID_SHADOW_MAX_DEPTH: u32 = 1;
 /// The collision bias for intercepting geometry during shadow raycasts.
 pub var POST_HYBRID_SHADOW_RAY_BIAS: f32 = 0.03;
 /// Distance per step during bounding volume traversal.
-pub var POST_HYBRID_SHADOW_SAMPLE_STRIDE: i32 = 12;
+pub var POST_HYBRID_SHADOW_SAMPLE_STRIDE: i32 = 1;
 /// Downsampling factor for coarse early-z shadow cull testing.
-pub var POST_HYBRID_SHADOW_COARSE_DOWNSAMPLE: i32 = 4;
+pub var POST_HYBRID_SHADOW_COARSE_DOWNSAMPLE: i32 = 1;
 /// Downsampling factor specifically for resolving shadow edges.
 pub var POST_HYBRID_SHADOW_EDGE_DOWNSAMPLE: i32 = 1;
 /// The minimum coverage fraction required to trigger an edge resolution check.
