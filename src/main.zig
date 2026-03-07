@@ -127,15 +127,26 @@ pub fn main() !void {
     // JS Analogy: `const window = new Window(800, 600);`
     // The `try` keyword is like `await` for a function that might fail. If `Window.init`
     // returns an error, `main` will immediately stop and report the error.
-    const initial_width = 640;
-    const initial_height = 360;
+    config.load(allocator, "resources/configs/default.settings.json") catch |err| {
+        app_logger.errSub("bootstrap", "Failed to load config: {any}", .{err});
+    };
+    defer config.deinit();
+    
+    const initial_width = @as(i32, @intCast(config.WINDOW_WIDTH));
+    const initial_height = @as(i32, @intCast(config.WINDOW_HEIGHT));
     var window = try Window.init(config.WINDOW_TITLE, initial_width, initial_height);
     defer window.deinit(); // Guarantees the window is destroyed on exit.
     app_logger.infoSub("bootstrap", "window created {d}x{d}", .{ initial_width, initial_height });
 
+    // Safely enforce a minimum size to prevent 0-dimension crashes
+    const rw = (config.WINDOW_WIDTH * config.RENDER_RESOLUTION_SCALE_PERCENT) / 100;
+    const rh = (config.WINDOW_HEIGHT * config.RENDER_RESOLUTION_SCALE_PERCENT) / 100;
+    const render_width = @as(i32, @intCast(@max(1, rw)));
+    const render_height = @as(i32, @intCast(@max(1, rh)));
+
     // Create a renderer.
     // JS Analogy: `const renderer = canvas.getContext('2d');`
-    var renderer = try Renderer.init(window.hwnd, initial_width, initial_height, allocator);
+    var renderer = try Renderer.init(window.hwnd, render_width, render_height, allocator);
     defer renderer.deinit(); // Guarantees the renderer is cleaned up on exit.
     app_logger.infoSub("bootstrap", "renderer initialized backbuffer={d}x{d}", .{ renderer.bitmap.width, renderer.bitmap.height });
 

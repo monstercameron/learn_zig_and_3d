@@ -1298,6 +1298,7 @@ extern "user32" fn ReleaseDC(hWnd: windows.HWND, hDC: windows.HDC) i32;
 extern "gdi32" fn CreateCompatibleDC(hdc: ?windows.HDC) ?windows.HDC;
 extern "gdi32" fn SelectObject(hdc: windows.HDC, hgdiobj: HGDIOBJ) HGDIOBJ;
 extern "gdi32" fn BitBlt(hdcDest: windows.HDC, nXDest: i32, nYDest: i32, nWidth: i32, nHeight: i32, hdcSrc: windows.HDC, nXSrc: i32, nYSrc: i32, dwRop: u32) bool;
+extern "gdi32" fn StretchBlt(hdcDest: windows.HDC, nXOriginDest: i32, nYOriginDest: i32, nWidthDest: i32, nHeightDest: i32, hdcSrc: windows.HDC, nXOriginSrc: i32, nYOriginSrc: i32, nWidthSrc: i32, nHeightSrc: i32, dwRop: u32) bool;
 extern "gdi32" fn DeleteDC(hdc: windows.HDC) bool;
 extern "gdi32" fn SetBkMode(hdc: windows.HDC, mode: i32) i32;
 extern "gdi32" fn SetTextColor(hdc: windows.HDC, color: u32) u32;
@@ -5552,17 +5553,36 @@ pub const Renderer = struct {
                 if (self.show_render_overlay or self.hybrid_shadow_debug.enabled) {
                     self.drawRenderPassOverlay(hdc_mem);
                 }
-                _ = BitBlt(
-                    hdc,
-                    0,
-                    0,
-                    self.bitmap.width,
-                    self.bitmap.height,
-                    hdc_mem,
-                    0,
-                    0,
-                    SRCCOPY,
-                );
+                
+                const window_w = @as(i32, @intCast(config.WINDOW_WIDTH));
+                const window_h = @as(i32, @intCast(config.WINDOW_HEIGHT));
+                if (window_w != self.bitmap.width or window_h != self.bitmap.height) {
+                    _ = StretchBlt(
+                        hdc,
+                        0,
+                        0,
+                        window_w,
+                        window_h,
+                        hdc_mem,
+                        0,
+                        0,
+                        self.bitmap.width,
+                        self.bitmap.height,
+                        SRCCOPY,
+                    );
+                } else {
+                    _ = BitBlt(
+                        hdc,
+                        0,
+                        0,
+                        self.bitmap.width,
+                        self.bitmap.height,
+                        hdc_mem,
+                        0,
+                        0,
+                        SRCCOPY,
+                    );
+                }
             }
         }
     }

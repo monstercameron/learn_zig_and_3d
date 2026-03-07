@@ -25,6 +25,7 @@
 
 const std = @import("std");
 const math = @import("math.zig");
+const config = @import("app_config.zig");
 
 // Helper functions to read little-endian integers from a byte slice.
 // File formats often specify a specific byte order (endianness).
@@ -57,6 +58,14 @@ pub const Texture = struct {
     pub fn sample(self: *const Texture, uv: math.Vec2) u32 {
         if (self.width == 0 or self.height == 0) return 0xFF000000; // Return black for invalid textures.
 
+        if (config.TEXTURE_FILTERING_BILINEAR) {
+            return self.sampleBilinear(uv);
+        } else {
+            return self.sampleNearest(uv);
+        }
+    }
+
+    fn sampleNearest(self: *const Texture, uv: math.Vec2) u32 {
         // Clamp UV coordinates to the [0, 1] range to prevent out-of-bounds access.
         const u = std.math.clamp(uv.x, 0.0, 1.0);
         const v = std.math.clamp(uv.y, 0.0, 1.0);
@@ -72,6 +81,56 @@ pub const Texture = struct {
         const y = @min(@as(usize, @intFromFloat(@floor(y_f + 0.5))), max_y);
 
         return self.pixels[y * self.width + x];
+    }
+    
+    fn sampleBilinear(self: *const Texture, uv: math.Vec2) u32 {
+        const u = std.math.clamp(uv.x, 0.0, 1.0);
+        const v = std.math.clamp(uv.y, 0.0, 1.0);
+
+        const w_f = @as(f32, @floatFromInt(self.width)) - 1.0;
+        const h_f = @as(f32, @floatFromInt(self.height)) - 1.0;
+
+        const x_coord = std.math.clamp(u * w_f, 0.0, w_f);
+        const y_coord = std.math.clamp(v * h_f, 0.0, h_f);
+
+        const x_floor = @floor(x_coord);
+        const y_floor = @floor(y_coord);
+
+        const dx = x_coord - x_floor;
+        const dy = y_coord - y_floor;
+
+        const ux0 = @as(usize, @intFromFloat(x_floor));
+        const uy0 = @as(usize, @intFromFloat(y_floor));
+        const ux1 = @min(ux0 + 1, self.width - 1);
+        const uy1 = @min(uy0 + 1, self.height - 1);
+
+        const c00 = self.pixels[uy0 * self.width + ux0];
+        const c10 = self.pixels[uy0 * self.width + ux1];
+        const c01 = self.pixels[uy1 * self.width + ux0];
+        const c11 = self.pixels[uy1 * self.width + ux1];
+
+        const frac_x = @as(u32, @intFromFloat(dx * 255.0));
+        const frac_y = @as(u32, @intFromFloat(dy * 255.0));
+        const inv_x = 255 - frac_x;
+        const inv_y = 255 - frac_y;
+
+        const w00 = inv_x * inv_y;
+        const w10 = frac_x * inv_y;
+        const w01 = inv_x * frac_y;
+        const w11 = frac_x * frac_y;
+
+        var result: u32 = 0;
+        inline for (.{ 0, 8, 16, 24 }) |shift| {
+            const val00 = (c00 >> shift) & 0xFF;
+            const val10 = (c10 >> shift) & 0xFF;
+            const val01 = (c01 >> shift) & 0xFF;
+            const val11 = (c11 >> shift) & 0xFF;
+            const sum = (val00 * w00 + val10 * w10 + val01 * w01 + val11 * w11);
+            const blended = sum / 65025;
+            result |= (blended << shift);
+        }
+
+        return result;
     }
 };
 
