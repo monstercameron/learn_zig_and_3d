@@ -164,6 +164,15 @@ pub fn main() !void {
     if (scene_asset.uses_gun_materials) {
         configureGunTextures(allocator, &bullet_albedo, &body_albedo, &material_textures);
         renderer.setTextures(material_textures[0..]);
+
+    // Load HDRI background
+    if (texture.loadHdrRaw(allocator, "resources/hdri/envmap.raw")) |env_map| {
+        app_logger.infoSub("assets", "loaded HDRI env map", .{});
+        renderer.setHdriMap(env_map);
+    } else |err| {
+        app_logger.warn("failed to load HDRI: {s}", .{@errorName(err)});
+    }
+
     }
 
     scene_asset.mesh.centerToOrigin(); // Center the model at (0,0,0).

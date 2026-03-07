@@ -45,6 +45,8 @@ pub var POST_COLOR_CORRECTION_ENABLED: bool = true;
 pub var POST_BLOOM_ENABLED: bool = true;
 /// Enables depth-aware atmospheric fog to simulate distance.
 pub var POST_DEPTH_FOG_ENABLED: bool = true;
+/// Enables HDR skybox rendering
+pub var POST_SKYBOX_ENABLED: bool = true;
 /// Enables the primary generic shadow mapping pass.
 pub var POST_SHADOW_ENABLED: bool = true;
 /// Square dimension resolution of the shadow depth map target.

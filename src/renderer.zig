@@ -2477,6 +2477,7 @@ pub const Renderer = struct {
 
     // Rendering options and data
     single_texture_binding: [1]?*const texture.Texture,
+    hdri_map: ?texture.HdrTexture = null,
     textures: []const ?*const texture.Texture,
     show_tile_borders: bool = false,
     show_wireframe: bool = false,
@@ -2937,6 +2938,7 @@ pub const Renderer = struct {
         self.allocator.free(self.lens_flare_job_contexts);
         self.allocator.free(self.lens_flare_scratch_pixels);
         self.allocator.free(self.color_grade_jobs);
+        if (self.hdri_map) |*m| m.deinit();
         if (self.tile_buffers) |buffers| {
             for (buffers) |*buf| buf.deinit();
             self.allocator.free(buffers);
@@ -4372,6 +4374,10 @@ pub const Renderer = struct {
         self.textures = self.single_texture_binding[0..];
     }
 
+    pub fn setHdriMap(self: *Renderer, hdri_map: texture.HdrTexture) void {
+        self.hdri_map = hdri_map;
+    }
+
     pub fn setTextures(self: *Renderer, textures: []const ?*const texture.Texture) void {
         self.textures = textures;
     }
@@ -5539,6 +5545,91 @@ pub const Renderer = struct {
         self.recordRenderPassTiming("hybrid_shadow", pass_start);
     }
 
+    
+    const SkyboxJobContext = struct {
+        renderer: *Renderer,
+        right: math.Vec3,
+        up: math.Vec3,
+        forward: math.Vec3,
+        projection: ProjectionParams,
+        hdri_map: *const texture.HdrTexture,
+        start_row: usize,
+        end_row: usize,
+    };
+
+    fn applySkyboxRows(ctx: *SkyboxJobContext) void {
+        const width: usize = @intCast(ctx.renderer.bitmap.width);
+        const center_x = ctx.projection.center_x;
+        const center_y = ctx.projection.center_y;
+        
+        var y: usize = ctx.start_row;
+        while (y < ctx.end_row) : (y += 1) {
+            const py_f = @as(f32, @floatFromInt(y));
+            const ndc_y = (center_y - py_f) / center_y;
+            const camera_y = ndc_y / ctx.projection.y_scale;
+            
+            var x: usize = 0;
+            while (x < width) : (x += 1) {
+                const idx = y * width + x;
+                
+                // Only draw skybox where depth is infinite (background)
+                if (ctx.renderer.scene_depth[idx] < std.math.inf(f32)) continue;
+                
+                const px_f = @as(f32, @floatFromInt(x));
+                const ndc_x = (px_f - center_x) / center_x;
+                const camera_x = ndc_x / ctx.projection.x_scale;
+                
+                const dir_local = math.Vec3.normalize(math.Vec3.new(camera_x, camera_y, 1.0));
+                
+                const right_term = math.Vec3.scale(ctx.right, dir_local.x);
+                const up_term = math.Vec3.scale(ctx.up, dir_local.y);
+                const fwd_term = math.Vec3.scale(ctx.forward, dir_local.z);
+                const dir_world = math.Vec3.normalize(math.Vec3.add(right_term, math.Vec3.add(up_term, fwd_term)));
+                
+                const hdr_color = ctx.hdri_map.sampleEquirectangular(dir_world);
+                
+                // Extremely simple basic tonemap (reinhard) just to get it to 8-bit ARGB
+                const r_ldr = hdr_color.x / (1.0 + hdr_color.x);
+                const g_ldr = hdr_color.y / (1.0 + hdr_color.y);
+                const b_ldr = hdr_color.z / (1.0 + hdr_color.z);
+                
+                const r = @as(u32, @intFromFloat(std.math.clamp(r_ldr * 255.0, 0.0, 255.0)));
+                const g = @as(u32, @intFromFloat(std.math.clamp(g_ldr * 255.0, 0.0, 255.0)));
+                const b = @as(u32, @intFromFloat(std.math.clamp(b_ldr * 255.0, 0.0, 255.0)));
+                
+                ctx.renderer.bitmap.pixels[idx] = (0xFF << 24) | (r << 16) | (g << 8) | b;
+            }
+        }
+    }
+
+    fn applySkyboxPass(
+        self: *Renderer,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        projection: ProjectionParams,
+    ) void {
+        const hdri = self.hdri_map orelse return;
+        const pass_start = std.time.nanoTimestamp();
+        
+        const height: usize = @intCast(self.bitmap.height);
+        
+        // Instead of multi-threading immediately, let's just do it sequentially 
+        // to see if threading was the issue!
+        var ctx = SkyboxJobContext{
+            .renderer = self,
+            .right = basis_right,
+            .up = basis_up,
+            .forward = basis_forward,
+            .projection = projection,
+            .hdri_map = &hdri,
+            .start_row = 0,
+            .end_row = height,
+        };
+        applySkyboxRows(&ctx);
+        self.recordRenderPassTiming("skybox", pass_start);
+    }
+
     fn applyPostProcessingPasses(
         self: *Renderer,
         mesh: *const Mesh,
@@ -5551,6 +5642,7 @@ pub const Renderer = struct {
         light_dir_world: math.Vec3,
         shadow_elapsed_ns: i128,
     ) void {
+        if (config.POST_SKYBOX_ENABLED) self.applySkyboxPass(basis_right, basis_up, basis_forward, projection);
         if (config.POST_SHADOW_ENABLED) {
             for (self.lights.items, 0..) |*light, pass_index| {
                 self.applyShadowPass(camera_position, basis_right, basis_up, basis_forward, projection, shadow_elapsed_ns, &light.shadow_map, pass_index);

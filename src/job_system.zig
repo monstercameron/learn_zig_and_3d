@@ -76,7 +76,7 @@ pub const Job = struct {
         }
     }
 
-    fn registerChild(self: *Job) void {
+    pub fn registerChild(self: *Job) void {
         _ = self.unfinished_jobs.fetchAdd(1, .acq_rel);
     }
 
@@ -210,8 +210,9 @@ const WorkerThread = struct {
 
             // 3. If we have a job, execute it.
             if (job) |j| {
+                const owner_allocator = j.owner_allocator;
                 j.execute();
-                if (j.owner_allocator) |allocator| {
+                if (owner_allocator) |allocator| {
                     allocator.destroy(j);
                 }
             } else {

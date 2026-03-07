@@ -281,3 +281,113 @@ pub fn loadBmp(allocator: std.mem.Allocator, path: []const u8) !Texture {
 
     return Texture{ .width = width, .height = height, .pixels = pixels, .mip_levels = mip_levels, .allocator = allocator };
 }
+
+
+/// A texture format storing raw 32-bit floats for High Dynamic Range (HDR) images.
+pub const HdrTexture = struct {
+    width: usize,
+    height: usize,
+    pixels: []math.Vec3, // Array of RGB floats
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *HdrTexture) void {
+        self.allocator.free(self.pixels);
+    }
+
+    /// Sample the HDR texture using equirectangular mapping (latitude/longitude)
+    /// dir: A normalized direction vector.
+    pub fn sampleEquirectangular(self: *const HdrTexture, dir: math.Vec3) math.Vec3 {
+        if (self.width == 0 or self.height == 0) return math.Vec3.new(0, 0, 0);
+
+        // Convert 3D direction to spherical coordinates
+        // dir is assumed to be +Y up.
+        // longitude (theta): atan2(x, -z) mapping to [0, 2*PI]
+        var theta = std.math.atan2(dir.x, -dir.z);
+        if (theta < 0.0) theta += 2.0 * std.math.pi; // Map to [0, 2PI]
+
+        // latitude (phi): acos(y) mapping to [0, PI]
+        const clamped_y = std.math.clamp(dir.y, -1.0, 1.0);
+        const phi = std.math.acos(clamped_y);
+
+        const u = theta / (2.0 * std.math.pi);
+        const v = phi / std.math.pi;
+
+        const wf = @as(f32, @floatFromInt(self.width));
+        const hf = @as(f32, @floatFromInt(self.height));
+
+        var x = u * wf - 0.5;
+        if (x < 0.0) x += wf;
+        var y = v * hf - 0.5;
+        y = std.math.clamp(y, 0.0, hf - 1.0);
+
+        const px = @as(usize, @intFromFloat(x));
+        const py = @as(usize, @intFromFloat(y));
+
+        const x0 = px % self.width;
+        const x1 = (px + 1) % self.width;
+        const y0 = py % self.height;
+        const y1 = @min(py + 1, self.height - 1);
+
+        const sx = x - @as(f32, @floatFromInt(px));
+        const sy = y - @as(f32, @floatFromInt(py));
+
+        const c00 = self.pixels[y0 * self.width + x0];
+        const c10 = self.pixels[y0 * self.width + x1];
+        const c01 = self.pixels[y1 * self.width + x0];
+        const c11 = self.pixels[y1 * self.width + x1];
+
+        // Bilinear interpolation
+        const c0 = math.Vec3.add(math.Vec3.scale(c00, 1.0 - sx), math.Vec3.scale(c10, sx));
+        const c1 = math.Vec3.add(math.Vec3.scale(c01, 1.0 - sx), math.Vec3.scale(c11, sx));
+        
+        return math.Vec3.add(math.Vec3.scale(c0, 1.0 - sy), math.Vec3.scale(c1, sy));
+    }
+};
+
+pub fn loadHdrRaw(allocator: std.mem.Allocator, path: []const u8) !HdrTexture {
+    var file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+    
+    // We expect header = 8 bytes. width (4 bytes) + height (4 bytes)
+    const file_size = try file.getEndPos();
+    if (file_size < 8) return error.InvalidHdrFile;
+    
+    var header: [8]u8 = undefined;
+    _ = try file.readAll(&header);
+    
+    const width = @as(usize, @intCast(readU32le(header[0..4])));
+    const height = @as(usize, @intCast(readU32le(header[4..8])));
+    
+    const expected_pixels = width * height;
+    const expected_bytes = expected_pixels * 3 * 4; // 3 floats per pixel, 4 bytes per float
+    if (file_size - 8 < expected_bytes) return error.HdrDataTruncated;
+    
+    const pixel_bytes = try allocator.alloc(u8, expected_bytes);
+    defer allocator.free(pixel_bytes);
+    
+    _ = try file.readAll(pixel_bytes);
+    
+    const pixels = try allocator.alloc(math.Vec3, expected_pixels);
+    
+    // Parse floats manually to avoid alignment/endian issues
+    var i: usize = 0;
+    while (i < expected_pixels) : (i += 1) {
+        const base = i * 12;
+        const r_bits = readU32le(pixel_bytes[base .. base+4]);
+        const g_bits = readU32le(pixel_bytes[base+4 .. base+8]);
+        const b_bits = readU32le(pixel_bytes[base+8 .. base+12]);
+        
+        pixels[i] = math.Vec3.new(
+            @as(f32, @bitCast(r_bits)),
+            @as(f32, @bitCast(g_bits)),
+            @as(f32, @bitCast(b_bits)),
+        );
+    }
+    
+    return HdrTexture{
+        .width = width,
+        .height = height,
+        .pixels = pixels,
+        .allocator = allocator,
+    };
+}
