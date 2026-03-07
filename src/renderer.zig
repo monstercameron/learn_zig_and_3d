@@ -218,6 +218,22 @@ const BloomScratch = struct {
     pong: []u32,
 };
 
+const AOScratch = struct {
+    width: usize,
+    height: usize,
+    ping: []u8,
+    pong: []u8,
+    depth: []f32,
+};
+
+const AmbientOcclusionConfig = struct {
+    downsample: usize,
+    radius: f32,
+    strength: f32,
+    bias: f32,
+    blur_depth_threshold: f32,
+};
+
 const DepthFogConfig = struct {
     near: f32,
     far: f32,
@@ -303,6 +319,67 @@ fn buildBloomIntensityLut(intensity_percent: i32) [256]u8 {
     }
     return lut;
 }
+
+fn validSceneCameraSample(camera_pos: math.Vec3) bool {
+    return std.math.isFinite(camera_pos.x) and
+        std.math.isFinite(camera_pos.y) and
+        std.math.isFinite(camera_pos.z) and
+        camera_pos.z > NEAR_CLIP;
+}
+
+fn sampleSceneCameraClamped(scene_camera: []const math.Vec3, width: usize, height: usize, x: i32, y: i32) math.Vec3 {
+    const clamped_x: usize = @intCast(@min(@as(i32, @intCast(width - 1)), @max(0, x)));
+    const clamped_y: usize = @intCast(@min(@as(i32, @intCast(height - 1)), @max(0, y)));
+    return scene_camera[clamped_y * width + clamped_x];
+}
+
+fn estimateSceneNormal(scene_camera: []const math.Vec3, width: usize, height: usize, center: math.Vec3, x: i32, y: i32, step: i32) math.Vec3 {
+    const left = sampleSceneCameraClamped(scene_camera, width, height, x - step, y);
+    const right = sampleSceneCameraClamped(scene_camera, width, height, x + step, y);
+    const up = sampleSceneCameraClamped(scene_camera, width, height, x, y - step);
+    const down = sampleSceneCameraClamped(scene_camera, width, height, x, y + step);
+
+    const tangent_x = if (validSceneCameraSample(left) and validSceneCameraSample(right))
+        math.Vec3.sub(right, left)
+    else if (validSceneCameraSample(right))
+        math.Vec3.sub(right, center)
+    else if (validSceneCameraSample(left))
+        math.Vec3.sub(center, left)
+    else
+        math.Vec3.new(0.0, 0.0, 0.0);
+
+    const tangent_y = if (validSceneCameraSample(up) and validSceneCameraSample(down))
+        math.Vec3.sub(down, up)
+    else if (validSceneCameraSample(down))
+        math.Vec3.sub(down, center)
+    else if (validSceneCameraSample(up))
+        math.Vec3.sub(center, up)
+    else
+        math.Vec3.new(0.0, 0.0, 0.0);
+
+    var normal = math.Vec3.cross(tangent_x, tangent_y);
+    if (math.Vec3.length(normal) <= 1e-4) {
+        normal = math.Vec3.scale(center, -1.0);
+        if (math.Vec3.length(normal) <= 1e-4) return math.Vec3.new(0.0, 0.0, -1.0);
+    }
+
+    normal = math.Vec3.normalize(normal);
+    if (math.Vec3.dot(normal, center) > 0.0) {
+        normal = math.Vec3.scale(normal, -1.0);
+    }
+    return normal;
+}
+
+const ao_sample_offsets = [_][2]i32{
+    .{ 1, 0 },
+    .{ -1, 0 },
+    .{ 0, 1 },
+    .{ 0, -1 },
+    .{ 1, 1 },
+    .{ -1, 1 },
+    .{ 1, -1 },
+    .{ -1, -1 },
+};
 
 fn chooseShadowBasis(light_dir_world: math.Vec3) struct { right: math.Vec3, up: math.Vec3, forward: math.Vec3 } {
     const forward = math.Vec3.normalize(math.Vec3.scale(light_dir_world, -1.0));
@@ -817,6 +894,208 @@ fn compositeBloomRows(
     }
 }
 
+fn renderAmbientOcclusionRows(
+    scene_camera: []const math.Vec3,
+    scene_width: usize,
+    scene_height: usize,
+    ao: *AOScratch,
+    config_value: AmbientOcclusionConfig,
+    start_row: usize,
+    end_row: usize,
+) void {
+    const radius_sq = config_value.radius * config_value.radius;
+    const half_step: i32 = @intCast(config_value.downsample / 2);
+    const sample_step: i32 = @intCast(@max(@as(usize, 1), config_value.downsample));
+
+    var y = start_row;
+    while (y < end_row) : (y += 1) {
+        const scene_y = @min(scene_height - 1, y * config_value.downsample + @as(usize, @intCast(half_step)));
+        const dst_row = y * ao.width;
+        var x: usize = 0;
+        while (x < ao.width) : (x += 1) {
+            const scene_x = @min(scene_width - 1, x * config_value.downsample + @as(usize, @intCast(half_step)));
+            const dst_idx = dst_row + x;
+            const center = scene_camera[scene_y * scene_width + scene_x];
+            if (!validSceneCameraSample(center)) {
+                ao.ping[dst_idx] = 255;
+                ao.depth[dst_idx] = std.math.inf(f32);
+                continue;
+            }
+
+            ao.depth[dst_idx] = center.z;
+            const normal = estimateSceneNormal(
+                scene_camera,
+                scene_width,
+                scene_height,
+                center,
+                @intCast(scene_x),
+                @intCast(scene_y),
+                sample_step,
+            );
+
+            var occlusion: f32 = 0.0;
+            var sample_count: usize = 0;
+            for (ao_sample_offsets) |offset| {
+                const sample = sampleSceneCameraClamped(
+                    scene_camera,
+                    scene_width,
+                    scene_height,
+                    @as(i32, @intCast(scene_x)) + offset[0] * sample_step,
+                    @as(i32, @intCast(scene_y)) + offset[1] * sample_step,
+                );
+                if (!validSceneCameraSample(sample)) continue;
+
+                const delta = math.Vec3.sub(sample, center);
+                const distance_sq = math.Vec3.dot(delta, delta);
+                if (distance_sq <= 1e-5 or distance_sq > radius_sq) continue;
+
+                const distance = @sqrt(distance_sq);
+                const ndot = math.Vec3.dot(normal, math.Vec3.scale(delta, 1.0 / distance)) - config_value.bias;
+                if (ndot <= 0.0) continue;
+
+                const range_weight = 1.0 - (distance_sq / radius_sq);
+                occlusion += ndot * range_weight;
+                sample_count += 1;
+            }
+
+            if (sample_count == 0) {
+                ao.ping[dst_idx] = 255;
+                continue;
+            }
+
+            const normalized = occlusion / @as(f32, @floatFromInt(sample_count));
+            const visibility = @max(0.0, 1.0 - @min(1.0, normalized * config_value.strength));
+            ao.ping[dst_idx] = @intFromFloat(visibility * 255.0 + 0.5);
+        }
+    }
+}
+
+fn blurAmbientOcclusionHorizontalRows(ao: *AOScratch, depth_threshold: f32, start_row: usize, end_row: usize) void {
+    const weights = [_]u32{ 1, 2, 3, 2, 1 };
+    var y = start_row;
+    while (y < end_row) : (y += 1) {
+        const row_start = y * ao.width;
+        var x: usize = 0;
+        while (x < ao.width) : (x += 1) {
+            const idx = row_start + x;
+            const center_depth = ao.depth[idx];
+            if (!std.math.isFinite(center_depth)) {
+                ao.pong[idx] = 255;
+                continue;
+            }
+
+            var sum: u32 = 0;
+            var weight_sum: u32 = 0;
+            var tap: usize = 0;
+            while (tap < weights.len) : (tap += 1) {
+                const offset: i32 = @intCast(tap);
+                const sample_x: usize = @intCast(@min(
+                    @as(i32, @intCast(ao.width - 1)),
+                    @max(0, @as(i32, @intCast(x)) + offset - 2),
+                ));
+                const sample_idx = row_start + sample_x;
+                const sample_depth = ao.depth[sample_idx];
+                if (!std.math.isFinite(sample_depth) or @abs(sample_depth - center_depth) > depth_threshold) continue;
+                sum += @as(u32, ao.ping[sample_idx]) * weights[tap];
+                weight_sum += weights[tap];
+            }
+
+            ao.pong[idx] = if (weight_sum == 0) ao.ping[idx] else @intCast(@divTrunc(sum + (weight_sum / 2), weight_sum));
+        }
+    }
+}
+
+fn blurAmbientOcclusionVerticalRows(ao: *AOScratch, depth_threshold: f32, start_row: usize, end_row: usize) void {
+    const weights = [_]u32{ 1, 2, 3, 2, 1 };
+    var y = start_row;
+    while (y < end_row) : (y += 1) {
+        const row_start = y * ao.width;
+        var x: usize = 0;
+        while (x < ao.width) : (x += 1) {
+            const idx = row_start + x;
+            const center_depth = ao.depth[idx];
+            if (!std.math.isFinite(center_depth)) {
+                ao.ping[idx] = 255;
+                continue;
+            }
+
+            var sum: u32 = 0;
+            var weight_sum: u32 = 0;
+            var tap: usize = 0;
+            while (tap < weights.len) : (tap += 1) {
+                const offset: i32 = @intCast(tap);
+                const sample_y: usize = @intCast(@min(
+                    @as(i32, @intCast(ao.height - 1)),
+                    @max(0, @as(i32, @intCast(y)) + offset - 2),
+                ));
+                const sample_idx = sample_y * ao.width + x;
+                const sample_depth = ao.depth[sample_idx];
+                if (!std.math.isFinite(sample_depth) or @abs(sample_depth - center_depth) > depth_threshold) continue;
+                sum += @as(u32, ao.pong[sample_idx]) * weights[tap];
+                weight_sum += weights[tap];
+            }
+
+            ao.ping[idx] = if (weight_sum == 0) ao.pong[idx] else @intCast(@divTrunc(sum + (weight_sum / 2), weight_sum));
+        }
+    }
+}
+
+fn sampleAmbientOcclusionVisibility(ao: *const AOScratch, scene_width: usize, scene_height: usize, x: usize, y: usize) f32 {
+    const u = ((@as(f32, @floatFromInt(x)) + 0.5) * @as(f32, @floatFromInt(ao.width))) / @as(f32, @floatFromInt(scene_width)) - 0.5;
+    const v = ((@as(f32, @floatFromInt(y)) + 0.5) * @as(f32, @floatFromInt(ao.height))) / @as(f32, @floatFromInt(scene_height)) - 0.5;
+    const x0_i = @max(0, @as(i32, @intFromFloat(@floor(u))));
+    const y0_i = @max(0, @as(i32, @intFromFloat(@floor(v))));
+    const x1_i = @min(@as(i32, @intCast(ao.width - 1)), x0_i + 1);
+    const y1_i = @min(@as(i32, @intCast(ao.height - 1)), y0_i + 1);
+    const frac_x = @max(0.0, @min(1.0, u - @as(f32, @floatFromInt(x0_i))));
+    const frac_y = @max(0.0, @min(1.0, v - @as(f32, @floatFromInt(y0_i))));
+    const x0: usize = @intCast(x0_i);
+    const y0: usize = @intCast(y0_i);
+    const x1: usize = @intCast(x1_i);
+    const y1: usize = @intCast(y1_i);
+
+    const s00 = @as(f32, @floatFromInt(ao.ping[y0 * ao.width + x0])) / 255.0;
+    const s10 = @as(f32, @floatFromInt(ao.ping[y0 * ao.width + x1])) / 255.0;
+    const s01 = @as(f32, @floatFromInt(ao.ping[y1 * ao.width + x0])) / 255.0;
+    const s11 = @as(f32, @floatFromInt(ao.ping[y1 * ao.width + x1])) / 255.0;
+    const top = s00 + (s10 - s00) * frac_x;
+    const bottom = s01 + (s11 - s01) * frac_x;
+    return top + (bottom - top) * frac_y;
+}
+
+fn compositeAmbientOcclusionRows(
+    dst: []u32,
+    scene_camera: []const math.Vec3,
+    dst_width: usize,
+    dst_height: usize,
+    ao: *const AOScratch,
+    start_row: usize,
+    end_row: usize,
+) void {
+    var y = start_row;
+    while (y < end_row) : (y += 1) {
+        const row_start = y * dst_width;
+        var x: usize = 0;
+        while (x < dst_width) : (x += 1) {
+            const idx = row_start + x;
+            if (!validSceneCameraSample(scene_camera[idx])) continue;
+
+            const visibility = sampleAmbientOcclusionVisibility(ao, dst_width, dst_height, x, y);
+            if (visibility >= 0.999) continue;
+
+            const pixel = dst[idx];
+            const alpha = pixel & 0xFF000000;
+            const r = @as(i32, @intFromFloat(@as(f32, @floatFromInt((pixel >> 16) & 0xFF)) * visibility + 0.5));
+            const g = @as(i32, @intFromFloat(@as(f32, @floatFromInt((pixel >> 8) & 0xFF)) * visibility + 0.5));
+            const b = @as(i32, @intFromFloat(@as(f32, @floatFromInt(pixel & 0xFF)) * visibility + 0.5));
+            dst[idx] = alpha |
+                (@as(u32, clampByte(r)) << 16) |
+                (@as(u32, clampByte(g)) << 8) |
+                @as(u32, clampByte(b));
+        }
+    }
+}
+
 fn colorGradeSimdLanes() comptime_int {
     return switch (builtin.target.cpu.arch) {
         .x86_64 => blk: {
@@ -886,6 +1165,13 @@ const BloomPassStage = enum {
     composite,
 };
 
+const AOPassStage = enum {
+    generate,
+    blur_horizontal,
+    blur_vertical,
+    composite,
+};
+
 const FogJobContext = struct {
     pixels: []u32,
     depth: []const f32,
@@ -897,6 +1183,20 @@ const FogJobContext = struct {
     fn run(ctx_ptr: *anyopaque) void {
         const ctx: *FogJobContext = @ptrCast(@alignCast(ctx_ptr));
         applyDepthFogRows(ctx.pixels, ctx.depth, ctx.width, ctx.start_row, ctx.end_row, ctx.config);
+    }
+};
+
+const AOJobContext = struct {
+    renderer: *Renderer,
+    stage: AOPassStage,
+    scene_width: usize,
+    scene_height: usize,
+    start_row: usize,
+    end_row: usize,
+
+    fn run(ctx_ptr: *anyopaque) void {
+        const ctx: *AOJobContext = @ptrCast(@alignCast(ctx_ptr));
+        ctx.renderer.runAmbientOcclusionStageRange(ctx.stage, ctx.start_row, ctx.end_row, ctx.scene_width, ctx.scene_height);
     }
 };
 
@@ -1628,6 +1928,7 @@ pub const Renderer = struct {
     render_pass_timings: [max_render_passes]RenderPassTiming,
     render_pass_count: usize,
     color_grade_profile: ColorGradeProfile,
+    ambient_occlusion_config: AmbientOcclusionConfig,
     depth_fog_config: DepthFogConfig,
     scene_depth: []f32,
     scene_camera: []math.Vec3,
@@ -1655,7 +1956,9 @@ pub const Renderer = struct {
     hybrid_shadow_stats: HybridShadowStats = .{},
     hybrid_shadow_debug: HybridShadowDebugState = .{},
     shadow_map: ShadowMap,
+    ao_scratch: AOScratch,
     bloom_scratch: BloomScratch,
+    ao_job_contexts: []AOJobContext,
     bloom_threshold_curve: [256]u8,
     bloom_intensity_lut: [256]u8,
     fog_job_contexts: []FogJobContext,
@@ -1715,6 +2018,8 @@ pub const Renderer = struct {
         const color_grade_job_count = @max(@as(usize, 1), @as(usize, @intCast(job_system.worker_count * 2)));
         const color_grade_job_contexts = try allocator.alloc(ColorGradeJobContext, color_grade_job_count);
         errdefer allocator.free(color_grade_job_contexts);
+        const ao_job_contexts = try allocator.alloc(AOJobContext, color_grade_job_count);
+        errdefer allocator.free(ao_job_contexts);
         const fog_job_contexts = try allocator.alloc(FogJobContext, color_grade_job_count);
         errdefer allocator.free(fog_job_contexts);
         const shadow_resolve_job_contexts = try allocator.alloc(ShadowResolveJobContext, color_grade_job_count);
@@ -1741,6 +2046,16 @@ pub const Renderer = struct {
         errdefer allocator.free(hybrid_shadow_edge_cache);
         const shadow_depth = try allocator.alloc(f32, config.POST_SHADOW_MAP_SIZE * config.POST_SHADOW_MAP_SIZE);
         errdefer allocator.free(shadow_depth);
+        const ao_downsample = @max(1, config.POST_SSAO_DOWNSAMPLE);
+        const ao_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + ao_downsample - 1, ao_downsample))));
+        const ao_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + ao_downsample - 1, ao_downsample))));
+        const ao_pixel_count = ao_width * ao_height;
+        const ao_ping = try allocator.alloc(u8, ao_pixel_count);
+        errdefer allocator.free(ao_ping);
+        const ao_pong = try allocator.alloc(u8, ao_pixel_count);
+        errdefer allocator.free(ao_pong);
+        const ao_depth = try allocator.alloc(f32, ao_pixel_count);
+        errdefer allocator.free(ao_depth);
         const bloom_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + 3, 4))));
         const bloom_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + 3, 4))));
         const bloom_pixel_count = bloom_width * bloom_height;
@@ -1816,6 +2131,13 @@ pub const Renderer = struct {
             }} ** max_render_passes,
             .render_pass_count = 0,
             .color_grade_profile = buildBlockbusterGradeProfile(),
+            .ambient_occlusion_config = .{
+                .downsample = @intCast(ao_downsample),
+                .radius = config.POST_SSAO_RADIUS,
+                .strength = @as(f32, @floatFromInt(config.POST_SSAO_STRENGTH_PERCENT)) / 100.0,
+                .bias = config.POST_SSAO_BIAS,
+                .blur_depth_threshold = config.POST_SSAO_BLUR_DEPTH_THRESHOLD,
+            },
             .depth_fog_config = .{
                 .near = config.POST_DEPTH_FOG_NEAR,
                 .far = config.POST_DEPTH_FOG_FAR,
@@ -1869,12 +2191,20 @@ pub const Renderer = struct {
                 .texel_bias = 0.0,
                 .active = false,
             },
+            .ao_scratch = .{
+                .width = ao_width,
+                .height = ao_height,
+                .ping = ao_ping,
+                .pong = ao_pong,
+                .depth = ao_depth,
+            },
             .bloom_scratch = .{
                 .width = bloom_width,
                 .height = bloom_height,
                 .ping = bloom_ping,
                 .pong = bloom_pong,
             },
+            .ao_job_contexts = ao_job_contexts,
             .bloom_threshold_curve = buildBloomThresholdCurve(config.POST_BLOOM_THRESHOLD),
             .bloom_intensity_lut = buildBloomIntensityLut(config.POST_BLOOM_INTENSITY_PERCENT),
             .fog_job_contexts = fog_job_contexts,
@@ -1918,8 +2248,12 @@ pub const Renderer = struct {
         if (self.hybrid_shadow_grid_candidates.len != 0) self.allocator.free(self.hybrid_shadow_grid_candidates);
         if (self.hybrid_shadow_candidate_marks.len != 0) self.allocator.free(self.hybrid_shadow_candidate_marks);
         self.allocator.free(self.shadow_map.depth);
+        self.allocator.free(self.ao_scratch.ping);
+        self.allocator.free(self.ao_scratch.pong);
+        self.allocator.free(self.ao_scratch.depth);
         self.allocator.free(self.bloom_scratch.ping);
         self.allocator.free(self.bloom_scratch.pong);
+        self.allocator.free(self.ao_job_contexts);
         self.allocator.free(self.fog_job_contexts);
         self.allocator.free(self.shadow_resolve_job_contexts);
         self.allocator.free(self.shadow_raster_job_contexts);
@@ -4510,10 +4844,121 @@ pub const Renderer = struct {
     ) void {
         if (config.POST_SHADOW_ENABLED) self.applyShadowPass(camera_position, basis_right, basis_up, basis_forward, projection, shadow_elapsed_ns);
         if (config.POST_HYBRID_SHADOW_ENABLED) self.applyAdaptiveShadowPass(mesh, camera_position, basis_right, basis_up, basis_forward, light_dir_world);
+        if (config.POST_SSAO_ENABLED) self.applyAmbientOcclusionPass();
         if (config.POST_DEPTH_FOG_ENABLED) self.applyDepthFogPass();
         if (config.POST_BLOOM_ENABLED) self.applyBloomPass();
         if (!config.POST_COLOR_CORRECTION_ENABLED) return;
         self.applyBlockbusterColorGradePass();
+    }
+
+    fn applyAmbientOcclusionPass(self: *Renderer) void {
+        if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
+        const pass_start = std.time.nanoTimestamp();
+        const scene_width: usize = @intCast(self.bitmap.width);
+        const scene_height: usize = @intCast(self.bitmap.height);
+        const ao = &self.ao_scratch;
+        self.dispatchAmbientOcclusionStage(.generate, ao.height, scene_width, scene_height);
+        self.dispatchAmbientOcclusionStage(.blur_horizontal, ao.height, scene_width, scene_height);
+        self.dispatchAmbientOcclusionStage(.blur_vertical, ao.height, scene_width, scene_height);
+        self.dispatchAmbientOcclusionStage(.composite, scene_height, scene_width, scene_height);
+        self.recordRenderPassTiming("ssao", pass_start);
+    }
+
+    fn dispatchAmbientOcclusionStage(
+        self: *Renderer,
+        stage: AOPassStage,
+        row_count: usize,
+        scene_width: usize,
+        scene_height: usize,
+    ) void {
+        if (row_count == 0) return;
+        const stripe_count = computeStripeCount(self.ao_job_contexts.len, row_count);
+        const rows_per_job = if (stripe_count <= 1) row_count else (row_count + stripe_count - 1) / stripe_count;
+
+        if (stripe_count <= 1 or self.job_system == null) {
+            self.runAmbientOcclusionStageRange(stage, 0, row_count, scene_width, scene_height);
+            return;
+        }
+
+        var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+        var stripe_index: usize = 0;
+        while (stripe_index < stripe_count) : (stripe_index += 1) {
+            const start_row = stripe_index * rows_per_job;
+            if (start_row >= row_count) break;
+            const end_row = @min(row_count, start_row + rows_per_job);
+
+            self.ao_job_contexts[stripe_index] = .{
+                .renderer = self,
+                .stage = stage,
+                .scene_width = scene_width,
+                .scene_height = scene_height,
+                .start_row = start_row,
+                .end_row = end_row,
+            };
+
+            if (stripe_index == 0) continue;
+
+            self.color_grade_jobs[stripe_index] = Job.init(
+                AOJobContext.run,
+                @ptrCast(&self.ao_job_contexts[stripe_index]),
+                &parent_job,
+            );
+            if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+                self.runAmbientOcclusionStageRange(stage, start_row, end_row, scene_width, scene_height);
+            }
+        }
+
+        self.runAmbientOcclusionStageRange(
+            stage,
+            self.ao_job_contexts[0].start_row,
+            self.ao_job_contexts[0].end_row,
+            scene_width,
+            scene_height,
+        );
+        parent_job.complete();
+        parent_job.wait();
+    }
+
+    fn runAmbientOcclusionStageRange(
+        self: *Renderer,
+        stage: AOPassStage,
+        start_row: usize,
+        end_row: usize,
+        scene_width: usize,
+        scene_height: usize,
+    ) void {
+        switch (stage) {
+            .generate => renderAmbientOcclusionRows(
+                self.scene_camera,
+                scene_width,
+                scene_height,
+                &self.ao_scratch,
+                self.ambient_occlusion_config,
+                start_row,
+                end_row,
+            ),
+            .blur_horizontal => blurAmbientOcclusionHorizontalRows(
+                &self.ao_scratch,
+                self.ambient_occlusion_config.blur_depth_threshold,
+                start_row,
+                end_row,
+            ),
+            .blur_vertical => blurAmbientOcclusionVerticalRows(
+                &self.ao_scratch,
+                self.ambient_occlusion_config.blur_depth_threshold,
+                start_row,
+                end_row,
+            ),
+            .composite => compositeAmbientOcclusionRows(
+                self.bitmap.pixels,
+                self.scene_camera,
+                scene_width,
+                scene_height,
+                &self.ao_scratch,
+                start_row,
+                end_row,
+            ),
+        }
     }
 
     fn applyDepthFogPass(self: *Renderer) void {
