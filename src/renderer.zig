@@ -241,6 +241,83 @@ const AmbientOcclusionConfig = struct {
     blur_depth_threshold: f32,
 };
 
+const DepthOfFieldScratch = struct {
+    pixels: []u32,
+    width: usize,
+    height: usize,
+};
+
+const DepthOfFieldJobContext = struct {
+    scene_pixels: []u32,
+    scratch_pixels: []u32,
+    scene_depth: []f32,
+    width: usize,
+    height: usize,
+    start_row: usize,
+    end_row: usize,
+    focal_distance: f32,
+    focal_range: f32,
+    max_blur_radius: i32,
+
+    fn run(ctx_ptr: *anyopaque) void {
+        const ctx: *DepthOfFieldJobContext = @ptrCast(@alignCast(ctx_ptr));
+        const pixels = ctx.scene_pixels;
+        const out_pixels = ctx.scratch_pixels;
+        const depth = ctx.scene_depth;
+        const w = ctx.width;
+        const h = ctx.height;
+                const max_rad = @as(f32, @floatFromInt(ctx.max_blur_radius));
+
+        for (ctx.start_row..ctx.end_row) |y| {
+            for (0..w) |x| {
+                const idx = y * w + x;
+                const d = depth[idx];
+                const dist_from_focal = @abs(d - ctx.focal_distance);
+                
+                var blur_amount: f32 = 0.0;
+                if (dist_from_focal > ctx.focal_range) {
+                    blur_amount = @min(1.0, (dist_from_focal - ctx.focal_range) / ctx.focal_range);
+                }
+                
+                const blur_radius = blur_amount * max_rad;
+                
+                if (blur_radius < 1.0) {
+                    out_pixels[idx] = pixels[idx];
+                } else {
+                    const irad = @as(i32, @intFromFloat(blur_radius));
+                    var r_sum: u32 = 0;
+                    var g_sum: u32 = 0;
+                    var b_sum: u32 = 0;
+                    var count: u32 = 0;
+                    
+                    const min_y = @max(0, @as(i32, @intCast(y)) - irad);
+                    const max_y = @min(@as(i32, @intCast(h)) - 1, @as(i32, @intCast(y)) + irad);
+                    const min_x = @max(0, @as(i32, @intCast(x)) - irad);
+                    const max_x = @min(@as(i32, @intCast(w)) - 1, @as(i32, @intCast(x)) + irad);
+                    
+                    var sy: i32 = min_y;
+                    while (sy <= max_y) : (sy += 1) {
+                        var sx: i32 = min_x;
+                        while (sx <= max_x) : (sx += 1) {
+                            const sidx = @as(usize, @intCast(sy)) * w + @as(usize, @intCast(sx));
+                            const p = pixels[sidx];
+                            r_sum += (p >> 16) & 0xFF;
+                            g_sum += (p >> 8) & 0xFF;
+                            b_sum += p & 0xFF;
+                            count += 1;
+                        }
+                    }
+                    
+                    const out_r = r_sum / count;
+                    const out_g = g_sum / count;
+                    const out_b = b_sum / count;
+                    out_pixels[idx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b;
+                }
+            }
+        }
+    }
+};
+
 const TemporalAAConfig = struct {
     history_weight: f32,
     depth_threshold: f32,
@@ -2262,6 +2339,8 @@ pub const Renderer = struct {
     shadow_resolve_job_contexts: []ShadowResolveJobContext,
     shadow_raster_job_contexts: []ShadowRasterJobContext,
     bloom_job_contexts: []BloomJobContext,
+    dof_scratch: DepthOfFieldScratch,
+    dof_job_contexts: []DepthOfFieldJobContext,
     taa_job_contexts: []TAAJobContext,
     color_grade_job_contexts: []ColorGradeJobContext,
     color_grade_jobs: []Job,
@@ -2328,6 +2407,11 @@ pub const Renderer = struct {
         errdefer allocator.free(shadow_raster_job_contexts);
         const bloom_job_contexts = try allocator.alloc(BloomJobContext, color_grade_job_count);
         errdefer allocator.free(bloom_job_contexts);
+        const fb_pix_count = @as(usize, @intCast(width)) * @as(usize, @intCast(height));
+        const dof_scratch_pixels = try allocator.alloc(u32, fb_pix_count);
+        errdefer allocator.free(dof_scratch_pixels);
+        const dof_job_contexts = try allocator.alloc(DepthOfFieldJobContext, color_grade_job_count);
+        errdefer allocator.free(dof_job_contexts);
         const color_grade_jobs = try allocator.alloc(Job, color_grade_job_count);
         errdefer allocator.free(color_grade_jobs);
         const scene_depth = try allocator.alloc(f32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
@@ -2544,6 +2628,8 @@ pub const Renderer = struct {
             .shadow_resolve_job_contexts = shadow_resolve_job_contexts,
             .shadow_raster_job_contexts = shadow_raster_job_contexts,
             .bloom_job_contexts = bloom_job_contexts,
+            .dof_scratch = .{ .pixels = dof_scratch_pixels, .width = @intCast(width), .height = @intCast(height) },
+            .dof_job_contexts = dof_job_contexts,
             .taa_job_contexts = taa_job_contexts,
             .color_grade_job_contexts = color_grade_job_contexts,
             .color_grade_jobs = color_grade_jobs,
@@ -2598,6 +2684,8 @@ pub const Renderer = struct {
         self.allocator.free(self.shadow_resolve_job_contexts);
         self.allocator.free(self.shadow_raster_job_contexts);
         self.allocator.free(self.bloom_job_contexts);
+        self.allocator.free(self.dof_scratch.pixels);
+        self.allocator.free(self.dof_job_contexts);
         self.allocator.free(self.taa_job_contexts);
         self.allocator.free(self.color_grade_job_contexts);
         self.allocator.free(self.color_grade_jobs);
@@ -5225,6 +5313,7 @@ pub const Renderer = struct {
         if (config.POST_DEPTH_FOG_ENABLED) self.applyDepthFogPass();
         if (config.POST_TAA_ENABLED) self.applyTemporalAAPass(current_view);
         if (config.POST_BLOOM_ENABLED) self.applyBloomPass();
+        if (config.POST_DOF_ENABLED) self.applyDepthOfFieldPass();
         if (!config.POST_COLOR_CORRECTION_ENABLED) return;
         self.applyBlockbusterColorGradePass();
     }
@@ -5497,6 +5586,72 @@ pub const Renderer = struct {
         self.recordRenderPassTiming("taa", pass_start);
     }
 
+    fn applyDepthOfFieldPass(self: *Renderer) void {
+        if (self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
+        const pass_start = std.time.nanoTimestamp();
+        
+        const scene_width: usize = @intCast(self.bitmap.width);
+        const scene_height: usize = @intCast(self.bitmap.height);
+        
+        const stripe_count = computeStripeCount(self.dof_job_contexts.len, scene_height);
+        const rows_per_job = if (stripe_count <= 1) scene_height else (scene_height + stripe_count - 1) / stripe_count;
+        
+        if (stripe_count <= 1 or self.job_system == null) {
+            self.dof_job_contexts[0] = .{
+                .scene_pixels = self.bitmap.pixels,
+                .scratch_pixels = self.dof_scratch.pixels,
+                .scene_depth = self.scene_depth,
+                .width = scene_width,
+                .height = scene_height,
+                .start_row = 0,
+                .end_row = scene_height,
+                .focal_distance = config.POST_DOF_FOCAL_DISTANCE,
+                .focal_range = config.POST_DOF_FOCAL_RANGE,
+                .max_blur_radius = config.POST_DOF_BLUR_RADIUS,
+            };
+            DepthOfFieldJobContext.run(&self.dof_job_contexts[0]);
+        } else {
+            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+            var stripe_index: usize = 0;
+            while (stripe_index < stripe_count) : (stripe_index += 1) {
+                const start_row = stripe_index * rows_per_job;
+                if (start_row >= scene_height) break;
+                const end_row = @min(scene_height, start_row + rows_per_job);
+                
+                self.dof_job_contexts[stripe_index] = .{
+                    .scene_pixels = self.bitmap.pixels,
+                    .scratch_pixels = self.dof_scratch.pixels,
+                    .scene_depth = self.scene_depth,
+                    .width = scene_width,
+                    .height = scene_height,
+                    .start_row = start_row,
+                    .end_row = end_row,
+                    .focal_distance = config.POST_DOF_FOCAL_DISTANCE,
+                    .focal_range = config.POST_DOF_FOCAL_RANGE,
+                    .max_blur_radius = config.POST_DOF_BLUR_RADIUS,
+                };
+                
+                self.color_grade_jobs[stripe_index] = Job.init(
+                    DepthOfFieldJobContext.run,
+                    @ptrCast(&self.dof_job_contexts[stripe_index]),
+                    &parent_job,
+                );
+                
+                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+                    DepthOfFieldJobContext.run(@ptrCast(&self.dof_job_contexts[stripe_index]));
+                }
+            }
+            DepthOfFieldJobContext.run(@ptrCast(&self.dof_job_contexts[0]));
+            parent_job.complete();
+            parent_job.wait();
+        }
+        
+        // Copy back to main framebuffer
+        @memcpy(self.bitmap.pixels, self.dof_scratch.pixels);
+        
+        self.recordRenderPassTiming("dof", pass_start);
+    }
+    
     fn applyBloomPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0) return;
         const pass_start = std.time.nanoTimestamp();

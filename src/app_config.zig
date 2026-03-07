@@ -108,6 +108,22 @@ pub var POST_BLOOM_THRESHOLD: i32 = 168;
 /// Multiplying intensifier for the resulting bloom blur overlay.
 pub var POST_BLOOM_INTENSITY_PERCENT: i32 = 55;
 
+/// Enables Depth of Field (DoF) to blur background and foreground objects outside the focal range.
+pub var POST_DOF_ENABLED: bool = true;
+/// The distance from the camera that is perfectly in focus.
+pub var POST_DOF_FOCAL_DISTANCE: f32 = 4.0;
+/// The depth range around the focal distance that remains in focus.
+pub var POST_DOF_FOCAL_RANGE: f32 = 2.0;
+/// The maximum scatter/blur radius for out-of-focus pixels.
+pub var POST_DOF_BLUR_RADIUS: i32 = 6;
+
+/// Enables Motion Blur based on pixel velocity from previous frames.
+pub var POST_MOTION_BLUR_ENABLED: bool = true;
+/// The number of samples gathered along the velocity vector for motion blur.
+pub var POST_MOTION_BLUR_SAMPLES: i32 = 6;
+/// The intensity multiplier for motion blur trail length.
+pub var POST_MOTION_BLUR_INTENSITY: f32 = 1.0;
+
 // --- Global Color Profile ---
 /// The name of the LUT or graded preset mapped onto the final output color.
 pub var POST_COLOR_PROFILE_NAME: []const u8 = "blockbuster_teal_orange";
