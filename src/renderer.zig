@@ -585,6 +585,7 @@ pub const Renderer = struct {
         fn renderTileJob(ctx: *anyopaque) void {
             const job: *TileRenderJob = @ptrCast(@alignCast(ctx));
             const near_plane = job.projection.near_plane;
+            job.tile_buffer.clear();
 
             for (job.tri_list.triangles.items) |tri_idx| {
                 if (tri_idx >= job.packets.len) continue;
@@ -2542,7 +2543,9 @@ pub const Renderer = struct {
         }
 
         const tile_jobs = self.tile_jobs_buffer.?;
+        const jobs = self.job_buffer.?;
         std.debug.assert(tile_jobs.len == grid.tiles.len);
+        std.debug.assert(jobs.len == grid.tiles.len);
         var active_tile_count: usize = 0;
         for (tile_lists, 0..) |*tile_list, tile_idx| {
             if (tile_list.count() == 0) continue;
@@ -2556,7 +2559,6 @@ pub const Renderer = struct {
                 if ((tile_idx & 7) == 0 and !p(self)) return error.RenderInterrupted;
             }
             const tile = &grid.tiles[tile_idx];
-            tile_buffers[tile_idx].clear();
             tile_jobs[tile_idx] = TileRenderJob{
                 .tile = tile,
                 .tile_buffer = &tile_buffers[tile_idx],
@@ -2566,7 +2568,44 @@ pub const Renderer = struct {
                 .texture = self.texture,
                 .projection = projection,
             };
-            TileRenderJob.renderTileJob(@ptrCast(&tile_jobs[tile_idx]));
+        }
+
+        if (active_tile_count == 0) {
+            pipeline_logger.debugSub("tiled", "triangles binned to zero active tiles", .{});
+            return;
+        }
+
+        if (self.job_system) |job_sys| {
+            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+            const main_tile_idx = active_indices[0];
+
+            for (active_indices[1..active_tile_count]) |tile_idx| {
+                jobs[tile_idx] = Job.init(
+                    TileRenderJob.renderTileJob,
+                    @ptrCast(&tile_jobs[tile_idx]),
+                    &parent_job,
+                );
+
+                if (!job_sys.submitJobAuto(&jobs[tile_idx])) {
+                    TileRenderJob.renderTileJob(@ptrCast(&tile_jobs[tile_idx]));
+                }
+            }
+
+            TileRenderJob.renderTileJob(@ptrCast(&tile_jobs[main_tile_idx]));
+            parent_job.complete();
+
+            var interrupted = false;
+            while (!parent_job.isComplete()) {
+                if (pump) |p| {
+                    if (!p(self)) interrupted = true;
+                }
+                std.Thread.yield() catch {};
+            }
+            if (interrupted) return error.RenderInterrupted;
+        } else {
+            for (active_indices[0..active_tile_count]) |tile_idx| {
+                TileRenderJob.renderTileJob(@ptrCast(&tile_jobs[tile_idx]));
+            }
         }
 
         // 4. Compositing: Copy the pixels from each completed tile buffer to the main screen bitmap.
