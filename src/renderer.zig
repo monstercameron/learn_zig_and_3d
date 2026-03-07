@@ -1924,13 +1924,11 @@ const AdaptiveShadowTileJob = struct {
             }
         }
 
-        if (!any_valid) return .{ .mixed = false, .shadowed = false };
+                if (!any_valid) return .{ .mixed = false, .shadowed = false };
         if (any_invalid) return .{ .mixed = true, .shadowed = false };
 
-        // FIX: Sparse 9-point check is prone to false positives for deep shadows on complex silhouettes.
-        // Always subdivide if there's any shadow to ensure sharp pixel edge evaluation.
-        if (any_occluded) return .{ .mixed = true, .shadowed = false };
-
+        if (any_occluded and any_lit) return .{ .mixed = true, .shadowed = false };
+        if (any_occluded) return .{ .mixed = false, .shadowed = true };
         return .{ .mixed = false, .shadowed = false };
     }
 
@@ -3242,6 +3240,8 @@ pub const Renderer = struct {
         }
 
         fn renderTileJob(ctx: *anyopaque) void {
+        const _z_renderTileJob = profiler.zone("renderTileJob");
+        defer if (_z_renderTileJob) |z| z.end();
             const job: *TileRenderJob = @ptrCast(@alignCast(ctx));
             const near_plane = job.projection.near_plane;
             job.tile_buffer.clear();
@@ -5544,6 +5544,8 @@ pub const Renderer = struct {
         basis_forward: math.Vec3,
         light_dir_world: math.Vec3,
     ) void {
+        const _z_applyAdaptiveShadowPass = profiler.zone("applyAdaptiveShadowPass");
+        defer if (_z_applyAdaptiveShadowPass) |z| z.end();
         if (!config.POST_HYBRID_SHADOW_ENABLED or self.bitmap.pixels.len == 0 or self.tile_grid == null or self.active_tile_flags == null) return;
 
         const pass_start = std.time.nanoTimestamp();
@@ -7401,6 +7403,8 @@ if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.l
         projection: ProjectionParams,
         mesh_work: *const MeshWork,
     ) !void {
+        const _z_renderTiled = profiler.zone("renderTiled");
+        defer if (_z_renderTiled) |z| z.end();
         _ = mesh;
         _ = transform;
         _ = light_dir;
@@ -7508,6 +7512,8 @@ if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.l
         tile_lists: []BinningStage.TileTriangleList,
         mesh_work: *const MeshWork,
     ) void {
+        const _z_populateTilesFromMeshlets = profiler.zone("populateTilesFromMeshlets");
+        defer if (_z_populateTilesFromMeshlets) |z| z.end();
         const meshlet_count = mesh_work.*.meshlet_len;
         if (meshlet_count == 0) return;
 

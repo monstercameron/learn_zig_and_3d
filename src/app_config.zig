@@ -59,7 +59,7 @@ pub var POST_SHADOW_DEPTH_BIAS: f32 = 0.07;
 /// Enables the advanced hybrid ray-traced shadow pass for high fidelity shadows.
 pub var POST_HYBRID_SHADOW_ENABLED: bool = true;
 /// Tile dimension constraint used during hybrid shadow evaluation.
-pub var POST_HYBRID_SHADOW_MIN_BLOCK_SIZE: i32 = 1;
+pub var POST_HYBRID_SHADOW_MIN_BLOCK_SIZE: i32 = 16;
 /// The maximum recursion or ray bounce depth for hybrid shadows.
 pub var POST_HYBRID_SHADOW_MAX_DEPTH: u32 = 1;
 /// The collision bias for intercepting geometry during shadow raycasts.
