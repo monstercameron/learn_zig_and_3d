@@ -493,7 +493,10 @@ fn levelAppendGroundPlane(mesh: *mesh_module.Mesh, allocator: std.mem.Allocator)
         }
     }
 
-    var tri_write: usize = 0;
+    // Copy the original mesh's triangles to the START so their indices don't shift.
+    std.mem.copyForwards(mesh_module.Triangle, new_triangles[0..old_triangle_count], mesh.triangles);
+
+    var tri_write: usize = old_triangle_count;
     row = 0;
     while (row < segments) : (row += 1) {
         var col: usize = 0;
@@ -509,8 +512,6 @@ fn levelAppendGroundPlane(mesh: *mesh_module.Mesh, allocator: std.mem.Allocator)
             tri_write += 1;
         }
     }
-
-    std.mem.copyForwards(mesh_module.Triangle, new_triangles[plane_triangle_count .. plane_triangle_count + old_triangle_count], mesh.triangles);
 
     const new_normals = try allocator.alloc(math.Vec3, new_triangle_count);
     errdefer allocator.free(new_normals);
