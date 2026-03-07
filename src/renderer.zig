@@ -3188,9 +3188,18 @@ pub const Renderer = struct {
         if (fov_delta != 0.0) self.adjustCameraFov(fov_delta);
 
         const auto_orbit_speed = 0.5;
+        const sweep_half_angle = std.math.pi / 2.0;
+        const light_elevation = 0.65;
+        const min_light_height = 0.35;
         self.light_orbit_x += auto_orbit_speed * delta_seconds;
-        const light_orbit = math.Mat4.multiply(math.Mat4.rotateY(self.light_orbit_y), math.Mat4.rotateX(self.light_orbit_x));
-        const light_pos_world = light_orbit.mulVec3(math.Vec3.new(0.0, 0.0, self.light_distance));
+        const sweep_angle = @sin(self.light_orbit_x) * sweep_half_angle;
+        const horizontal_radius = self.light_distance * @cos(light_elevation);
+        const light_height = @max(min_light_height, self.light_distance * @sin(light_elevation));
+        const light_pos_world = math.Vec3.new(
+            @sin(sweep_angle) * horizontal_radius,
+            light_height,
+            @cos(sweep_angle) * horizontal_radius,
+        );
         const light_dir_world = math.Vec3.normalize(light_pos_world);
 
         const yaw = self.rotation_angle;
