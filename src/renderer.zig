@@ -91,6 +91,285 @@ const ColorGradeProfile = struct {
     tone_add_b: [256]i16,
 };
 
+const BloomScratch = struct {
+    width: usize,
+    height: usize,
+    ping: []u32,
+    pong: []u32,
+};
+
+fn fastScale255(value: u32, factor: u32) u8 {
+    const scaled = ((value * factor) + 128) * 257;
+    return @intCast(@min(scaled >> 16, 255));
+}
+
+fn averageBlur5(sum: i32) u8 {
+    return @intCast(@divTrunc(sum + 2, 5));
+}
+
+fn buildBloomThresholdCurve(threshold: i32) [256]u8 {
+    var lut: [256]u8 = undefined;
+    for (0..lut.len) |idx| {
+        const luma: i32 = @intCast(idx);
+        if (luma <= threshold) {
+            lut[idx] = 0;
+        } else {
+            lut[idx] = clampByte(@divTrunc((luma - threshold) * 255, @max(1, 255 - threshold)));
+        }
+    }
+    return lut;
+}
+
+fn buildBloomIntensityLut(intensity_percent: i32) [256]u8 {
+    var lut: [256]u8 = undefined;
+    for (0..lut.len) |idx| {
+        lut[idx] = clampByte(@divTrunc(@as(i32, @intCast(idx)) * intensity_percent, 100));
+    }
+    return lut;
+}
+
+fn extractBloomDownsampleRows(
+    src: []u32,
+    src_width: usize,
+    src_height: usize,
+    bloom: *BloomScratch,
+    threshold_curve: *const [256]u8,
+    start_row: usize,
+    end_row: usize,
+) void {
+    var y = start_row;
+    while (y < end_row) : (y += 1) {
+        const sy0 = @min(src_height - 1, y * 4);
+        const sy1 = @min(src_height - 1, sy0 + 1);
+        const sy2 = @min(src_height - 1, sy0 + 2);
+        const sy3 = @min(src_height - 1, sy0 + 3);
+        const row0 = sy0 * src_width;
+        const row1 = sy1 * src_width;
+        const row2 = sy2 * src_width;
+        const row3 = sy3 * src_width;
+        const dst_row = y * bloom.width;
+        var x: usize = 0;
+        while (x < bloom.width) : (x += 1) {
+            const sx = x * 4;
+            var r_sum: u32 = 0;
+            var g_sum: u32 = 0;
+            var b_sum: u32 = 0;
+
+            if (sx + 3 < src_width) {
+                inline for (0..4) |dx| {
+                    const p0 = src[row0 + sx + dx];
+                    const p1 = src[row1 + sx + dx];
+                    const p2 = src[row2 + sx + dx];
+                    const p3 = src[row3 + sx + dx];
+
+                    r_sum += (p0 >> 16) & 0xFF;
+                    g_sum += (p0 >> 8) & 0xFF;
+                    b_sum += p0 & 0xFF;
+
+                    r_sum += (p1 >> 16) & 0xFF;
+                    g_sum += (p1 >> 8) & 0xFF;
+                    b_sum += p1 & 0xFF;
+
+                    r_sum += (p2 >> 16) & 0xFF;
+                    g_sum += (p2 >> 8) & 0xFF;
+                    b_sum += p2 & 0xFF;
+
+                    r_sum += (p3 >> 16) & 0xFF;
+                    g_sum += (p3 >> 8) & 0xFF;
+                    b_sum += p3 & 0xFF;
+                }
+            } else {
+                inline for (0..4) |dx| {
+                    const sample_x = @min(src_width - 1, sx + dx);
+                    const p0 = src[row0 + sample_x];
+                    const p1 = src[row1 + sample_x];
+                    const p2 = src[row2 + sample_x];
+                    const p3 = src[row3 + sample_x];
+
+                    r_sum += (p0 >> 16) & 0xFF;
+                    g_sum += (p0 >> 8) & 0xFF;
+                    b_sum += p0 & 0xFF;
+
+                    r_sum += (p1 >> 16) & 0xFF;
+                    g_sum += (p1 >> 8) & 0xFF;
+                    b_sum += p1 & 0xFF;
+
+                    r_sum += (p2 >> 16) & 0xFF;
+                    g_sum += (p2 >> 8) & 0xFF;
+                    b_sum += p2 & 0xFF;
+
+                    r_sum += (p3 >> 16) & 0xFF;
+                    g_sum += (p3 >> 8) & 0xFF;
+                    b_sum += p3 & 0xFF;
+                }
+            }
+
+            const r = r_sum >> 4;
+            const g = g_sum >> 4;
+            const b = b_sum >> 4;
+            const luma: usize = @intCast((r_sum * 77 + g_sum * 150 + b_sum * 29) >> 12);
+            const factor = threshold_curve[luma];
+
+            if (factor == 0) {
+                bloom.ping[dst_row + x] = 0xFF000000;
+                continue;
+            }
+
+            const br = fastScale255(r, factor);
+            const bg = fastScale255(g, factor);
+            const bb = fastScale255(b, factor);
+            bloom.ping[dst_row + x] = 0xFF000000 |
+                (@as(u32, br) << 16) |
+                (@as(u32, bg) << 8) |
+                @as(u32, bb);
+        }
+    }
+}
+
+fn blurBloomHorizontalRows(bloom: *BloomScratch, start_row: usize, end_row: usize) void {
+    var y = start_row;
+    while (y < end_row) : (y += 1) {
+        const row_start = y * bloom.width;
+        const src_row = bloom.ping[row_start .. row_start + bloom.width];
+        const dst_row = bloom.pong[row_start .. row_start + bloom.width];
+        const edge1 = @min(bloom.width - 1, @as(usize, 1));
+        const edge2 = @min(bloom.width - 1, @as(usize, 2));
+        const p0 = src_row[0];
+        const p1 = src_row[edge1];
+        const p2 = src_row[edge2];
+        var r: i32 = @intCast(((p0 >> 16) & 0xFF) * 3 + ((p1 >> 16) & 0xFF) + ((p2 >> 16) & 0xFF));
+        var g: i32 = @intCast(((p0 >> 8) & 0xFF) * 3 + ((p1 >> 8) & 0xFF) + ((p2 >> 8) & 0xFF));
+        var b: i32 = @intCast((p0 & 0xFF) * 3 + (p1 & 0xFF) + (p2 & 0xFF));
+        var x: usize = 0;
+        while (x < bloom.width) : (x += 1) {
+            dst_row[x] = 0xFF000000 |
+                (@as(u32, averageBlur5(r)) << 16) |
+                (@as(u32, averageBlur5(g)) << 8) |
+                @as(u32, averageBlur5(b));
+
+            if (x + 1 >= bloom.width) break;
+            const remove_idx = if (x >= 2) x - 2 else 0;
+            const add_idx = @min(bloom.width - 1, x + 3);
+            const remove_pixel = src_row[remove_idx];
+            const add_pixel = src_row[add_idx];
+            r += @as(i32, @intCast((add_pixel >> 16) & 0xFF)) - @as(i32, @intCast((remove_pixel >> 16) & 0xFF));
+            g += @as(i32, @intCast((add_pixel >> 8) & 0xFF)) - @as(i32, @intCast((remove_pixel >> 8) & 0xFF));
+            b += @as(i32, @intCast(add_pixel & 0xFF)) - @as(i32, @intCast(remove_pixel & 0xFF));
+        }
+    }
+}
+
+fn blurBloomVerticalRows(bloom: *BloomScratch, start_row: usize, end_row: usize) void {
+    var x: usize = 0;
+    while (x < bloom.width) : (x += 1) {
+        var r: i32 = 0;
+        var g: i32 = 0;
+        var b: i32 = 0;
+        var offset: i32 = -2;
+        while (offset <= 2) : (offset += 1) {
+            const sample_y = @min(
+                bloom.height - 1,
+                @as(usize, @intCast(@max(0, @as(i32, @intCast(start_row)) + offset))),
+            );
+            const pixel = bloom.pong[sample_y * bloom.width + x];
+            r += @intCast((pixel >> 16) & 0xFF);
+            g += @intCast((pixel >> 8) & 0xFF);
+            b += @intCast(pixel & 0xFF);
+        }
+
+        var current_y = start_row;
+        while (current_y < end_row) : (current_y += 1) {
+            bloom.ping[current_y * bloom.width + x] = 0xFF000000 |
+                (@as(u32, averageBlur5(r)) << 16) |
+                (@as(u32, averageBlur5(g)) << 8) |
+                @as(u32, averageBlur5(b));
+
+            if (current_y + 1 >= end_row) break;
+            const remove_idx = if (current_y >= 2) current_y - 2 else 0;
+            const add_idx = @min(bloom.height - 1, current_y + 3);
+            const remove_pixel = bloom.pong[remove_idx * bloom.width + x];
+            const add_pixel = bloom.pong[add_idx * bloom.width + x];
+            r += @as(i32, @intCast((add_pixel >> 16) & 0xFF)) - @as(i32, @intCast((remove_pixel >> 16) & 0xFF));
+            g += @as(i32, @intCast((add_pixel >> 8) & 0xFF)) - @as(i32, @intCast((remove_pixel >> 8) & 0xFF));
+            b += @as(i32, @intCast(add_pixel & 0xFF)) - @as(i32, @intCast(remove_pixel & 0xFF));
+        }
+    }
+}
+
+fn compositeBloomRows(
+    dst: []u32,
+    dst_width: usize,
+    bloom: *const BloomScratch,
+    intensity_lut: *const [256]u8,
+    start_row: usize,
+    end_row: usize,
+) void {
+    const max_channel: GradeVec = @splat(255);
+    var y = start_row;
+    while (y < end_row) : (y += 1) {
+        const by = @min(bloom.height - 1, y / 4);
+        const bloom_row = bloom.ping[by * bloom.width ..][0..bloom.width];
+        const row_start = y * dst_width;
+        var x: usize = 0;
+        while (x + color_grade_simd_lanes <= dst_width) : (x += color_grade_simd_lanes) {
+            var alpha: [color_grade_simd_lanes]u32 = undefined;
+            var r_arr: [color_grade_simd_lanes]i16 = undefined;
+            var g_arr: [color_grade_simd_lanes]i16 = undefined;
+            var b_arr: [color_grade_simd_lanes]i16 = undefined;
+            var add_r_arr: [color_grade_simd_lanes]i16 = undefined;
+            var add_g_arr: [color_grade_simd_lanes]i16 = undefined;
+            var add_b_arr: [color_grade_simd_lanes]i16 = undefined;
+
+            inline for (0..color_grade_simd_lanes) |lane| {
+                const dst_idx = row_start + x + lane;
+                const dst_pixel = dst[dst_idx];
+                const bloom_pixel = bloom_row[@min(bloom.width - 1, (x + lane) / 4)];
+                alpha[lane] = dst_pixel & 0xFF000000;
+                r_arr[lane] = @intCast((dst_pixel >> 16) & 0xFF);
+                g_arr[lane] = @intCast((dst_pixel >> 8) & 0xFF);
+                b_arr[lane] = @intCast(dst_pixel & 0xFF);
+                add_r_arr[lane] = intensity_lut[(bloom_pixel >> 16) & 0xFF];
+                add_g_arr[lane] = intensity_lut[(bloom_pixel >> 8) & 0xFF];
+                add_b_arr[lane] = intensity_lut[bloom_pixel & 0xFF];
+            }
+
+            const r_src: GradeVec = @bitCast(r_arr);
+            const g_src: GradeVec = @bitCast(g_arr);
+            const b_src: GradeVec = @bitCast(b_arr);
+            const add_r_vec: GradeVec = @bitCast(add_r_arr);
+            const add_g_vec: GradeVec = @bitCast(add_g_arr);
+            const add_b_vec: GradeVec = @bitCast(add_b_arr);
+            const r_vec: GradeVec = @as(GradeVec, @min(r_src + add_r_vec, max_channel));
+            const g_vec: GradeVec = @as(GradeVec, @min(g_src + add_g_vec, max_channel));
+            const b_vec: GradeVec = @as(GradeVec, @min(b_src + add_b_vec, max_channel));
+            const r_out: [color_grade_simd_lanes]i16 = @bitCast(r_vec);
+            const g_out: [color_grade_simd_lanes]i16 = @bitCast(g_vec);
+            const b_out: [color_grade_simd_lanes]i16 = @bitCast(b_vec);
+
+            inline for (0..color_grade_simd_lanes) |lane| {
+                dst[row_start + x + lane] = alpha[lane] |
+                    (@as(u32, @intCast(r_out[lane])) << 16) |
+                    (@as(u32, @intCast(g_out[lane])) << 8) |
+                    @as(u32, @intCast(b_out[lane]));
+            }
+        }
+
+        while (x < dst_width) : (x += 1) {
+            const bloom_pixel = bloom_row[@min(bloom.width - 1, x / 4)];
+            const idx = row_start + x;
+            const dst_pixel = dst[idx];
+            const a = dst_pixel & 0xFF000000;
+            const r = @as(i32, @intCast((dst_pixel >> 16) & 0xFF)) + intensity_lut[(bloom_pixel >> 16) & 0xFF];
+            const g = @as(i32, @intCast((dst_pixel >> 8) & 0xFF)) + intensity_lut[(bloom_pixel >> 8) & 0xFF];
+            const b = @as(i32, @intCast(dst_pixel & 0xFF)) + intensity_lut[bloom_pixel & 0xFF];
+            dst[idx] = a |
+                (@as(u32, clampByte(r)) << 16) |
+                (@as(u32, clampByte(g)) << 8) |
+                @as(u32, clampByte(b));
+        }
+    }
+}
+
 fn colorGradeSimdLanes() comptime_int {
     return switch (builtin.target.cpu.arch) {
         .x86_64 => blk: {
@@ -148,6 +427,50 @@ const ColorGradeJobContext = struct {
     fn run(ctx_ptr: *anyopaque) void {
         const ctx: *ColorGradeJobContext = @ptrCast(@alignCast(ctx_ptr));
         applyBlockbusterGradeRange(ctx.pixels, ctx.start_index, ctx.end_index, ctx.profile);
+    }
+};
+
+const BloomPassStage = enum {
+    extract,
+    blur_horizontal,
+    blur_vertical,
+    composite,
+};
+
+const BloomJobContext = struct {
+    stage: BloomPassStage,
+    scene_pixels: []u32,
+    scene_width: usize,
+    scene_height: usize,
+    bloom: *BloomScratch,
+    threshold_curve: *const [256]u8,
+    intensity_lut: *const [256]u8,
+    start_row: usize,
+    end_row: usize,
+
+    fn run(ctx_ptr: *anyopaque) void {
+        const ctx: *BloomJobContext = @ptrCast(@alignCast(ctx_ptr));
+        switch (ctx.stage) {
+            .extract => extractBloomDownsampleRows(
+                ctx.scene_pixels,
+                ctx.scene_width,
+                ctx.scene_height,
+                ctx.bloom,
+                ctx.threshold_curve,
+                ctx.start_row,
+                ctx.end_row,
+            ),
+            .blur_horizontal => blurBloomHorizontalRows(ctx.bloom, ctx.start_row, ctx.end_row),
+            .blur_vertical => blurBloomVerticalRows(ctx.bloom, ctx.start_row, ctx.end_row),
+            .composite => compositeBloomRows(
+                ctx.scene_pixels,
+                ctx.scene_width,
+                ctx.bloom,
+                ctx.intensity_lut,
+                ctx.start_row,
+                ctx.end_row,
+            ),
+        }
     }
 };
 
@@ -309,6 +632,10 @@ pub const Renderer = struct {
     render_pass_timings: [max_render_passes]RenderPassTiming,
     render_pass_count: usize,
     color_grade_profile: ColorGradeProfile,
+    bloom_scratch: BloomScratch,
+    bloom_threshold_curve: [256]u8,
+    bloom_intensity_lut: [256]u8,
+    bloom_job_contexts: []BloomJobContext,
     color_grade_job_contexts: []ColorGradeJobContext,
     color_grade_jobs: []Job,
 
@@ -358,8 +685,17 @@ pub const Renderer = struct {
         const color_grade_job_count = @max(@as(usize, 1), @as(usize, @intCast(job_system.worker_count * 2)));
         const color_grade_job_contexts = try allocator.alloc(ColorGradeJobContext, color_grade_job_count);
         errdefer allocator.free(color_grade_job_contexts);
+        const bloom_job_contexts = try allocator.alloc(BloomJobContext, color_grade_job_count);
+        errdefer allocator.free(bloom_job_contexts);
         const color_grade_jobs = try allocator.alloc(Job, color_grade_job_count);
         errdefer allocator.free(color_grade_jobs);
+        const bloom_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + 3, 4))));
+        const bloom_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + 3, 4))));
+        const bloom_pixel_count = bloom_width * bloom_height;
+        const bloom_ping = try allocator.alloc(u32, bloom_pixel_count);
+        errdefer allocator.free(bloom_ping);
+        const bloom_pong = try allocator.alloc(u32, bloom_pixel_count);
+        errdefer allocator.free(bloom_pong);
 
         renderer_logger.infoSub(
             "init",
@@ -424,6 +760,15 @@ pub const Renderer = struct {
             }} ** max_render_passes,
             .render_pass_count = 0,
             .color_grade_profile = buildBlockbusterGradeProfile(),
+            .bloom_scratch = .{
+                .width = bloom_width,
+                .height = bloom_height,
+                .ping = bloom_ping,
+                .pong = bloom_pong,
+            },
+            .bloom_threshold_curve = buildBloomThresholdCurve(config.POST_BLOOM_THRESHOLD),
+            .bloom_intensity_lut = buildBloomIntensityLut(config.POST_BLOOM_INTENSITY_PERCENT),
+            .bloom_job_contexts = bloom_job_contexts,
             .color_grade_job_contexts = color_grade_job_contexts,
             .color_grade_jobs = color_grade_jobs,
         };
@@ -440,6 +785,9 @@ pub const Renderer = struct {
         if (self.tile_triangle_lists) |lists| BinningStage.freeTileTriangleLists(lists, self.allocator);
         if (self.active_tile_flags) |flags| self.allocator.free(flags);
         if (self.active_tile_indices) |indices| self.allocator.free(indices);
+        self.allocator.free(self.bloom_scratch.ping);
+        self.allocator.free(self.bloom_scratch.pong);
+        self.allocator.free(self.bloom_job_contexts);
         self.allocator.free(self.color_grade_job_contexts);
         self.allocator.free(self.color_grade_jobs);
         if (self.tile_buffers) |buffers| {
@@ -2323,8 +2671,115 @@ pub const Renderer = struct {
     }
 
     fn applyPostProcessingPasses(self: *Renderer) void {
+        if (config.POST_BLOOM_ENABLED) self.applyBloomPass();
         if (!config.POST_COLOR_CORRECTION_ENABLED) return;
         self.applyBlockbusterColorGradePass();
+    }
+
+    fn applyBloomPass(self: *Renderer) void {
+        if (self.bitmap.pixels.len == 0) return;
+        const pass_start = std.time.nanoTimestamp();
+        const bloom = &self.bloom_scratch;
+        const scene_width: usize = @intCast(self.bitmap.width);
+        const scene_height: usize = @intCast(self.bitmap.height);
+        self.dispatchBloomStage(.extract, bloom.height, scene_width, scene_height, config.POST_BLOOM_THRESHOLD, 0);
+        self.dispatchBloomStage(.blur_horizontal, bloom.height, scene_width, scene_height, 0, 0);
+        self.dispatchBloomStage(.blur_vertical, bloom.height, scene_width, scene_height, 0, 0);
+        self.dispatchBloomStage(.composite, scene_height, scene_width, scene_height, 0, config.POST_BLOOM_INTENSITY_PERCENT);
+        self.recordRenderPassTiming("bloom", pass_start);
+    }
+
+    fn dispatchBloomStage(
+        self: *Renderer,
+        stage: BloomPassStage,
+        row_count: usize,
+        scene_width: usize,
+        scene_height: usize,
+        threshold: i32,
+        intensity_percent: i32,
+    ) void {
+        if (row_count == 0) return;
+        const stripe_count = @min(self.bloom_job_contexts.len, @max(@as(usize, 1), row_count));
+        const rows_per_job = if (stripe_count <= 1) row_count else (row_count + stripe_count - 1) / stripe_count;
+
+        if (stripe_count <= 1 or self.job_system == null) {
+            self.runBloomStageRange(stage, 0, row_count, scene_width, scene_height, threshold, intensity_percent);
+            return;
+        }
+
+        var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+        var stripe_index: usize = 0;
+        while (stripe_index < stripe_count) : (stripe_index += 1) {
+            const start_row = stripe_index * rows_per_job;
+            if (start_row >= row_count) break;
+            const end_row = @min(row_count, start_row + rows_per_job);
+
+            self.bloom_job_contexts[stripe_index] = .{
+                .stage = stage,
+                .scene_pixels = self.bitmap.pixels,
+                .scene_width = scene_width,
+                .scene_height = scene_height,
+                .bloom = &self.bloom_scratch,
+                .threshold_curve = &self.bloom_threshold_curve,
+                .intensity_lut = &self.bloom_intensity_lut,
+                .start_row = start_row,
+                .end_row = end_row,
+            };
+
+            if (stripe_index == 0) continue;
+
+            self.color_grade_jobs[stripe_index] = Job.init(
+                BloomJobContext.run,
+                @ptrCast(&self.bloom_job_contexts[stripe_index]),
+                &parent_job,
+            );
+            if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+                BloomJobContext.run(@ptrCast(&self.bloom_job_contexts[stripe_index]));
+            }
+        }
+
+        BloomJobContext.run(@ptrCast(&self.bloom_job_contexts[0]));
+        parent_job.complete();
+        parent_job.wait();
+    }
+
+    fn runBloomStageRange(
+        self: *Renderer,
+        stage: BloomPassStage,
+        start_row: usize,
+        end_row: usize,
+        scene_width: usize,
+        scene_height: usize,
+        threshold: i32,
+        intensity_percent: i32,
+    ) void {
+        switch (stage) {
+            .extract => {
+                _ = threshold;
+                extractBloomDownsampleRows(
+                    self.bitmap.pixels,
+                    scene_width,
+                    scene_height,
+                    &self.bloom_scratch,
+                    &self.bloom_threshold_curve,
+                    start_row,
+                    end_row,
+                );
+            },
+            .blur_horizontal => blurBloomHorizontalRows(&self.bloom_scratch, start_row, end_row),
+            .blur_vertical => blurBloomVerticalRows(&self.bloom_scratch, start_row, end_row),
+            .composite => {
+                _ = intensity_percent;
+                compositeBloomRows(
+                    self.bitmap.pixels,
+                    scene_width,
+                    &self.bloom_scratch,
+                    &self.bloom_intensity_lut,
+                    start_row,
+                    end_row,
+                );
+            },
+        }
     }
 
     fn applyBlockbusterColorGradePass(self: *Renderer) void {

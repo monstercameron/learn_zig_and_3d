@@ -37,6 +37,9 @@ pub const LIGHT_DISTANCE_INITIAL: f32 = 3.0;
 
 // Enables the first post-processing stage layered over the meshlet render output.
 pub const POST_COLOR_CORRECTION_ENABLED = true;
+pub const POST_BLOOM_ENABLED = true;
+pub const POST_BLOOM_THRESHOLD: i32 = 168;
+pub const POST_BLOOM_INTENSITY_PERCENT: i32 = 55;
 
 // A simple blockbuster-style teal/orange grade tuned for the current CPU renderer.
 pub const POST_COLOR_PROFILE_NAME = "blockbuster_teal_orange";
