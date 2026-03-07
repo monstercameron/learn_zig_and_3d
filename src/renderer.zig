@@ -2341,6 +2341,8 @@ pub const Renderer = struct {
     bloom_job_contexts: []BloomJobContext,
     dof_scratch: DepthOfFieldScratch,
     dof_job_contexts: []DepthOfFieldJobContext,
+    dof_focal_distance: f32,
+    dof_target_focal_distance: f32,
     taa_job_contexts: []TAAJobContext,
     color_grade_job_contexts: []ColorGradeJobContext,
     color_grade_jobs: []Job,
@@ -2630,6 +2632,8 @@ pub const Renderer = struct {
             .bloom_job_contexts = bloom_job_contexts,
             .dof_scratch = .{ .pixels = dof_scratch_pixels, .width = @intCast(width), .height = @intCast(height) },
             .dof_job_contexts = dof_job_contexts,
+            .dof_focal_distance = config.POST_DOF_FOCAL_DISTANCE,
+            .dof_target_focal_distance = config.POST_DOF_FOCAL_DISTANCE,
             .taa_job_contexts = taa_job_contexts,
             .color_grade_job_contexts = color_grade_job_contexts,
             .color_grade_jobs = color_grade_jobs,
@@ -5593,6 +5597,39 @@ pub const Renderer = struct {
         const scene_width: usize = @intCast(self.bitmap.width);
         const scene_height: usize = @intCast(self.bitmap.height);
         
+        const center_x = scene_width / 2;
+        const center_y = scene_height / 2;
+        var center_depth = self.scene_depth[center_y * scene_width + center_x];
+        
+        // Safety guard for extreme depths
+        if (center_depth > 1000.0) center_depth = 1000.0;
+        
+        // Check a 3x3 region in center to ensure targeting isn't noisy
+        var min_depth: f32 = 1000.0;
+        const box_size: i32 = 4;
+        
+        var cy: i32 = -box_size;
+        while (cy <= box_size) : (cy += 1) {
+            var cx: i32 = -box_size;
+            while (cx <= box_size) : (cx += 1) {
+                const py = @as(usize, @intCast(@max(0, @min(@as(i32, @intCast(scene_height)) - 1, @as(i32, @intCast(center_y)) + cy))));
+                const px = @as(usize, @intCast(@max(0, @min(@as(i32, @intCast(scene_width)) - 1, @as(i32, @intCast(center_x)) + cx))));
+                const d = self.scene_depth[py * scene_width + px];
+                if (d < min_depth) {
+                    min_depth = d;
+                }
+            }
+        }
+        
+        if (min_depth > 1000.0) min_depth = 1000.0;
+        
+        self.dof_target_focal_distance = min_depth;
+        
+        // Smooth lerp (Eye Accommodation)
+        self.dof_focal_distance = self.dof_focal_distance + (self.dof_target_focal_distance - self.dof_focal_distance) * 0.1;
+        
+        const auto_focal_distance = self.dof_focal_distance;
+        
         const stripe_count = computeStripeCount(self.dof_job_contexts.len, scene_height);
         const rows_per_job = if (stripe_count <= 1) scene_height else (scene_height + stripe_count - 1) / stripe_count;
         
@@ -5605,7 +5642,7 @@ pub const Renderer = struct {
                 .height = scene_height,
                 .start_row = 0,
                 .end_row = scene_height,
-                .focal_distance = config.POST_DOF_FOCAL_DISTANCE,
+                .focal_distance = auto_focal_distance,
                 .focal_range = config.POST_DOF_FOCAL_RANGE,
                 .max_blur_radius = config.POST_DOF_BLUR_RADIUS,
             };
@@ -5626,7 +5663,7 @@ pub const Renderer = struct {
                     .height = scene_height,
                     .start_row = start_row,
                     .end_row = end_row,
-                    .focal_distance = config.POST_DOF_FOCAL_DISTANCE,
+                    .focal_distance = auto_focal_distance,
                     .focal_range = config.POST_DOF_FOCAL_RANGE,
                     .max_blur_radius = config.POST_DOF_BLUR_RADIUS,
                 };
