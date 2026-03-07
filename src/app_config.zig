@@ -35,6 +35,14 @@ pub const CAMERA_FOV_MAX: f32 = 120.0;
 // The initial distance of the dynamic light source from the origin.
 pub const LIGHT_DISTANCE_INITIAL: f32 = 3.0;
 
+// Enables the first post-processing stage layered over the meshlet render output.
+pub const POST_COLOR_CORRECTION_ENABLED = true;
+
+// A simple blockbuster-style teal/orange grade tuned for the current CPU renderer.
+pub const POST_COLOR_PROFILE_NAME = "blockbuster_teal_orange";
+pub const POST_COLOR_BRIGHTNESS_BIAS: i32 = 4;
+pub const POST_COLOR_CONTRAST_PERCENT: i32 = 112;
+
 /// Calculates the target time per frame in nanoseconds, based on the TARGET_FPS.
 /// This is used for frame rate limiting.
 pub fn targetFrameTimeNs() i128 {

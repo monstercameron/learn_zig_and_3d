@@ -15,7 +15,8 @@ pub const BrightnessContrastKernel = struct {
     pub const SharedSize: usize = 0;
 
     fn getPC(ctx: *const ComputeContext) *const BrightnessContrastPC {
-        return @ptrCast(*const BrightnessContrastPC, ctx.push_constants.?.ptr);
+        const bytes = ctx.push_constants.?;
+        return @ptrCast(@alignCast(bytes.ptr));
     }
 
     pub fn main(ctx: *ComputeContext) void {
@@ -35,6 +36,11 @@ pub const BrightnessContrastKernel = struct {
         const g = (c[1] - 0.5) * pc.contrast + 0.5 + pc.brightness;
         const b = (c[2] - 0.5) * pc.contrast + 0.5 + pc.brightness;
 
-        storeRGBA(dst, x, y, .{ std.math.clamp(r, 0.0, 1.0), std.math.clamp(g, 0.0, 1.0), std.math.clamp(b, 0.0, 1.0), c[3] });
+        storeRGBA(dst, x, y, .{
+            std.math.clamp(r, 0.0, 1.0),
+            std.math.clamp(g, 0.0, 1.0),
+            std.math.clamp(b, 0.0, 1.0),
+            c[3],
+        });
     }
 };

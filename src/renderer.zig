@@ -29,6 +29,7 @@
 //! ```
 
 const std = @import("std");
+const builtin = @import("builtin");
 const windows = std.os.windows;
 const math = @import("math.zig");
 const MeshModule = @import("mesh.zig");
@@ -73,11 +74,45 @@ const MeshletTelemetry = struct {
     touched_tiles: usize = 0,
 };
 
+const max_render_passes = 8;
+
+const RenderPassTiming = struct {
+    name: []const u8,
+    frame_duration_ms: f32,
+    accumulated_ms: f32,
+    sampled_ms_per_frame: f32,
+    has_sample: bool,
+};
+
+const ColorGradeProfile = struct {
+    base_curve: [256]u8,
+    tone_add_r: [256]i16,
+    tone_add_g: [256]i16,
+    tone_add_b: [256]i16,
+};
+
+fn colorGradeSimdLanes() comptime_int {
+    return switch (builtin.target.cpu.arch) {
+        .x86_64 => blk: {
+            const features = builtin.target.cpu.features;
+            if (std.Target.x86.featureSetHas(features, .avx512bw)) break :blk 32;
+            if (std.Target.x86.featureSetHas(features, .avx2)) break :blk 16;
+            break :blk 8;
+        },
+        .aarch64 => 8,
+        else => 8,
+    };
+}
+
+const color_grade_simd_lanes = colorGradeSimdLanes();
+const GradeVec = @Vector(color_grade_simd_lanes, i16);
+
 // HGDIOBJ: A "handle" (like an ID) to a Windows graphics object.
 const HGDIOBJ = *anyopaque;
 
 // SRCCOPY: A Windows constant that tells BitBlt to do a direct pixel copy.
 const SRCCOPY = 0x00CC0020;
+const TRANSPARENT = 1;
 
 // ========== WINDOWS API DECLARATIONS ==========
 // These are external function definitions for the Windows Graphics Device Interface (GDI).
@@ -88,6 +123,9 @@ extern "gdi32" fn CreateCompatibleDC(hdc: ?windows.HDC) ?windows.HDC;
 extern "gdi32" fn SelectObject(hdc: windows.HDC, hgdiobj: HGDIOBJ) HGDIOBJ;
 extern "gdi32" fn BitBlt(hdcDest: windows.HDC, nXDest: i32, nYDest: i32, nWidth: i32, nHeight: i32, hdcSrc: windows.HDC, nXSrc: i32, nYSrc: i32, dwRop: u32) bool;
 extern "gdi32" fn DeleteDC(hdc: windows.HDC) bool;
+extern "gdi32" fn SetBkMode(hdc: windows.HDC, mode: i32) i32;
+extern "gdi32" fn SetTextColor(hdc: windows.HDC, color: u32) u32;
+extern "gdi32" fn TextOutW(hdc: windows.HDC, x: i32, y: i32, lpString: [*]const u16, c: i32) bool;
 extern "user32" fn SetWindowTextW(hWnd: windows.HWND, lpString: [*:0]const u16) bool;
 extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
 
@@ -97,8 +135,119 @@ const TileRenderer = @import("tile_renderer.zig");
 const TileGrid = TileRenderer.TileGrid;
 const TileBuffer = TileRenderer.TileBuffer;
 const BinningStage = @import("binning_stage.zig");
-const JobSystem = @import("job_system.zig").JobSystem;
-const Job = @import("job_system.zig").Job;
+const job_system_module = @import("job_system.zig");
+const JobSystem = job_system_module.JobSystem;
+const Job = job_system_module.Job;
+
+const ColorGradeJobContext = struct {
+    pixels: []u32,
+    start_index: usize,
+    end_index: usize,
+    profile: *const ColorGradeProfile,
+
+    fn run(ctx_ptr: *anyopaque) void {
+        const ctx: *ColorGradeJobContext = @ptrCast(@alignCast(ctx_ptr));
+        applyBlockbusterGradeRange(ctx.pixels, ctx.start_index, ctx.end_index, ctx.profile);
+    }
+};
+
+fn noopRenderPassJob(ctx: *anyopaque) void {
+    _ = ctx;
+}
+
+fn applyBlockbusterGradeRange(pixels: []u32, start_index: usize, end_index: usize, grade: *const ColorGradeProfile) void {
+    var i = start_index;
+    const zero: GradeVec = @splat(0);
+    const max_channel: GradeVec = @splat(255);
+    const three: GradeVec = @splat(3);
+    const sat_r: GradeVec = @splat(110);
+    const sat_g: GradeVec = @splat(104);
+    const sat_b: GradeVec = @splat(96);
+    const hundred: GradeVec = @splat(100);
+
+    while (i + color_grade_simd_lanes <= end_index) : (i += color_grade_simd_lanes) {
+        var alpha: [color_grade_simd_lanes]u32 = undefined;
+        var r_arr: [color_grade_simd_lanes]i16 = undefined;
+        var g_arr: [color_grade_simd_lanes]i16 = undefined;
+        var b_arr: [color_grade_simd_lanes]i16 = undefined;
+        var add_r_arr: [color_grade_simd_lanes]i16 = undefined;
+        var add_g_arr: [color_grade_simd_lanes]i16 = undefined;
+        var add_b_arr: [color_grade_simd_lanes]i16 = undefined;
+
+        inline for (0..color_grade_simd_lanes) |lane| {
+            const pixel = pixels[i + lane];
+            alpha[lane] = pixel & 0xFF000000;
+
+            const r0 = grade.base_curve[@intCast((pixel >> 16) & 0xFF)];
+            const g0 = grade.base_curve[@intCast((pixel >> 8) & 0xFF)];
+            const b0 = grade.base_curve[@intCast(pixel & 0xFF)];
+            const luma_index: usize = @intCast((@as(u32, r0) * 77 + @as(u32, g0) * 150 + @as(u32, b0) * 29) >> 8);
+
+            r_arr[lane] = r0;
+            g_arr[lane] = g0;
+            b_arr[lane] = b0;
+            add_r_arr[lane] = grade.tone_add_r[luma_index];
+            add_g_arr[lane] = grade.tone_add_g[luma_index];
+            add_b_arr[lane] = grade.tone_add_b[luma_index];
+        }
+
+        var r_vec: GradeVec = @bitCast(r_arr);
+        var g_vec: GradeVec = @bitCast(g_arr);
+        var b_vec: GradeVec = @bitCast(b_arr);
+        r_vec += @bitCast(add_r_arr);
+        g_vec += @bitCast(add_g_arr);
+        b_vec += @bitCast(add_b_arr);
+
+        const mean = @divTrunc(r_vec + g_vec + b_vec, three);
+        r_vec = mean + @divTrunc((r_vec - mean) * sat_r, hundred);
+        g_vec = mean + @divTrunc((g_vec - mean) * sat_g, hundred);
+        b_vec = mean + @divTrunc((b_vec - mean) * sat_b, hundred);
+
+        const r_clamped: GradeVec = @min(@max(r_vec, zero), max_channel);
+        const g_clamped: GradeVec = @min(@max(g_vec, zero), max_channel);
+        const b_clamped: GradeVec = @min(@max(b_vec, zero), max_channel);
+        const r_out: [color_grade_simd_lanes]i16 = @bitCast(r_clamped);
+        const g_out: [color_grade_simd_lanes]i16 = @bitCast(g_clamped);
+        const b_out: [color_grade_simd_lanes]i16 = @bitCast(b_clamped);
+
+        inline for (0..color_grade_simd_lanes) |lane| {
+            pixels[i + lane] = alpha[lane] |
+                (@as(u32, @intCast(r_out[lane])) << 16) |
+                (@as(u32, @intCast(g_out[lane])) << 8) |
+                @as(u32, @intCast(b_out[lane]));
+        }
+    }
+
+    while (i < end_index) : (i += 1) {
+        const pixel = pixels[i];
+        const a: u32 = pixel & 0xFF000000;
+
+        const r0: u8 = grade.base_curve[@intCast((pixel >> 16) & 0xFF)];
+        const g0: u8 = grade.base_curve[@intCast((pixel >> 8) & 0xFF)];
+        const b0: u8 = grade.base_curve[@intCast(pixel & 0xFF)];
+
+        const luma_index: usize = @intCast((@as(u32, r0) * 77 + @as(u32, g0) * 150 + @as(u32, b0) * 29) >> 8);
+        var r: i32 = @as(i32, r0) + grade.tone_add_r[luma_index];
+        var g: i32 = @as(i32, g0) + grade.tone_add_g[luma_index];
+        var b: i32 = @as(i32, b0) + grade.tone_add_b[luma_index];
+
+        const mean = @divTrunc(r + g + b, 3);
+        r = mean + @divTrunc((r - mean) * 110, 100);
+        g = mean + @divTrunc((g - mean) * 104, 100);
+        b = mean + @divTrunc((b - mean) * 96, 100);
+
+        pixels[i] = a |
+            (@as(u32, clampByte(r)) << 16) |
+            (@as(u32, clampByte(g)) << 8) |
+            @as(u32, clampByte(b));
+    }
+}
+
+fn clampByte(value: i32) u8 {
+    if (value <= 0) return 0;
+    if (value >= 255) return 255;
+    return @intCast(value);
+}
 
 /// The `Renderer` struct holds the entire state of the rendering engine.
 /// It manages the window connection, the pixel buffer, the rendering pipeline, and application state.
@@ -157,6 +306,11 @@ pub const Renderer = struct {
 
     ground_debug: GroundDebugState = .{},
     meshlet_telemetry: MeshletTelemetry = .{},
+    render_pass_timings: [max_render_passes]RenderPassTiming,
+    render_pass_count: usize,
+    color_grade_profile: ColorGradeProfile,
+    color_grade_job_contexts: []ColorGradeJobContext,
+    color_grade_jobs: []Job,
 
     // Unused state from previous versions
     last_brightness_min: f32,
@@ -201,6 +355,11 @@ pub const Renderer = struct {
         errdefer allocator.free(active_tile_indices);
 
         const job_system = try JobSystem.init(allocator);
+        const color_grade_job_count = @max(@as(usize, 1), @as(usize, @intCast(job_system.worker_count * 2)));
+        const color_grade_job_contexts = try allocator.alloc(ColorGradeJobContext, color_grade_job_count);
+        errdefer allocator.free(color_grade_job_contexts);
+        const color_grade_jobs = try allocator.alloc(Job, color_grade_job_count);
+        errdefer allocator.free(color_grade_jobs);
 
         renderer_logger.infoSub(
             "init",
@@ -256,6 +415,17 @@ pub const Renderer = struct {
             .tile_triangle_lists = tile_triangle_lists,
             .active_tile_flags = active_tile_flags,
             .active_tile_indices = active_tile_indices,
+            .render_pass_timings = [_]RenderPassTiming{.{
+                .name = "",
+                .frame_duration_ms = 0.0,
+                .accumulated_ms = 0.0,
+                .sampled_ms_per_frame = 0.0,
+                .has_sample = false,
+            }} ** max_render_passes,
+            .render_pass_count = 0,
+            .color_grade_profile = buildBlockbusterGradeProfile(),
+            .color_grade_job_contexts = color_grade_job_contexts,
+            .color_grade_jobs = color_grade_jobs,
         };
     }
 
@@ -270,6 +440,8 @@ pub const Renderer = struct {
         if (self.tile_triangle_lists) |lists| BinningStage.freeTileTriangleLists(lists, self.allocator);
         if (self.active_tile_flags) |flags| self.allocator.free(flags);
         if (self.active_tile_indices) |indices| self.allocator.free(indices);
+        self.allocator.free(self.color_grade_job_contexts);
+        self.allocator.free(self.color_grade_jobs);
         if (self.tile_buffers) |buffers| {
             for (buffers) |*buf| buf.deinit();
             self.allocator.free(buffers);
@@ -1681,6 +1853,7 @@ pub const Renderer = struct {
     /// This is the heart of the engine, executing the full 3D pipeline each frame.
     pub fn render3DMeshWithPump(self: *Renderer, mesh: *const Mesh, pump: ?*const fn (*Renderer) bool) !void {
         @memset(self.bitmap.pixels, 0xFF000000);
+        self.resetRenderPassTimings();
 
         const delta_seconds = self.beginFrame();
 
@@ -1854,23 +2027,26 @@ pub const Renderer = struct {
 
         const mesh_work = &cache.work;
 
+        const scene_pass_start = std.time.nanoTimestamp();
         if (self.use_tiled_rendering and self.tile_grid != null and self.tile_buffers != null) {
             const tri_count = mesh_work.triangleSlice().len;
             pipeline_logger.debugSub("dispatch", "rendering tiled path triangles={} meshlets={}", .{ tri_count, mesh_work.*.meshlet_len });
             try self.renderTiled(mesh, view_rotation, light_dir, pump, projection, mesh_work);
+            self.recordRenderPassTiming("meshlet_tiled", scene_pass_start);
         } else {
             const tri_count = mesh_work.triangleSlice().len;
             pipeline_logger.debugSub("dispatch", "rendering direct path triangles={} meshlets={}", .{ tri_count, mesh_work.*.meshlet_len });
             try self.renderDirect(mesh, view_rotation, light_dir, projection, mesh_work);
+            self.recordRenderPassTiming("meshlet_direct", scene_pass_start);
         }
 
+        self.applyPostProcessingPasses();
         if (self.show_light_orb) {
             const light_camera_z = light_camera.z;
             if (light_camera_z > NEAR_CLIP) {
                 self.drawLightMarker(light_camera, light_camera_z, center_x, center_y, x_scale, y_scale);
             }
         }
-
         self.drawBitmap();
         pipeline_logger.debugSub("present", "bitmap presented", .{});
 
@@ -1928,6 +2104,7 @@ pub const Renderer = struct {
         const elapsed_ms = @as(f32, @floatFromInt(elapsed_ns)) / 1_000_000.0;
         const avg_frame_time_ms = if (frame_count_f > 0.0) elapsed_ms / frame_count_f else 0.0;
 
+        self.sampleRenderPassTimings(self.frame_count);
         self.frame_count = 0;
         self.last_time = current_time;
         self.updateWindowTitle(avg_frame_time_ms);
@@ -1950,6 +2127,39 @@ pub const Renderer = struct {
         const title_len = std.unicode.utf8ToUtf16Le(&title_wide, title) catch 0;
         title_wide[title_len] = 0;
         _ = SetWindowTextW(self.hwnd, &title_wide);
+    }
+
+    fn resetRenderPassTimings(self: *Renderer) void {
+        self.render_pass_count = 0;
+    }
+
+    fn recordRenderPassTiming(self: *Renderer, name: []const u8, start_ns: i128) void {
+        if (self.render_pass_count >= self.render_pass_timings.len) return;
+        const elapsed_ns = std.time.nanoTimestamp() - start_ns;
+        const elapsed_ms = @as(f32, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+        var timing = &self.render_pass_timings[self.render_pass_count];
+        if (timing.name.len == 0 or !std.mem.eql(u8, timing.name, name)) {
+            timing.* = .{
+                .name = name,
+                .frame_duration_ms = 0.0,
+                .accumulated_ms = 0.0,
+                .sampled_ms_per_frame = 0.0,
+                .has_sample = false,
+            };
+        }
+        timing.frame_duration_ms = elapsed_ms;
+        timing.accumulated_ms += elapsed_ms;
+        self.render_pass_count += 1;
+    }
+
+    fn sampleRenderPassTimings(self: *Renderer, frame_samples: u32) void {
+        if (frame_samples == 0) return;
+        const sample_count = @as(f32, @floatFromInt(frame_samples));
+        for (self.render_pass_timings[0..self.render_pass_count]) |*pass| {
+            pass.sampled_ms_per_frame = pass.accumulated_ms / sample_count;
+            pass.accumulated_ms = 0.0;
+            pass.has_sample = true;
+        }
     }
 
     fn debugGroundPlane(self: *Renderer, mesh: *const Mesh, transformed_vertices: []math.Vec3, transform: math.Mat4) void {
@@ -2111,11 +2321,77 @@ pub const Renderer = struct {
         }
     }
 
+    fn applyPostProcessingPasses(self: *Renderer) void {
+        if (!config.POST_COLOR_CORRECTION_ENABLED) return;
+        self.applyBlockbusterColorGradePass();
+    }
+
+    fn applyBlockbusterColorGradePass(self: *Renderer) void {
+        if (self.bitmap.pixels.len == 0) return;
+        const pass_start = std.time.nanoTimestamp();
+        const width: usize = @intCast(self.bitmap.width);
+        const height: usize = @intCast(self.bitmap.height);
+        const stripe_count = @min(self.color_grade_job_contexts.len, @max(@as(usize, 1), height));
+        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
+
+        if (stripe_count <= 1 or self.job_system == null) {
+            applyBlockbusterGradeRange(self.bitmap.pixels, 0, self.bitmap.pixels.len, &self.color_grade_profile);
+            self.recordRenderPassTiming(config.POST_COLOR_PROFILE_NAME, pass_start);
+            return;
+        }
+
+        var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+
+        var stripe_index: usize = 0;
+        while (stripe_index < stripe_count) : (stripe_index += 1) {
+            const start_row = stripe_index * rows_per_job;
+            if (start_row >= height) break;
+            const end_row = @min(height, start_row + rows_per_job);
+
+            self.color_grade_job_contexts[stripe_index] = .{
+                .pixels = self.bitmap.pixels,
+                .start_index = start_row * width,
+                .end_index = end_row * width,
+                .profile = &self.color_grade_profile,
+            };
+
+            if (stripe_index == 0) continue;
+
+            self.color_grade_jobs[stripe_index] = Job.init(
+                ColorGradeJobContext.run,
+                @ptrCast(&self.color_grade_job_contexts[stripe_index]),
+                &parent_job,
+            );
+
+            if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+                applyBlockbusterGradeRange(
+                    self.bitmap.pixels,
+                    self.color_grade_job_contexts[stripe_index].start_index,
+                    self.color_grade_job_contexts[stripe_index].end_index,
+                    &self.color_grade_profile,
+                );
+            }
+        }
+
+        applyBlockbusterGradeRange(
+            self.bitmap.pixels,
+            self.color_grade_job_contexts[0].start_index,
+            self.color_grade_job_contexts[0].end_index,
+            &self.color_grade_profile,
+        );
+
+        parent_job.complete();
+        parent_job.wait();
+
+        self.recordRenderPassTiming(config.POST_COLOR_PROFILE_NAME, pass_start);
+    }
+
     fn drawBitmap(self: *Renderer) void {
         if (self.hdc) |hdc| {
             if (self.hdc_mem) |hdc_mem| {
                 const old_bitmap = SelectObject(hdc_mem, self.bitmap.hbitmap);
                 defer _ = SelectObject(hdc_mem, old_bitmap);
+                self.drawRenderPassOverlay(hdc_mem);
                 _ = BitBlt(
                     hdc,
                     0,
@@ -2129,6 +2405,57 @@ pub const Renderer = struct {
                 );
             }
         }
+    }
+
+    fn drawRenderPassOverlay(self: *Renderer, hdc_mem: windows.HDC) void {
+        if (self.render_pass_count == 0) return;
+
+        _ = SetBkMode(hdc_mem, TRANSPARENT);
+
+        var y: i32 = 12;
+        self.drawOverlayTextLine(hdc_mem, 12, y, "Render Passes (1s avg ms/frame)");
+        y += 20;
+
+        var line_buffer: [128]u8 = undefined;
+        for (self.render_pass_timings[0..self.render_pass_count]) |pass| {
+            const line = if (pass.has_sample)
+                std.fmt.bufPrint(&line_buffer, "{s}: {d:.2} ms/frame", .{ pass.name, pass.sampled_ms_per_frame }) catch continue
+            else
+                std.fmt.bufPrint(&line_buffer, "{s}: sampling...", .{pass.name}) catch continue;
+            self.drawOverlayTextLine(hdc_mem, 12, y, line);
+            y += 16;
+        }
+    }
+
+    fn drawOverlayTextLine(self: *Renderer, hdc_mem: windows.HDC, x: i32, y: i32, text: []const u8) void {
+        _ = self;
+        var wide_buffer: [128:0]u16 = undefined;
+        const len = std.unicode.utf8ToUtf16Le(&wide_buffer, text) catch return;
+        wide_buffer[len] = 0;
+
+        _ = SetTextColor(hdc_mem, 0x00000000);
+        _ = TextOutW(hdc_mem, x + 1, y + 1, &wide_buffer, @intCast(len));
+        _ = SetTextColor(hdc_mem, 0x00F0F0F0);
+        _ = TextOutW(hdc_mem, x, y, &wide_buffer, @intCast(len));
+    }
+
+    fn buildBlockbusterGradeProfile() ColorGradeProfile {
+        var profile: ColorGradeProfile = undefined;
+        var i: usize = 0;
+        while (i < 256) : (i += 1) {
+            const value: i32 = @intCast(i);
+            const contrasted = @divTrunc((value - 128) * config.POST_COLOR_CONTRAST_PERCENT, 100) + 128 + config.POST_COLOR_BRIGHTNESS_BIAS;
+            profile.base_curve[i] = clampByte(contrasted);
+
+            const shadow_span = 124 - value;
+            const highlight_span = value - 96;
+            const shadow = std.math.clamp(@divTrunc(shadow_span * 255, 124), 0, 255);
+            const highlight = std.math.clamp(@divTrunc(highlight_span * 255, 159), 0, 255);
+            profile.tone_add_r[i] = @intCast(@divTrunc(highlight * 26, 255) - @divTrunc(shadow * 10, 255));
+            profile.tone_add_g[i] = @intCast(@divTrunc(highlight * 8, 255) + @divTrunc(shadow * 10, 255));
+            profile.tone_add_b[i] = @intCast(-@divTrunc(highlight * 18, 255) + @divTrunc(shadow * 24, 255));
+        }
+        return profile;
     }
 
     fn meshletVisible(

@@ -2,16 +2,16 @@ const std = @import("std");
 
 pub const Vec2u = struct { x: u32, y: u32 };
 
-pub const TextureFormat = enum { rgba8, r8, r32f, rgba32f };
+pub const TextureFormat = enum { rgba8, bgra8, r8, r32f, rgba32f };
 
 fn readF32Le(data: []const u8, offset: usize) f32 {
     const slice = data[offset .. offset + @sizeOf(u32)];
-    return @bitCast(f32, std.mem.readIntLittle(u32, slice));
+    return @bitCast(std.mem.bytesToValue(u32, slice));
 }
 
 fn writeF32Le(data: []u8, offset: usize, value: f32) void {
     const slice = data[offset .. offset + @sizeOf(u32)];
-    std.mem.writeIntLittle(u32, slice, @bitCast(u32, value));
+    std.mem.bytesAsValue(u32, slice).* = @bitCast(value);
 }
 
 fn clampToByte(v: f32) u8 {
@@ -28,9 +28,13 @@ pub const Texture2D = struct {
     data: []u8,
 
     pub inline fn idx(self: *const Texture2D, x: u32, y: u32) usize {
-        return @as(usize, y) * @as(usize, self.stride_bytes) + @as(usize, x) * switch (self.format) {
-            .r8 => 1, .r32f => 4, .rgba8 => 4, .rgba32f => 16
+        const pixel_stride: usize = switch (self.format) {
+            .r8 => 1,
+            .r32f => 4,
+            .rgba8, .bgra8 => 4,
+            .rgba32f => 16,
         };
+        return @as(usize, y) * @as(usize, self.stride_bytes) + @as(usize, x) * pixel_stride;
     }
 };
 
@@ -41,7 +45,7 @@ pub fn loadR(self: *const Texture2D, x: u32, y: u32) f32 {
     return switch (self.format) {
         .r8 => @as(f32, @floatFromInt(self.data[i])) / 255.0,
         .r32f => readF32Le(self.data, i),
-        .rgba8, .rgba32f => @panic("use loadRGBA for rgba formats"),
+        .rgba8, .bgra8, .rgba32f => @panic("use loadRGBA for color formats"),
     };
 }
 
@@ -52,6 +56,12 @@ pub fn loadRGBA(self: *const Texture2D, x: u32, y: u32) [4]f32 {
             @as(f32, @floatFromInt(self.data[i + 0])) / 255.0,
             @as(f32, @floatFromInt(self.data[i + 1])) / 255.0,
             @as(f32, @floatFromInt(self.data[i + 2])) / 255.0,
+            @as(f32, @floatFromInt(self.data[i + 3])) / 255.0,
+        },
+        .bgra8 => .{
+            @as(f32, @floatFromInt(self.data[i + 2])) / 255.0,
+            @as(f32, @floatFromInt(self.data[i + 1])) / 255.0,
+            @as(f32, @floatFromInt(self.data[i + 0])) / 255.0,
             @as(f32, @floatFromInt(self.data[i + 3])) / 255.0,
         },
         .rgba32f => .{
@@ -82,6 +92,12 @@ pub fn storeRGBA(self: *RWTexture2D, x: u32, y: u32, rgba: [4]f32) void {
             self.data[i + 2] = clampToByte(rgba[2]);
             self.data[i + 3] = clampToByte(rgba[3]);
         },
+        .bgra8 => {
+            self.data[i + 0] = clampToByte(rgba[2]);
+            self.data[i + 1] = clampToByte(rgba[1]);
+            self.data[i + 2] = clampToByte(rgba[0]);
+            self.data[i + 3] = clampToByte(rgba[3]);
+        },
         .rgba32f => {
             writeF32Le(self.data, i + 0, rgba[0]);
             writeF32Le(self.data, i + 4, rgba[1]);
@@ -105,17 +121,11 @@ fn elementStride(comptime T: type, buffer: *const StorageBuffer) usize {
 }
 
 fn bytesToConstSlice(comptime T: type, bytes: []const u8) []const T {
-    const count = bytes.len / @sizeOf(T);
-    const ptr_u8 = @as([*]const u8, bytes.ptr);
-    const aligned_ptr = @alignCast(@alignOf(T), ptr_u8);
-    return @as([*]const T, @ptrCast(aligned_ptr))[0..count];
+    return std.mem.bytesAsSlice(T, bytes);
 }
 
 fn bytesToSlice(comptime T: type, bytes: []u8) []T {
-    const count = bytes.len / @sizeOf(T);
-    const ptr_u8 = @as([*]u8, bytes.ptr);
-    const aligned_ptr = @alignCast(@alignOf(T), ptr_u8);
-    return @as([*]T, @ptrCast(aligned_ptr))[0..count];
+    return std.mem.bytesAsSlice(T, bytes);
 }
 
 pub fn bufferLen(comptime T: type, buffer: *const StorageBuffer) usize {
