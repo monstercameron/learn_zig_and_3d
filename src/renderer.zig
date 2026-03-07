@@ -764,6 +764,65 @@ fn rayIntersectsSphere(origin: math.Vec3, direction: math.Vec3, center: math.Vec
     return t > 0.0;
 }
 
+fn rayIntersectsTriangle8(
+    orig_x: @Vector(8, f32), orig_y: @Vector(8, f32), orig_z: @Vector(8, f32),
+    dir_x: @Vector(8, f32), dir_y: @Vector(8, f32), dir_z: @Vector(8, f32),
+    v0x: @Vector(8, f32), v0y: @Vector(8, f32), v0z: @Vector(8, f32),
+    v1x: @Vector(8, f32), v1y: @Vector(8, f32), v1z: @Vector(8, f32),
+    v2x: @Vector(8, f32), v2y: @Vector(8, f32), v2z: @Vector(8, f32),
+    active_mask: @Vector(8, bool),
+) bool {
+    const eps: @Vector(8, f32) = @splat(1e-6);
+    const zeros: @Vector(8, f32) = @splat(0.0);
+    const ones: @Vector(8, f32) = @splat(1.0);
+
+    const edge1_x = v1x - v0x;
+    const edge1_y = v1y - v0y;
+    const edge1_z = v1z - v0z;
+
+    const edge2_x = v2x - v0x;
+    const edge2_y = v2y - v0y;
+    const edge2_z = v2z - v0z;
+
+    const pvec_x = dir_y * edge2_z - dir_z * edge2_y;
+    const pvec_y = dir_z * edge2_x - dir_x * edge2_z;
+    const pvec_z = dir_x * edge2_y - dir_y * edge2_x;
+
+    const det = edge1_x * pvec_x + edge1_y * pvec_y + edge1_z * pvec_z;
+    const valid_det = @abs(det) >= eps;
+
+    const inv_det = ones / det;
+
+    const tvec_x = orig_x - v0x;
+    const tvec_y = orig_y - v0y;
+    const tvec_z = orig_z - v0z;
+
+    const u = (tvec_x * pvec_x + tvec_y * pvec_y + tvec_z * pvec_z) * inv_det;
+    const valid_u_min = u >= zeros;
+    const valid_u_max = u <= ones;
+
+    const qvec_x = tvec_y * edge1_z - tvec_z * edge1_y;
+    const qvec_y = tvec_z * edge1_x - tvec_x * edge1_z;
+    const qvec_z = tvec_x * edge1_y - tvec_y * edge1_x;
+
+    const v = (dir_x * qvec_x + dir_y * qvec_y + dir_z * qvec_z) * inv_det;
+    const valid_v_min = v >= zeros;
+    const valid_v_max = (u + v) <= ones;
+
+    const t = (edge2_x * qvec_x + edge2_y * qvec_y + edge2_z * qvec_z) * inv_det;
+    const valid_t = t > eps;
+    
+    var hit = active_mask;
+    hit = @select(bool, hit, valid_det, @as(@Vector(8, bool), @splat(false)));
+    hit = @select(bool, hit, valid_u_min, @as(@Vector(8, bool), @splat(false)));
+    hit = @select(bool, hit, valid_u_max, @as(@Vector(8, bool), @splat(false)));
+    hit = @select(bool, hit, valid_v_min, @as(@Vector(8, bool), @splat(false)));
+    hit = @select(bool, hit, valid_v_max, @as(@Vector(8, bool), @splat(false)));
+    hit = @select(bool, hit, valid_t, @as(@Vector(8, bool), @splat(false)));
+
+    return @reduce(.Or, hit);
+}
+
 fn rayIntersectsTriangle(origin: math.Vec3, direction: math.Vec3, v0: math.Vec3, v1: math.Vec3, v2: math.Vec3) bool {
     const eps: f32 = 1e-6;
     const edge1 = math.Vec3.sub(v1, v0);
@@ -1713,12 +1772,47 @@ const AdaptiveShadowTileJob = struct {
 
             const meshlet = &ctx.mesh.meshlets[caster.meshlet_index];
             if (!rayIntersectsSphere(ray_origin, ctx.light_dir_world, meshlet.bounds_center, meshlet.bounds_radius)) continue;
-            for (ctx.mesh.meshletPrimitiveSlice(meshlet)) |primitive| {
-                const tri = ctx.mesh.triangles[primitive.triangle_index];
-                const v0 = ctx.mesh.vertices[tri.v0];
-                const v1 = ctx.mesh.vertices[tri.v1];
-                const v2 = ctx.mesh.vertices[tri.v2];
-                if (rayIntersectsTriangle(ray_origin, ctx.light_dir_world, v0, v1, v2)) return true;
+            const primitives = ctx.mesh.meshletPrimitiveSlice(meshlet);
+            var prim_i: usize = 0;
+            const dir_x: @Vector(8, f32) = @splat(ctx.light_dir_world.x);
+            const dir_y: @Vector(8, f32) = @splat(ctx.light_dir_world.y);
+            const dir_z: @Vector(8, f32) = @splat(ctx.light_dir_world.z);
+            const orig_x: @Vector(8, f32) = @splat(ray_origin.x);
+            const orig_y: @Vector(8, f32) = @splat(ray_origin.y);
+            const orig_z: @Vector(8, f32) = @splat(ray_origin.z);
+
+            while (prim_i < primitives.len) : (prim_i += 8) {
+                var v0x: @Vector(8, f32) = @splat(0);
+                var v0y: @Vector(8, f32) = @splat(0);
+                var v0z: @Vector(8, f32) = @splat(0);
+                var v1x: @Vector(8, f32) = @splat(0);
+                var v1y: @Vector(8, f32) = @splat(0);
+                var v1z: @Vector(8, f32) = @splat(0);
+                var v2x: @Vector(8, f32) = @splat(0);
+                var v2y: @Vector(8, f32) = @splat(0);
+                var v2z: @Vector(8, f32) = @splat(0);
+                var active_mask: @Vector(8, bool) = @splat(false);
+
+                const count = @min(8, primitives.len - prim_i);
+                for (0..count) |j| {
+                    const tri = ctx.mesh.triangles[primitives[prim_i + j].triangle_index];
+                    const v0 = ctx.mesh.vertices[tri.v0];
+                    const v1 = ctx.mesh.vertices[tri.v1];
+                    const v2 = ctx.mesh.vertices[tri.v2];
+                    v0x[j] = v0.x; v0y[j] = v0.y; v0z[j] = v0.z;
+                    v1x[j] = v1.x; v1y[j] = v1.y; v1z[j] = v1.z;
+                    v2x[j] = v2.x; v2y[j] = v2.y; v2z[j] = v2.z;
+                    active_mask[j] = true;
+                }
+
+                if (rayIntersectsTriangle8(
+                    orig_x, orig_y, orig_z,
+                    dir_x, dir_y, dir_z,
+                    v0x, v0y, v0z,
+                    v1x, v1y, v1z,
+                    v2x, v2y, v2z,
+                    active_mask
+                )) return true;
             }
         }
         return false;
