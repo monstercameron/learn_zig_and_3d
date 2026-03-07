@@ -204,33 +204,35 @@ pub fn drawTileBoundaries(grid: *const TileGrid, bitmap: *Bitmap) void {
 pub fn rasterizeTriangleToTile(
     tile: *const Tile,
     tile_buffer: *TileBuffer,
-    p0_screen: [2]i32,
-    p1_screen: [2]i32,
-    p2_screen: [2]i32,
+    p0_screen: math.Vec2,
+    p1_screen: math.Vec2,
+    p2_screen: math.Vec2,
     camera_positions: [3]math.Vec3,
     depths: [3]f32,
     shading: ShadingParams,
 ) void {
     // 1. Convert vertex coordinates from screen space to tile-local space.
-    const v0 = [2]i32{ p0_screen[0] - tile.x, p0_screen[1] - tile.y };
-    const v1 = [2]i32{ p1_screen[0] - tile.x, p1_screen[1] - tile.y };
-    const v2 = [2]i32{ p2_screen[0] - tile.x, p2_screen[1] - tile.y };
+    const v0x = p0_screen.x - @as(f32, @floatFromInt(tile.x));
+    const v0y = p0_screen.y - @as(f32, @floatFromInt(tile.y));
+    const v1x = p1_screen.x - @as(f32, @floatFromInt(tile.x));
+    const v1y = p1_screen.y - @as(f32, @floatFromInt(tile.y));
+    const v2x = p2_screen.x - @as(f32, @floatFromInt(tile.x));
+    const v2y = p2_screen.y - @as(f32, @floatFromInt(tile.y));
 
     // 2. Calculate the triangle's bounding box within the tile to minimize pixel checks.
-    const min_x = scanline.maxI32(0, scanline.minI32(v0[0], scanline.minI32(v1[0], v2[0])));
-    const min_y = scanline.maxI32(0, scanline.minI32(v0[1], scanline.minI32(v1[1], v2[1])));
-    const max_x = scanline.minI32(tile_buffer.width - 1, scanline.maxI32(v0[0], scanline.maxI32(v1[0], v2[0])));
-    const max_y = scanline.minI32(tile_buffer.height - 1, scanline.maxI32(v0[1], scanline.maxI32(v1[1], v2[1])));
+    const raw_min_x = @min(v0x, @min(v1x, v2x));
+    const raw_min_y = @min(v0y, @min(v1y, v2y));
+    const raw_max_x = @max(v0x, @max(v1x, v2x));
+    const raw_max_y = @max(v0y, @max(v1y, v2y));
+
+    const min_x = scanline.maxI32(0, scanline.minI32(tile_buffer.width - 1, @as(i32, @intFromFloat(@floor(raw_min_x)))));
+    const min_y = scanline.maxI32(0, scanline.minI32(tile_buffer.height - 1, @as(i32, @intFromFloat(@floor(raw_min_y)))));
+    const max_x = scanline.minI32(tile_buffer.width - 1, scanline.maxI32(0, @as(i32, @intFromFloat(@ceil(raw_max_x)))));
+    const max_y = scanline.minI32(tile_buffer.height - 1, scanline.maxI32(0, @as(i32, @intFromFloat(@ceil(raw_max_y)))));
 
     if (min_x > max_x or min_y > max_y) return; // Bounding box is empty.
 
     // 3. Pre-calculate values for barycentric coordinate calculation.
-    const v0x = @as(f32, @floatFromInt(v0[0]));
-    const v0y = @as(f32, @floatFromInt(v0[1]));
-    const v1x = @as(f32, @floatFromInt(v1[0]));
-    const v1y = @as(f32, @floatFromInt(v1[1]));
-    const v2x = @as(f32, @floatFromInt(v2[0]));
-    const v2y = @as(f32, @floatFromInt(v2[1]));
     const denom = (v1y - v2y) * (v0x - v2x) + (v2x - v1x) * (v0y - v2y);
     if (@abs(denom) < 1e-6) return; // Degenerate triangle.
     const inv_denom = 1.0 / denom;
@@ -314,11 +316,11 @@ pub fn rasterizeTriangleToTile(
 }
 
 /// Draws a line into a tile buffer (used for wireframes).
-pub fn drawLineToTile(tile: *const Tile, tile_buffer: *TileBuffer, p0_screen: [2]i32, p1_screen: [2]i32, color: u32) void {
-    var x0 = p0_screen[0] - tile.x;
-    var y0 = p0_screen[1] - tile.y;
-    const x1 = p1_screen[0] - tile.x;
-    const y1 = p1_screen[1] - tile.y;
+pub fn drawLineToTile(tile: *const Tile, tile_buffer: *TileBuffer, p0_screen: math.Vec2, p1_screen: math.Vec2, color: u32) void {
+    var x0 = @as(i32, @intFromFloat(p0_screen.x)) - tile.x;
+    var y0 = @as(i32, @intFromFloat(p0_screen.y)) - tile.y;
+    const x1 = @as(i32, @intFromFloat(p1_screen.x)) - tile.x;
+    const y1 = @as(i32, @intFromFloat(p1_screen.y)) - tile.y;
 
     const clamp = struct {
         fn inBounds(x: i32, y: i32, width: i32, height: i32) bool {

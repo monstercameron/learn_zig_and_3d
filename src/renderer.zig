@@ -708,14 +708,14 @@ fn cameraToWorldPosition(
 }
 
 const taa_jitter_sequence = [_]math.Vec2{
-    .{ .x = 0.0, .y = -0.083333334 },
-    .{ .x = -0.125, .y = 0.083333334 },
-    .{ .x = 0.125, .y = -0.19444445 },
-    .{ .x = -0.1875, .y = -0.027777778 },
-    .{ .x = 0.0625, .y = 0.1388889 },
-    .{ .x = -0.0625, .y = -0.1388889 },
-    .{ .x = 0.1875, .y = 0.027777778 },
-    .{ .x = -0.21875, .y = 0.19444445 },
+    .{ .x = 0.25, .y = -0.16666666 },
+    .{ .x = -0.25, .y = 0.16666666 },
+    .{ .x = 0.25, .y = -0.38888888 },
+    .{ .x = -0.375, .y = -0.05555555 },
+    .{ .x = 0.125, .y = 0.27777777 },
+    .{ .x = -0.125, .y = -0.27777777 },
+    .{ .x = 0.375, .y = 0.05555555 },
+    .{ .x = -0.4375, .y = 0.38888888 },
 };
 
 fn taaJitterForFrame(frame_index: u64) math.Vec2 {
@@ -782,12 +782,9 @@ fn sampleHistoryDepthNearest(history_depth: []const f32, width: usize, height: u
 }
 
 fn clampHistoryToNeighborhood(pixels: []const u32, width: usize, height: usize, x: usize, y: usize, history_color: [3]f32) [3]f32 {
-    var min_r: f32 = 255.0;
-    var min_g: f32 = 255.0;
-    var min_b: f32 = 255.0;
-    var max_r: f32 = 0.0;
-    var max_g: f32 = 0.0;
-    var max_b: f32 = 0.0;
+    var mu = [3]f32{ 0.0, 0.0, 0.0 };
+    var m2 = [3]f32{ 0.0, 0.0, 0.0 };
+    var count: f32 = 0.0;
 
     var offset_y: i32 = -1;
     while (offset_y <= 1) : (offset_y += 1) {
@@ -799,19 +796,35 @@ fn clampHistoryToNeighborhood(pixels: []const u32, width: usize, height: usize, 
             const r = @as(f32, @floatFromInt((pixel >> 16) & 0xFF));
             const g = @as(f32, @floatFromInt((pixel >> 8) & 0xFF));
             const b = @as(f32, @floatFromInt(pixel & 0xFF));
-            min_r = @min(min_r, r);
-            min_g = @min(min_g, g);
-            min_b = @min(min_b, b);
-            max_r = @max(max_r, r);
-            max_g = @max(max_g, g);
-            max_b = @max(max_b, b);
+            
+            mu[0] += r;
+            mu[1] += g;
+            mu[2] += b;
+            m2[0] += r * r;
+            m2[1] += g * g;
+            m2[2] += b * b;
+            count += 1.0;
         }
     }
 
+    mu[0] /= count;
+    mu[1] /= count;
+    mu[2] /= count;
+    m2[0] /= count;
+    m2[1] /= count;
+    m2[2] /= count;
+
+    var sigma = [3]f32{ 0.0, 0.0, 0.0 };
+    inline for (0..3) |i| {
+        const variance = @max(0.0, m2[i] - mu[i] * mu[i]);
+        sigma[i] = @sqrt(variance);
+    }
+
+    const gamma: f32 = 1.25; // slightly wider than 1 sigma for less flickering
     return .{
-        std.math.clamp(history_color[0], min_r, max_r),
-        std.math.clamp(history_color[1], min_g, max_g),
-        std.math.clamp(history_color[2], min_b, max_b),
+        std.math.clamp(history_color[0], @max(0.0, mu[0] - gamma * sigma[0]), @min(255.0, mu[0] + gamma * sigma[0])),
+        std.math.clamp(history_color[1], @max(0.0, mu[1] - gamma * sigma[1]), @min(255.0, mu[1] + gamma * sigma[1])),
+        std.math.clamp(history_color[2], @max(0.0, mu[2] - gamma * sigma[2]), @min(255.0, mu[2] + gamma * sigma[2])),
     };
 }
 
@@ -2791,7 +2804,7 @@ pub const Renderer = struct {
             return out_count;
         }
 
-        fn projectToScreen(self: *const TileRenderJob, position: math.Vec3) [2]i32 {
+        fn projectToScreen(self: *const TileRenderJob, position: math.Vec3) math.Vec2 {
             const clamped_z = if (position.z < self.projection.near_plane + NEAR_EPSILON)
                 self.projection.near_plane + NEAR_EPSILON
             else
@@ -2802,24 +2815,24 @@ pub const Renderer = struct {
             const screen_x = ndc_x * self.projection.center_x + self.projection.center_x + self.projection.jitter_x;
             const screen_y = -ndc_y * self.projection.center_y + self.projection.center_y + self.projection.jitter_y;
             return .{
-                @as(i32, @intFromFloat(screen_x)),
-                @as(i32, @intFromFloat(screen_y)),
+                .x = screen_x,
+                .y = screen_y,
             };
         }
 
-        fn isDegenerate(p0: [2]i32, p1: [2]i32, p2: [2]i32) bool {
-            const ax = @as(i64, p1[0]) - @as(i64, p0[0]);
-            const ay = @as(i64, p1[1]) - @as(i64, p0[1]);
-            const bx = @as(i64, p2[0]) - @as(i64, p0[0]);
-            const by = @as(i64, p2[1]) - @as(i64, p0[1]);
+        fn isDegenerate(p0: math.Vec2, p1: math.Vec2, p2: math.Vec2) bool {
+            const ax = p1.x - p0.x;
+            const ay = p1.y - p0.y;
+            const bx = p2.x - p0.x;
+            const by = p2.y - p0.y;
             const cross = ax * by - ay * bx;
-            return cross == 0;
+            return @abs(cross) < 0.5;
         }
 
         fn rasterizeFan(job: *TileRenderJob, vertices: []ClipVertex, base_color: u32, texture_index: u16, intensity: f32) void {
             if (vertices.len < 3) return;
 
-            var screen_pts: [max_clipped_vertices][2]i32 = undefined;
+            var screen_pts: [max_clipped_vertices]math.Vec2 = undefined;
             var depths: [max_clipped_vertices]f32 = undefined;
             var camera_positions: [max_clipped_vertices]math.Vec3 = undefined;
             for (vertices, 0..) |v, idx| {

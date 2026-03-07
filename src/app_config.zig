@@ -90,7 +90,7 @@ pub var POST_TAA_ENABLED: bool = false;
 /// Percentage mix of historic frame data blended into current image.
 pub var POST_TAA_HISTORY_PERCENT: i32 = 92;
 /// A depth threshold allowing TAA to discard historic data to prevent ghosting.
-pub var POST_TAA_DEPTH_THRESHOLD: f32 = 0.2;
+pub var POST_TAA_DEPTH_THRESHOLD: f32 = 2.0;
 /// The near viewing plane at which fog starts appearing.
 pub var POST_DEPTH_FOG_NEAR: f32 = 5.5;
 /// The distant viewing place at which fog fully obscures vision.
