@@ -115,7 +115,7 @@ pub var POST_DOF_FOCAL_DISTANCE: f32 = 4.0;
 /// The depth range around the focal distance that remains in focus.
 pub var POST_DOF_FOCAL_RANGE: f32 = 2.0;
 /// The maximum scatter/blur radius for out-of-focus pixels.
-pub var POST_DOF_BLUR_RADIUS: i32 = 6;
+pub var POST_DOF_BLUR_RADIUS: i32 = 1;
 
 /// Enables Motion Blur based on pixel velocity from previous frames.
 pub var POST_MOTION_BLUR_ENABLED: bool = true;
