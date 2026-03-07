@@ -96,6 +96,25 @@ const HybridShadowGrid = struct {
     active: bool = false,
 };
 
+const HybridShadowStats = struct {
+    active_tile_count: usize = 0,
+    job_count: usize = 0,
+    grid_candidate_count: usize = 0,
+    unique_candidate_count: usize = 0,
+    final_candidate_count: usize = 0,
+};
+
+const HybridShadowDebugState = struct {
+    enabled: bool = false,
+    advance_requested: bool = false,
+    completed_jobs: usize = 0,
+
+    fn reset(self: *HybridShadowDebugState) void {
+        self.advance_requested = false;
+        self.completed_jobs = 0;
+    }
+};
+
 const GroundReason = struct {
     pub const near_plane: u8 = 1 << 0;
     pub const backface: u8 = 1 << 1;
@@ -1087,42 +1106,46 @@ const AdaptiveShadowTileJob = struct {
     }
 
     fn resolveBlockExact(ctx: *AdaptiveShadowTileJob, x: i32, y: i32, width: i32, height: i32) void {
-        var py = y;
-        while (py < y + height) : (py += 1) {
-            if (py < 0 or py >= ctx.renderer.bitmap.height) continue;
-            var run_start: ?usize = null;
-            var px = x;
-            while (px < x + width) : (px += 1) {
-                const sample = ctx.sampleShadow(px, py);
-                const idx = @as(usize, @intCast(py * ctx.renderer.bitmap.width + px));
-                if (idx >= ctx.renderer.bitmap.pixels.len) continue;
-                if (!sample.valid or sample.coverage <= 0.02) {
-                    if (run_start) |start| {
-                        darkenPixelSpan(ctx.renderer.bitmap.pixels, start, idx, ctx.darkness_scale);
-                        run_start = null;
-                    }
-                    continue;
-                }
+        const sample_stride = @max(1, config.POST_HYBRID_SHADOW_SAMPLE_STRIDE);
+        const max_x = x + width;
+        const max_y = y + height;
+
+        var block_y = y;
+        while (block_y < max_y) : (block_y += sample_stride) {
+            if (block_y >= ctx.renderer.bitmap.height) break;
+            const block_h = @min(sample_stride, max_y - block_y);
+            if (block_h <= 0) continue;
+
+            var block_x = x;
+            while (block_x < max_x) : (block_x += sample_stride) {
+                if (block_x >= ctx.renderer.bitmap.width) break;
+                const block_w = @min(sample_stride, max_x - block_x);
+                if (block_w <= 0) continue;
+
+                const sample_x = block_x + @divTrunc(block_w - 1, 2);
+                const sample_y = block_y + @divTrunc(block_h - 1, 2);
+                const sample = ctx.sampleShadow(sample_x, sample_y);
+                if (!sample.valid or sample.coverage <= 0.02) continue;
 
                 if (sample.coverage >= 0.98) {
-                    if (run_start == null) run_start = idx;
+                    ctx.darkenBlock(block_x, block_y, block_w, block_h);
                     continue;
                 }
 
-                if (run_start) |start| {
-                    darkenPixelSpan(ctx.renderer.bitmap.pixels, start, idx, ctx.darkness_scale);
-                    run_start = null;
-                }
                 const pixel_scale = 1.0 - ((1.0 - ctx.darkness_scale) * sample.coverage);
-                ctx.renderer.bitmap.pixels[idx] = darkenPackedColor(ctx.renderer.bitmap.pixels[idx], pixel_scale);
-            }
-
-            if (run_start) |start| {
-                const row_end = @min(
-                    @as(usize, @intCast(py * ctx.renderer.bitmap.width + x + width)),
-                    ctx.renderer.bitmap.pixels.len,
-                );
-                darkenPixelSpan(ctx.renderer.bitmap.pixels, start, row_end, ctx.darkness_scale);
+                var py = block_y;
+                while (py < block_y + block_h) : (py += 1) {
+                    if (py < 0 or py >= ctx.renderer.bitmap.height) continue;
+                    const row_start = @as(usize, @intCast(py * ctx.renderer.bitmap.width + block_x));
+                    const row_end = @min(
+                        @as(usize, @intCast(py * ctx.renderer.bitmap.width + block_x + block_w)),
+                        ctx.renderer.bitmap.pixels.len,
+                    );
+                    var idx = row_start;
+                    while (idx < row_end) : (idx += 1) {
+                        ctx.renderer.bitmap.pixels[idx] = darkenPackedColor(ctx.renderer.bitmap.pixels[idx], pixel_scale);
+                    }
+                }
             }
         }
     }
@@ -1487,11 +1510,15 @@ pub const Renderer = struct {
     hybrid_shadow_grid: HybridShadowGrid,
     hybrid_shadow_grid_ranges: [hybrid_shadow_grid_cells]HybridShadowTileRange,
     hybrid_shadow_grid_candidates: []usize,
+    hybrid_shadow_candidate_marks: []u32,
+    hybrid_shadow_candidate_mark_generation: u32,
     hybrid_shadow_accel_valid: bool,
     hybrid_shadow_cached_light_dir: math.Vec3,
     hybrid_shadow_cached_meshlet_count: usize,
     hybrid_shadow_cached_meshlet_vertex_count: usize,
     hybrid_shadow_cached_meshlet_primitive_count: usize,
+    hybrid_shadow_stats: HybridShadowStats = .{},
+    hybrid_shadow_debug: HybridShadowDebugState = .{},
     shadow_map: ShadowMap,
     bloom_scratch: BloomScratch,
     bloom_threshold_curve: [256]u8,
@@ -1668,11 +1695,15 @@ pub const Renderer = struct {
             .hybrid_shadow_grid = .{},
             .hybrid_shadow_grid_ranges = [_]HybridShadowTileRange{.{}} ** hybrid_shadow_grid_cells,
             .hybrid_shadow_grid_candidates = &[_]usize{},
+            .hybrid_shadow_candidate_marks = &[_]u32{},
+            .hybrid_shadow_candidate_mark_generation = 0,
             .hybrid_shadow_accel_valid = false,
             .hybrid_shadow_cached_light_dir = math.Vec3.new(0.0, 0.0, 0.0),
             .hybrid_shadow_cached_meshlet_count = 0,
             .hybrid_shadow_cached_meshlet_vertex_count = 0,
             .hybrid_shadow_cached_meshlet_primitive_count = 0,
+            .hybrid_shadow_stats = .{},
+            .hybrid_shadow_debug = .{},
             .shadow_map = .{
                 .width = config.POST_SHADOW_MAP_SIZE,
                 .height = config.POST_SHADOW_MAP_SIZE,
@@ -1729,6 +1760,7 @@ pub const Renderer = struct {
         self.allocator.free(self.hybrid_shadow_tile_ranges);
         if (self.hybrid_shadow_tile_candidates.len != 0) self.allocator.free(self.hybrid_shadow_tile_candidates);
         if (self.hybrid_shadow_grid_candidates.len != 0) self.allocator.free(self.hybrid_shadow_grid_candidates);
+        if (self.hybrid_shadow_candidate_marks.len != 0) self.allocator.free(self.hybrid_shadow_candidate_marks);
         self.allocator.free(self.shadow_map.depth);
         self.allocator.free(self.bloom_scratch.ping);
         self.allocator.free(self.bloom_scratch.pong);
@@ -3140,6 +3172,18 @@ pub const Renderer = struct {
         switch (char_code) {
             'q', 'Q' => self.pending_fov_delta -= config.CAMERA_FOV_STEP,
             'e', 'E' => self.pending_fov_delta += config.CAMERA_FOV_STEP,
+            'h', 'H' => {
+                self.hybrid_shadow_debug.enabled = !self.hybrid_shadow_debug.enabled;
+                self.hybrid_shadow_debug.reset();
+                renderer_logger.infoSub(
+                    "shadow_debug",
+                    "hybrid shadow stepping {s}",
+                    .{if (self.hybrid_shadow_debug.enabled) "enabled" else "disabled"},
+                );
+            },
+            'n', 'N' => if (self.hybrid_shadow_debug.enabled) {
+                self.hybrid_shadow_debug.advance_requested = true;
+            },
             else => {},
         }
     }
@@ -3160,6 +3204,7 @@ pub const Renderer = struct {
         self.resetRenderPassTimings();
 
         const delta_seconds = self.beginFrame();
+        const simulation_delta_seconds: f32 = if (self.hybrid_shadow_debug.enabled) 0.0 else delta_seconds;
 
         renderer_logger.debugSub(
             "frame",
@@ -3174,10 +3219,10 @@ pub const Renderer = struct {
         );
 
         const rotation_speed = 2.0;
-        if ((self.keys_pressed & input.KeyBits.left) != 0) self.rotation_angle -= rotation_speed * delta_seconds;
-        if ((self.keys_pressed & input.KeyBits.right) != 0) self.rotation_angle += rotation_speed * delta_seconds;
-        if ((self.keys_pressed & input.KeyBits.up) != 0) self.rotation_x -= rotation_speed * delta_seconds;
-        if ((self.keys_pressed & input.KeyBits.down) != 0) self.rotation_x += rotation_speed * delta_seconds;
+        if ((self.keys_pressed & input.KeyBits.left) != 0) self.rotation_angle -= rotation_speed * simulation_delta_seconds;
+        if ((self.keys_pressed & input.KeyBits.right) != 0) self.rotation_angle += rotation_speed * simulation_delta_seconds;
+        if ((self.keys_pressed & input.KeyBits.up) != 0) self.rotation_x -= rotation_speed * simulation_delta_seconds;
+        if ((self.keys_pressed & input.KeyBits.down) != 0) self.rotation_x += rotation_speed * simulation_delta_seconds;
 
         const mouse_delta = self.consumeMouseDelta();
         self.rotation_angle += mouse_delta.x * self.mouse_sensitivity;
@@ -3191,7 +3236,7 @@ pub const Renderer = struct {
         const sweep_half_angle = std.math.pi / 2.0;
         const light_elevation = 0.65;
         const min_light_height = 0.35;
-        self.light_orbit_x += auto_orbit_speed * delta_seconds;
+        self.light_orbit_x += auto_orbit_speed * simulation_delta_seconds;
         const sweep_angle = @sin(self.light_orbit_x) * sweep_half_angle;
         const horizontal_radius = self.light_distance * @cos(light_elevation);
         const light_height = @max(min_light_height, self.light_distance * @sin(light_elevation));
@@ -3251,7 +3296,7 @@ pub const Renderer = struct {
         const movement_mag = math.Vec3.length(movement_dir);
         if (movement_mag > 0.0001) {
             const normalized_move = math.Vec3.scale(movement_dir, 1.0 / movement_mag);
-            const move_step = math.Vec3.scale(normalized_move, self.camera_move_speed * delta_seconds);
+            const move_step = math.Vec3.scale(normalized_move, self.camera_move_speed * simulation_delta_seconds);
             self.camera_position = math.Vec3.add(self.camera_position, move_step);
         }
 
@@ -3825,6 +3870,15 @@ pub const Renderer = struct {
                 try self.allocator.realloc(self.hybrid_shadow_caster_bounds, caster_capacity);
         }
 
+        if (caster_capacity > self.hybrid_shadow_candidate_marks.len) {
+            self.hybrid_shadow_candidate_marks = if (self.hybrid_shadow_candidate_marks.len == 0)
+                try self.allocator.alloc(u32, caster_capacity)
+            else
+                try self.allocator.realloc(self.hybrid_shadow_candidate_marks, caster_capacity);
+            @memset(self.hybrid_shadow_candidate_marks, 0);
+            self.hybrid_shadow_candidate_mark_generation = 0;
+        }
+
         if (tile_candidate_capacity > self.hybrid_shadow_tile_candidates.len) {
             self.hybrid_shadow_tile_candidates = if (self.hybrid_shadow_tile_candidates.len == 0)
                 try self.allocator.alloc(usize, tile_candidate_capacity)
@@ -3838,6 +3892,83 @@ pub const Renderer = struct {
             else
                 try self.allocator.realloc(self.hybrid_shadow_grid_candidates, grid_candidate_capacity);
         }
+    }
+
+    fn nextHybridShadowCandidateMark(self: *Renderer) u32 {
+        if (self.hybrid_shadow_candidate_marks.len == 0) return 0;
+
+        if (self.hybrid_shadow_candidate_mark_generation == std.math.maxInt(u32)) {
+            @memset(self.hybrid_shadow_candidate_marks, 0);
+            self.hybrid_shadow_candidate_mark_generation = 1;
+        } else {
+            self.hybrid_shadow_candidate_mark_generation += 1;
+            if (self.hybrid_shadow_candidate_mark_generation == 0) self.hybrid_shadow_candidate_mark_generation = 1;
+        }
+        return self.hybrid_shadow_candidate_mark_generation;
+    }
+
+    fn collectHybridShadowTileCandidates(
+        self: *Renderer,
+        receiver_bounds: HybridShadowReceiverBounds,
+        candidate_write: *usize,
+    ) HybridShadowStats {
+        var stats = HybridShadowStats{};
+        if (!self.hybrid_shadow_grid.active or self.hybrid_shadow_caster_count == 0) return stats;
+
+        const grid = self.hybrid_shadow_grid;
+        const mark = self.nextHybridShadowCandidateMark();
+        if (mark == 0) return stats;
+
+        const min_cell_x = std.math.clamp(
+            @as(i32, @intFromFloat(@floor((receiver_bounds.min_u - grid.min_u) * grid.inv_cell_u))),
+            0,
+            @as(i32, hybrid_shadow_grid_dim - 1),
+        );
+        const max_cell_x = std.math.clamp(
+            @as(i32, @intFromFloat(@floor((receiver_bounds.max_u - grid.min_u) * grid.inv_cell_u))),
+            0,
+            @as(i32, hybrid_shadow_grid_dim - 1),
+        );
+        const min_cell_y = std.math.clamp(
+            @as(i32, @intFromFloat(@floor((receiver_bounds.min_v - grid.min_v) * grid.inv_cell_v))),
+            0,
+            @as(i32, hybrid_shadow_grid_dim - 1),
+        );
+        const max_cell_y = std.math.clamp(
+            @as(i32, @intFromFloat(@floor((receiver_bounds.max_v - grid.min_v) * grid.inv_cell_v))),
+            0,
+            @as(i32, hybrid_shadow_grid_dim - 1),
+        );
+
+        var cell_y = min_cell_y;
+        while (cell_y <= max_cell_y) : (cell_y += 1) {
+            var cell_x = min_cell_x;
+            while (cell_x <= max_cell_x) : (cell_x += 1) {
+                const cell_index = @as(usize, @intCast(cell_y)) * hybrid_shadow_grid_dim + @as(usize, @intCast(cell_x));
+                const cell_range = self.hybrid_shadow_grid_ranges[cell_index];
+                if (cell_range.count == 0) continue;
+
+                const caster_indices = self.hybrid_shadow_grid_candidates[cell_range.offset .. cell_range.offset + cell_range.count];
+                stats.grid_candidate_count += caster_indices.len;
+                for (caster_indices) |caster_index| {
+                    if (caster_index >= self.hybrid_shadow_caster_count) continue;
+                    if (self.hybrid_shadow_candidate_marks[caster_index] == mark) continue;
+                    self.hybrid_shadow_candidate_marks[caster_index] = mark;
+                    stats.unique_candidate_count += 1;
+
+                    const caster = self.hybrid_shadow_caster_bounds[caster_index];
+                    if (caster.max_depth <= receiver_bounds.min_depth + config.POST_HYBRID_SHADOW_RAY_BIAS) continue;
+                    if (caster.max_u < receiver_bounds.min_u or caster.min_u > receiver_bounds.max_u) continue;
+                    if (caster.max_v < receiver_bounds.min_v or caster.min_v > receiver_bounds.max_v) continue;
+
+                    self.hybrid_shadow_tile_candidates[candidate_write.*] = caster.meshlet_index;
+                    candidate_write.* += 1;
+                    stats.final_candidate_count += 1;
+                }
+            }
+        }
+
+        return stats;
     }
 
     fn buildHybridShadowReceiverBounds(
@@ -3969,7 +4100,7 @@ pub const Renderer = struct {
         }
 
         var write_offsets = [_]usize{0} ** hybrid_shadow_grid_cells;
-        for (self.hybrid_shadow_caster_bounds[0..caster_count]) |caster| {
+        for (self.hybrid_shadow_caster_bounds[0..caster_count], 0..) |caster, caster_index| {
             const min_cell_x = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.min_u - min_u) * self.hybrid_shadow_grid.inv_cell_u))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
             const max_cell_x = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.max_u - min_u) * self.hybrid_shadow_grid.inv_cell_u))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
             const min_cell_y = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.min_v - min_v) * self.hybrid_shadow_grid.inv_cell_v))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
@@ -3981,7 +4112,7 @@ pub const Renderer = struct {
                 while (cell_x <= max_cell_x) : (cell_x += 1) {
                     const cell_index = @as(usize, @intCast(cell_y)) * hybrid_shadow_grid_dim + @as(usize, @intCast(cell_x));
                     const write_index = self.hybrid_shadow_grid_ranges[cell_index].offset + write_offsets[cell_index];
-                    self.hybrid_shadow_grid_candidates[write_index] = caster.meshlet_index;
+                    self.hybrid_shadow_grid_candidates[write_index] = caster_index;
                     write_offsets[cell_index] += 1;
                 }
             }
@@ -4000,6 +4131,7 @@ pub const Renderer = struct {
         if (!config.POST_HYBRID_SHADOW_ENABLED or self.bitmap.pixels.len == 0 or self.tile_grid == null or self.active_tile_flags == null) return;
 
         const pass_start = std.time.nanoTimestamp();
+        self.hybrid_shadow_stats = .{};
         const grid = self.tile_grid.?;
         const active_flags = self.active_tile_flags.?;
         const active_indices = self.active_tile_indices.?;
@@ -4019,8 +4151,6 @@ pub const Renderer = struct {
             pipeline_logger.errorSub("hybrid_shadow", "scratch allocation failed: {s}", .{@errorName(err)});
             return;
         };
-
-        @memset(self.hybrid_shadow_cache, 0xFF);
 
         const accel_needs_rebuild = !self.hybrid_shadow_accel_valid or
             self.hybrid_shadow_cached_meshlet_count != mesh.meshlets.len or
@@ -4065,6 +4195,7 @@ pub const Renderer = struct {
         for (grid.tiles, 0..) |*tile, tile_index| {
             tile_ranges[tile_index] = .{};
             if (tile_index >= active_flags.len or !active_flags[tile_index]) continue;
+            self.hybrid_shadow_stats.active_tile_count += 1;
 
             const receiver_bounds = self.buildHybridShadowReceiverBounds(
                 tile,
@@ -4078,13 +4209,10 @@ pub const Renderer = struct {
             ) orelse continue;
 
             const candidate_offset = candidate_write;
-            for (self.hybrid_shadow_caster_bounds[0..caster_count]) |caster| {
-                if (caster.max_depth <= receiver_bounds.min_depth + config.POST_HYBRID_SHADOW_RAY_BIAS) continue;
-                if (caster.max_u < receiver_bounds.min_u or caster.min_u > receiver_bounds.max_u) continue;
-                if (caster.max_v < receiver_bounds.min_v or caster.min_v > receiver_bounds.max_v) continue;
-                self.hybrid_shadow_tile_candidates[candidate_write] = caster.meshlet_index;
-                candidate_write += 1;
-            }
+            const candidate_stats = self.collectHybridShadowTileCandidates(receiver_bounds, &candidate_write);
+            self.hybrid_shadow_stats.grid_candidate_count += candidate_stats.grid_candidate_count;
+            self.hybrid_shadow_stats.unique_candidate_count += candidate_stats.unique_candidate_count;
+            self.hybrid_shadow_stats.final_candidate_count += candidate_stats.final_candidate_count;
 
             const candidate_count = candidate_write - candidate_offset;
             if (candidate_count == 0) continue;
@@ -4111,7 +4239,25 @@ pub const Renderer = struct {
             shadow_job_count += 1;
         }
 
+        self.hybrid_shadow_stats.job_count = shadow_job_count;
         if (shadow_job_count == 0) return;
+        @memset(self.hybrid_shadow_cache, 0xFF);
+
+        if (self.hybrid_shadow_debug.enabled) {
+            if (self.hybrid_shadow_debug.completed_jobs > shadow_job_count) {
+                self.hybrid_shadow_debug.completed_jobs = shadow_job_count;
+            }
+            if (self.hybrid_shadow_debug.advance_requested) {
+                self.hybrid_shadow_debug.completed_jobs = @min(shadow_job_count, self.hybrid_shadow_debug.completed_jobs + 1);
+            }
+            self.hybrid_shadow_debug.advance_requested = false;
+
+            for (active_indices[0..self.hybrid_shadow_debug.completed_jobs]) |tile_index| {
+                AdaptiveShadowTileJob.run(@ptrCast(&shadow_jobs[tile_index]));
+            }
+            self.recordRenderPassTiming("hybrid_shadow_step", pass_start);
+            return;
+        }
 
         if (self.job_system) |job_sys| {
             var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
@@ -4395,22 +4541,58 @@ pub const Renderer = struct {
     }
 
     fn drawRenderPassOverlay(self: *Renderer, hdc_mem: windows.HDC) void {
-        if (self.render_pass_count == 0) return;
+        if (self.render_pass_count == 0 and !self.hybrid_shadow_debug.enabled and self.hybrid_shadow_stats.job_count == 0) return;
 
         _ = SetBkMode(hdc_mem, TRANSPARENT);
 
         var y: i32 = 12;
-        self.drawOverlayTextLine(hdc_mem, 12, y, "Render Passes (1s avg ms/frame)");
-        y += 20;
+        if (self.render_pass_count != 0) {
+            self.drawOverlayTextLine(hdc_mem, 12, y, "Render Passes (1s avg ms/frame)");
+            y += 20;
 
-        var line_buffer: [128]u8 = undefined;
-        for (self.render_pass_timings[0..self.render_pass_count]) |pass| {
-            const line = if (pass.has_sample)
-                std.fmt.bufPrint(&line_buffer, "{s}: {d:.2} ms/frame", .{ pass.name, pass.sampled_ms_per_frame }) catch continue
+            var line_buffer: [160]u8 = undefined;
+            for (self.render_pass_timings[0..self.render_pass_count]) |pass| {
+                const line = if (pass.has_sample)
+                    std.fmt.bufPrint(&line_buffer, "{s}: {d:.2} ms/frame", .{ pass.name, pass.sampled_ms_per_frame }) catch continue
+                else
+                    std.fmt.bufPrint(&line_buffer, "{s}: sampling...", .{pass.name}) catch continue;
+                self.drawOverlayTextLine(hdc_mem, 12, y, line);
+                y += 16;
+            }
+        }
+
+        if (self.hybrid_shadow_debug.enabled or self.hybrid_shadow_stats.job_count != 0) {
+            var line_buffer: [160]u8 = undefined;
+            if (self.render_pass_count != 0) y += 8;
+            self.drawOverlayTextLine(hdc_mem, 12, y, "Hybrid Shadow");
+            y += 20;
+
+            const mode_line = if (self.hybrid_shadow_debug.enabled)
+                std.fmt.bufPrint(
+                    &line_buffer,
+                    "step mode: H toggle, N advance ({}/{} jobs)",
+                    .{ self.hybrid_shadow_debug.completed_jobs, self.hybrid_shadow_stats.job_count },
+                ) catch ""
             else
-                std.fmt.bufPrint(&line_buffer, "{s}: sampling...", .{pass.name}) catch continue;
-            self.drawOverlayTextLine(hdc_mem, 12, y, line);
-            y += 16;
+                std.fmt.bufPrint(&line_buffer, "jobs={} active_tiles={}", .{ self.hybrid_shadow_stats.job_count, self.hybrid_shadow_stats.active_tile_count }) catch "";
+            if (mode_line.len != 0) {
+                self.drawOverlayTextLine(hdc_mem, 12, y, mode_line);
+                y += 16;
+            }
+
+            const stats_line = std.fmt.bufPrint(
+                &line_buffer,
+                "grid={} unique={} final={}",
+                .{
+                    self.hybrid_shadow_stats.grid_candidate_count,
+                    self.hybrid_shadow_stats.unique_candidate_count,
+                    self.hybrid_shadow_stats.final_candidate_count,
+                },
+            ) catch "";
+            if (stats_line.len != 0) {
+                self.drawOverlayTextLine(hdc_mem, 12, y, stats_line);
+                y += 16;
+            }
         }
     }
 
