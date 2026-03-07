@@ -209,6 +209,14 @@ fn loadInternal(allocator: std.mem.Allocator, mesh: *Mesh, source_path: []const 
         normal_cone_axis.y = try cursor.readF32();
         normal_cone_axis.z = try cursor.readF32();
         const normal_cone_cutoff = try cursor.readF32();
+        var aabb_min = math.Vec3.new(0, 0, 0);
+        aabb_min.x = try cursor.readF32();
+        aabb_min.y = try cursor.readF32();
+        aabb_min.z = try cursor.readF32();
+        var aabb_max = math.Vec3.new(0, 0, 0);
+        aabb_max.x = try cursor.readF32();
+        aabb_max.y = try cursor.readF32();
+        aabb_max.z = try cursor.readF32();
 
         var vi: usize = 0;
         while (vi < vertex_count) : (vi += 1) {
@@ -249,6 +257,8 @@ fn loadInternal(allocator: std.mem.Allocator, mesh: *Mesh, source_path: []const 
             .bounds_radius = radius,
             .normal_cone_axis = normal_cone_axis,
             .normal_cone_cutoff = normal_cone_cutoff,
+            .aabb_min = aabb_min,
+            .aabb_max = aabb_max,
         };
         vertex_cursor += vertex_count;
         primitive_cursor += primitive_count;
@@ -299,6 +309,12 @@ pub fn storeMeshlets(mesh: *const Mesh, source_path: []const u8) !void {
         try appendF32(&list, alloc, meshlet.normal_cone_axis.y);
         try appendF32(&list, alloc, meshlet.normal_cone_axis.z);
         try appendF32(&list, alloc, meshlet.normal_cone_cutoff);
+        try appendF32(&list, alloc, meshlet.aabb_min.x);
+        try appendF32(&list, alloc, meshlet.aabb_min.y);
+        try appendF32(&list, alloc, meshlet.aabb_min.z);
+        try appendF32(&list, alloc, meshlet.aabb_max.x);
+        try appendF32(&list, alloc, meshlet.aabb_max.y);
+        try appendF32(&list, alloc, meshlet.aabb_max.z);
 
         for (mesh.meshletVertexSlice(&meshlet)) |idx| {
             try appendU32(&list, alloc, try ensureU32(idx));

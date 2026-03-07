@@ -95,6 +95,22 @@ pub const Vec3 = struct {
         );
     }
 
+    pub fn min(a: Vec3, b: Vec3) Vec3 {
+        return Vec3.new(
+            @min(a.x, b.x),
+            @min(a.y, b.y),
+            @min(a.z, b.z),
+        );
+    }
+
+    pub fn max(a: Vec3, b: Vec3) Vec3 {
+        return Vec3.new(
+            @max(a.x, b.x),
+            @max(a.y, b.y),
+            @max(a.z, b.z),
+        );
+    }
+
     /// Calculates the length (magnitude) of the vector.
     pub fn length(v: Vec3) f32 {
         return @sqrt(v.x * v.x + v.y * v.y + v.z * v.z);

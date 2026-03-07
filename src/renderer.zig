@@ -7544,9 +7544,9 @@ if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.l
                 .light_direction = if (self.lights.items.len > 0) self.lights.items[0].direction else math.Vec3.new(0,-1,0),
                 .mesh_ptr = mesh,
                 .cam_pos = self.camera_position,
-                .cam_right = math.Vec3.new(transform.data[0], transform.data[4], transform.data[8]),
-                .cam_up = math.Vec3.new(transform.data[1], transform.data[5], transform.data[9]),
-                .cam_fwd = math.Vec3.new(-transform.data[2], -transform.data[6], -transform.data[10]),
+                .cam_right = math.Vec3.new(transform.data[0], transform.data[1], transform.data[2]),
+                .cam_up = math.Vec3.new(transform.data[4], transform.data[5], transform.data[6]),
+                .cam_fwd = math.Vec3.new(transform.data[8], transform.data[9], transform.data[10]),
             };
         }
 

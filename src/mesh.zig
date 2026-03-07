@@ -49,6 +49,8 @@ pub const Meshlet = struct {
     bounds_radius: f32,
     normal_cone_axis: Vec3,
     normal_cone_cutoff: f32,
+    aabb_min: Vec3,
+    aabb_max: Vec3,
 };
 
 // ========== MESH STRUCTURE ==========
@@ -363,10 +365,15 @@ pub const Mesh = struct {
                 }
 
                 var radius: f32 = 0.0;
+                var aabb_min = Vec3.new(std.math.inf(f32), std.math.inf(f32), std.math.inf(f32));
+                var aabb_max = Vec3.new(-std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32));
                 for (vertex_indices.items) |vi| {
-                    const delta = Vec3.sub(mesh.vertices[vi], centroid);
+                    const pos = mesh.vertices[vi];
+                    const delta = Vec3.sub(pos, centroid);
                     const distance = Vec3.length(delta);
                     if (distance > radius) radius = distance;
+                    aabb_min = Vec3.min(aabb_min, pos);
+                    aabb_max = Vec3.max(aabb_max, pos);
                 }
 
                 var cone_axis_sum = Vec3.new(0.0, 0.0, 0.0);
@@ -401,6 +408,8 @@ pub const Mesh = struct {
                     .bounds_radius = radius,
                     .normal_cone_axis = cone_axis,
                     .normal_cone_cutoff = cone_cutoff,
+                    .aabb_min = aabb_min,
+                    .aabb_max = aabb_max,
                 };
                 try meshlets.append(mesh.allocator, meshlet);
             }

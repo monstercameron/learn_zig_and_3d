@@ -49,6 +49,9 @@ pub var POST_DEPTH_FOG_ENABLED: bool = false;
 pub var POST_SKYBOX_ENABLED: bool = true;
 /// Enables the primary generic shadow mapping pass.
 /// Disabled in favor of hybrid shadows as requested
+/// Enables the new CPU-focussed meshlet-native shadow system
+pub var MESHLET_SHADOWS_ENABLED: bool = true;
+
 pub var POST_SHADOW_ENABLED: bool = false;
 /// Square dimension resolution of the shadow depth map target.
 pub var POST_SHADOW_MAP_SIZE: usize = 4096;
@@ -57,7 +60,7 @@ pub var POST_SHADOW_STRENGTH_PERCENT: i32 = 38;
 /// A depth offset to prevent shadow acne artifacts on lit surfaces.
 pub var POST_SHADOW_DEPTH_BIAS: f32 = 0.07;
 /// Enables the advanced hybrid ray-traced shadow pass for high fidelity shadows.
-pub var POST_HYBRID_SHADOW_ENABLED: bool = true;
+pub var POST_HYBRID_SHADOW_ENABLED: bool = false;
 /// Tile dimension constraint used during hybrid shadow evaluation.
 pub var POST_HYBRID_SHADOW_MIN_BLOCK_SIZE: i32 = 16;
 /// The maximum recursion or ray bounce depth for hybrid shadows.
@@ -199,6 +202,7 @@ const ConfigFile = struct {
         colorCorrectionEnabled: ?bool = null,
         bloomEnabled: ?bool = null,
         depthFogEnabled: ?bool = null,
+        meshletShadowsEnabled: ?bool = null,
         shadowEnabled: ?bool = null,
         shadowMapSize: ?usize = null,
         shadowStrengthPercent: ?i32 = null,
@@ -278,6 +282,7 @@ pub fn load(allocator: std.mem.Allocator, filepath: []const u8) !void {
     if (c.postProcessing.colorCorrectionEnabled) |v| POST_COLOR_CORRECTION_ENABLED = v;
     if (c.postProcessing.bloomEnabled) |v| POST_BLOOM_ENABLED = v;
     if (c.postProcessing.depthFogEnabled) |v| POST_DEPTH_FOG_ENABLED = v;
+    if (c.postProcessing.meshletShadowsEnabled) |v| MESHLET_SHADOWS_ENABLED = v;
     if (c.postProcessing.shadowEnabled) |v| POST_SHADOW_ENABLED = v;
     if (c.postProcessing.shadowMapSize) |v| POST_SHADOW_MAP_SIZE = v;
     if (c.postProcessing.shadowStrengthPercent) |v| POST_SHADOW_STRENGTH_PERCENT = v;

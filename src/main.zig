@@ -208,6 +208,7 @@ pub fn main() !void {
 
 
     try levelAppendGroundPlane(&scene_asset.mesh, allocator);
+    try scene_asset.mesh.generateMeshlets(64, 126);
     app_logger.infoSub(
         "assets",
         "loaded scene mesh vertices={} triangles={} meshlets={}",

@@ -29,7 +29,7 @@
         "shadowMapSize": 2048,
         "shadowStrengthPercent": 38,
         "shadowDepthBias": 0.07,
-        "hybridShadowEnabled": true,
+        "hybridShadowEnabled": false,
         "hybridShadowMinBlockSize": 24,
         "hybridShadowMaxDepth": 4,
         "hybridShadowRayBias": 0.03,
@@ -58,6 +58,7 @@
         "bloomIntensityPercent": 55,
         "colorProfileName": "blockbuster_teal_orange",
         "colorBrightnessBias": 4,
-        "colorContrastPercent": 112
+        "colorContrastPercent": 112,
+        "meshletShadowsEnabled": true
     }
 }
