@@ -1925,8 +1925,12 @@ const AdaptiveShadowTileJob = struct {
 
         if (!any_valid) return .{ .mixed = false, .shadowed = false };
         if (any_invalid) return .{ .mixed = true, .shadowed = false };
-        if (any_occluded and any_lit) return .{ .mixed = true, .shadowed = false };
-        return .{ .mixed = false, .shadowed = any_occluded };
+        
+        // FIX: Sparse 9-point check is prone to false positives for deep shadows on complex silhouettes.
+        // Always subdivide if there's any shadow to ensure sharp pixel edge evaluation.
+        if (any_occluded) return .{ .mixed = true, .shadowed = false };
+        
+        return .{ .mixed = false, .shadowed = false };
     }
 
     fn evaluateShadowPoint(ctx: *AdaptiveShadowTileJob, screen_x: i32, screen_y: i32) ShadowSample {

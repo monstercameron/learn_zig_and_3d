@@ -1,64 +1,63 @@
 {
-  "window": {
-    "title": "Zig 3D CPU Rasterizer",
-    "width": 1280,
-    "height": 720,
-    "fullscreen": false,
-    "vsync": true
-  },
-  "rendering": {
-    "renderResolutionScalePercent": 50,
-    "fpsLimit": 120,
-    "textureFilteringBilinear": true
-  },
-  "camera": {
-    "initialFovDegrees": 60.0,
-    "fovStep": 1.5,
-    "minFov": 20.0,
-    "maxFov": 120.0
-  },
-  "debug": {
-    "showTileBorders": false,
-    "showWireframe": false
-  },
-  "postProcessing": {
-    "colorCorrectionEnabled": true,
-    "bloomEnabled": true,
-    "depthFogEnabled": true,
-    "shadowEnabled": true,
-    "shadowMapSize": 1024,
-    "shadowStrengthPercent": 38,
-    "shadowDepthBias": 0.07,
-    "hybridShadowEnabled": false,
-    "hybridShadowMinBlockSize": 24,
-    "hybridShadowMaxDepth": 1,
-    "hybridShadowRayBias": 0.03,
-    "hybridShadowSampleStride": 12,
-    "hybridShadowCoarseDownsample": 4,
-    "hybridShadowEdgeDownsample": 1,
-    "hybridShadowEdgeMinCoverage": 0.22,
-    "hybridShadowEdgeMaxCoverage": 0.78,
-    "hybridShadowEdgeBlend": 0.4,
-    "ssaoEnabled": true,
-    "ssaoDownsample": 4,
-    "ssaoRadius": 0.85,
-    "ssaoStrengthPercent": 52,
-    "ssaoBias": 0.08,
-    "ssaoBlurDepthThreshold": 0.55,
-    "taaEnabled": true,
-    "taaHistoryPercent": 92,
-    "taaDepthThreshold": 2.0,
-    "depthFogNear": 5.5,
-    "depthFogFar": 16.0,
-    "depthFogColorR": 92,
-    "depthFogColorG": 118,
-    "depthFogColorB": 142,
-    "depthFogStrengthPercent": 72,
-    "bloomThreshold": 168,
-    "bloomIntensityPercent": 55,
-    "colorProfileName": "blockbuster_teal_orange",
-    "colorBrightnessBias": 4,
-    "colorContrastPercent": 112
-  }
+    "window": {
+        "title": "Zig 3D CPU Rasterizer",
+        "width": 1280,
+        "height": 720,
+        "fullscreen": false,
+        "vsync": true
+    },
+    "rendering": {
+        "renderResolutionScalePercent": 100,
+        "fpsLimit": 120,
+        "textureFilteringBilinear": true
+    },
+    "camera": {
+        "initialFovDegrees": 60.0,
+        "fovStep": 1.5,
+        "minFov": 20.0,
+        "maxFov": 120.0
+    },
+    "debug": {
+        "showTileBorders": false,
+        "showWireframe": false
+    },
+    "postProcessing": {
+        "colorCorrectionEnabled": true,
+        "bloomEnabled": true,
+        "depthFogEnabled": true,
+        "shadowEnabled": false,
+        "shadowMapSize": 2048,
+        "shadowStrengthPercent": 38,
+        "shadowDepthBias": 0.07,
+        "hybridShadowEnabled": true,
+        "hybridShadowMinBlockSize": 1,
+        "hybridShadowMaxDepth": 8,
+        "hybridShadowRayBias": 0.03,
+        "hybridShadowSampleStride": 1,
+        "hybridShadowCoarseDownsample": 1,
+        "hybridShadowEdgeDownsample": 1,
+        "hybridShadowEdgeMinCoverage": 0.22,
+        "hybridShadowEdgeMaxCoverage": 0.78,
+        "hybridShadowEdgeBlend": 0.4,
+        "ssaoEnabled": true,
+        "ssaoDownsample": 4,
+        "ssaoRadius": 0.85,
+        "ssaoStrengthPercent": 52,
+        "ssaoBias": 0.08,
+        "ssaoBlurDepthThreshold": 0.55,
+        "taaEnabled": true,
+        "taaHistoryPercent": 92,
+        "taaDepthThreshold": 2.0,
+        "depthFogNear": 5.5,
+        "depthFogFar": 16.0,
+        "depthFogColorR": 92,
+        "depthFogColorG": 118,
+        "depthFogColorB": 142,
+        "depthFogStrengthPercent": 72,
+        "bloomThreshold": 168,
+        "bloomIntensityPercent": 55,
+        "colorProfileName": "blockbuster_teal_orange",
+        "colorBrightnessBias": 4,
+        "colorContrastPercent": 112
+    }
 }
-
