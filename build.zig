@@ -10,6 +10,7 @@ pub fn build(b: *std.Build) void {
 
     // Define the optimization level (Debug, ReleaseSafe, ReleaseFast, ReleaseSmall)
     const optimize = b.standardOptimizeOption(.{});
+    const profile = b.option(bool, "profile", "Enable frame pointers for native sampling profilers") orelse false;
 
     // Create an executable with the specified name and root source file
     const exe = b.addExecutable(.{
@@ -18,6 +19,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .omit_frame_pointer = if (profile) false else null,
         }),
     });
 

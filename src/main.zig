@@ -116,8 +116,8 @@ pub fn main() !void {
     // JS Analogy: `const window = new Window(800, 600);`
     // The `try` keyword is like `await` for a function that might fail. If `Window.init`
     // returns an error, `main` will immediately stop and report the error.
-    const initial_width = 800;
-    const initial_height = 600;
+    const initial_width = 640;
+    const initial_height = 360;
     var window = try Window.init(config.WINDOW_TITLE, initial_width, initial_height);
     defer window.deinit(); // Guarantees the window is destroyed on exit.
     app_logger.infoSub("bootstrap", "window created {d}x{d}", .{ initial_width, initial_height });

@@ -984,8 +984,7 @@ const AdaptiveShadowTileJob = struct {
         return .{ .valid = true, .coverage = if (ctx.isPointShadowed(world_pos)) 1.0 else 0.0 };
     }
 
-    fn evaluateShadowCell(ctx: *AdaptiveShadowTileJob, cache_x: usize, cache_y: usize) ShadowSample {
-        const shadow_scale = @max(1, config.POST_HYBRID_SHADOW_DOWNSAMPLE);
+    fn evaluateShadowCellAtScale(ctx: *AdaptiveShadowTileJob, cache_x: usize, cache_y: usize, shadow_scale: i32) ShadowSample {
         const origin_x = @as(i32, @intCast(cache_x * @as(usize, @intCast(shadow_scale))));
         const origin_y = @as(i32, @intCast(cache_y * @as(usize, @intCast(shadow_scale))));
         const max_x = @min(origin_x + shadow_scale - 1, ctx.renderer.bitmap.width - 1);
@@ -995,6 +994,7 @@ const AdaptiveShadowTileJob = struct {
         const center = ctx.evaluateShadowPoint(center_x, center_y);
         if (!center.valid) return .{ .valid = false, .coverage = 0.0 };
         if (center.coverage >= 1.0) return center;
+        if (shadow_scale <= 2) return center;
 
         const corner_a = ctx.evaluateShadowPoint(origin_x, origin_y);
         const corner_b = ctx.evaluateShadowPoint(max_x, max_y);
@@ -1006,18 +1006,25 @@ const AdaptiveShadowTileJob = struct {
         return .{ .valid = true, .coverage = max_coverage };
     }
 
-    fn sampleShadow(ctx: *AdaptiveShadowTileJob, screen_x: i32, screen_y: i32) ShadowSample {
-        const shadow_scale = @max(1, config.POST_HYBRID_SHADOW_DOWNSAMPLE);
+    fn sampleShadowCache(
+        ctx: *AdaptiveShadowTileJob,
+        cache: []u8,
+        cache_width: usize,
+        cache_height: usize,
+        shadow_scale: i32,
+        screen_x: i32,
+        screen_y: i32,
+    ) ShadowSample {
         if (screen_x < 0 or screen_y < 0 or screen_x >= ctx.renderer.bitmap.width or screen_y >= ctx.renderer.bitmap.height) {
             return .{ .valid = false, .coverage = 0.0 };
         }
 
         const sample_x = @as(f32, @floatFromInt(screen_x)) / @as(f32, @floatFromInt(shadow_scale));
         const sample_y = @as(f32, @floatFromInt(screen_y)) / @as(f32, @floatFromInt(shadow_scale));
-        const base_x = std.math.clamp(@as(i32, @intFromFloat(@floor(sample_x))), 0, @as(i32, @intCast(ctx.renderer.hybrid_shadow_cache_width - 1)));
-        const base_y = std.math.clamp(@as(i32, @intFromFloat(@floor(sample_y))), 0, @as(i32, @intCast(ctx.renderer.hybrid_shadow_cache_height - 1)));
-        const next_x = @min(base_x + 1, @as(i32, @intCast(ctx.renderer.hybrid_shadow_cache_width - 1)));
-        const next_y = @min(base_y + 1, @as(i32, @intCast(ctx.renderer.hybrid_shadow_cache_height - 1)));
+        const base_x = std.math.clamp(@as(i32, @intFromFloat(@floor(sample_x))), 0, @as(i32, @intCast(cache_width - 1)));
+        const base_y = std.math.clamp(@as(i32, @intFromFloat(@floor(sample_y))), 0, @as(i32, @intCast(cache_height - 1)));
+        const next_x = @min(base_x + 1, @as(i32, @intCast(cache_width - 1)));
+        const next_y = @min(base_y + 1, @as(i32, @intCast(cache_height - 1)));
         const frac_x = std.math.clamp(sample_x - @as(f32, @floatFromInt(base_x)), 0.0, 1.0);
         const frac_y = std.math.clamp(sample_y - @as(f32, @floatFromInt(base_y)), 0.0, 1.0);
 
@@ -1031,15 +1038,15 @@ const AdaptiveShadowTileJob = struct {
         };
 
         for (coords, 0..) |coord, tap_index| {
-            const cache_idx = @as(usize, @intCast(coord[1])) * ctx.renderer.hybrid_shadow_cache_width + @as(usize, @intCast(coord[0]));
-            var cached = ctx.renderer.hybrid_shadow_cache[cache_idx];
+            const cache_idx = @as(usize, @intCast(coord[1])) * cache_width + @as(usize, @intCast(coord[0]));
+            var cached = cache[cache_idx];
             if (cached == hybrid_shadow_cache_unknown) {
-                const evaluated = ctx.evaluateShadowCell(@intCast(coord[0]), @intCast(coord[1]));
+                const evaluated = ctx.evaluateShadowCellAtScale(@intCast(coord[0]), @intCast(coord[1]), shadow_scale);
                 cached = if (!evaluated.valid)
                     hybrid_shadow_cache_invalid
                 else
                     @intCast(std.math.clamp(@as(i32, @intFromFloat(@round(evaluated.coverage * 253.0))), 0, 253));
-                ctx.renderer.hybrid_shadow_cache[cache_idx] = cached;
+                cache[cache_idx] = cached;
             }
 
             if (cached == hybrid_shadow_cache_invalid) {
@@ -1065,6 +1072,72 @@ const AdaptiveShadowTileJob = struct {
 
         if (weight_sum <= 1e-5) return .{ .valid = false, .coverage = 0.0 };
         return .{ .valid = true, .coverage = coverage_sum / weight_sum };
+    }
+
+    fn sampleShadowCacheNearest(
+        ctx: *AdaptiveShadowTileJob,
+        cache: []u8,
+        cache_width: usize,
+        cache_height: usize,
+        shadow_scale: i32,
+        screen_x: i32,
+        screen_y: i32,
+    ) ShadowSample {
+        if (screen_x < 0 or screen_y < 0 or screen_x >= ctx.renderer.bitmap.width or screen_y >= ctx.renderer.bitmap.height) {
+            return .{ .valid = false, .coverage = 0.0 };
+        }
+
+        const cache_x = std.math.clamp(@as(i32, @intFromFloat(@round(@as(f32, @floatFromInt(screen_x)) / @as(f32, @floatFromInt(shadow_scale))))), 0, @as(i32, @intCast(cache_width - 1)));
+        const cache_y = std.math.clamp(@as(i32, @intFromFloat(@round(@as(f32, @floatFromInt(screen_y)) / @as(f32, @floatFromInt(shadow_scale))))), 0, @as(i32, @intCast(cache_height - 1)));
+        const cache_idx = @as(usize, @intCast(cache_y)) * cache_width + @as(usize, @intCast(cache_x));
+        var cached = cache[cache_idx];
+        if (cached == hybrid_shadow_cache_unknown) {
+            const evaluated = ctx.evaluateShadowCellAtScale(@intCast(cache_x), @intCast(cache_y), shadow_scale);
+            cached = if (!evaluated.valid)
+                hybrid_shadow_cache_invalid
+            else
+                @intCast(std.math.clamp(@as(i32, @intFromFloat(@round(evaluated.coverage * 253.0))), 0, 253));
+            cache[cache_idx] = cached;
+        }
+
+        if (cached == hybrid_shadow_cache_invalid) return .{ .valid = false, .coverage = 0.0 };
+        return .{ .valid = true, .coverage = @as(f32, @floatFromInt(cached)) / 253.0 };
+    }
+
+    fn sampleShadowCoarse(ctx: *AdaptiveShadowTileJob, screen_x: i32, screen_y: i32) ShadowSample {
+        return ctx.sampleShadowCacheNearest(
+            ctx.renderer.hybrid_shadow_coarse_cache,
+            ctx.renderer.hybrid_shadow_coarse_cache_width,
+            ctx.renderer.hybrid_shadow_coarse_cache_height,
+            @max(1, config.POST_HYBRID_SHADOW_COARSE_DOWNSAMPLE),
+            screen_x,
+            screen_y,
+        );
+    }
+
+    fn sampleShadowRefined(ctx: *AdaptiveShadowTileJob, screen_x: i32, screen_y: i32) ShadowSample {
+        const coarse = ctx.sampleShadowCoarse(screen_x, screen_y);
+        if (!coarse.valid) return coarse;
+        if (coarse.coverage <= config.POST_HYBRID_SHADOW_EDGE_MIN_COVERAGE or coarse.coverage >= config.POST_HYBRID_SHADOW_EDGE_MAX_COVERAGE) return coarse;
+
+        const edge = ctx.sampleShadowCacheNearest(
+            ctx.renderer.hybrid_shadow_edge_cache,
+            ctx.renderer.hybrid_shadow_edge_cache_width,
+            ctx.renderer.hybrid_shadow_edge_cache_height,
+            @max(1, config.POST_HYBRID_SHADOW_EDGE_DOWNSAMPLE),
+            screen_x,
+            screen_y,
+        );
+        if (!edge.valid) return coarse;
+        const blend = std.math.clamp(config.POST_HYBRID_SHADOW_EDGE_BLEND, 0.0, 1.0);
+        return .{
+            .valid = true,
+            .coverage = edge.coverage * (1.0 - blend) + coarse.coverage * blend,
+        };
+    }
+
+    fn sampleShadow(ctx: *AdaptiveShadowTileJob, screen_x: i32, screen_y: i32) ShadowSample {
+        return ctx.sampleShadowCoarse(screen_x, screen_y);
     }
 
     fn isPointShadowed(ctx: *AdaptiveShadowTileJob, world_pos: math.Vec3) bool {
@@ -1106,7 +1179,7 @@ const AdaptiveShadowTileJob = struct {
     }
 
     fn resolveBlockExact(ctx: *AdaptiveShadowTileJob, x: i32, y: i32, width: i32, height: i32) void {
-        const sample_stride = @max(1, config.POST_HYBRID_SHADOW_SAMPLE_STRIDE);
+        const sample_stride = @max(1, config.POST_HYBRID_SHADOW_EDGE_DOWNSAMPLE);
         const max_x = x + width;
         const max_y = y + height;
 
@@ -1124,15 +1197,16 @@ const AdaptiveShadowTileJob = struct {
 
                 const sample_x = block_x + @divTrunc(block_w - 1, 2);
                 const sample_y = block_y + @divTrunc(block_h - 1, 2);
-                const sample = ctx.sampleShadow(sample_x, sample_y);
-                if (!sample.valid or sample.coverage <= 0.02) continue;
-
-                if (sample.coverage >= 0.98) {
+                const sample = ctx.sampleShadowRefined(sample_x, sample_y);
+                if (!sample.valid) continue;
+                const coverage = sample.coverage;
+                if (coverage <= 0.02) continue;
+                if (coverage >= 0.98) {
                     ctx.darkenBlock(block_x, block_y, block_w, block_h);
                     continue;
                 }
 
-                const pixel_scale = 1.0 - ((1.0 - ctx.darkness_scale) * sample.coverage);
+                const pixel_scale = 1.0 - ((1.0 - ctx.darkness_scale) * coverage);
                 var py = block_y;
                 while (py < block_y + block_h) : (py += 1) {
                     if (py < 0 or py >= ctx.renderer.bitmap.height) continue;
@@ -1490,6 +1564,7 @@ pub const Renderer = struct {
     show_light_orb: bool = true,
     cull_light_orb: bool = true,
     use_tiled_rendering: bool = true,
+    show_render_overlay: bool = builtin.mode == .Debug,
 
     ground_debug: GroundDebugState = .{},
     meshlet_telemetry: MeshletTelemetry = .{},
@@ -1499,9 +1574,12 @@ pub const Renderer = struct {
     depth_fog_config: DepthFogConfig,
     scene_depth: []f32,
     scene_camera: []math.Vec3,
-    hybrid_shadow_cache: []u8,
-    hybrid_shadow_cache_width: usize,
-    hybrid_shadow_cache_height: usize,
+    hybrid_shadow_coarse_cache: []u8,
+    hybrid_shadow_coarse_cache_width: usize,
+    hybrid_shadow_coarse_cache_height: usize,
+    hybrid_shadow_edge_cache: []u8,
+    hybrid_shadow_edge_cache_width: usize,
+    hybrid_shadow_edge_cache_height: usize,
     hybrid_shadow_caster_indices: []usize,
     hybrid_shadow_caster_bounds: []HybridShadowCasterBounds,
     hybrid_shadow_caster_count: usize,
@@ -1594,11 +1672,16 @@ pub const Renderer = struct {
         errdefer allocator.free(scene_depth);
         const scene_camera = try allocator.alloc(math.Vec3, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(scene_camera);
-        const hybrid_shadow_downsample = @max(1, config.POST_HYBRID_SHADOW_DOWNSAMPLE);
-        const hybrid_shadow_cache_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + hybrid_shadow_downsample - 1, hybrid_shadow_downsample))));
-        const hybrid_shadow_cache_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + hybrid_shadow_downsample - 1, hybrid_shadow_downsample))));
-        const hybrid_shadow_cache = try allocator.alloc(u8, hybrid_shadow_cache_width * hybrid_shadow_cache_height);
-        errdefer allocator.free(hybrid_shadow_cache);
+        const hybrid_shadow_coarse_downsample = @max(1, config.POST_HYBRID_SHADOW_COARSE_DOWNSAMPLE);
+        const hybrid_shadow_coarse_cache_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + hybrid_shadow_coarse_downsample - 1, hybrid_shadow_coarse_downsample))));
+        const hybrid_shadow_coarse_cache_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + hybrid_shadow_coarse_downsample - 1, hybrid_shadow_coarse_downsample))));
+        const hybrid_shadow_coarse_cache = try allocator.alloc(u8, hybrid_shadow_coarse_cache_width * hybrid_shadow_coarse_cache_height);
+        errdefer allocator.free(hybrid_shadow_coarse_cache);
+        const hybrid_shadow_edge_downsample = @max(1, config.POST_HYBRID_SHADOW_EDGE_DOWNSAMPLE);
+        const hybrid_shadow_edge_cache_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + hybrid_shadow_edge_downsample - 1, hybrid_shadow_edge_downsample))));
+        const hybrid_shadow_edge_cache_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + hybrid_shadow_edge_downsample - 1, hybrid_shadow_edge_downsample))));
+        const hybrid_shadow_edge_cache = try allocator.alloc(u8, hybrid_shadow_edge_cache_width * hybrid_shadow_edge_cache_height);
+        errdefer allocator.free(hybrid_shadow_edge_cache);
         const shadow_depth = try allocator.alloc(f32, config.POST_SHADOW_MAP_SIZE * config.POST_SHADOW_MAP_SIZE);
         errdefer allocator.free(shadow_depth);
         const bloom_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + 3, 4))));
@@ -1684,9 +1767,12 @@ pub const Renderer = struct {
             },
             .scene_depth = scene_depth,
             .scene_camera = scene_camera,
-            .hybrid_shadow_cache = hybrid_shadow_cache,
-            .hybrid_shadow_cache_width = hybrid_shadow_cache_width,
-            .hybrid_shadow_cache_height = hybrid_shadow_cache_height,
+            .hybrid_shadow_coarse_cache = hybrid_shadow_coarse_cache,
+            .hybrid_shadow_coarse_cache_width = hybrid_shadow_coarse_cache_width,
+            .hybrid_shadow_coarse_cache_height = hybrid_shadow_coarse_cache_height,
+            .hybrid_shadow_edge_cache = hybrid_shadow_edge_cache,
+            .hybrid_shadow_edge_cache_width = hybrid_shadow_edge_cache_width,
+            .hybrid_shadow_edge_cache_height = hybrid_shadow_edge_cache_height,
             .hybrid_shadow_caster_indices = &[_]usize{},
             .hybrid_shadow_caster_bounds = &[_]HybridShadowCasterBounds{},
             .hybrid_shadow_caster_count = 0,
@@ -1754,7 +1840,8 @@ pub const Renderer = struct {
         if (self.active_tile_indices) |indices| self.allocator.free(indices);
         self.allocator.free(self.scene_depth);
         self.allocator.free(self.scene_camera);
-        self.allocator.free(self.hybrid_shadow_cache);
+        self.allocator.free(self.hybrid_shadow_coarse_cache);
+        self.allocator.free(self.hybrid_shadow_edge_cache);
         if (self.hybrid_shadow_caster_indices.len != 0) self.allocator.free(self.hybrid_shadow_caster_indices);
         if (self.hybrid_shadow_caster_bounds.len != 0) self.allocator.free(self.hybrid_shadow_caster_bounds);
         self.allocator.free(self.hybrid_shadow_tile_ranges);
@@ -3172,6 +3259,14 @@ pub const Renderer = struct {
         switch (char_code) {
             'q', 'Q' => self.pending_fov_delta -= config.CAMERA_FOV_STEP,
             'e', 'E' => self.pending_fov_delta += config.CAMERA_FOV_STEP,
+            'p', 'P' => {
+                self.show_render_overlay = !self.show_render_overlay;
+                renderer_logger.infoSub(
+                    "overlay",
+                    "render overlay {s}",
+                    .{if (self.show_render_overlay) "enabled" else "disabled"},
+                );
+            },
             'h', 'H' => {
                 self.hybrid_shadow_debug.enabled = !self.hybrid_shadow_debug.enabled;
                 self.hybrid_shadow_debug.reset();
@@ -3379,7 +3474,7 @@ pub const Renderer = struct {
             meshlet_logger.debugSub("work", "reusing cached mesh work", .{});
         }
 
-        if (cache.full_vertex_cache_valid and cache.transformed_vertices.len == mesh.vertices.len) {
+        if (builtin.mode == .Debug and cache.full_vertex_cache_valid and cache.transformed_vertices.len == mesh.vertices.len) {
             self.debugGroundPlane(mesh, cache.transformed_vertices, view_rotation);
         }
 
@@ -4241,7 +4336,8 @@ pub const Renderer = struct {
 
         self.hybrid_shadow_stats.job_count = shadow_job_count;
         if (shadow_job_count == 0) return;
-        @memset(self.hybrid_shadow_cache, 0xFF);
+        @memset(self.hybrid_shadow_coarse_cache, 0xFF);
+        @memset(self.hybrid_shadow_edge_cache, 0xFF);
 
         if (self.hybrid_shadow_debug.enabled) {
             if (self.hybrid_shadow_debug.completed_jobs > shadow_job_count) {
@@ -4524,7 +4620,9 @@ pub const Renderer = struct {
             if (self.hdc_mem) |hdc_mem| {
                 const old_bitmap = SelectObject(hdc_mem, self.bitmap.hbitmap);
                 defer _ = SelectObject(hdc_mem, old_bitmap);
-                self.drawRenderPassOverlay(hdc_mem);
+                if (self.show_render_overlay or self.hybrid_shadow_debug.enabled) {
+                    self.drawRenderPassOverlay(hdc_mem);
+                }
                 _ = BitBlt(
                     hdc,
                     0,

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// Defines the severity of a log message.
 pub const LogLevel = enum(u8) {
@@ -96,6 +97,7 @@ pub const Logger = struct {
     namespace: []const u8,
 
     pub inline fn debug(self: Logger, comptime format: []const u8, args: anytype) void {
+        if (comptime builtin.mode != .Debug) return;
         if (g_log_manager) |*manager| manager.log(.debug, self.namespace, null, format, args);
     }
 
@@ -112,6 +114,7 @@ pub const Logger = struct {
     }
 
     pub inline fn debugSub(self: Logger, subsystem: []const u8, comptime format: []const u8, args: anytype) void {
+        if (comptime builtin.mode != .Debug) return;
         if (g_log_manager) |*manager| manager.log(.debug, self.namespace, subsystem, format, args);
     }
 
