@@ -1915,7 +1915,8 @@ pub const Renderer = struct {
     mesh_work_cache: MeshWorkCache = MeshWorkCache.init(),
 
     // Rendering options and data
-    texture: ?*const texture.Texture, // The currently active texture.
+    single_texture_binding: [1]?*const texture.Texture,
+    textures: []const ?*const texture.Texture,
     show_tile_borders: bool = false,
     show_wireframe: bool = false,
     show_light_orb: bool = true,
@@ -2112,7 +2113,8 @@ pub const Renderer = struct {
             .profile_capture_emitted = false,
             .tile_grid = tile_grid,
             .tile_buffers = tile_buffers,
-            .texture = null,
+            .single_texture_binding = .{null},
+            .textures = &.{},
             .use_tiled_rendering = true,
             .job_system = job_system,
             .tile_jobs_buffer = tile_jobs_buffer,
@@ -2289,7 +2291,7 @@ pub const Renderer = struct {
         tri_list: *const BinningStage.TileTriangleList,
         packets: []const TrianglePacket,
         draw_wireframe: bool,
-        texture: ?*const texture.Texture,
+        textures: []const ?*const texture.Texture,
         projection: ProjectionParams,
 
         const max_clipped_vertices: usize = 5;
@@ -2309,6 +2311,13 @@ pub const Renderer = struct {
             const uv_delta = math.Vec2.sub(b.uv, a.uv);
             const uv = math.Vec2.add(a.uv, math.Vec2.scale(uv_delta, t));
             return ClipVertex{ .position = position, .uv = uv };
+        }
+
+        fn textureForIndex(job: *const TileRenderJob, texture_index: u16) ?*const texture.Texture {
+            if (texture_index == MeshModule.Triangle.no_texture_index) return null;
+            const idx: usize = @intCast(texture_index);
+            if (idx >= job.textures.len) return null;
+            return job.textures[idx];
         }
 
         fn clipPolygonToNearPlane(vertices: []ClipVertex, near_plane: f32, output: *[max_clipped_vertices]ClipVertex) usize {
@@ -2366,7 +2375,7 @@ pub const Renderer = struct {
             return cross == 0;
         }
 
-        fn rasterizeFan(job: *TileRenderJob, vertices: []ClipVertex, base_color: u32, intensity: f32) void {
+        fn rasterizeFan(job: *TileRenderJob, vertices: []ClipVertex, base_color: u32, texture_index: u16, intensity: f32) void {
             if (vertices.len < 3) return;
 
             var screen_pts: [max_clipped_vertices][2]i32 = undefined;
@@ -2387,7 +2396,7 @@ pub const Renderer = struct {
 
                 const shading = TileRenderer.ShadingParams{
                     .base_color = base_color,
-                    .texture = job.texture,
+                    .texture = job.textureForIndex(texture_index),
                     .uv0 = vertices[0].uv,
                     .uv1 = vertices[tri_idx].uv,
                     .uv2 = vertices[tri_idx + 1].uv,
@@ -2433,7 +2442,7 @@ pub const Renderer = struct {
                 const clipped_count = clipPolygonToNearPlane(clip_input[0..], near_plane, &clipped);
                 if (clipped_count < 3) continue;
 
-                rasterizeFan(job, clipped[0..clipped_count], packet.base_color, packet.intensity);
+                rasterizeFan(job, clipped[0..clipped_count], packet.base_color, packet.texture_index, packet.intensity);
 
                 if (job.draw_wireframe and !packet.flags.cull_wire) {
                     const p0 = job.projectToScreen(camera_positions[0]);
@@ -2616,6 +2625,7 @@ pub const Renderer = struct {
             p2_cam,
             uv,
             tri.base_color,
+            tri.texture_index,
             intensity,
             flags,
         );
@@ -3253,6 +3263,7 @@ pub const Renderer = struct {
             p2: math.Vec3,
             uv: [3]math.Vec2,
             base_color: u32,
+            texture_index: u16,
             intensity: f32,
             flags: TriangleFlags,
         ) !void {
@@ -3264,6 +3275,7 @@ pub const Renderer = struct {
                 .camera = .{ p0, p1, p2 },
                 .uv = uv,
                 .base_color = base_color,
+                .texture_index = texture_index,
                 .intensity = intensity,
                 .flags = flags,
                 .triangle_id = tri_idx,
@@ -3687,7 +3699,12 @@ pub const Renderer = struct {
     }
 
     pub fn setTexture(self: *Renderer, tex: *const texture.Texture) void {
-        self.texture = tex;
+        self.single_texture_binding[0] = tex;
+        self.textures = self.single_texture_binding[0..];
+    }
+
+    pub fn setTextures(self: *Renderer, textures: []const ?*const texture.Texture) void {
+        self.textures = textures;
     }
 
     /// The main render loop function for a single frame.
@@ -5392,7 +5409,7 @@ pub const Renderer = struct {
                 .tri_list = &tile_lists[tile_idx],
                 .packets = triangles,
                 .draw_wireframe = self.show_wireframe,
-                .texture = self.texture,
+                .textures = self.textures,
                 .projection = projection,
             };
         }

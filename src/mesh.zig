@@ -69,11 +69,20 @@ pub const Triangle = struct {
     v2: usize, // Index of the third vertex.
     cull_flags: TriangleCullFlags = .{}, // Flags for rendering.
     base_color: u32 = default_color,
+    texture_index: u16 = no_texture_index,
 
     pub const default_color: u32 = 0xFF7F7F7F;
+    pub const no_texture_index: u16 = std.math.maxInt(u16);
 
     pub fn new(v0: usize, v1: usize, v2: usize) Triangle {
-        return Triangle{ .v0 = v0, .v1 = v1, .v2 = v2, .cull_flags = .{}, .base_color = default_color };
+        return Triangle{
+            .v0 = v0,
+            .v1 = v1,
+            .v2 = v2,
+            .cull_flags = .{},
+            .base_color = default_color,
+            .texture_index = no_texture_index,
+        };
     }
 
     pub fn newWithCulling(v0: usize, v1: usize, v2: usize, cull_fill: bool, cull_wireframe: bool) Triangle {
@@ -83,11 +92,19 @@ pub const Triangle = struct {
             .v2 = v2,
             .cull_flags = .{ .cull_fill = cull_fill, .cull_wireframe = cull_wireframe },
             .base_color = default_color,
+            .texture_index = no_texture_index,
         };
     }
 
     pub fn newWithColor(v0: usize, v1: usize, v2: usize, color: u32) Triangle {
-        return Triangle{ .v0 = v0, .v1 = v1, .v2 = v2, .cull_flags = .{}, .base_color = color };
+        return Triangle{
+            .v0 = v0,
+            .v1 = v1,
+            .v2 = v2,
+            .cull_flags = .{},
+            .base_color = color,
+            .texture_index = no_texture_index,
+        };
     }
 
     pub fn newWithCullingAndColor(v0: usize, v1: usize, v2: usize, cull_fill: bool, cull_wireframe: bool, color: u32) Triangle {
@@ -97,6 +114,7 @@ pub const Triangle = struct {
             .v2 = v2,
             .cull_flags = .{ .cull_fill = cull_fill, .cull_wireframe = cull_wireframe },
             .base_color = color,
+            .texture_index = no_texture_index,
         };
     }
 };

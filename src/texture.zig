@@ -77,7 +77,9 @@ pub const Texture = struct {
 
 /// Loads a texture from a .bmp file. This is a manual parser for the BMP format.
 pub fn loadBmp(allocator: std.mem.Allocator, path: []const u8) !Texture {
-    const data = try std.fs.cwd().openFile(path, .{}).readToEndAlloc(allocator, std.math.maxInt(usize));
+    var file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+    const data = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
     defer allocator.free(data);
 
     // --- BMP Header Parsing ---

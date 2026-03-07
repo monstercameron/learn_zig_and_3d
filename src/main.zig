@@ -84,11 +84,22 @@ extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
 const Window = @import("window.zig").Window;
 const Renderer = @import("renderer.zig").Renderer;
 const obj_loader = @import("obj_loader.zig");
+const gltf_loader = @import("gltf_loader.zig");
 const mesh_module = @import("mesh.zig");
+const texture = @import("texture.zig");
 const config = @import("app_config.zig");
 const log = @import("log.zig");
 
 const app_logger = log.get("app.main");
+const preferred_model_path = "resources/models/gun/rovelver1.0.0.glb";
+const fallback_model_path = "resources/models/teapot.obj";
+const gun_bullet_albedo_path = "resources/models/gun/Texture/Cylinder/1_bullet-low_ALBEDO.bmp";
+const gun_body_albedo_path = "resources/models/gun/Texture/body/1_body_low_ALBEDO.004.bmp";
+
+const SceneAsset = struct {
+    mesh: mesh_module.Mesh,
+    uses_gun_materials: bool,
+};
 
 /// # Application Entry Point
 /// This `main` function is where the program execution begins.
@@ -128,16 +139,27 @@ pub fn main() !void {
     defer renderer.deinit(); // Guarantees the renderer is cleaned up on exit.
     app_logger.infoSub("bootstrap", "renderer initialized backbuffer={d}x{d}", .{ renderer.bitmap.width, renderer.bitmap.height });
 
-    // Load a 3D model from an .obj file.
-    var teapot = try obj_loader.load(allocator, "resources/models/teapot.obj");
-    defer teapot.deinit(); // Guarantees the mesh memory is freed on exit.
-    teapot.centerToOrigin(); // Center the model at (0,0,0).
-    levelLiftMeshToGround(&teapot);
-    try levelAppendGroundPlane(&teapot, allocator);
+    var bullet_albedo: ?texture.Texture = null;
+    defer if (bullet_albedo) |*tex| tex.deinit();
+    var body_albedo: ?texture.Texture = null;
+    defer if (body_albedo) |*tex| tex.deinit();
+    var material_textures = [_]?*const texture.Texture{ null, null, null };
+
+    // Load the preferred scene model, falling back to the teapot if the GLB path fails.
+    var scene_asset = try loadPrimaryMesh(allocator);
+    defer scene_asset.mesh.deinit(); // Guarantees the mesh memory is freed on exit.
+    if (scene_asset.uses_gun_materials) {
+        configureGunTextures(allocator, &bullet_albedo, &body_albedo, &material_textures);
+        renderer.setTextures(material_textures[0..]);
+    }
+
+    scene_asset.mesh.centerToOrigin(); // Center the model at (0,0,0).
+    levelLiftMeshToGround(&scene_asset.mesh);
+    try levelAppendGroundPlane(&scene_asset.mesh, allocator);
     app_logger.infoSub(
         "assets",
-        "loaded teapot mesh vertices={} triangles={} meshlets={}",
-        .{ teapot.vertices.len, teapot.triangles.len, teapot.meshlets.len },
+        "loaded scene mesh vertices={} triangles={} meshlets={}",
+        .{ scene_asset.mesh.vertices.len, scene_asset.mesh.triangles.len, scene_asset.mesh.meshlets.len },
     );
 
     renderer.setCameraPosition(math.Vec3.new(0.0, 2.0, -10.0));
@@ -226,7 +248,7 @@ pub fn main() !void {
         }
         // This is the main drawing call.
         // JS Analogy: `renderer.renderScene(scene);` inside a `requestAnimationFrame` callback.
-        renderer.render3DMeshWithPump(&teapot, MessagePump.pump) catch |err| {
+        renderer.render3DMeshWithPump(&scene_asset.mesh, MessagePump.pump) catch |err| {
             // If rendering fails, log the error and exit the loop.
             if (err == error.RenderInterrupted) {
                 app_logger.info("render interrupted by shutdown request", .{});
@@ -247,6 +269,54 @@ pub fn main() !void {
     }
 
     app_logger.info("exited main loop after {} frames", .{frame_count});
+}
+
+fn loadPrimaryMesh(allocator: std.mem.Allocator) !SceneAsset {
+    if (gltf_loader.load(allocator, preferred_model_path)) |mesh| {
+        app_logger.infoSub("assets", "loaded gltf scene from {s}", .{preferred_model_path});
+        return .{
+            .mesh = mesh,
+            .uses_gun_materials = true,
+        };
+    } else |err| {
+        app_logger.warn("preferred model load failed for {s}: {s}; falling back to {s}", .{
+            preferred_model_path,
+            @errorName(err),
+            fallback_model_path,
+        });
+    }
+
+    const fallback_mesh = try obj_loader.load(allocator, fallback_model_path);
+    app_logger.infoSub("assets", "loaded fallback obj from {s}", .{fallback_model_path});
+    return .{
+        .mesh = fallback_mesh,
+        .uses_gun_materials = false,
+    };
+}
+
+fn configureGunTextures(
+    allocator: std.mem.Allocator,
+    bullet_albedo: *?texture.Texture,
+    body_albedo: *?texture.Texture,
+    material_textures: *[3]?*const texture.Texture,
+) void {
+    bullet_albedo.* = texture.loadBmp(allocator, gun_bullet_albedo_path) catch |err| blk: {
+        app_logger.warn("failed to load gun bullet texture {s}: {s}", .{ gun_bullet_albedo_path, @errorName(err) });
+        break :blk null;
+    };
+    if (bullet_albedo.*) |*tex| {
+        material_textures[0] = tex;
+        app_logger.infoSub("assets", "loaded gun bullet albedo {s}", .{gun_bullet_albedo_path});
+    }
+
+    body_albedo.* = texture.loadBmp(allocator, gun_body_albedo_path) catch |err| blk: {
+        app_logger.warn("failed to load gun body texture {s}: {s}", .{ gun_body_albedo_path, @errorName(err) });
+        break :blk null;
+    };
+    if (body_albedo.*) |*tex| {
+        material_textures[1] = tex;
+        app_logger.infoSub("assets", "loaded gun body albedo {s}", .{gun_body_albedo_path});
+    }
 }
 
 fn levelLiftMeshToGround(mesh: *mesh_module.Mesh) void {

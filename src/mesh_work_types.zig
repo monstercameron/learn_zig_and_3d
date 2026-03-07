@@ -12,6 +12,7 @@ pub const TrianglePacket = struct {
     camera: [3]math.Vec3,
     uv: [3]math.Vec2,
     base_color: u32,
+    texture_index: u16,
     intensity: f32,
     flags: TriangleFlags,
     triangle_id: usize,
