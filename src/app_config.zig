@@ -86,7 +86,7 @@ pub var POST_SSAO_BIAS: f32 = 0.08;
 /// Blurring threshold difference between sampling depths.
 pub var POST_SSAO_BLUR_DEPTH_THRESHOLD: f32 = 0.55;
 /// Enables Temporal Anti-Aliasing (TAA) to smooth out jagged edges across frames.
-pub var POST_TAA_ENABLED: bool = false;
+pub var POST_TAA_ENABLED: bool = true;
 /// Percentage mix of historic frame data blended into current image.
 pub var POST_TAA_HISTORY_PERCENT: i32 = 92;
 /// A depth threshold allowing TAA to discard historic data to prevent ghosting.

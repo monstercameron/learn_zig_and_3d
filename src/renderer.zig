@@ -266,21 +266,21 @@ const DepthOfFieldJobContext = struct {
         const depth = ctx.scene_depth;
         const w = ctx.width;
         const h = ctx.height;
-                const max_rad = @as(f32, @floatFromInt(ctx.max_blur_radius));
+        const max_rad = @as(f32, @floatFromInt(ctx.max_blur_radius));
 
         for (ctx.start_row..ctx.end_row) |y| {
             for (0..w) |x| {
                 const idx = y * w + x;
                 const d = depth[idx];
                 const dist_from_focal = @abs(d - ctx.focal_distance);
-                
+
                 var blur_amount: f32 = 0.0;
                 if (dist_from_focal > ctx.focal_range) {
                     blur_amount = @min(1.0, (dist_from_focal - ctx.focal_range) / ctx.focal_range);
                 }
-                
+
                 const blur_radius = blur_amount * max_rad;
-                
+
                 if (blur_radius < 1.0) {
                     out_pixels[idx] = pixels[idx];
                 } else {
@@ -289,16 +289,18 @@ const DepthOfFieldJobContext = struct {
                     var g_sum: u32 = 0;
                     var b_sum: u32 = 0;
                     var count: u32 = 0;
-                    
+
                     const min_y = @max(0, @as(i32, @intCast(y)) - irad);
                     const max_y = @min(@as(i32, @intCast(h)) - 1, @as(i32, @intCast(y)) + irad);
                     const min_x = @max(0, @as(i32, @intCast(x)) - irad);
                     const max_x = @min(@as(i32, @intCast(w)) - 1, @as(i32, @intCast(x)) + irad);
-                    
+
+                    const step: i32 = if (irad > 2) 2 else 1;
+
                     var sy: i32 = min_y;
-                    while (sy <= max_y) : (sy += 1) {
+                    while (sy <= max_y) : (sy += step) {
                         var sx: i32 = min_x;
-                        while (sx <= max_x) : (sx += 1) {
+                        while (sx <= max_x) : (sx += step) {
                             const sidx = @as(usize, @intCast(sy)) * w + @as(usize, @intCast(sx));
                             const p = pixels[sidx];
                             r_sum += (p >> 16) & 0xFF;
@@ -307,7 +309,7 @@ const DepthOfFieldJobContext = struct {
                             count += 1;
                         }
                     }
-                    
+
                     const out_r = r_sum / count;
                     const out_g = g_sum / count;
                     const out_b = b_sum / count;
@@ -737,21 +739,24 @@ fn projectCameraPositionFloat(position: math.Vec3, projection: ProjectionParams)
 }
 
 fn sampleHistoryColor(history: []const u32, width: usize, height: usize, screen: math.Vec2) ?[3]f32 {
-    if (screen.x < 0.0 or screen.y < 0.0) return null;
-    const max_x = @as(f32, @floatFromInt(width - 1));
-    const max_y = @as(f32, @floatFromInt(height - 1));
-    if (screen.x > max_x or screen.y > max_y) return null;
+    const w_f = @as(f32, @floatFromInt(width));
+    const h_f = @as(f32, @floatFromInt(height));
+    if (screen.x < 0.0 or screen.y < 0.0 or screen.x >= w_f or screen.y >= h_f) return null;
 
-    const x0_i = @as(i32, @intFromFloat(@floor(screen.x)));
-    const y0_i = @as(i32, @intFromFloat(@floor(screen.y)));
-    const x1_i = @min(@as(i32, @intCast(width - 1)), x0_i + 1);
-    const y1_i = @min(@as(i32, @intCast(height - 1)), y0_i + 1);
-    const frac_x = std.math.clamp(screen.x - @as(f32, @floatFromInt(x0_i)), 0.0, 1.0);
-    const frac_y = std.math.clamp(screen.y - @as(f32, @floatFromInt(y0_i)), 0.0, 1.0);
-    const x0: usize = @intCast(x0_i);
-    const y0: usize = @intCast(y0_i);
-    const x1: usize = @intCast(x1_i);
-    const y1: usize = @intCast(y1_i);
+    const adj_x = screen.x - 0.5;
+    const adj_y = screen.y - 0.5;
+    const x0_i = @as(i32, @intFromFloat(@floor(adj_x)));
+    const y0_i = @as(i32, @intFromFloat(@floor(adj_y)));
+    const cx0 = @max(0, @min(@as(i32, @intCast(width - 1)), x0_i));
+    const cy0 = @max(0, @min(@as(i32, @intCast(height - 1)), y0_i));
+    const cx1 = @max(0, @min(@as(i32, @intCast(width - 1)), x0_i + 1));
+    const cy1 = @max(0, @min(@as(i32, @intCast(height - 1)), y0_i + 1));
+    const frac_x = std.math.clamp(adj_x - @as(f32, @floatFromInt(x0_i)), 0.0, 1.0);
+    const frac_y = std.math.clamp(adj_y - @as(f32, @floatFromInt(y0_i)), 0.0, 1.0);
+    const x0: usize = @intCast(cx0);
+    const y0: usize = @intCast(cy0);
+    const x1: usize = @intCast(cx1);
+    const y1: usize = @intCast(cy1);
 
     const c00 = history[y0 * width + x0];
     const c10 = history[y0 * width + x1];
@@ -773,8 +778,8 @@ fn sampleHistoryColor(history: []const u32, width: usize, height: usize, screen:
 }
 
 fn sampleHistoryDepthNearest(history_depth: []const f32, width: usize, height: usize, screen: math.Vec2) ?f32 {
-    const x = @as(i32, @intFromFloat(@floor(screen.x + 0.5)));
-    const y = @as(i32, @intFromFloat(@floor(screen.y + 0.5)));
+    const x = @as(i32, @intFromFloat(@floor(screen.x)));
+    const y = @as(i32, @intFromFloat(@floor(screen.y)));
     if (x < 0 or y < 0 or x >= @as(i32, @intCast(width)) or y >= @as(i32, @intCast(height))) return null;
     const sample = history_depth[@as(usize, @intCast(y)) * width + @as(usize, @intCast(x))];
     if (!std.math.isFinite(sample)) return null;
@@ -796,7 +801,7 @@ fn clampHistoryToNeighborhood(pixels: []const u32, width: usize, height: usize, 
             const r = @as(f32, @floatFromInt((pixel >> 16) & 0xFF));
             const g = @as(f32, @floatFromInt((pixel >> 8) & 0xFF));
             const b = @as(f32, @floatFromInt(pixel & 0xFF));
-            
+
             mu[0] += r;
             mu[1] += g;
             mu[2] += b;
@@ -855,11 +860,21 @@ fn rayIntersectsSphere(origin: math.Vec3, direction: math.Vec3, center: math.Vec
 }
 
 fn rayIntersectsTriangle8(
-    orig_x: @Vector(8, f32), orig_y: @Vector(8, f32), orig_z: @Vector(8, f32),
-    dir_x: @Vector(8, f32), dir_y: @Vector(8, f32), dir_z: @Vector(8, f32),
-    v0x: @Vector(8, f32), v0y: @Vector(8, f32), v0z: @Vector(8, f32),
-    v1x: @Vector(8, f32), v1y: @Vector(8, f32), v1z: @Vector(8, f32),
-    v2x: @Vector(8, f32), v2y: @Vector(8, f32), v2z: @Vector(8, f32),
+    orig_x: @Vector(8, f32),
+    orig_y: @Vector(8, f32),
+    orig_z: @Vector(8, f32),
+    dir_x: @Vector(8, f32),
+    dir_y: @Vector(8, f32),
+    dir_z: @Vector(8, f32),
+    v0x: @Vector(8, f32),
+    v0y: @Vector(8, f32),
+    v0z: @Vector(8, f32),
+    v1x: @Vector(8, f32),
+    v1y: @Vector(8, f32),
+    v1z: @Vector(8, f32),
+    v2x: @Vector(8, f32),
+    v2y: @Vector(8, f32),
+    v2z: @Vector(8, f32),
     active_mask: @Vector(8, bool),
 ) bool {
     const eps: @Vector(8, f32) = @splat(1e-6);
@@ -901,7 +916,7 @@ fn rayIntersectsTriangle8(
 
     const t = (edge2_x * qvec_x + edge2_y * qvec_y + edge2_z * qvec_z) * inv_det;
     const valid_t = t > eps;
-    
+
     var hit = active_mask;
     hit = @select(bool, hit, valid_det, @as(@Vector(8, bool), @splat(false)));
     hit = @select(bool, hit, valid_u_min, @as(@Vector(8, bool), @splat(false)));
@@ -1636,6 +1651,10 @@ const AdaptiveShadowTileJob = struct {
             .{ x, max_y },
             .{ max_x, max_y },
             .{ center_x, center_y },
+            .{ x, center_y },
+            .{ max_x, center_y },
+            .{ center_x, y },
+            .{ center_x, max_y },
         };
 
         var any_valid = false;
@@ -1688,18 +1707,25 @@ const AdaptiveShadowTileJob = struct {
         const center_x = @min(origin_x + @divTrunc(shadow_scale, 2), ctx.renderer.bitmap.width - 1);
         const center_y = @min(origin_y + @divTrunc(shadow_scale, 2), ctx.renderer.bitmap.height - 1);
         const center = ctx.evaluateShadowPoint(center_x, center_y);
-        if (!center.valid) return .{ .valid = false, .coverage = 0.0 };
-        if (center.coverage >= 1.0) return center;
-        if (shadow_scale <= 2) return center;
+        if (!center.valid or shadow_scale <= 2) return center;
 
         const corner_a = ctx.evaluateShadowPoint(origin_x, origin_y);
-        const corner_b = ctx.evaluateShadowPoint(max_x, max_y);
-        var max_coverage = center.coverage;
-        if (corner_a.valid and corner_a.coverage > max_coverage) max_coverage = corner_a.coverage;
-        if (corner_b.valid and corner_b.coverage > max_coverage) max_coverage = corner_b.coverage;
-        if (max_coverage <= 0.0) return .{ .valid = true, .coverage = 0.0 };
-        if (max_coverage >= 1.0) return .{ .valid = true, .coverage = 0.5 };
-        return .{ .valid = true, .coverage = max_coverage };
+        const corner_b = ctx.evaluateShadowPoint(max_x, origin_y);
+        const corner_c = ctx.evaluateShadowPoint(origin_x, max_y);
+        const corner_d = ctx.evaluateShadowPoint(max_x, max_y);
+        
+        var min_c = center.coverage;
+        var max_c = center.coverage;
+        if (corner_a.valid) { min_c = @min(min_c, corner_a.coverage); max_c = @max(max_c, corner_a.coverage); }
+        if (corner_b.valid) { min_c = @min(min_c, corner_b.coverage); max_c = @max(max_c, corner_b.coverage); }
+        if (corner_c.valid) { min_c = @min(min_c, corner_c.coverage); max_c = @max(max_c, corner_c.coverage); }
+        if (corner_d.valid) { min_c = @min(min_c, corner_d.coverage); max_c = @max(max_c, corner_d.coverage); }
+        
+        if (min_c == max_c) {
+            return .{ .valid = true, .coverage = min_c };
+        }
+        
+        return .{ .valid = true, .coverage = 0.5 };
     }
 
     fn sampleShadowCache(
@@ -1819,7 +1845,7 @@ const AdaptiveShadowTileJob = struct {
         // Apply a small 3x3 PCF-style box filter in the edge cache to anti-alias the outline
         var coverage_sum: f32 = 0.0;
         var valid_count: f32 = 0.0;
-        
+
         var dy: i32 = -1;
         while (dy <= 1) : (dy += 1) {
             var dx: i32 = -1;
@@ -1838,12 +1864,12 @@ const AdaptiveShadowTileJob = struct {
                 }
             }
         }
-        
+
         if (valid_count == 0.0) return coarse;
-        
+
         const avg_coverage = coverage_sum / valid_count;
         const blend = std.math.clamp(config.POST_HYBRID_SHADOW_EDGE_BLEND, 0.0, 1.0);
-        
+
         return .{
             .valid = true,
             .coverage = avg_coverage * (1.0 - blend) + coarse.coverage * blend,
@@ -1907,20 +1933,19 @@ const AdaptiveShadowTileJob = struct {
                     const v0 = ctx.mesh.vertices[tri.v0];
                     const v1 = ctx.mesh.vertices[tri.v1];
                     const v2 = ctx.mesh.vertices[tri.v2];
-                    v0x[j] = v0.x; v0y[j] = v0.y; v0z[j] = v0.z;
-                    v1x[j] = v1.x; v1y[j] = v1.y; v1z[j] = v1.z;
-                    v2x[j] = v2.x; v2y[j] = v2.y; v2z[j] = v2.z;
+                    v0x[j] = v0.x;
+                    v0y[j] = v0.y;
+                    v0z[j] = v0.z;
+                    v1x[j] = v1.x;
+                    v1y[j] = v1.y;
+                    v1z[j] = v1.z;
+                    v2x[j] = v2.x;
+                    v2y[j] = v2.y;
+                    v2z[j] = v2.z;
                     active_mask[j] = true;
                 }
 
-                if (rayIntersectsTriangle8(
-                    orig_x, orig_y, orig_z,
-                    dir_x, dir_y, dir_z,
-                    v0x, v0y, v0z,
-                    v1x, v1y, v1z,
-                    v2x, v2y, v2z,
-                    active_mask
-                )) return true;
+                if (rayIntersectsTriangle8(orig_x, orig_y, orig_z, dir_x, dir_y, dir_z, v0x, v0y, v0z, v1x, v1y, v1z, v2x, v2y, v2z, active_mask)) return true;
             }
         }
         return false;
@@ -5547,7 +5572,11 @@ pub const Renderer = struct {
                 );
                 if (previous_camera.z <= previous_view.projection.near_plane + NEAR_EPSILON) continue;
 
-                const previous_screen = projectCameraPositionFloat(previous_camera, previous_view.projection);
+                const previous_screen_raw = projectCameraPositionFloat(previous_camera, previous_view.projection);
+                const previous_screen = math.Vec2.new(
+                    previous_screen_raw.x - previous_view.projection.jitter_x + current_view.projection.jitter_x,
+                    previous_screen_raw.y - previous_view.projection.jitter_y + current_view.projection.jitter_y,
+                );
                 const previous_depth = sampleHistoryDepthNearest(self.taa_scratch.history_depth, width, height, previous_screen) orelse continue;
                 if (@abs(previous_depth - previous_camera.z) > self.temporal_aa_config.depth_threshold) continue;
 
@@ -5624,21 +5653,21 @@ pub const Renderer = struct {
     fn applyDepthOfFieldPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
-        
+
         const scene_width: usize = @intCast(self.bitmap.width);
         const scene_height: usize = @intCast(self.bitmap.height);
-        
+
         const center_x = scene_width / 2;
         const center_y = scene_height / 2;
         var center_depth = self.scene_depth[center_y * scene_width + center_x];
-        
+
         // Safety guard for extreme depths
         if (center_depth > 1000.0) center_depth = 1000.0;
-        
+
         // Check a 3x3 region in center to ensure targeting isn't noisy
         var min_depth: f32 = 1000.0;
         const box_size: i32 = 4;
-        
+
         var cy: i32 = -box_size;
         while (cy <= box_size) : (cy += 1) {
             var cx: i32 = -box_size;
@@ -5651,19 +5680,19 @@ pub const Renderer = struct {
                 }
             }
         }
-        
+
         if (min_depth > 1000.0) min_depth = 1000.0;
-        
+
         self.dof_target_focal_distance = min_depth;
-        
+
         // Smooth lerp (Eye Accommodation)
         self.dof_focal_distance = self.dof_focal_distance + (self.dof_target_focal_distance - self.dof_focal_distance) * 0.1;
-        
+
         const auto_focal_distance = self.dof_focal_distance;
-        
+
         const stripe_count = computeStripeCount(self.dof_job_contexts.len, scene_height);
         const rows_per_job = if (stripe_count <= 1) scene_height else (scene_height + stripe_count - 1) / stripe_count;
-        
+
         if (stripe_count <= 1 or self.job_system == null) {
             self.dof_job_contexts[0] = .{
                 .scene_pixels = self.bitmap.pixels,
@@ -5685,7 +5714,7 @@ pub const Renderer = struct {
                 const start_row = stripe_index * rows_per_job;
                 if (start_row >= scene_height) break;
                 const end_row = @min(scene_height, start_row + rows_per_job);
-                
+
                 self.dof_job_contexts[stripe_index] = .{
                     .scene_pixels = self.bitmap.pixels,
                     .scratch_pixels = self.dof_scratch.pixels,
@@ -5698,13 +5727,13 @@ pub const Renderer = struct {
                     .focal_range = config.POST_DOF_FOCAL_RANGE,
                     .max_blur_radius = config.POST_DOF_BLUR_RADIUS,
                 };
-                
+
                 self.color_grade_jobs[stripe_index] = Job.init(
                     DepthOfFieldJobContext.run,
                     @ptrCast(&self.dof_job_contexts[stripe_index]),
                     &parent_job,
                 );
-                
+
                 if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
                     DepthOfFieldJobContext.run(@ptrCast(&self.dof_job_contexts[stripe_index]));
                 }
@@ -5713,13 +5742,13 @@ pub const Renderer = struct {
             parent_job.complete();
             parent_job.wait();
         }
-        
+
         // Copy back to main framebuffer
         @memcpy(self.bitmap.pixels, self.dof_scratch.pixels);
-        
+
         self.recordRenderPassTiming("dof", pass_start);
     }
-    
+
     fn applyBloomPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0) return;
         const pass_start = std.time.nanoTimestamp();
