@@ -194,7 +194,7 @@ const MeshletTelemetry = struct {
     touched_tiles: usize = 0,
 };
 
-const max_render_passes = 8;
+const max_render_passes = 10;
 
 const RenderPassTiming = struct {
     name: []const u8,
@@ -226,12 +226,34 @@ const AOScratch = struct {
     depth: []f32,
 };
 
+const TemporalAAScratch = struct {
+    history_pixels: []u32,
+    resolve_pixels: []u32,
+    history_depth: []f32,
+    valid: bool,
+};
+
 const AmbientOcclusionConfig = struct {
     downsample: usize,
     radius: f32,
     strength: f32,
     bias: f32,
     blur_depth_threshold: f32,
+};
+
+const TemporalAAConfig = struct {
+    history_weight: f32,
+    depth_threshold: f32,
+};
+
+const ProjectionParams = struct {
+    center_x: f32,
+    center_y: f32,
+    x_scale: f32,
+    y_scale: f32,
+    near_plane: f32,
+    jitter_x: f32,
+    jitter_y: f32,
 };
 
 const DepthFogConfig = struct {
@@ -379,6 +401,30 @@ const ao_sample_offsets = [_][2]i32{
     .{ -1, 1 },
     .{ 1, -1 },
     .{ -1, -1 },
+};
+
+const TemporalAAViewState = struct {
+    camera_position: math.Vec3,
+    basis_right: math.Vec3,
+    basis_up: math.Vec3,
+    basis_forward: math.Vec3,
+    projection: ProjectionParams,
+
+    fn init(
+        camera_position: math.Vec3,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        projection: ProjectionParams,
+    ) TemporalAAViewState {
+        return .{
+            .camera_position = camera_position,
+            .basis_right = basis_right,
+            .basis_up = basis_up,
+            .basis_forward = basis_forward,
+            .projection = projection,
+        };
+    }
 };
 
 fn chooseShadowBasis(light_dir_world: math.Vec3) struct { right: math.Vec3, up: math.Vec3, forward: math.Vec3 } {
@@ -582,6 +628,129 @@ fn cameraToWorldPosition(
             math.Vec3.scale(basis_forward, camera_pos.z),
         ),
     );
+}
+
+const taa_jitter_sequence = [_]math.Vec2{
+    .{ .x = 0.0, .y = -0.083333334 },
+    .{ .x = -0.125, .y = 0.083333334 },
+    .{ .x = 0.125, .y = -0.19444445 },
+    .{ .x = -0.1875, .y = -0.027777778 },
+    .{ .x = 0.0625, .y = 0.1388889 },
+    .{ .x = -0.0625, .y = -0.1388889 },
+    .{ .x = 0.1875, .y = 0.027777778 },
+    .{ .x = -0.21875, .y = 0.19444445 },
+};
+
+fn taaJitterForFrame(frame_index: u64) math.Vec2 {
+    return taa_jitter_sequence[@as(usize, @intCast(frame_index % taa_jitter_sequence.len))];
+}
+
+fn projectCameraPositionFloat(position: math.Vec3, projection: ProjectionParams) math.Vec2 {
+    const clamped_z = if (position.z < projection.near_plane + NEAR_EPSILON)
+        projection.near_plane + NEAR_EPSILON
+    else
+        position.z;
+    const inv_z = 1.0 / clamped_z;
+    const ndc_x = position.x * inv_z * projection.x_scale;
+    const ndc_y = position.y * inv_z * projection.y_scale;
+    return .{
+        .x = ndc_x * projection.center_x + projection.center_x + projection.jitter_x,
+        .y = -ndc_y * projection.center_y + projection.center_y + projection.jitter_y,
+    };
+}
+
+fn sampleHistoryColor(history: []const u32, width: usize, height: usize, screen: math.Vec2) ?[3]f32 {
+    if (screen.x < 0.0 or screen.y < 0.0) return null;
+    const max_x = @as(f32, @floatFromInt(width - 1));
+    const max_y = @as(f32, @floatFromInt(height - 1));
+    if (screen.x > max_x or screen.y > max_y) return null;
+
+    const x0_i = @as(i32, @intFromFloat(@floor(screen.x)));
+    const y0_i = @as(i32, @intFromFloat(@floor(screen.y)));
+    const x1_i = @min(@as(i32, @intCast(width - 1)), x0_i + 1);
+    const y1_i = @min(@as(i32, @intCast(height - 1)), y0_i + 1);
+    const frac_x = std.math.clamp(screen.x - @as(f32, @floatFromInt(x0_i)), 0.0, 1.0);
+    const frac_y = std.math.clamp(screen.y - @as(f32, @floatFromInt(y0_i)), 0.0, 1.0);
+    const x0: usize = @intCast(x0_i);
+    const y0: usize = @intCast(y0_i);
+    const x1: usize = @intCast(x1_i);
+    const y1: usize = @intCast(y1_i);
+
+    const c00 = history[y0 * width + x0];
+    const c10 = history[y0 * width + x1];
+    const c01 = history[y1 * width + x0];
+    const c11 = history[y1 * width + x1];
+
+    const top_r = @as(f32, @floatFromInt((c00 >> 16) & 0xFF)) + (@as(f32, @floatFromInt((c10 >> 16) & 0xFF)) - @as(f32, @floatFromInt((c00 >> 16) & 0xFF))) * frac_x;
+    const top_g = @as(f32, @floatFromInt((c00 >> 8) & 0xFF)) + (@as(f32, @floatFromInt((c10 >> 8) & 0xFF)) - @as(f32, @floatFromInt((c00 >> 8) & 0xFF))) * frac_x;
+    const top_b = @as(f32, @floatFromInt(c00 & 0xFF)) + (@as(f32, @floatFromInt(c10 & 0xFF)) - @as(f32, @floatFromInt(c00 & 0xFF))) * frac_x;
+    const bottom_r = @as(f32, @floatFromInt((c01 >> 16) & 0xFF)) + (@as(f32, @floatFromInt((c11 >> 16) & 0xFF)) - @as(f32, @floatFromInt((c01 >> 16) & 0xFF))) * frac_x;
+    const bottom_g = @as(f32, @floatFromInt((c01 >> 8) & 0xFF)) + (@as(f32, @floatFromInt((c11 >> 8) & 0xFF)) - @as(f32, @floatFromInt((c01 >> 8) & 0xFF))) * frac_x;
+    const bottom_b = @as(f32, @floatFromInt(c01 & 0xFF)) + (@as(f32, @floatFromInt(c11 & 0xFF)) - @as(f32, @floatFromInt(c01 & 0xFF))) * frac_x;
+
+    return .{
+        top_r + (bottom_r - top_r) * frac_y,
+        top_g + (bottom_g - top_g) * frac_y,
+        top_b + (bottom_b - top_b) * frac_y,
+    };
+}
+
+fn sampleHistoryDepthNearest(history_depth: []const f32, width: usize, height: usize, screen: math.Vec2) ?f32 {
+    const x = @as(i32, @intFromFloat(@floor(screen.x + 0.5)));
+    const y = @as(i32, @intFromFloat(@floor(screen.y + 0.5)));
+    if (x < 0 or y < 0 or x >= @as(i32, @intCast(width)) or y >= @as(i32, @intCast(height))) return null;
+    const sample = history_depth[@as(usize, @intCast(y)) * width + @as(usize, @intCast(x))];
+    if (!std.math.isFinite(sample)) return null;
+    return sample;
+}
+
+fn clampHistoryToNeighborhood(pixels: []const u32, width: usize, height: usize, x: usize, y: usize, history_color: [3]f32) [3]f32 {
+    var min_r: f32 = 255.0;
+    var min_g: f32 = 255.0;
+    var min_b: f32 = 255.0;
+    var max_r: f32 = 0.0;
+    var max_g: f32 = 0.0;
+    var max_b: f32 = 0.0;
+
+    var offset_y: i32 = -1;
+    while (offset_y <= 1) : (offset_y += 1) {
+        const sample_y = @min(@as(i32, @intCast(height - 1)), @max(0, @as(i32, @intCast(y)) + offset_y));
+        var offset_x: i32 = -1;
+        while (offset_x <= 1) : (offset_x += 1) {
+            const sample_x = @min(@as(i32, @intCast(width - 1)), @max(0, @as(i32, @intCast(x)) + offset_x));
+            const pixel = pixels[@as(usize, @intCast(sample_y)) * width + @as(usize, @intCast(sample_x))];
+            const r = @as(f32, @floatFromInt((pixel >> 16) & 0xFF));
+            const g = @as(f32, @floatFromInt((pixel >> 8) & 0xFF));
+            const b = @as(f32, @floatFromInt(pixel & 0xFF));
+            min_r = @min(min_r, r);
+            min_g = @min(min_g, g);
+            min_b = @min(min_b, b);
+            max_r = @max(max_r, r);
+            max_g = @max(max_g, g);
+            max_b = @max(max_b, b);
+        }
+    }
+
+    return .{
+        std.math.clamp(history_color[0], min_r, max_r),
+        std.math.clamp(history_color[1], min_g, max_g),
+        std.math.clamp(history_color[2], min_b, max_b),
+    };
+}
+
+fn blendTemporalColor(current_pixel: u32, history_color: [3]f32, history_weight: f32) u32 {
+    const alpha = current_pixel & 0xFF000000;
+    const current_weight = 1.0 - history_weight;
+    const current_r = @as(f32, @floatFromInt((current_pixel >> 16) & 0xFF));
+    const current_g = @as(f32, @floatFromInt((current_pixel >> 8) & 0xFF));
+    const current_b = @as(f32, @floatFromInt(current_pixel & 0xFF));
+    const out_r = @as(i32, @intFromFloat(current_r * current_weight + history_color[0] * history_weight + 0.5));
+    const out_g = @as(i32, @intFromFloat(current_g * current_weight + history_color[1] * history_weight + 0.5));
+    const out_b = @as(i32, @intFromFloat(current_b * current_weight + history_color[2] * history_weight + 0.5));
+    return alpha |
+        (@as(u32, clampByte(out_r)) << 16) |
+        (@as(u32, clampByte(out_g)) << 8) |
+        @as(u32, clampByte(out_b));
 }
 
 fn rayIntersectsSphere(origin: math.Vec3, direction: math.Vec3, center: math.Vec3, radius: f32) bool {
@@ -1197,6 +1366,28 @@ const AOJobContext = struct {
     fn run(ctx_ptr: *anyopaque) void {
         const ctx: *AOJobContext = @ptrCast(@alignCast(ctx_ptr));
         ctx.renderer.runAmbientOcclusionStageRange(ctx.stage, ctx.start_row, ctx.end_row, ctx.scene_width, ctx.scene_height);
+    }
+};
+
+const TAAJobContext = struct {
+    renderer: *Renderer,
+    current_view: TemporalAAViewState,
+    previous_view: TemporalAAViewState,
+    start_row: usize,
+    end_row: usize,
+    width: usize,
+    height: usize,
+
+    fn run(ctx_ptr: *anyopaque) void {
+        const ctx: *TAAJobContext = @ptrCast(@alignCast(ctx_ptr));
+        ctx.renderer.applyTemporalAARows(
+            ctx.current_view,
+            ctx.previous_view,
+            ctx.start_row,
+            ctx.end_row,
+            ctx.width,
+            ctx.height,
+        );
     }
 };
 
@@ -1930,9 +2121,12 @@ pub const Renderer = struct {
     render_pass_count: usize,
     color_grade_profile: ColorGradeProfile,
     ambient_occlusion_config: AmbientOcclusionConfig,
+    temporal_aa_config: TemporalAAConfig,
     depth_fog_config: DepthFogConfig,
     scene_depth: []f32,
     scene_camera: []math.Vec3,
+    taa_scratch: TemporalAAScratch,
+    taa_previous_view: TemporalAAViewState,
     hybrid_shadow_coarse_cache: []u8,
     hybrid_shadow_coarse_cache_width: usize,
     hybrid_shadow_coarse_cache_height: usize,
@@ -1966,6 +2160,7 @@ pub const Renderer = struct {
     shadow_resolve_job_contexts: []ShadowResolveJobContext,
     shadow_raster_job_contexts: []ShadowRasterJobContext,
     bloom_job_contexts: []BloomJobContext,
+    taa_job_contexts: []TAAJobContext,
     color_grade_job_contexts: []ColorGradeJobContext,
     color_grade_jobs: []Job,
 
@@ -2023,6 +2218,8 @@ pub const Renderer = struct {
         errdefer allocator.free(ao_job_contexts);
         const fog_job_contexts = try allocator.alloc(FogJobContext, color_grade_job_count);
         errdefer allocator.free(fog_job_contexts);
+        const taa_job_contexts = try allocator.alloc(TAAJobContext, color_grade_job_count);
+        errdefer allocator.free(taa_job_contexts);
         const shadow_resolve_job_contexts = try allocator.alloc(ShadowResolveJobContext, color_grade_job_count);
         errdefer allocator.free(shadow_resolve_job_contexts);
         const shadow_raster_job_contexts = try allocator.alloc(ShadowRasterJobContext, color_grade_job_count);
@@ -2035,6 +2232,12 @@ pub const Renderer = struct {
         errdefer allocator.free(scene_depth);
         const scene_camera = try allocator.alloc(math.Vec3, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(scene_camera);
+        const taa_history_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        errdefer allocator.free(taa_history_pixels);
+        const taa_resolve_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        errdefer allocator.free(taa_resolve_pixels);
+        const taa_history_depth = try allocator.alloc(f32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        errdefer allocator.free(taa_history_depth);
         const hybrid_shadow_coarse_downsample = @max(1, config.POST_HYBRID_SHADOW_COARSE_DOWNSAMPLE);
         const hybrid_shadow_coarse_cache_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + hybrid_shadow_coarse_downsample - 1, hybrid_shadow_coarse_downsample))));
         const hybrid_shadow_coarse_cache_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + hybrid_shadow_coarse_downsample - 1, hybrid_shadow_coarse_downsample))));
@@ -2140,6 +2343,10 @@ pub const Renderer = struct {
                 .bias = config.POST_SSAO_BIAS,
                 .blur_depth_threshold = config.POST_SSAO_BLUR_DEPTH_THRESHOLD,
             },
+            .temporal_aa_config = .{
+                .history_weight = @as(f32, @floatFromInt(config.POST_TAA_HISTORY_PERCENT)) / 100.0,
+                .depth_threshold = config.POST_TAA_DEPTH_THRESHOLD,
+            },
             .depth_fog_config = .{
                 .near = config.POST_DEPTH_FOG_NEAR,
                 .far = config.POST_DEPTH_FOG_FAR,
@@ -2151,6 +2358,27 @@ pub const Renderer = struct {
             },
             .scene_depth = scene_depth,
             .scene_camera = scene_camera,
+            .taa_scratch = .{
+                .history_pixels = taa_history_pixels,
+                .resolve_pixels = taa_resolve_pixels,
+                .history_depth = taa_history_depth,
+                .valid = false,
+            },
+            .taa_previous_view = TemporalAAViewState.init(
+                math.Vec3.new(0.0, 1.5, -5.0),
+                math.Vec3.new(1.0, 0.0, 0.0),
+                math.Vec3.new(0.0, 1.0, 0.0),
+                math.Vec3.new(0.0, 0.0, 1.0),
+                .{
+                    .center_x = 0.0,
+                    .center_y = 0.0,
+                    .x_scale = 1.0,
+                    .y_scale = 1.0,
+                    .near_plane = NEAR_CLIP,
+                    .jitter_x = 0.0,
+                    .jitter_y = 0.0,
+                },
+            ),
             .hybrid_shadow_coarse_cache = hybrid_shadow_coarse_cache,
             .hybrid_shadow_coarse_cache_width = hybrid_shadow_coarse_cache_width,
             .hybrid_shadow_coarse_cache_height = hybrid_shadow_coarse_cache_height,
@@ -2213,6 +2441,7 @@ pub const Renderer = struct {
             .shadow_resolve_job_contexts = shadow_resolve_job_contexts,
             .shadow_raster_job_contexts = shadow_raster_job_contexts,
             .bloom_job_contexts = bloom_job_contexts,
+            .taa_job_contexts = taa_job_contexts,
             .color_grade_job_contexts = color_grade_job_contexts,
             .color_grade_jobs = color_grade_jobs,
         };
@@ -2241,6 +2470,9 @@ pub const Renderer = struct {
         if (self.active_tile_indices) |indices| self.allocator.free(indices);
         self.allocator.free(self.scene_depth);
         self.allocator.free(self.scene_camera);
+        self.allocator.free(self.taa_scratch.history_pixels);
+        self.allocator.free(self.taa_scratch.resolve_pixels);
+        self.allocator.free(self.taa_scratch.history_depth);
         self.allocator.free(self.hybrid_shadow_coarse_cache);
         self.allocator.free(self.hybrid_shadow_edge_cache);
         if (self.hybrid_shadow_caster_indices.len != 0) self.allocator.free(self.hybrid_shadow_caster_indices);
@@ -2260,6 +2492,7 @@ pub const Renderer = struct {
         self.allocator.free(self.shadow_resolve_job_contexts);
         self.allocator.free(self.shadow_raster_job_contexts);
         self.allocator.free(self.bloom_job_contexts);
+        self.allocator.free(self.taa_job_contexts);
         self.allocator.free(self.color_grade_job_contexts);
         self.allocator.free(self.color_grade_jobs);
         if (self.tile_buffers) |buffers| {
@@ -2273,14 +2506,6 @@ pub const Renderer = struct {
     }
 
     // ========== TILE RENDER JOB ==========
-
-    const ProjectionParams = struct {
-        center_x: f32,
-        center_y: f32,
-        x_scale: f32,
-        y_scale: f32,
-        near_plane: f32,
-    };
 
     /// This struct is the "context object" for a single tile rendering job.
     /// It packages up all the data a worker thread needs to render one tile.
@@ -2358,8 +2583,8 @@ pub const Renderer = struct {
             const inv_z = 1.0 / clamped_z;
             const ndc_x = position.x * inv_z * self.projection.x_scale;
             const ndc_y = position.y * inv_z * self.projection.y_scale;
-            const screen_x = ndc_x * self.projection.center_x + self.projection.center_x;
-            const screen_y = -ndc_y * self.projection.center_y + self.projection.center_y;
+            const screen_x = ndc_x * self.projection.center_x + self.projection.center_x + self.projection.jitter_x;
+            const screen_y = -ndc_y * self.projection.center_y + self.projection.center_y + self.projection.jitter_y;
             return .{
                 @as(i32, @intFromFloat(screen_x)),
                 @as(i32, @intFromFloat(screen_y)),
@@ -2505,8 +2730,8 @@ pub const Renderer = struct {
                 const inv_z = 1.0 / camera_space.z;
                 const ndc_x = camera_space.x * inv_z * projection_params.x_scale;
                 const ndc_y = camera_space.y * inv_z * projection_params.y_scale;
-                const screen_x = ndc_x * projection_params.center_x + projection_params.center_x;
-                const screen_y = -ndc_y * projection_params.center_y + projection_params.center_y;
+                const screen_x = ndc_x * projection_params.center_x + projection_params.center_x + projection_params.jitter_x;
+                const screen_y = -ndc_y * projection_params.center_y + projection_params.center_y + projection_params.jitter_y;
                 projected_slice[idx][0] = @as(i32, @intFromFloat(screen_x));
                 projected_slice[idx][1] = @as(i32, @intFromFloat(screen_y));
             }
@@ -2743,8 +2968,8 @@ pub const Renderer = struct {
         const inv_z = 1.0 / clamped_z;
         const ndc_x = position.x * inv_z * projection.x_scale;
         const ndc_y = position.y * inv_z * projection.y_scale;
-        const screen_x = ndc_x * projection.center_x + projection.center_x;
-        const screen_y = -ndc_y * projection.center_y + projection.center_y;
+        const screen_x = ndc_x * projection.center_x + projection.center_x + projection.jitter_x;
+        const screen_y = -ndc_y * projection.center_y + projection.center_y + projection.jitter_y;
         return .{
             @as(i32, @intFromFloat(screen_x)),
             @as(i32, @intFromFloat(screen_y)),
@@ -3343,6 +3568,8 @@ pub const Renderer = struct {
                     .x_scale = 0.0,
                     .y_scale = 0.0,
                     .near_plane = NEAR_CLIP,
+                    .jitter_x = 0.0,
+                    .jitter_y = 0.0,
                 },
                 .vertex_generation = 0,
                 .full_vertex_cache_valid = false,
@@ -3850,13 +4077,26 @@ pub const Renderer = struct {
         const center_x = width_f * 0.5;
         const center_y = height_f * 0.5;
 
-        const projection = ProjectionParams{
+        const cache_projection = ProjectionParams{
             .center_x = center_x,
             .center_y = center_y,
             .x_scale = x_scale,
             .y_scale = y_scale,
             .near_plane = NEAR_CLIP,
+            .jitter_x = 0.0,
+            .jitter_y = 0.0,
         };
+        const taa_jitter = if (config.POST_TAA_ENABLED) taaJitterForFrame(self.total_frames_rendered) else math.Vec2.new(0.0, 0.0);
+        const raster_projection = ProjectionParams{
+            .center_x = center_x,
+            .center_y = center_y,
+            .x_scale = x_scale,
+            .y_scale = y_scale,
+            .near_plane = NEAR_CLIP,
+            .jitter_x = taa_jitter.x,
+            .jitter_y = taa_jitter.y,
+        };
+        const taa_view = TemporalAAViewState.init(self.camera_position, right, up, forward, raster_projection);
 
         var cache = &self.mesh_work_cache;
         try cache.ensureCapacity(self.allocator, mesh.vertices.len);
@@ -3868,7 +4108,7 @@ pub const Renderer = struct {
             up,
             forward,
             light_dir,
-            projection,
+            cache_projection,
         );
         if (needs_update) {
             const mesh_work_start = std.time.nanoTimestamp();
@@ -3886,11 +4126,11 @@ pub const Renderer = struct {
                 right,
                 up,
                 forward,
-                projection,
+                cache_projection,
                 &cache.work,
                 light_dir,
             );
-            cache.finalizeUpdate(mesh, self.camera_position, right, up, forward, light_dir, projection);
+            cache.finalizeUpdate(mesh, self.camera_position, right, up, forward, light_dir, cache_projection);
             self.recordRenderPassTiming("mesh_work_update", mesh_work_start);
         } else {
             meshlet_logger.debugSub("work", "reusing cached mesh work", .{});
@@ -3907,16 +4147,16 @@ pub const Renderer = struct {
         if (self.use_tiled_rendering and self.tile_grid != null and self.tile_buffers != null) {
             const tri_count = mesh_work.triangleSlice().len;
             pipeline_logger.debugSub("dispatch", "rendering tiled path triangles={} meshlets={}", .{ tri_count, mesh_work.*.meshlet_len });
-            try self.renderTiled(mesh, view_rotation, light_dir, pump, projection, mesh_work);
+            try self.renderTiled(mesh, view_rotation, light_dir, pump, raster_projection, mesh_work);
             self.recordRenderPassTiming("meshlet_tiled", scene_pass_start);
         } else {
             const tri_count = mesh_work.triangleSlice().len;
             pipeline_logger.debugSub("dispatch", "rendering direct path triangles={} meshlets={}", .{ tri_count, mesh_work.*.meshlet_len });
-            try self.renderDirect(mesh, view_rotation, light_dir, projection, mesh_work);
+            try self.renderDirect(mesh, view_rotation, light_dir, raster_projection, mesh_work);
             self.recordRenderPassTiming("meshlet_direct", scene_pass_start);
         }
 
-        self.applyPostProcessingPasses(mesh, self.camera_position, right, up, forward, projection, light_dir_world, shadow_elapsed_ns);
+        self.applyPostProcessingPasses(mesh, self.camera_position, right, up, forward, taa_view, raster_projection, light_dir_world, shadow_elapsed_ns);
         if (self.show_light_orb) {
             const light_camera_z = light_camera.z;
             if (light_camera_z > NEAR_CLIP) {
@@ -4855,6 +5095,7 @@ pub const Renderer = struct {
         basis_right: math.Vec3,
         basis_up: math.Vec3,
         basis_forward: math.Vec3,
+        current_view: TemporalAAViewState,
         projection: ProjectionParams,
         light_dir_world: math.Vec3,
         shadow_elapsed_ns: i128,
@@ -4863,6 +5104,7 @@ pub const Renderer = struct {
         if (config.POST_HYBRID_SHADOW_ENABLED) self.applyAdaptiveShadowPass(mesh, camera_position, basis_right, basis_up, basis_forward, light_dir_world);
         if (config.POST_SSAO_ENABLED) self.applyAmbientOcclusionPass();
         if (config.POST_DEPTH_FOG_ENABLED) self.applyDepthFogPass();
+        if (config.POST_TAA_ENABLED) self.applyTemporalAAPass(current_view);
         if (config.POST_BLOOM_ENABLED) self.applyBloomPass();
         if (!config.POST_COLOR_CORRECTION_ENABLED) return;
         self.applyBlockbusterColorGradePass();
@@ -5024,6 +5266,116 @@ pub const Renderer = struct {
         parent_job.complete();
         parent_job.wait();
         self.recordRenderPassTiming("depth_fog", pass_start);
+    }
+
+    fn applyTemporalAARows(
+        self: *Renderer,
+        current_view: TemporalAAViewState,
+        previous_view: TemporalAAViewState,
+        start_row: usize,
+        end_row: usize,
+        width: usize,
+        height: usize,
+    ) void {
+        var y = start_row;
+        while (y < end_row) : (y += 1) {
+            const row_start = y * width;
+            var x: usize = 0;
+            while (x < width) : (x += 1) {
+                const idx = row_start + x;
+                const current_pixel = self.bitmap.pixels[idx];
+                self.taa_scratch.resolve_pixels[idx] = current_pixel;
+
+                const current_camera = self.scene_camera[idx];
+                if (!validSceneCameraSample(current_camera)) continue;
+
+                const world_pos = cameraToWorldPosition(
+                    current_view.camera_position,
+                    current_view.basis_right,
+                    current_view.basis_up,
+                    current_view.basis_forward,
+                    current_camera,
+                );
+                const previous_relative = math.Vec3.sub(world_pos, previous_view.camera_position);
+                const previous_camera = math.Vec3.new(
+                    math.Vec3.dot(previous_relative, previous_view.basis_right),
+                    math.Vec3.dot(previous_relative, previous_view.basis_up),
+                    math.Vec3.dot(previous_relative, previous_view.basis_forward),
+                );
+                if (previous_camera.z <= previous_view.projection.near_plane + NEAR_EPSILON) continue;
+
+                const previous_screen = projectCameraPositionFloat(previous_camera, previous_view.projection);
+                const previous_depth = sampleHistoryDepthNearest(self.taa_scratch.history_depth, width, height, previous_screen) orelse continue;
+                if (@abs(previous_depth - previous_camera.z) > self.temporal_aa_config.depth_threshold) continue;
+
+                const previous_color = sampleHistoryColor(self.taa_scratch.history_pixels, width, height, previous_screen) orelse continue;
+                const clamped_history = clampHistoryToNeighborhood(self.bitmap.pixels, width, height, x, y, previous_color);
+                self.taa_scratch.resolve_pixels[idx] = blendTemporalColor(current_pixel, clamped_history, self.temporal_aa_config.history_weight);
+            }
+        }
+    }
+
+    fn applyTemporalAAPass(self: *Renderer, current_view: TemporalAAViewState) void {
+        if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
+        const pass_start = std.time.nanoTimestamp();
+        const width: usize = @intCast(self.bitmap.width);
+        const height: usize = @intCast(self.bitmap.height);
+
+        if (!self.taa_scratch.valid) {
+            @memcpy(self.taa_scratch.history_pixels, self.bitmap.pixels);
+            @memcpy(self.taa_scratch.history_depth, self.scene_depth);
+            self.taa_previous_view = current_view;
+            self.taa_scratch.valid = true;
+            self.recordRenderPassTiming("taa", pass_start);
+            return;
+        }
+
+        const stripe_count = computeStripeCount(self.taa_job_contexts.len, height);
+        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
+
+        if (stripe_count <= 1 or self.job_system == null) {
+            self.applyTemporalAARows(current_view, self.taa_previous_view, 0, height, width, height);
+        } else {
+            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+            var stripe_index: usize = 0;
+            while (stripe_index < stripe_count) : (stripe_index += 1) {
+                const start_row = stripe_index * rows_per_job;
+                if (start_row >= height) break;
+                const end_row = @min(height, start_row + rows_per_job);
+
+                self.taa_job_contexts[stripe_index] = .{
+                    .renderer = self,
+                    .current_view = current_view,
+                    .previous_view = self.taa_previous_view,
+                    .start_row = start_row,
+                    .end_row = end_row,
+                    .width = width,
+                    .height = height,
+                };
+
+                if (stripe_index == 0) continue;
+
+                self.color_grade_jobs[stripe_index] = Job.init(
+                    TAAJobContext.run,
+                    @ptrCast(&self.taa_job_contexts[stripe_index]),
+                    &parent_job,
+                );
+                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+                    TAAJobContext.run(@ptrCast(&self.taa_job_contexts[stripe_index]));
+                }
+            }
+
+            TAAJobContext.run(@ptrCast(&self.taa_job_contexts[0]));
+            parent_job.complete();
+            parent_job.wait();
+        }
+
+        @memcpy(self.bitmap.pixels, self.taa_scratch.resolve_pixels);
+        @memcpy(self.taa_scratch.history_pixels, self.bitmap.pixels);
+        @memcpy(self.taa_scratch.history_depth, self.scene_depth);
+        self.taa_previous_view = current_view;
+        self.taa_scratch.valid = true;
+        self.recordRenderPassTiming("taa", pass_start);
     }
 
     fn applyBloomPass(self: *Renderer) void {

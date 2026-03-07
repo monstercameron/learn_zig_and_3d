@@ -6,14 +6,19 @@ A high-performance, CPU-based 3D rasterizer built from scratch in Zig. This proj
 
 ## Key Features
 
-*   **Advanced Rendering Pipeline**: A complete 3D rendering pipeline, from model loading to final image composition.
+*   **Advanced Rendering Pipeline**: A complete 3D rendering pipeline, from model loading to final image composition, including a deferred rendering path.
 *   **Multi-threaded Rendering**: Utilizes a custom-built, work-stealing job system to parallelize the rendering workload across multiple CPU cores, significantly boosting performance.
-*   **Tile-Based Architecture**: The screen is divided into a grid of tiles that are rendered independently. This approach improves cache locality and is the foundation for the parallel rendering system.
-*   **Real-time Lighting and Shading**: Implements a flat shading model with a dynamic, directional light source that can be manipulated interactively.
+*   **Tile-Based Architecture**: The screen is divided into a grid of tiles that are rendered independently, improving cache locality. Future iterations plan to transition to a meshlet-based compute approach.
+*   **Render Passes (In Progress)**: The pipeline represents a modern deferred shading architecture featuring multiple full-screen and compute kernels:
+    *   **G-Buffer Pass**: Captures albedo, normals, and depth.
+    *   **Deferred Lighting**: Computes complex lighting based on G-Buffer data.
+    *   **Post-Processing**: Includes kernels for Bloom, Screen Space Ambient Occlusion (SSAO), Depth of Field (DoF), and Tonemapping.
+    *   **Shadow Render Pass (WIP)**: Currently implementing a dedicated shadow mapping pass to generate dynamic shadows based on directional and point light sources.
+*   **Real-time Lighting and Shading**: Implements dynamic light sources that can be manipulated interactively.
 *   **Texture Mapping**: Supports textured models, with correct perspective-aware texture coordinate interpolation.
-*   **Model Loading**: Loads 3D models from the Wavefront `.obj` file format.
+*   **Model Loading**: Loads 3D models from the Wavefront `.obj` file format and handles complex mesh structures.
 *   **Interactive Controls**: Full real-time control over the camera and light source position.
-*   **Debug Visualizations**: Includes optional overlays for wireframe rendering and tile boundaries to help visualize the rendering process.
+*   **Debug Visualizations**: Includes optional overlays for wireframe rendering, tile boundaries, and depth/normal visualizations to help debug the rendering process.
 
 ## The Rendering Pipeline
 
@@ -48,26 +53,28 @@ The project is designed with a modular architecture, where each component has a 
 flowchart TD
     subgraph "Main Thread - Frame Setup"
         direction LR
-        A[Input: Mesh Data] --> B(Stage 1: Vertex Processing);
-        B -- Transformed Vertices --> C(Stage 2: Culling & Binning);
-        C -- Per-Tile Triangle Lists --> D{Dispatch Jobs to Workers};
+        A[Input: Scene Data] --> B(Stage 1: Vertex Transform & Culling);
+        B -- Transformed Vertices --> C(Stage 2: Tile Binning/Meshlet Setup);
+        C -- Geometry Data --> D{Dispatch Render Passes};
     end
 
-    subgraph "Worker Threads - Parallel Processing"
+    subgraph "Worker Threads - Render Passes"
         direction TB
-        E((Tile Render Job));
-        D -.-> E;
-        E -- Processes 1 Tile --> F(Stage 3: Rasterization);
-        F -- Covered Pixels --> G(Stage 4: Fragment Shading);
-        G -- Colored Pixels --> H((Rendered Tile Buffer));
+        D -.-> SP(Shadow Render Pass WIP)
+        D -.-> GB(G-Buffer Pass)
+        
+        SP -.-> |Shadow Mappings| DL
+        GB -.-> |Albedo, Normal, Depth| DL(Deferred Lighting Pass)
+        
+        DL -.-> PP(Post-Processing Kernels<br>Bloom, SSAO, DoF)
     end
 
     subgraph "Main Thread - Frame Finalization"
         direction LR
-        I{Wait for All Jobs to Complete};
-        H -.-> I;
-        I -- All Tiles Rendered --> J(Stage 5: Compositing);
-        J -- Final Image in Memory --> K[Stage 6: Present to Screen];
+        I{Wait for Passes to Complete};
+        PP -.-> I;
+        I -- Output Buffers --> J(Tonemapping & Compositing);
+        J --> K[Present to Screen];
     end
 ```
 
@@ -114,12 +121,13 @@ graph TD
 
 ## Future Goals
 
-While the rasterizer is fully functional, there are many opportunities for further development and learning:
+While the rasterizer is fully functional and features many advanced rendering techniques, there are ongoing areas of development:
 
-*   **Advanced Shading Models**: Implement more sophisticated shading techniques like Gouraud or Phong shading for smoother, more realistic lighting.
-*   **More Complex Scenes**: Extend the renderer to support multiple objects and a more complex scene graph.
-*   **Performance Optimizations**: Further optimize the rendering pipeline, for example by implementing more advanced culling techniques like frustum culling.
-*   **Cross-Platform Support**: Port the windowing and input handling logic to other operating systems like Linux and macOS.
+*   **Shadow Render Pass**: Completing the in-progress dynamic shadow pass (shadow mapping) for full integration into the deferred lighting pipeline.
+*   **Meshlet Compute Pipeline**: Transitioning fully to a GPU-style, compute-based meshlet rendering architecture, replacing or supplementing the tile-based rasterizer.
+*   **Advanced Shading Models**: Implement physically based rendering (PBR) shading models for more realistic lighting and material interaction.
+*   **Performance Optimizations**: Further optimize the rendering pipeline using SIMD-accelerated math kernels, and advanced culling techniques (i.e., frustum/occlusion culling on meshlets).
+*   **Cross-Platform Support**: Port the windowing and input handling logic to other OS targets beyond Windows.
 
 ## License
 
