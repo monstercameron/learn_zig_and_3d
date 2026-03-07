@@ -332,19 +332,41 @@ pub fn main() !void {
     std.debug.print("\n--- Meshlet Pipeline Benchmarks ---\n", .{});
     const meshlet_result = try bench_meshlet.runMeshletBench(allocator, 48, 120);
     std.debug.print(
-        "Grid 48x48 -> meshlets:{} triangles:{}\n",
-        .{ meshlet_result.meshlet_count, meshlet_result.triangle_count },
+        "Grid 48x48 -> meshlets:{} triangles:{} packed_vertices:{} packed_primitives:{}\n",
+        .{
+            meshlet_result.meshlet_count,
+            meshlet_result.triangle_count,
+            meshlet_result.packed_vertex_count,
+            meshlet_result.packed_primitive_count,
+        },
     );
     std.debug.print(
         "Generation time: {} ns\n",
         .{meshlet_result.generation_ns},
     );
     std.debug.print(
-        "Average cull: {d:.2} ns/frame | visible meshlets: {d:.2} | visible triangles: {d:.2}\n",
+        "Meshlet quality: avg verts {d:.2} | avg prims {d:.2} | reuse {d:.2}x\n",
+        .{
+            meshlet_result.avg_vertices_per_meshlet,
+            meshlet_result.avg_primitives_per_meshlet,
+            meshlet_result.vertex_reuse_ratio,
+        },
+    );
+    std.debug.print(
+        "Average cull: {d:.2} ns/frame | visible meshlets: {d:.2} | visible triangles: {d:.2} ({d:.2}% of scene)\n",
         .{
             meshlet_result.avg_cull_ns,
             meshlet_result.avg_visible_meshlets,
             meshlet_result.avg_visible_triangles,
+            meshlet_result.visible_triangle_ratio * 100.0,
+        },
+    );
+    std.debug.print(
+        "Legacy triangle stage: {d:.2} ns/frame | visible triangles: {d:.2} | meshlet stage speedup {d:.2}x\n",
+        .{
+            meshlet_result.avg_legacy_stage_ns,
+            meshlet_result.avg_legacy_visible_triangles,
+            meshlet_result.meshlet_stage_speedup,
         },
     );
 

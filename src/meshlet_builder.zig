@@ -54,8 +54,8 @@ pub fn buildMeshlets(allocator: std.mem.Allocator, mesh: *Mesh, config: BuildCon
     var max_vertices_seen: usize = 0;
 
     for (meshlets) |meshlet| {
-        const tri_count = meshlet.triangle_indices.len;
-        const vert_count = meshlet.vertex_indices.len;
+        const tri_count = meshlet.primitive_count;
+        const vert_count = meshlet.vertex_count;
 
         total_triangles += tri_count;
         total_vertices += vert_count;

@@ -52,6 +52,7 @@ const ground_logger = log.get("renderer.ground");
 const NEAR_CLIP: f32 = 0.01;
 const NEAR_EPSILON: f32 = 1e-4;
 const INVALID_PROJECTED_COORD: i32 = -1000;
+const ENABLE_MESHLET_CONE_CULL = false;
 
 const GroundReason = struct {
     pub const near_plane: u8 = 1 << 0;
@@ -62,6 +63,14 @@ const GroundReason = struct {
 const GroundDebugState = struct {
     last_mask: u8 = 0,
     frames_since_log: u32 = 0,
+};
+
+const MeshletTelemetry = struct {
+    total_meshlets: usize = 0,
+    visible_meshlets: usize = 0,
+    culled_meshlets: usize = 0,
+    emitted_triangles: usize = 0,
+    touched_tiles: usize = 0,
 };
 
 // HGDIOBJ: A "handle" (like an ID) to a Windows graphics object.
@@ -144,6 +153,7 @@ pub const Renderer = struct {
     use_tiled_rendering: bool = true,
 
     ground_debug: GroundDebugState = .{},
+    meshlet_telemetry: MeshletTelemetry = .{},
 
     // Unused state from previous versions
     last_brightness_min: f32,
@@ -423,21 +433,18 @@ pub const Renderer = struct {
         }
     };
 
-    const VertexState = enum(u8) {
-        uninitialized,
-        working,
-        ready,
-    };
+    fn vertexReadyTag(generation: u32) u32 {
+        return generation << 1;
+    }
 
-    fn resetVertexStates(states: []std.atomic.Value(VertexState)) void {
-        for (states) |*state| {
-            state.store(.uninitialized, .release);
-        }
+    fn vertexWorkingTag(generation: u32) u32 {
+        return (generation << 1) | 1;
     }
 
     fn ensureVertex(
         idx: usize,
-        states: []std.atomic.Value(VertexState),
+        states: []std.atomic.Value(u32),
+        generation: u32,
         mesh_vertices: []const math.Vec3,
         camera_position: math.Vec3,
         basis_right: math.Vec3,
@@ -447,39 +454,42 @@ pub const Renderer = struct {
         projected_slice: [][2]i32,
         projection_params: ProjectionParams,
     ) void {
+        const ready_tag = vertexReadyTag(generation);
+        const working_tag = vertexWorkingTag(generation);
+
         while (true) {
             const state = states[idx].load(.acquire);
-            switch (state) {
-                .ready => return,
-                .uninitialized => {
-                    if (states[idx].cmpxchgStrong(.uninitialized, .working, .acq_rel, .acquire) == null) {
-                        const vertex = mesh_vertices[idx];
-                        const relative = math.Vec3.sub(vertex, camera_position);
-                        const camera_space = math.Vec3.new(
-                            math.Vec3.dot(relative, basis_right),
-                            math.Vec3.dot(relative, basis_up),
-                            math.Vec3.dot(relative, basis_forward),
-                        );
-                        vertex_cache[idx] = camera_space;
-
-                        if (camera_space.z <= NEAR_CLIP) {
-                            projected_slice[idx] = .{ INVALID_PROJECTED_COORD, INVALID_PROJECTED_COORD };
-                        } else {
-                            const inv_z = 1.0 / camera_space.z;
-                            const ndc_x = camera_space.x * inv_z * projection_params.x_scale;
-                            const ndc_y = camera_space.y * inv_z * projection_params.y_scale;
-                            const screen_x = ndc_x * projection_params.center_x + projection_params.center_x;
-                            const screen_y = -ndc_y * projection_params.center_y + projection_params.center_y;
-                            projected_slice[idx][0] = @as(i32, @intFromFloat(screen_x));
-                            projected_slice[idx][1] = @as(i32, @intFromFloat(screen_y));
-                        }
-
-                        states[idx].store(.ready, .release);
-                        return;
-                    }
-                },
-                .working => std.atomic.spinLoopHint(),
+            if (state == ready_tag) return;
+            if (state == working_tag) {
+                std.atomic.spinLoopHint();
+                continue;
             }
+
+            if (states[idx].cmpxchgStrong(state, working_tag, .acq_rel, .acquire) != null) continue;
+
+            const vertex = mesh_vertices[idx];
+            const relative = math.Vec3.sub(vertex, camera_position);
+            const camera_space = math.Vec3.new(
+                math.Vec3.dot(relative, basis_right),
+                math.Vec3.dot(relative, basis_up),
+                math.Vec3.dot(relative, basis_forward),
+            );
+            vertex_cache[idx] = camera_space;
+
+            if (camera_space.z <= NEAR_CLIP) {
+                projected_slice[idx] = .{ INVALID_PROJECTED_COORD, INVALID_PROJECTED_COORD };
+            } else {
+                const inv_z = 1.0 / camera_space.z;
+                const ndc_x = camera_space.x * inv_z * projection_params.x_scale;
+                const ndc_y = camera_space.y * inv_z * projection_params.y_scale;
+                const screen_x = ndc_x * projection_params.center_x + projection_params.center_x;
+                const screen_y = -ndc_y * projection_params.center_y + projection_params.center_y;
+                projected_slice[idx][0] = @as(i32, @intFromFloat(screen_x));
+                projected_slice[idx][1] = @as(i32, @intFromFloat(screen_y));
+            }
+
+            states[idx].store(ready_tag, .release);
+            return;
         }
     }
 
@@ -494,31 +504,46 @@ pub const Renderer = struct {
         return math.Vec3.scale(transformed, 1.0 / len);
     }
 
-    fn emitTriangleToWork(
-        writer: *MeshWorkWriter,
+    fn triangleNormalCamera(
         mesh: *const Mesh,
         tri_idx: usize,
         tri: MeshModule.Triangle,
-        states: []std.atomic.Value(VertexState),
-        mesh_vertices: []const math.Vec3,
-        camera_position: math.Vec3,
         basis_right: math.Vec3,
         basis_up: math.Vec3,
         basis_forward: math.Vec3,
-        vertex_cache: []math.Vec3,
-        projected_slice: [][2]i32,
+        p0_cam: math.Vec3,
+        p1_cam: math.Vec3,
+        p2_cam: math.Vec3,
+    ) math.Vec3 {
+        if (tri_idx < mesh.normals.len) {
+            return transformNormalFromBasis(basis_right, basis_up, basis_forward, mesh.normals[tri_idx]);
+        }
+
+        const edge0 = math.Vec3.sub(p1_cam, p0_cam);
+        const edge1 = math.Vec3.sub(p2_cam, p0_cam);
+        const fallback = math.Vec3.cross(edge0, edge1);
+        const len = math.Vec3.length(fallback);
+        if (len > 1e-6) return math.Vec3.scale(fallback, 1.0 / len);
+        _ = tri;
+        return math.Vec3.new(0.0, 0.0, 1.0);
+    }
+
+    fn emitPreparedTriangleToWork(
+        writer: *MeshWorkWriter,
+        tri_idx: usize,
+        tri: MeshModule.Triangle,
+        p0_cam: math.Vec3,
+        p1_cam: math.Vec3,
+        p2_cam: math.Vec3,
+        screen0_input: [2]i32,
+        screen1_input: [2]i32,
+        screen2_input: [2]i32,
+        uv: [3]math.Vec2,
+        normal_cam: math.Vec3,
         projection_params: ProjectionParams,
         light_dir: math.Vec3,
         output_cursor: ?*usize,
     ) !?usize {
-        ensureVertex(tri.v0, states, mesh_vertices, camera_position, basis_right, basis_up, basis_forward, vertex_cache, projected_slice, projection_params);
-        ensureVertex(tri.v1, states, mesh_vertices, camera_position, basis_right, basis_up, basis_forward, vertex_cache, projected_slice, projection_params);
-        ensureVertex(tri.v2, states, mesh_vertices, camera_position, basis_right, basis_up, basis_forward, vertex_cache, projected_slice, projection_params);
-
-        const p0_cam = vertex_cache[tri.v0];
-        const p1_cam = vertex_cache[tri.v1];
-        const p2_cam = vertex_cache[tri.v2];
-
         const front0 = p0_cam.z >= projection_params.near_plane - NEAR_EPSILON;
         const front1 = p1_cam.z >= projection_params.near_plane - NEAR_EPSILON;
         const front2 = p2_cam.z >= projection_params.near_plane - NEAR_EPSILON;
@@ -526,29 +551,12 @@ pub const Renderer = struct {
 
         const crosses_near = (front0 or front1 or front2) and !(front0 and front1 and front2);
 
-        var screen0 = projected_slice[tri.v0];
-        var screen1 = projected_slice[tri.v1];
-        var screen2 = projected_slice[tri.v2];
+        var screen0 = screen0_input;
+        var screen1 = screen1_input;
+        var screen2 = screen2_input;
         if (screen0[0] == INVALID_PROJECTED_COORD or screen0[1] == INVALID_PROJECTED_COORD) screen0 = projectCameraPosition(p0_cam, projection_params);
         if (screen1[0] == INVALID_PROJECTED_COORD or screen1[1] == INVALID_PROJECTED_COORD) screen1 = projectCameraPosition(p1_cam, projection_params);
         if (screen2[0] == INVALID_PROJECTED_COORD or screen2[1] == INVALID_PROJECTED_COORD) screen2 = projectCameraPosition(p2_cam, projection_params);
-
-        const uv = [3]math.Vec2{
-            if (tri.v0 < mesh.tex_coords.len) mesh.tex_coords[tri.v0] else math.Vec2.new(0.0, 0.0),
-            if (tri.v1 < mesh.tex_coords.len) mesh.tex_coords[tri.v1] else math.Vec2.new(0.0, 0.0),
-            if (tri.v2 < mesh.tex_coords.len) mesh.tex_coords[tri.v2] else math.Vec2.new(0.0, 0.0),
-        };
-
-        var normal_cam = math.Vec3.new(0.0, 0.0, 1.0);
-        if (tri_idx < mesh.normals.len) {
-            normal_cam = transformNormalFromBasis(basis_right, basis_up, basis_forward, mesh.normals[tri_idx]);
-        } else {
-            const edge0 = math.Vec3.sub(p1_cam, p0_cam);
-            const edge1 = math.Vec3.sub(p2_cam, p0_cam);
-            const fallback = math.Vec3.cross(edge0, edge1);
-            const len = math.Vec3.length(fallback);
-            if (len > 1e-6) normal_cam = math.Vec3.scale(fallback, 1.0 / len);
-        }
 
         var backface = false;
         if (!crosses_near) {
@@ -598,6 +606,109 @@ pub const Renderer = struct {
             flags,
         );
         return write_index;
+    }
+
+    fn emitTriangleToWork(
+        writer: *MeshWorkWriter,
+        mesh: *const Mesh,
+        tri_idx: usize,
+        tri: MeshModule.Triangle,
+        states: []std.atomic.Value(u32),
+        vertex_generation: u32,
+        mesh_vertices: []const math.Vec3,
+        camera_position: math.Vec3,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        vertex_cache: []math.Vec3,
+        projected_slice: [][2]i32,
+        projection_params: ProjectionParams,
+        light_dir: math.Vec3,
+        output_cursor: ?*usize,
+    ) !?usize {
+        ensureVertex(tri.v0, states, vertex_generation, mesh_vertices, camera_position, basis_right, basis_up, basis_forward, vertex_cache, projected_slice, projection_params);
+        ensureVertex(tri.v1, states, vertex_generation, mesh_vertices, camera_position, basis_right, basis_up, basis_forward, vertex_cache, projected_slice, projection_params);
+        ensureVertex(tri.v2, states, vertex_generation, mesh_vertices, camera_position, basis_right, basis_up, basis_forward, vertex_cache, projected_slice, projection_params);
+
+        const p0_cam = vertex_cache[tri.v0];
+        const p1_cam = vertex_cache[tri.v1];
+        const p2_cam = vertex_cache[tri.v2];
+        const screen0 = projected_slice[tri.v0];
+        const screen1 = projected_slice[tri.v1];
+        const screen2 = projected_slice[tri.v2];
+
+        const uv = [3]math.Vec2{
+            if (tri.v0 < mesh.tex_coords.len) mesh.tex_coords[tri.v0] else math.Vec2.new(0.0, 0.0),
+            if (tri.v1 < mesh.tex_coords.len) mesh.tex_coords[tri.v1] else math.Vec2.new(0.0, 0.0),
+            if (tri.v2 < mesh.tex_coords.len) mesh.tex_coords[tri.v2] else math.Vec2.new(0.0, 0.0),
+        };
+
+        const normal_cam = triangleNormalCamera(mesh, tri_idx, tri, basis_right, basis_up, basis_forward, p0_cam, p1_cam, p2_cam);
+        return emitPreparedTriangleToWork(
+            writer,
+            tri_idx,
+            tri,
+            p0_cam,
+            p1_cam,
+            p2_cam,
+            screen0,
+            screen1,
+            screen2,
+            uv,
+            normal_cam,
+            projection_params,
+            light_dir,
+            output_cursor,
+        );
+    }
+
+    fn emitMeshletPrimitiveToWork(
+        writer: *MeshWorkWriter,
+        mesh: *const Mesh,
+        tri_idx: usize,
+        tri: MeshModule.Triangle,
+        primitive: MeshModule.MeshletPrimitive,
+        local_camera_vertices: []const math.Vec3,
+        local_projected_vertices: []const [2]i32,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        projection_params: ProjectionParams,
+        light_dir: math.Vec3,
+        output_cursor: ?*usize,
+    ) !?usize {
+        const local_v0 = @as(usize, primitive.local_v0);
+        const local_v1 = @as(usize, primitive.local_v1);
+        const local_v2 = @as(usize, primitive.local_v2);
+        const p0_cam = local_camera_vertices[local_v0];
+        const p1_cam = local_camera_vertices[local_v1];
+        const p2_cam = local_camera_vertices[local_v2];
+        const screen0 = local_projected_vertices[local_v0];
+        const screen1 = local_projected_vertices[local_v1];
+        const screen2 = local_projected_vertices[local_v2];
+
+        const uv = [3]math.Vec2{
+            if (tri.v0 < mesh.tex_coords.len) mesh.tex_coords[tri.v0] else math.Vec2.new(0.0, 0.0),
+            if (tri.v1 < mesh.tex_coords.len) mesh.tex_coords[tri.v1] else math.Vec2.new(0.0, 0.0),
+            if (tri.v2 < mesh.tex_coords.len) mesh.tex_coords[tri.v2] else math.Vec2.new(0.0, 0.0),
+        };
+        const normal_cam = triangleNormalCamera(mesh, tri_idx, tri, basis_right, basis_up, basis_forward, p0_cam, p1_cam, p2_cam);
+        return emitPreparedTriangleToWork(
+            writer,
+            tri_idx,
+            tri,
+            p0_cam,
+            p1_cam,
+            p2_cam,
+            screen0,
+            screen1,
+            screen2,
+            uv,
+            normal_cam,
+            projection_params,
+            light_dir,
+            output_cursor,
+        );
     }
 
     fn projectCameraPosition(position: math.Vec3, projection: ProjectionParams) [2]i32 {
@@ -656,9 +767,8 @@ pub const Renderer = struct {
         mesh: *const Mesh,
         meshlet: *const Meshlet,
         mesh_work: *MeshWork,
-        projected: [][2]i32,
-        transformed_vertices: []math.Vec3,
-        vertex_ready: []std.atomic.Value(VertexState),
+        local_projected_vertices: [][2]i32,
+        local_camera_vertices: []math.Vec3,
         camera_position: math.Vec3,
         basis_right: math.Vec3,
         basis_up: math.Vec3,
@@ -674,22 +784,50 @@ pub const Renderer = struct {
             job.contribution.clear();
             var writer = MeshWorkWriter.init(job.mesh_work);
             const mesh_vertices = job.mesh.vertices;
+            const meshlet_vertices = job.mesh.meshletVertexSlice(job.meshlet);
+            std.debug.assert(job.local_camera_vertices.len == meshlet_vertices.len);
+            std.debug.assert(job.local_projected_vertices.len == meshlet_vertices.len);
+
+            for (meshlet_vertices, 0..) |global_vertex_idx, local_idx| {
+                const vertex = mesh_vertices[global_vertex_idx];
+                const relative = math.Vec3.sub(vertex, job.camera_position);
+                const camera_space = math.Vec3.new(
+                    math.Vec3.dot(relative, job.basis_right),
+                    math.Vec3.dot(relative, job.basis_up),
+                    math.Vec3.dot(relative, job.basis_forward),
+                );
+                job.local_camera_vertices[local_idx] = camera_space;
+
+                if (camera_space.z <= NEAR_CLIP) {
+                    job.local_projected_vertices[local_idx] = .{ INVALID_PROJECTED_COORD, INVALID_PROJECTED_COORD };
+                } else {
+                    const inv_z = 1.0 / camera_space.z;
+                    const ndc_x = camera_space.x * inv_z * job.projection.x_scale;
+                    const ndc_y = camera_space.y * inv_z * job.projection.y_scale;
+                    const screen_x = ndc_x * job.projection.center_x + job.projection.center_x;
+                    const screen_y = -ndc_y * job.projection.center_y + job.projection.center_y;
+                    job.local_projected_vertices[local_idx] = .{
+                        @as(i32, @intFromFloat(screen_x)),
+                        @as(i32, @intFromFloat(screen_y)),
+                    };
+                }
+            }
+
             var cursor = job.output_start;
-            for (job.meshlet.triangle_indices) |tri_idx| {
+            for (job.mesh.meshletPrimitiveSlice(job.meshlet)) |primitive| {
+                const tri_idx = primitive.triangle_index;
                 const tri = job.mesh.triangles[tri_idx];
-                const result = emitTriangleToWork(
+                const result = emitMeshletPrimitiveToWork(
                     &writer,
                     job.mesh,
                     tri_idx,
                     tri,
-                    job.vertex_ready,
-                    mesh_vertices,
-                    job.camera_position,
+                    primitive,
+                    job.local_camera_vertices,
+                    job.local_projected_vertices,
                     job.basis_right,
                     job.basis_up,
                     job.basis_forward,
-                    job.transformed_vertices,
-                    job.projected,
                     job.projection,
                     job.light_dir,
                     &cursor,
@@ -759,12 +897,20 @@ pub const Renderer = struct {
 
         allocator: std.mem.Allocator,
         entries: std.ArrayList(Entry),
+        lookup_keys: []usize,
+        lookup_values: []usize,
+        lookup_stamps: []u32,
+        lookup_generation: u32,
         active_count: usize,
 
         fn init(allocator: std.mem.Allocator) MeshletContribution {
             return MeshletContribution{
                 .allocator = allocator,
                 .entries = std.ArrayList(Entry){},
+                .lookup_keys = &[_]usize{},
+                .lookup_values = &[_]usize{},
+                .lookup_stamps = &[_]u32{},
+                .lookup_generation = 1,
                 .active_count = 0,
             };
         }
@@ -775,7 +921,14 @@ pub const Renderer = struct {
                 entry.triangles.deinit(self.allocator);
             }
             self.entries.deinit(self.allocator);
+            if (self.lookup_keys.len != 0) self.allocator.free(self.lookup_keys);
+            if (self.lookup_values.len != 0) self.allocator.free(self.lookup_values);
+            if (self.lookup_stamps.len != 0) self.allocator.free(self.lookup_stamps);
             self.entries = std.ArrayList(Entry){};
+            self.lookup_keys = &[_]usize{};
+            self.lookup_values = &[_]usize{};
+            self.lookup_stamps = &[_]u32{};
+            self.lookup_generation = 1;
             self.active_count = 0;
         }
 
@@ -785,31 +938,33 @@ pub const Renderer = struct {
                 self.entries.items[idx].triangles.clearRetainingCapacity();
             }
             self.active_count = 0;
+            self.advanceLookupGeneration();
         }
 
         fn addTriangle(self: *MeshletContribution, tile_index: usize, tri_index: usize) !void {
-            for (self.entries.items[0..self.active_count]) |*entry| {
-                if (entry.tile_index == tile_index) {
-                    try entry.triangles.append(self.allocator, tri_index);
-                    return;
-                }
-            }
-
-            if (self.active_count < self.entries.items.len) {
-                var reuse_entry = &self.entries.items[self.active_count];
-                reuse_entry.tile_index = tile_index;
-                reuse_entry.triangles.clearRetainingCapacity();
-                try reuse_entry.triangles.append(self.allocator, tri_index);
-                self.active_count += 1;
+            if (self.findEntryIndex(tile_index)) |entry_index| {
+                try self.entries.items[entry_index].triangles.append(self.allocator, tri_index);
                 return;
             }
 
-            var new_entry = Entry{
-                .tile_index = tile_index,
-                .triangles = std.ArrayList(usize){},
-            };
-            try new_entry.triangles.append(self.allocator, tri_index);
-            try self.entries.append(self.allocator, new_entry);
+            try self.ensureLookupCapacity(self.active_count + 1);
+
+            const entry_index = self.active_count;
+            if (self.active_count < self.entries.items.len) {
+                var reuse_entry = &self.entries.items[entry_index];
+                reuse_entry.tile_index = tile_index;
+                reuse_entry.triangles.clearRetainingCapacity();
+                try reuse_entry.triangles.append(self.allocator, tri_index);
+            } else {
+                var new_entry = Entry{
+                    .tile_index = tile_index,
+                    .triangles = std.ArrayList(usize){},
+                };
+                try new_entry.triangles.append(self.allocator, tri_index);
+                try self.entries.append(self.allocator, new_entry);
+            }
+
+            self.insertLookup(tile_index, entry_index);
             self.active_count += 1;
         }
 
@@ -829,6 +984,78 @@ pub const Renderer = struct {
                     entry.triangles.items[idx] = new_start + offset;
                 }
             }
+        }
+
+        fn advanceLookupGeneration(self: *MeshletContribution) void {
+            if (self.lookup_stamps.len == 0) return;
+            if (self.lookup_generation == std.math.maxInt(u32)) {
+                @memset(self.lookup_stamps, 0);
+                self.lookup_generation = 1;
+                return;
+            }
+            self.lookup_generation += 1;
+        }
+
+        fn ensureLookupCapacity(self: *MeshletContribution, min_entries: usize) !void {
+            const min_lookup_capacity = if (min_entries < 4) 8 else min_entries * 2;
+            const required_capacity = nextPowerOfTwo(min_lookup_capacity);
+            if (self.lookup_keys.len >= required_capacity) return;
+
+            const new_keys = try self.allocator.alloc(usize, required_capacity);
+            errdefer self.allocator.free(new_keys);
+            const new_values = try self.allocator.alloc(usize, required_capacity);
+            errdefer self.allocator.free(new_values);
+            const new_stamps = try self.allocator.alloc(u32, required_capacity);
+            errdefer self.allocator.free(new_stamps);
+            @memset(new_stamps, 0);
+
+            if (self.lookup_keys.len != 0) self.allocator.free(self.lookup_keys);
+            if (self.lookup_values.len != 0) self.allocator.free(self.lookup_values);
+            if (self.lookup_stamps.len != 0) self.allocator.free(self.lookup_stamps);
+
+            self.lookup_keys = new_keys;
+            self.lookup_values = new_values;
+            self.lookup_stamps = new_stamps;
+            self.lookup_generation = 1;
+
+            var idx: usize = 0;
+            while (idx < self.active_count) : (idx += 1) {
+                self.insertLookup(self.entries.items[idx].tile_index, idx);
+            }
+        }
+
+        fn findEntryIndex(self: *const MeshletContribution, tile_index: usize) ?usize {
+            if (self.lookup_keys.len == 0) return null;
+
+            const mask = self.lookup_keys.len - 1;
+            var slot = std.hash_map.hashString(std.mem.asBytes(&tile_index)) & mask;
+            while (self.lookup_stamps[slot] == self.lookup_generation) {
+                if (self.lookup_keys[slot] == tile_index) {
+                    return self.lookup_values[slot];
+                }
+                slot = (slot + 1) & mask;
+            }
+            return null;
+        }
+
+        fn insertLookup(self: *MeshletContribution, tile_index: usize, entry_index: usize) void {
+            std.debug.assert(self.lookup_keys.len != 0);
+
+            const mask = self.lookup_keys.len - 1;
+            var slot = std.hash_map.hashString(std.mem.asBytes(&tile_index)) & mask;
+            while (self.lookup_stamps[slot] == self.lookup_generation and self.lookup_keys[slot] != tile_index) {
+                slot = (slot + 1) & mask;
+            }
+
+            self.lookup_stamps[slot] = self.lookup_generation;
+            self.lookup_keys[slot] = tile_index;
+            self.lookup_values[slot] = entry_index;
+        }
+
+        fn nextPowerOfTwo(value: usize) usize {
+            var capacity: usize = 1;
+            while (capacity < value) : (capacity <<= 1) {}
+            return capacity;
         }
     };
 
@@ -1033,11 +1260,20 @@ pub const Renderer = struct {
     const MeshWorkCache = struct {
         projected: [][2]i32,
         transformed_vertices: []math.Vec3,
-        vertex_ready: []std.atomic.Value(VertexState),
+        vertex_ready: []std.atomic.Value(u32),
         meshlet_jobs: []MeshletRenderJob,
         meshlet_job_handles: []Job,
         meshlet_job_completion: []bool,
         meshlet_contributions: []MeshletContribution,
+        meshlet_visibility: []bool,
+        visible_meshlet_indices: []usize,
+        visible_meshlet_offsets: []usize,
+        visible_meshlet_vertex_offsets: []usize,
+        meshlet_cull_jobs: []MeshletCullJob,
+        meshlet_cull_job_handles: []Job,
+        meshlet_cull_job_completion: []bool,
+        meshlet_local_camera_scratch: []math.Vec3,
+        meshlet_local_projected_scratch: [][2]i32,
         work: MeshWork,
         mesh: ?*const Mesh,
         camera_position: math.Vec3,
@@ -1046,17 +1282,28 @@ pub const Renderer = struct {
         forward: math.Vec3,
         light_dir: math.Vec3,
         projection: ProjectionParams,
+        vertex_generation: u32,
+        full_vertex_cache_valid: bool,
         valid: bool,
 
         fn init() MeshWorkCache {
             return MeshWorkCache{
                 .projected = &[_][2]i32{},
                 .transformed_vertices = &[_]math.Vec3{},
-                .vertex_ready = &[_]std.atomic.Value(VertexState){},
+                .vertex_ready = &[_]std.atomic.Value(u32){},
                 .meshlet_jobs = &[_]MeshletRenderJob{},
                 .meshlet_job_handles = &[_]Job{},
                 .meshlet_job_completion = &[_]bool{},
                 .meshlet_contributions = &[_]MeshletContribution{},
+                .meshlet_visibility = &[_]bool{},
+                .visible_meshlet_indices = &[_]usize{},
+                .visible_meshlet_offsets = &[_]usize{},
+                .visible_meshlet_vertex_offsets = &[_]usize{},
+                .meshlet_cull_jobs = &[_]MeshletCullJob{},
+                .meshlet_cull_job_handles = &[_]Job{},
+                .meshlet_cull_job_completion = &[_]bool{},
+                .meshlet_local_camera_scratch = &[_]math.Vec3{},
+                .meshlet_local_projected_scratch = &[_][2]i32{},
                 .work = MeshWork.init(),
                 .mesh = null,
                 .camera_position = math.Vec3.new(0.0, 0.0, 0.0),
@@ -1071,6 +1318,8 @@ pub const Renderer = struct {
                     .y_scale = 0.0,
                     .near_plane = NEAR_CLIP,
                 },
+                .vertex_generation = 0,
+                .full_vertex_cache_valid = false,
                 .valid = false,
             };
         }
@@ -1083,19 +1332,39 @@ pub const Renderer = struct {
             if (self.meshlet_jobs.len != 0) allocator.free(self.meshlet_jobs);
             if (self.meshlet_job_handles.len != 0) allocator.free(self.meshlet_job_handles);
             if (self.meshlet_job_completion.len != 0) allocator.free(self.meshlet_job_completion);
+            if (self.meshlet_visibility.len != 0) allocator.free(self.meshlet_visibility);
+            if (self.visible_meshlet_indices.len != 0) allocator.free(self.visible_meshlet_indices);
+            if (self.visible_meshlet_offsets.len != 0) allocator.free(self.visible_meshlet_offsets);
+            if (self.visible_meshlet_vertex_offsets.len != 0) allocator.free(self.visible_meshlet_vertex_offsets);
+            if (self.meshlet_cull_jobs.len != 0) allocator.free(self.meshlet_cull_jobs);
+            if (self.meshlet_cull_job_handles.len != 0) allocator.free(self.meshlet_cull_job_handles);
+            if (self.meshlet_cull_job_completion.len != 0) allocator.free(self.meshlet_cull_job_completion);
+            if (self.meshlet_local_camera_scratch.len != 0) allocator.free(self.meshlet_local_camera_scratch);
+            if (self.meshlet_local_projected_scratch.len != 0) allocator.free(self.meshlet_local_projected_scratch);
             if (self.meshlet_contributions.len != 0) {
                 for (self.meshlet_contributions) |*contrib| contrib.deinit();
                 allocator.free(self.meshlet_contributions);
             }
             self.projected = &[_][2]i32{};
             self.transformed_vertices = &[_]math.Vec3{};
-            self.vertex_ready = &[_]std.atomic.Value(VertexState){};
+            self.vertex_ready = &[_]std.atomic.Value(u32){};
             self.meshlet_jobs = &[_]MeshletRenderJob{};
             self.meshlet_job_handles = &[_]Job{};
             self.meshlet_job_completion = &[_]bool{};
             self.meshlet_contributions = &[_]MeshletContribution{};
+            self.meshlet_visibility = &[_]bool{};
+            self.visible_meshlet_indices = &[_]usize{};
+            self.visible_meshlet_offsets = &[_]usize{};
+            self.visible_meshlet_vertex_offsets = &[_]usize{};
+            self.meshlet_cull_jobs = &[_]MeshletCullJob{};
+            self.meshlet_cull_job_handles = &[_]Job{};
+            self.meshlet_cull_job_completion = &[_]bool{};
+            self.meshlet_local_camera_scratch = &[_]math.Vec3{};
+            self.meshlet_local_projected_scratch = &[_][2]i32{};
             self.mesh = null;
             self.light_dir = math.Vec3.new(0.0, 0.0, 0.0);
+            self.vertex_generation = 0;
+            self.full_vertex_cache_valid = false;
             self.valid = false;
         }
 
@@ -1119,13 +1388,103 @@ pub const Renderer = struct {
             if (self.vertex_ready.len != vertex_count) {
                 if (self.vertex_ready.len != 0) allocator.free(self.vertex_ready);
                 self.vertex_ready = if (vertex_count == 0)
-                    &[_]std.atomic.Value(VertexState){}
+                    &[_]std.atomic.Value(u32){}
                 else blk: {
-                    const states = try allocator.alloc(std.atomic.Value(VertexState), vertex_count);
-                    for (states) |*state| state.* = std.atomic.Value(VertexState).init(.uninitialized);
+                    const states = try allocator.alloc(std.atomic.Value(u32), vertex_count);
+                    for (states) |*state| state.* = std.atomic.Value(u32).init(0);
                     break :blk states;
                 };
+                self.vertex_generation = 0;
+                self.full_vertex_cache_valid = false;
                 self.valid = false;
+            }
+        }
+
+        fn ensureMeshletVisibilityCapacity(self: *MeshWorkCache, allocator: std.mem.Allocator, capacity: usize) !void {
+            if (capacity == 0) return;
+
+            if (self.meshlet_visibility.len < capacity) {
+                if (self.meshlet_visibility.len == 0) {
+                    self.meshlet_visibility = try allocator.alloc(bool, capacity);
+                } else {
+                    self.meshlet_visibility = try allocator.realloc(self.meshlet_visibility, capacity);
+                }
+            }
+        }
+
+        fn ensureVisibleMeshletCapacity(self: *MeshWorkCache, allocator: std.mem.Allocator, capacity: usize) !void {
+            if (capacity == 0) return;
+
+            if (self.visible_meshlet_indices.len < capacity) {
+                if (self.visible_meshlet_indices.len == 0) {
+                    self.visible_meshlet_indices = try allocator.alloc(usize, capacity);
+                } else {
+                    self.visible_meshlet_indices = try allocator.realloc(self.visible_meshlet_indices, capacity);
+                }
+            }
+
+            if (self.visible_meshlet_offsets.len < capacity) {
+                if (self.visible_meshlet_offsets.len == 0) {
+                    self.visible_meshlet_offsets = try allocator.alloc(usize, capacity);
+                } else {
+                    self.visible_meshlet_offsets = try allocator.realloc(self.visible_meshlet_offsets, capacity);
+                }
+            }
+
+            if (self.visible_meshlet_vertex_offsets.len < capacity) {
+                if (self.visible_meshlet_vertex_offsets.len == 0) {
+                    self.visible_meshlet_vertex_offsets = try allocator.alloc(usize, capacity);
+                } else {
+                    self.visible_meshlet_vertex_offsets = try allocator.realloc(self.visible_meshlet_vertex_offsets, capacity);
+                }
+            }
+        }
+
+        fn ensureMeshletLocalScratchCapacity(self: *MeshWorkCache, allocator: std.mem.Allocator, vertex_capacity: usize) !void {
+            if (vertex_capacity == 0) return;
+
+            if (self.meshlet_local_camera_scratch.len < vertex_capacity) {
+                if (self.meshlet_local_camera_scratch.len == 0) {
+                    self.meshlet_local_camera_scratch = try allocator.alloc(math.Vec3, vertex_capacity);
+                } else {
+                    self.meshlet_local_camera_scratch = try allocator.realloc(self.meshlet_local_camera_scratch, vertex_capacity);
+                }
+            }
+
+            if (self.meshlet_local_projected_scratch.len < vertex_capacity) {
+                if (self.meshlet_local_projected_scratch.len == 0) {
+                    self.meshlet_local_projected_scratch = try allocator.alloc([2]i32, vertex_capacity);
+                } else {
+                    self.meshlet_local_projected_scratch = try allocator.realloc(self.meshlet_local_projected_scratch, vertex_capacity);
+                }
+            }
+        }
+
+        fn ensureMeshletCullJobCapacity(self: *MeshWorkCache, allocator: std.mem.Allocator, capacity: usize) !void {
+            if (capacity == 0) return;
+
+            if (self.meshlet_cull_jobs.len < capacity) {
+                if (self.meshlet_cull_jobs.len == 0) {
+                    self.meshlet_cull_jobs = try allocator.alloc(MeshletCullJob, capacity);
+                } else {
+                    self.meshlet_cull_jobs = try allocator.realloc(self.meshlet_cull_jobs, capacity);
+                }
+            }
+
+            if (self.meshlet_cull_job_handles.len < capacity) {
+                if (self.meshlet_cull_job_handles.len == 0) {
+                    self.meshlet_cull_job_handles = try allocator.alloc(Job, capacity);
+                } else {
+                    self.meshlet_cull_job_handles = try allocator.realloc(self.meshlet_cull_job_handles, capacity);
+                }
+            }
+
+            if (self.meshlet_cull_job_completion.len < capacity) {
+                if (self.meshlet_cull_job_completion.len == 0) {
+                    self.meshlet_cull_job_completion = try allocator.alloc(bool, capacity);
+                } else {
+                    self.meshlet_cull_job_completion = try allocator.realloc(self.meshlet_cull_job_completion, capacity);
+                }
             }
         }
 
@@ -1210,6 +1569,19 @@ pub const Renderer = struct {
         fn beginUpdate(self: *MeshWorkCache) void {
             self.valid = false;
             self.work.clear();
+            self.advanceVertexGeneration();
+            self.full_vertex_cache_valid = false;
+        }
+
+        fn advanceVertexGeneration(self: *MeshWorkCache) void {
+            if (self.vertex_generation >= (std.math.maxInt(u32) >> 1) - 1) {
+                for (self.vertex_ready) |*state| {
+                    state.store(0, .release);
+                }
+                self.vertex_generation = 1;
+                return;
+            }
+            self.vertex_generation += 1;
         }
 
         fn finalizeUpdate(
@@ -1267,8 +1639,9 @@ pub const Renderer = struct {
     }
 
     pub fn shouldRenderFrame(self: *Renderer) bool {
-        _ = self;
-        return true;
+        if (self.target_frame_time_ns <= 0) return true;
+        const now = std.time.nanoTimestamp();
+        return now - self.last_frame_time >= self.target_frame_time_ns;
     }
 
     pub fn handleCharInput(self: *Renderer, char_code: u32) void {
@@ -1459,7 +1832,7 @@ pub const Renderer = struct {
             meshlet_logger.debugSub("work", "reusing cached mesh work", .{});
         }
 
-        if (cache.transformed_vertices.len == mesh.vertices.len) {
+        if (cache.full_vertex_cache_valid and cache.transformed_vertices.len == mesh.vertices.len) {
             self.debugGroundPlane(mesh, cache.transformed_vertices, view_rotation);
         }
 
@@ -1546,10 +1919,15 @@ pub const Renderer = struct {
 
     fn updateWindowTitle(self: *Renderer, avg_frame_time_ms: f32) void {
         var title_buffer: [256]u8 = undefined;
-        const title = std.fmt.bufPrint(&title_buffer, "{s} | FPS: {} | Frame: {d:.2}ms", .{
+        const telemetry = self.meshlet_telemetry;
+        const title = std.fmt.bufPrint(&title_buffer, "{s} | FPS: {} | Frame: {d:.2}ms | Meshlets: {}/{} | Tris: {} | Tiles: {}", .{
             config.WINDOW_TITLE,
             self.current_fps,
             avg_frame_time_ms,
+            telemetry.visible_meshlets,
+            telemetry.total_meshlets,
+            telemetry.emitted_triangles,
+            telemetry.touched_tiles,
         }) catch config.WINDOW_TITLE;
 
         var title_wide: [256:0]u16 = undefined;
@@ -1759,6 +2137,25 @@ pub const Renderer = struct {
         const sphere_radius = radius + safety_margin;
 
         if (center_cam.z + sphere_radius <= projection.near_plane - NEAR_EPSILON) return false;
+        if (projection.x_scale <= 0.0 or projection.y_scale <= 0.0) return true;
+
+        const side_plane_x_len = @sqrt(projection.x_scale * projection.x_scale + 1.0);
+        const side_plane_y_len = @sqrt(projection.y_scale * projection.y_scale + 1.0);
+        if (projection.x_scale * center_cam.x - center_cam.z > sphere_radius * side_plane_x_len) return false;
+        if (-projection.x_scale * center_cam.x - center_cam.z > sphere_radius * side_plane_x_len) return false;
+        if (projection.y_scale * center_cam.y - center_cam.z > sphere_radius * side_plane_y_len) return false;
+        if (-projection.y_scale * center_cam.y - center_cam.z > sphere_radius * side_plane_y_len) return false;
+
+        if (ENABLE_MESHLET_CONE_CULL and meshlet.normal_cone_cutoff > -1.0) {
+            const axis_cam = transformNormalFromBasis(right, up, forward, meshlet.normal_cone_axis);
+            const view_to_camera = math.Vec3.scale(center_cam, -1.0);
+            const view_len = math.Vec3.length(view_to_camera);
+            if (view_len > 1e-6) {
+                const view_dir = math.Vec3.scale(view_to_camera, 1.0 / view_len);
+                const cone_sine = @sqrt(@max(0.0, 1.0 - meshlet.normal_cone_cutoff * meshlet.normal_cone_cutoff));
+                if (math.Vec3.dot(axis_cam, view_dir) < -cone_sine) return false;
+            }
+        }
 
         return true;
     }
@@ -1781,6 +2178,7 @@ pub const Renderer = struct {
         for (tile_buffers) |*buf| buf.clear();
 
         const triangles = mesh_work.triangleSlice();
+        self.meshlet_telemetry.touched_tiles = 0;
 
         if (triangles.len == 0) {
             pipeline_logger.debugSub("tiled", "no triangles; compositing {} tiles", .{grid.tiles.len});
@@ -1846,6 +2244,7 @@ pub const Renderer = struct {
         const triangles = mesh_work.triangleSlice();
 
         for (contributions[0..meshlet_count]) |contrib| {
+            self.meshlet_telemetry.touched_tiles += contrib.active_count;
             for (contrib.entries.items[0..contrib.active_count]) |entry| {
                 if (entry.tile_index >= tile_lists.len) {
                     meshlet_logger.errorSub(
@@ -1875,7 +2274,7 @@ pub const Renderer = struct {
         mesh: *const Mesh,
         projected: [][2]i32,
         transformed_vertices: []math.Vec3,
-        vertex_ready: []std.atomic.Value(VertexState),
+        vertex_ready: []std.atomic.Value(u32),
         right: math.Vec3,
         up: math.Vec3,
         forward: math.Vec3,
@@ -1888,19 +2287,17 @@ pub const Renderer = struct {
         std.debug.assert(mesh.vertices.len == transformed_vertices.len);
 
         work.clear();
+        const cache_ptr = &self.mesh_work_cache;
+        const vertex_generation = cache_ptr.vertex_generation;
 
         if (mesh.vertices.len == 0 or mesh.triangles.len == 0) {
+            self.meshlet_telemetry = .{};
+            cache_ptr.full_vertex_cache_valid = false;
             for (projected) |*p| {
                 p.* = .{ INVALID_PROJECTED_COORD, INVALID_PROJECTED_COORD };
             }
             return;
         }
-
-        for (projected) |*p| {
-            p.* = .{ INVALID_PROJECTED_COORD, INVALID_PROJECTED_COORD };
-        }
-
-        resetVertexStates(vertex_ready);
 
         const mesh_vertices = mesh.vertices;
 
@@ -1914,8 +2311,7 @@ pub const Renderer = struct {
 
         if (mesh.meshlets.len == 0) {
             const reserve = mesh.triangles.len;
-            const packet_count: usize = if (reserve == 0) 0 else 1;
-            try work.beginWrite(self.allocator, packet_count, reserve);
+            try work.beginWrite(self.allocator, 0, reserve);
             var writer = MeshWorkWriter.init(work);
             for (mesh.triangles, 0..) |tri, tri_idx| {
                 _ = try emitTriangleToWork(
@@ -1924,6 +2320,7 @@ pub const Renderer = struct {
                     tri_idx,
                     tri,
                     vertex_ready,
+                    vertex_generation,
                     mesh_vertices,
                     self.camera_position,
                     right,
@@ -1936,38 +2333,32 @@ pub const Renderer = struct {
                     null,
                 );
             }
-            if (reserve != 0) {
-                work.meshlet_packets[0] = MeshletPacket{
-                    .triangle_start = 0,
-                    .triangle_count = reserve,
-                    .meshlet_index = 0,
-                };
-                work.next_triangle.store(reserve, .release);
-                work.finalize(packet_count);
-            } else {
-                work.finalize(0);
-            }
+            self.meshlet_telemetry = .{
+                .emitted_triangles = work.next_triangle.load(.acquire),
+            };
+            cache_ptr.full_vertex_cache_valid = true;
+            work.finalize(0);
             return;
         }
 
         const meshlets = mesh.meshlets;
         const meshlet_count = meshlets.len;
-        var visibility = try self.allocator.alloc(bool, meshlet_count);
-        defer self.allocator.free(visibility);
+        cache_ptr.full_vertex_cache_valid = false;
+        try cache_ptr.ensureMeshletVisibilityCapacity(self.allocator, meshlet_count);
+        const visibility = cache_ptr.meshlet_visibility[0..meshlet_count];
         if (meshlet_count != 0) @memset(visibility, false);
 
         var visible_meshlet_count: usize = 0;
         var visible_triangle_budget: usize = 0;
+        var visible_vertex_budget: usize = 0;
 
         if (self.job_system) |js| {
             if (meshlet_count != 0) {
                 const job_count = (meshlet_count + MESHLETS_PER_CULL_JOB - 1) / MESHLETS_PER_CULL_JOB;
-                var cull_jobs = try self.allocator.alloc(MeshletCullJob, job_count);
-                defer self.allocator.free(cull_jobs);
-                var jobs = try self.allocator.alloc(Job, job_count);
-                defer self.allocator.free(jobs);
-                var job_completion = try self.allocator.alloc(bool, job_count);
-                defer self.allocator.free(job_completion);
+                try cache_ptr.ensureMeshletCullJobCapacity(self.allocator, job_count);
+                var cull_jobs = cache_ptr.meshlet_cull_jobs[0..job_count];
+                var jobs = cache_ptr.meshlet_cull_job_handles[0..job_count];
+                var job_completion = cache_ptr.meshlet_cull_job_completion[0..job_count];
                 @memset(job_completion, false);
 
                 var job_idx: usize = 0;
@@ -2018,36 +2409,46 @@ pub const Renderer = struct {
 
         visible_meshlet_count = 0;
         visible_triangle_budget = 0;
+        visible_vertex_budget = 0;
         var visibility_index: usize = 0;
         while (visibility_index < meshlet_count) : (visibility_index += 1) {
             if (!visibility[visibility_index]) continue;
             visible_meshlet_count += 1;
-            visible_triangle_budget += meshlets[visibility_index].triangle_indices.len;
+            visible_triangle_budget += meshlets[visibility_index].primitive_count;
+            visible_vertex_budget += meshlets[visibility_index].vertex_count;
         }
 
         if (visible_triangle_budget == 0) {
+            self.meshlet_telemetry = .{
+                .total_meshlets = meshlet_count,
+                .visible_meshlets = visible_meshlet_count,
+                .culled_meshlets = meshlet_count - visible_meshlet_count,
+            };
             work.clear();
             return;
         }
 
         var visible_indices: []usize = &[_]usize{};
         var meshlet_offsets: []usize = &[_]usize{};
-        defer {
-            if (visible_indices.len != 0) self.allocator.free(visible_indices);
-            if (meshlet_offsets.len != 0) self.allocator.free(meshlet_offsets);
-        }
+        var meshlet_vertex_offsets: []usize = &[_]usize{};
         if (visible_meshlet_count > 0) {
-            visible_indices = try self.allocator.alloc(usize, visible_meshlet_count);
-            meshlet_offsets = try self.allocator.alloc(usize, visible_meshlet_count);
+            try cache_ptr.ensureVisibleMeshletCapacity(self.allocator, visible_meshlet_count);
+            try cache_ptr.ensureMeshletLocalScratchCapacity(self.allocator, visible_vertex_budget);
+            visible_indices = cache_ptr.visible_meshlet_indices[0..visible_meshlet_count];
+            meshlet_offsets = cache_ptr.visible_meshlet_offsets[0..visible_meshlet_count];
+            meshlet_vertex_offsets = cache_ptr.visible_meshlet_vertex_offsets[0..visible_meshlet_count];
 
             var fill: usize = 0;
-            var running: usize = 0;
+            var running_triangles: usize = 0;
+            var running_vertices: usize = 0;
             var idx: usize = 0;
             while (idx < meshlet_count) : (idx += 1) {
                 if (!visibility[idx]) continue;
                 visible_indices[fill] = idx;
-                meshlet_offsets[fill] = running;
-                running += meshlets[idx].triangle_indices.len;
+                meshlet_offsets[fill] = running_triangles;
+                meshlet_vertex_offsets[fill] = running_vertices;
+                running_triangles += meshlets[idx].primitive_count;
+                running_vertices += meshlets[idx].vertex_count;
                 fill += 1;
             }
             if (fill != visible_meshlet_count) {
@@ -2057,11 +2458,18 @@ pub const Renderer = struct {
                     .{ fill, visible_meshlet_count },
                 );
             }
-            if (running != visible_triangle_budget) {
+            if (running_triangles != visible_triangle_budget) {
                 meshlet_logger.errorSub(
                     "visibility",
                     "triangle budget mismatch running={} expected={}",
-                    .{ running, visible_triangle_budget },
+                    .{ running_triangles, visible_triangle_budget },
+                );
+            }
+            if (running_vertices != visible_vertex_budget) {
+                meshlet_logger.errorSub(
+                    "visibility",
+                    "vertex budget mismatch running={} expected={}",
+                    .{ running_vertices, visible_vertex_budget },
                 );
             }
         }
@@ -2071,7 +2479,7 @@ pub const Renderer = struct {
         if (visible_meshlet_count > 0) {
             for (visible_indices, 0..) |meshlet_index, packet_idx| {
                 const triangle_start = meshlet_offsets[packet_idx];
-                const triangle_count = meshlets[meshlet_index].triangle_indices.len;
+                const triangle_count = meshlets[meshlet_index].primitive_count;
                 work.meshlet_packets[packet_idx] = MeshletPacket{
                     .triangle_start = triangle_start,
                     .triangle_count = triangle_count,
@@ -2085,7 +2493,6 @@ pub const Renderer = struct {
                 work.finalize(0);
                 return;
             }
-            var cache_ptr = &self.mesh_work_cache;
             try cache_ptr.ensureMeshletJobCapacity(self.allocator, visible_meshlet_count);
             var meshlet_jobs = cache_ptr.meshlet_jobs[0..visible_meshlet_count];
             var jobs = cache_ptr.meshlet_job_handles[0..visible_meshlet_count];
@@ -2110,9 +2517,8 @@ pub const Renderer = struct {
                     .mesh = mesh,
                     .meshlet = meshlet_ptr,
                     .mesh_work = work,
-                    .projected = projected,
-                    .transformed_vertices = transformed_vertices,
-                    .vertex_ready = vertex_ready,
+                    .local_projected_vertices = cache_ptr.meshlet_local_projected_scratch[meshlet_vertex_offsets[job_idx] .. meshlet_vertex_offsets[job_idx] + meshlet_ptr.vertex_count],
+                    .local_camera_vertices = cache_ptr.meshlet_local_camera_scratch[meshlet_vertex_offsets[job_idx] .. meshlet_vertex_offsets[job_idx] + meshlet_ptr.vertex_count],
                     .camera_position = self.camera_position,
                     .basis_right = right,
                     .basis_up = up,
@@ -2177,21 +2583,50 @@ pub const Renderer = struct {
                     continue;
                 }
                 const meshlet_ptr = &meshlets[meshlet_index];
-                for (meshlet_ptr.triangle_indices) |tri_idx| {
+                const local_vertex_start = meshlet_vertex_offsets[visible_idx];
+                const local_camera_vertices = cache_ptr.meshlet_local_camera_scratch[local_vertex_start .. local_vertex_start + meshlet_ptr.vertex_count];
+                const local_projected_vertices = cache_ptr.meshlet_local_projected_scratch[local_vertex_start .. local_vertex_start + meshlet_ptr.vertex_count];
+                const meshlet_vertices = mesh.meshletVertexSlice(meshlet_ptr);
+
+                for (meshlet_vertices, 0..) |global_vertex_idx, local_idx| {
+                    const vertex = mesh_vertices[global_vertex_idx];
+                    const relative = math.Vec3.sub(vertex, self.camera_position);
+                    const camera_space = math.Vec3.new(
+                        math.Vec3.dot(relative, right),
+                        math.Vec3.dot(relative, up),
+                        math.Vec3.dot(relative, forward),
+                    );
+                    local_camera_vertices[local_idx] = camera_space;
+
+                    if (camera_space.z <= NEAR_CLIP) {
+                        local_projected_vertices[local_idx] = .{ INVALID_PROJECTED_COORD, INVALID_PROJECTED_COORD };
+                    } else {
+                        const inv_z = 1.0 / camera_space.z;
+                        const ndc_x = camera_space.x * inv_z * projection.x_scale;
+                        const ndc_y = camera_space.y * inv_z * projection.y_scale;
+                        const screen_x = ndc_x * projection.center_x + projection.center_x;
+                        const screen_y = -ndc_y * projection.center_y + projection.center_y;
+                        local_projected_vertices[local_idx] = .{
+                            @as(i32, @intFromFloat(screen_x)),
+                            @as(i32, @intFromFloat(screen_y)),
+                        };
+                    }
+                }
+
+                for (mesh.meshletPrimitiveSlice(meshlet_ptr)) |primitive| {
+                    const tri_idx = primitive.triangle_index;
                     const tri = mesh.triangles[tri_idx];
-                    _ = emitTriangleToWork(
+                    _ = emitMeshletPrimitiveToWork(
                         &writer,
                         mesh,
                         tri_idx,
                         tri,
-                        vertex_ready,
-                        mesh_vertices,
-                        self.camera_position,
+                        primitive,
+                        local_camera_vertices,
+                        local_projected_vertices,
                         right,
                         up,
                         forward,
-                        transformed_vertices,
-                        projected,
                         projection,
                         light_dir,
                         &cursor,
@@ -2205,6 +2640,13 @@ pub const Renderer = struct {
             work.next_triangle.store(cursor, .release);
         }
 
+        self.meshlet_telemetry = .{
+            .total_meshlets = meshlet_count,
+            .visible_meshlets = visible_meshlet_count,
+            .culled_meshlets = meshlet_count - visible_meshlet_count,
+            .emitted_triangles = work.next_triangle.load(.acquire),
+            .touched_tiles = self.meshlet_telemetry.touched_tiles,
+        };
         work.finalize(visible_meshlet_count);
     }
 

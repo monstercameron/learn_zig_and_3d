@@ -251,8 +251,11 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
 
     // Convert the ArrayLists to final slices for the Mesh struct.
     const vertex_slice = try final_vertices.toOwnedSlice(allocator);
+    errdefer allocator.free(vertex_slice);
     const texcoord_slice = try final_texcoords.toOwnedSlice(allocator);
+    errdefer allocator.free(texcoord_slice);
     const triangle_slice = try triangles.toOwnedSlice(allocator);
+    errdefer allocator.free(triangle_slice);
 
     var mesh = Mesh{
         .vertices = vertex_slice,
@@ -260,8 +263,11 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
         .normals = try allocator.alloc(Vec3, triangle_slice.len), // Will be calculated next.
         .tex_coords = texcoord_slice,
         .meshlets = &[_]MeshModule.Meshlet{},
+        .meshlet_vertices = &[_]usize{},
+        .meshlet_primitives = &[_]MeshModule.MeshletPrimitive{},
         .allocator = allocator,
     };
+    errdefer mesh.deinit();
 
     // Now that we have the final triangles, calculate the face normals.
     mesh.recalculateNormals();

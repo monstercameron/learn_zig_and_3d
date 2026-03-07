@@ -17,6 +17,7 @@ const GroupDispatchJobContext = struct {
 /// The function executed by a worker thread for a single group.
 fn groupDispatchJobFn(ctx_ptr: *anyopaque) void {
     const job_ctx: *GroupDispatchJobContext = @ptrCast(@alignCast(ctx_ptr));
+    defer job_ctx.allocator.destroy(job_ctx);
     const K = job_ctx.kernel_type; // Get the kernel type from the context
 
     const gs = Vec2u{ .x = K.group_size_x, .y = K.group_size_y };
@@ -29,6 +30,7 @@ fn groupDispatchJobFn(ctx_ptr: *anyopaque) void {
         };
         std.mem.set(u8, shared.?, 0);
     }
+    defer if (shared) |buf| job_ctx.allocator.free(buf);
 
     var ctx = job_ctx.ctx_base; // Copy the base context
     ctx.group_size = gs;
@@ -51,10 +53,6 @@ fn groupDispatchJobFn(ctx_ptr: *anyopaque) void {
             K.main(&ctx); // Execute the kernel's main function
         }
     }
-
-    if (shared) |buf| job_ctx.allocator.free(buf);
-    // Free the job context itself after the job is done
-    job_ctx.allocator.destroy(job_ctx);
 }
 
 fn noopJob(ctx: *anyopaque) void {
@@ -71,10 +69,15 @@ fn noopJob(ctx: *anyopaque) void {
 ///   pub fn main(ctx: *ComputeContext) void;
 pub fn dispatchKernel(comptime K: type, allocator: std.mem.Allocator, job_sys: *job_system.JobSystem, ctx_base: *const ComputeContext) !void {
     const gs = Vec2u{ .x = K.group_size_x, .y = K.group_size_y };
+    _ = gs;
 
     // Create a parent job to track completion of all group dispatches
     var parent_job = try job_system.allocateJob(allocator, noopJob, null, null);
     defer job_system.freeJob(allocator, parent_job);
+    errdefer {
+        parent_job.complete();
+        parent_job.wait();
+    }
 
     // Loop through the grid of groups and submit a job for each
     var gy: u32 = 0;
@@ -82,7 +85,7 @@ pub fn dispatchKernel(comptime K: type, allocator: std.mem.Allocator, job_sys: *
         var gx: u32 = 0;
         while (gx < ctx_base.num_groups.x) : (gx += 1) {
             // Allocate job context for this group
-            var job_ctx = try allocator.create(GroupDispatchJobContext);
+            const job_ctx = try allocator.create(GroupDispatchJobContext);
             job_ctx.* = GroupDispatchJobContext{
                 .kernel_type = K,
                 .ctx_base = ctx_base.*, // Copy the base context
@@ -92,7 +95,7 @@ pub fn dispatchKernel(comptime K: type, allocator: std.mem.Allocator, job_sys: *
             };
 
             // Allocate and submit the job
-            var job = try job_system.allocateJob(allocator, groupDispatchJobFn, job_ctx, parent_job);
+            const job = try job_system.allocateJob(allocator, groupDispatchJobFn, job_ctx, parent_job);
             if (!job_sys.submitJobAuto(job)) {
                 // Handle job submission failure (e.g., queue full)
                 job_system.freeJob(allocator, job);
@@ -103,5 +106,6 @@ pub fn dispatchKernel(comptime K: type, allocator: std.mem.Allocator, job_sys: *
     }
 
     // Wait for all child jobs (group dispatches) to complete
+    parent_job.complete();
     parent_job.wait();
 }

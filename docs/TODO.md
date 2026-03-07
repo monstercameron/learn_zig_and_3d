@@ -11,7 +11,38 @@ This is a comprehensive list of potential improvements, new features, and refact
 - [x] Cache per-triangle camera and screen-space vertices so raster stages can bypass mesh lookups.
 - [x] Parallelize meshlet task emission by dispatching meshlet jobs through the job system.
 - [x] Persist meshlet work buffers across frames with fine-grained invalidation to avoid rebuilds.
-- [ ] Add runtime telemetry (meshlets culled/processed, triangles emitted) to validate task-stage performance.
+- [x] Add runtime telemetry (meshlets culled/processed, triangles emitted) to validate task-stage performance.
+
+## Meshlet Implementation Upgrades
+
+- [x] **Adopt Packed Meshlet Storage**: Replace per-meshlet heap slices in [`src/mesh.zig`] with a descriptor array plus packed vertex-index and triangle-index buffers to improve cache locality and reduce allocation overhead.
+- [x] **Add Local Vertex Remapping**: Store meshlet-local vertex indices instead of only global mesh indices so meshlet jobs can operate on tighter working sets and smaller index formats.
+- [ ] **Improve Offline Meshlet Clustering**: Upgrade the greedy builder in [`src/mesh.zig`] / [`src/meshlet_builder.zig`] to account for shared-vertex reuse, spatial locality, and tighter bounds when grouping triangles.
+- [x] **Serialize Packed Meshlet Data**: Update [`src/meshlet_cache.zig`] to persist the packed meshlet format directly instead of reconstructing fragmented heap-owned slices on load.
+- [x] **Use Narrower Meshlet Index Types**: Downsize meshlet-local indices to `u16` or smaller when limits allow to reduce bandwidth and cache pressure.
+
+## Meshlet Runtime Optimizations
+
+- [x] **Give Meshlet Jobs Local Vertex Scratch**: Replace the shared global vertex-ready path in [`src/renderer.zig`] with per-meshlet local transform scratch keyed by meshlet-local vertex lists.
+- [ ] **Batch Meshlet Triangle Reservations**: Reserve triangle output spans once per meshlet in [`src/renderer.zig`] instead of incrementing shared output state per emitted triangle.
+- [x] **Make Tile Contribution Recording O(1)**: Replace the linear search inside `MeshletContribution.addTriangle` in [`src/renderer.zig`] with a dense tile lookup or per-frame stamp table.
+- [ ] **Parallelize Meshlet-to-Tile Binning Further**: Reduce the cost of the post-emission merge step in [`src/renderer.zig`] so tile list assembly scales with meshlet job parallelism.
+- [ ] **Promote Meshlets to the Primary Work Unit**: Refactor [`src/renderer.zig`] so the meshlet path is the first-class render path rather than an adapter back into generic triangle packets.
+
+## Meshlet Culling & Data Quality
+
+- [x] **Add Meshlet Normal-Cones**: Extend meshlet data with average-normal or cone information and use it for coarse backface culling before primitive emission.
+- [ ] **Add Tighter Bounds**: Evaluate storing meshlet AABBs alongside spheres for elongated clusters that cull poorly with spherical bounds alone.
+- [ ] **Add Depth-Aware Scheduling**: Investigate front-to-back meshlet ordering once scene complexity grows so culling and depth efficiency improve together.
+- [x] **Persist More Offline Derived Data**: Precompute and serialize extra meshlet metadata such as tighter bounds, cone data, and local remap tables.
+
+## Meshlet Tooling & Validation
+
+- [x] **Add Meshlet Telemetry Counters**: Track visible meshlets, emitted triangles, rejected triangles, tiles touched, and merge costs per frame in [`src/renderer.zig`].
+- [ ] **Add Meshlet Debug Visualizations**: Render overlays showing active meshlets, meshlet bounds, and visibility state to validate clustering and culling behavior.
+- [x] **Benchmark Meshlet Quality**: Extend [`benchmarks/src/bench_meshlet.zig`] to report reuse ratio, average local vertex count, bounds quality, and emission efficiency instead of only cull timing.
+- [x] **Add Meshlet Regression Tests**: Cover near-plane crossing, degenerate clusters, and cache reload correctness so meshlet changes don’t regress silently.
+- [x] **Compare Meshlet vs Non-Meshlet Paths**: Add reproducible benchmark traces using the same mesh/camera inputs so improvements can be validated against the legacy triangle path.
 
 ## Audio Engine (Native Windows)
 
@@ -159,13 +190,13 @@ This is a comprehensive list of potential improvements, new features, and refact
 - [x] **Define Meshlet Data Structure**: Create a `Meshlet` struct containing a small number of vertex indices and primitive indices, along with a bounding sphere/box for culling.
 - [x] **Implement Meshlet Builder**: Add an offline/loader step in `obj_loader.zig` (or a new tool) that partitions each mesh into meshlets using the target limits.
 - [x] **Persist Meshlets**: Decide on in-memory vs serialized storage and update asset loading to populate meshlet arrays alongside the existing `Mesh`.
-- [ ] **Invalidate Legacy Cache Entries**: Bump the meshlet cache version or auto-detect single-triangle cache files so the new greedy packing replaces older one-triangle meshlets without manual intervention.
+- [x] **Invalidate Legacy Cache Entries**: Bump the meshlet cache version or auto-detect single-triangle cache files so the new greedy packing replaces older one-triangle meshlets without manual intervention.
 
 ### Phase 2 – Runtime Task Stage
 
 - [x] **Task-Level Culling**: Implement frustum and view-dependent culling that accepts a meshlet's bounds and enqueues only visible meshlets (CPU analog of a task shader).
 - [ ] **Redesign Work Unit**: Replace `TileRenderJob` submissions with `MeshletRenderJob`s that own the meshlet’s vertex/primitive processing.
-- [ ] **Shared Vertex Cache**: Introduce a per-job scratch buffer for transformed vertices to cut redundant math across primitives inside a meshlet.
+- [x] **Shared Vertex Cache**: Introduce a per-job scratch buffer for transformed vertices to cut redundant math across primitives inside a meshlet.
 - [x] **Parallel Meshlet Submission**: Feed visible meshlets into the job system with deterministic output spans to unlock multi-core task processing.
 
 ### Phase 3 – Meshlet Processing & Output

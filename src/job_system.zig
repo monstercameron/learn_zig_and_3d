@@ -38,6 +38,8 @@ pub const Job = struct {
     context: *anyopaque,
     /// A pointer to a parent job. This allows for creating dependencies between jobs.
     parent: ?*Job,
+    /// Non-null when this job itself was heap-allocated and should be destroyed after execution.
+    owner_allocator: ?std.mem.Allocator,
     /// An atomic counter for tracking how many child jobs are left to be completed.
     /// When this hits zero, the job is considered finished.
     unfinished_jobs: std.atomic.Value(u32),
@@ -48,6 +50,7 @@ pub const Job = struct {
             .function = function,
             .context = context,
             .parent = parent,
+            .owner_allocator = null,
             // A job starts with 1 unfinished task: itself.
             .unfinished_jobs = std.atomic.Value(u32).init(1),
         };
@@ -63,14 +66,27 @@ pub const Job = struct {
     /// unfinished job counter. This is how dependencies are resolved.
     fn finish(self: *Job) void {
         // Atomically decrement the counter.
-        const unfinished = self.unfinished_jobs.fetchSub(1, .release);
+        const unfinished = self.unfinished_jobs.fetchSub(1, .acq_rel);
 
         // If the counter was 1 before we decremented it, it means this was the last task
         // for this job to be completed.
         if (unfinished == 1) {
             // If we have a parent, we notify it that one of its children has finished.
-            if (self.parent) |_| return;
+            if (self.parent) |parent| parent.finish();
         }
+    }
+
+    fn registerChild(self: *Job) void {
+        _ = self.unfinished_jobs.fetchAdd(1, .acq_rel);
+    }
+
+    fn unregisterChild(self: *Job) void {
+        _ = self.unfinished_jobs.fetchSub(1, .acq_rel);
+    }
+
+    /// Marks the job's own scheduling work as complete so callers can wait on children only.
+    pub fn complete(self: *Job) void {
+        self.finish();
     }
 
     /// Checks if the job and all its potential children are complete.
@@ -80,9 +96,14 @@ pub const Job = struct {
 
     /// Waits (by spinning) until the job is complete. This is a simple way to synchronize.
     pub fn wait(self: *const Job) void {
+        var spins: u32 = 0;
         while (!self.isComplete()) {
-            // Hint to the CPU that we are in a spin-wait loop.
-            std.atomic.spinLoopHint();
+            if ((spins & 255) == 255) {
+                std.Thread.yield() catch {};
+            } else {
+                std.atomic.spinLoopHint();
+            }
+            spins +%= 1;
         }
     }
 };
@@ -190,6 +211,9 @@ const WorkerThread = struct {
             // 3. If we have a job, execute it.
             if (job) |j| {
                 j.execute();
+                if (j.owner_allocator) |allocator| {
+                    allocator.destroy(j);
+                }
             } else {
                 // 4. If there's no work anywhere, yield to the OS to avoid busy-waiting.
                 std.Thread.yield() catch {};
@@ -282,9 +306,11 @@ pub const JobSystem = struct {
         var attempts: u32 = 0;
         while (attempts < self.worker_count) : (attempts += 1) {
             const worker_idx = (self.next_worker.fetchAdd(1, .monotonic)) % self.worker_count;
+            if (job.parent) |parent| parent.registerChild();
             if (self.workers[worker_idx].queue.push(job)) {
                 return true;
             }
+            if (job.parent) |parent| parent.unregisterChild();
         }
         job_logger.errorSub("submit", "failed to submit job after {} worker attempts", .{self.worker_count});
         return false;
@@ -321,6 +347,7 @@ pub const JobSystem = struct {
 pub fn allocateJob(allocator: std.mem.Allocator, function: JobFn, context: *anyopaque, parent: ?*Job) !*Job {
     const job = try allocator.create(Job);
     job.* = Job.init(function, context, parent);
+    job.owner_allocator = allocator;
     return job;
 }
 

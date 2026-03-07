@@ -215,26 +215,29 @@ pub fn main() !void {
         }
 
         // Check if it's time to render a new frame, based on our target FPS.
-        if (renderer.shouldRenderFrame()) {
-            frame_count += 1;
-            if (frame_count <= 3) {
-                app_logger.debug("rendering frame {}", .{frame_count});
+        if (!renderer.shouldRenderFrame()) {
+            Sleep(1);
+            continue;
+        }
+
+        frame_count += 1;
+        if (frame_count <= 3) {
+            app_logger.debug("rendering frame {}", .{frame_count});
+        }
+        // This is the main drawing call.
+        // JS Analogy: `renderer.renderScene(scene);` inside a `requestAnimationFrame` callback.
+        renderer.render3DMeshWithPump(&teapot, MessagePump.pump) catch |err| {
+            // If rendering fails, log the error and exit the loop.
+            if (err == error.RenderInterrupted) {
+                app_logger.info("render interrupted by shutdown request", .{});
+            } else {
+                app_logger.@"error"("rendering failed: {s}", .{@errorName(err)});
             }
-            // This is the main drawing call.
-            // JS Analogy: `renderer.renderScene(scene);` inside a `requestAnimationFrame` callback.
-            renderer.render3DMeshWithPump(&teapot, MessagePump.pump) catch |err| {
-                // If rendering fails, log the error and exit the loop.
-                if (err == error.RenderInterrupted) {
-                    app_logger.info("render interrupted by shutdown request", .{});
-                } else {
-                    app_logger.@"error"("rendering failed: {s}", .{@errorName(err)});
-                }
-                running = false;
-                break;
-            };
-            if (frame_count <= 3) {
-                app_logger.debug("frame {} complete", .{frame_count});
-            }
+            running = false;
+            break;
+        };
+        if (frame_count <= 3) {
+            app_logger.debug("frame {} complete", .{frame_count});
         }
 
         // Yield to the OS. This prevents our app from using 100% CPU if it's running
@@ -257,6 +260,7 @@ fn levelLiftMeshToGround(mesh: *mesh_module.Mesh) void {
     for (mesh.vertices) |*v| {
         v.y += offset;
     }
+    mesh.clearMeshlets();
 }
 
 fn levelAppendGroundPlane(mesh: *mesh_module.Mesh, allocator: std.mem.Allocator) !void {
@@ -332,4 +336,5 @@ fn levelAppendGroundPlane(mesh: *mesh_module.Mesh, allocator: std.mem.Allocator)
     mesh.triangles = new_triangles;
     mesh.normals = new_normals;
     mesh.recalculateNormals();
+    mesh.clearMeshlets();
 }

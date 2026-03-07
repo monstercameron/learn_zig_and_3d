@@ -31,20 +31,24 @@ const Vec3 = math.Vec3;
 const Vec2 = math.Vec2;
 
 /// A compact cluster of triangles processed together in the mesh-shader pipeline.
-/// Stores the subset of vertex indices and triangle indices that belong to the meshlet
-/// as well as a bounding sphere for quick culling tests.
+/// Stores offsets into the packed meshlet vertex/primitive buffers along with a
+/// bounding sphere for quick culling tests.
+pub const MeshletPrimitive = struct {
+    triangle_index: usize,
+    local_v0: u16,
+    local_v1: u16,
+    local_v2: u16,
+};
+
 pub const Meshlet = struct {
-    vertex_indices: []usize,
-    triangle_indices: []usize,
+    vertex_offset: usize,
+    vertex_count: usize,
+    primitive_offset: usize,
+    primitive_count: usize,
     bounds_center: Vec3,
     bounds_radius: f32,
-
-    pub fn deinit(self: *Meshlet, allocator: std.mem.Allocator) void {
-        allocator.free(self.vertex_indices);
-        allocator.free(self.triangle_indices);
-        self.vertex_indices = &[_]usize{};
-        self.triangle_indices = &[_]usize{};
-    }
+    normal_cone_axis: Vec3,
+    normal_cone_cutoff: f32,
 };
 
 // ========== MESH STRUCTURE ==========
@@ -111,6 +115,10 @@ pub const Mesh = struct {
     tex_coords: []Vec2,
     /// Meshlets generated for this mesh. Empty until meshlet generation runs.
     meshlets: []Meshlet,
+    /// Packed global vertex indices for all meshlets.
+    meshlet_vertices: []usize,
+    /// Packed primitive descriptors for all meshlets.
+    meshlet_primitives: []MeshletPrimitive,
     /// The allocator used to manage the memory for the mesh data.
     allocator: std.mem.Allocator,
 
@@ -121,6 +129,8 @@ pub const Mesh = struct {
             .normals = &[_]Vec3{},
             .tex_coords = &[_]Vec2{},
             .meshlets = &[_]Meshlet{},
+            .meshlet_vertices = &[_]usize{},
+            .meshlet_primitives = &[_]MeshletPrimitive{},
             .allocator = allocator,
         };
     }
@@ -182,6 +192,8 @@ pub const Mesh = struct {
             .normals = try allocator.alloc(Vec3, 12),
             .tex_coords = tex_coords,
             .meshlets = &[_]Meshlet{},
+            .meshlet_vertices = &[_]usize{},
+            .meshlet_primitives = &[_]MeshletPrimitive{},
             .allocator = allocator,
         };
 
@@ -208,6 +220,8 @@ pub const Mesh = struct {
             .normals = try allocator.alloc(Vec3, 1),
             .tex_coords = tex_coords,
             .meshlets = &[_]Meshlet{},
+            .meshlet_vertices = &[_]usize{},
+            .meshlet_primitives = &[_]MeshletPrimitive{},
             .allocator = allocator,
         };
 
@@ -226,12 +240,41 @@ pub const Mesh = struct {
 
     /// Releases all generated meshlets and associated buffers.
     pub fn clearMeshlets(self: *Mesh) void {
-        if (self.meshlets.len == 0) return;
-        for (self.meshlets) |*meshlet| {
-            meshlet.deinit(self.allocator);
-        }
-        self.allocator.free(self.meshlets);
+        if (self.meshlets.len != 0) self.allocator.free(self.meshlets);
+        if (self.meshlet_vertices.len != 0) self.allocator.free(self.meshlet_vertices);
+        if (self.meshlet_primitives.len != 0) self.allocator.free(self.meshlet_primitives);
         self.meshlets = &[_]Meshlet{};
+        self.meshlet_vertices = &[_]usize{};
+        self.meshlet_primitives = &[_]MeshletPrimitive{};
+    }
+
+    pub fn meshletVertexSlice(self: *const Mesh, meshlet: *const Meshlet) []const usize {
+        return self.meshlet_vertices[meshlet.vertex_offset .. meshlet.vertex_offset + meshlet.vertex_count];
+    }
+
+    pub fn meshletPrimitiveSlice(self: *const Mesh, meshlet: *const Meshlet) []const MeshletPrimitive {
+        return self.meshlet_primitives[meshlet.primitive_offset .. meshlet.primitive_offset + meshlet.primitive_count];
+    }
+
+    pub fn meshletGlobalVertexIndex(self: *const Mesh, meshlet: *const Meshlet, local_index: u16) usize {
+        return self.meshlet_vertices[meshlet.vertex_offset + @as(usize, @intCast(local_index))];
+    }
+
+    fn triangleNormalForIndex(self: *const Mesh, tri_idx: usize) Vec3 {
+        if (tri_idx < self.normals.len) {
+            const normal = self.normals[tri_idx];
+            const len = Vec3.length(normal);
+            if (len > 1e-6) return Vec3.scale(normal, 1.0 / len);
+        }
+
+        const tri = self.triangles[tri_idx];
+        const p0 = self.vertices[tri.v0];
+        const p1 = self.vertices[tri.v1];
+        const p2 = self.vertices[tri.v2];
+        const fallback = Vec3.cross(Vec3.sub(p1, p0), Vec3.sub(p2, p0));
+        const len = Vec3.length(fallback);
+        if (len > 1e-6) return Vec3.scale(fallback, 1.0 / len);
+        return Vec3.new(0.0, 0.0, 1.0);
     }
 
     /// Calculates the mesh's bounding box and translates its vertices so that the
@@ -252,6 +295,7 @@ pub const Mesh = struct {
         for (self.vertices) |*v| {
             v.* = Vec3.sub(v.*, center);
         }
+        self.clearMeshlets();
     }
 
     pub fn generateMeshlets(self: *Mesh, max_vertices: usize, max_triangles: usize) !void {
@@ -265,63 +309,80 @@ pub const Mesh = struct {
         }
 
         var meshlets_temp = std.ArrayList(Meshlet){};
-        var release_meshlets = true;
-        defer {
-            if (release_meshlets) {
-                for (meshlets_temp.items) |*entry| {
-                    entry.deinit(self.allocator);
-                }
-            }
-            meshlets_temp.deinit(self.allocator);
-        }
+        defer meshlets_temp.deinit(self.allocator);
+        var packed_vertices_temp = std.ArrayList(usize){};
+        defer packed_vertices_temp.deinit(self.allocator);
+        var packed_primitives_temp = std.ArrayList(MeshletPrimitive){};
+        defer packed_primitives_temp.deinit(self.allocator);
 
         var current_vertices = std.ArrayList(usize){};
         defer current_vertices.deinit(self.allocator);
 
-        var current_triangles = std.ArrayList(usize){};
-        defer current_triangles.deinit(self.allocator);
+        var current_primitives = std.ArrayList(MeshletPrimitive){};
+        defer current_primitives.deinit(self.allocator);
 
-        var vertex_map = std.AutoHashMap(usize, bool).init(self.allocator);
+        var vertex_map = std.AutoHashMap(usize, u16).init(self.allocator);
         defer vertex_map.deinit();
 
         const Flush = struct {
             fn emit(
                 mesh: *Mesh,
                 meshlets: *std.ArrayList(Meshlet),
+                packed_vertices: *std.ArrayList(usize),
+                packed_primitives: *std.ArrayList(MeshletPrimitive),
                 vertex_indices: *std.ArrayList(usize),
-                triangle_indices: *std.ArrayList(usize),
+                primitives: *std.ArrayList(MeshletPrimitive),
             ) !void {
-                if (triangle_indices.items.len == 0) return;
-
-                const vert_slice = try mesh.allocator.alloc(usize, vertex_indices.items.len);
-                errdefer mesh.allocator.free(vert_slice);
-                std.mem.copyForwards(usize, vert_slice, vertex_indices.items);
-
-                const tri_slice = try mesh.allocator.alloc(usize, triangle_indices.items.len);
-                errdefer mesh.allocator.free(tri_slice);
-                std.mem.copyForwards(usize, tri_slice, triangle_indices.items);
+                if (primitives.items.len == 0) return;
 
                 var centroid = Vec3.new(0.0, 0.0, 0.0);
-                if (vert_slice.len != 0) {
-                    for (vert_slice) |vi| {
+                if (vertex_indices.items.len != 0) {
+                    for (vertex_indices.items) |vi| {
                         centroid = Vec3.add(centroid, mesh.vertices[vi]);
                     }
-                    const inv = 1.0 / @as(f32, @floatFromInt(vert_slice.len));
+                    const inv = 1.0 / @as(f32, @floatFromInt(vertex_indices.items.len));
                     centroid = Vec3.scale(centroid, inv);
                 }
 
                 var radius: f32 = 0.0;
-                for (vert_slice) |vi| {
+                for (vertex_indices.items) |vi| {
                     const delta = Vec3.sub(mesh.vertices[vi], centroid);
                     const distance = Vec3.length(delta);
                     if (distance > radius) radius = distance;
                 }
 
+                var cone_axis_sum = Vec3.new(0.0, 0.0, 0.0);
+                for (primitives.items) |primitive| {
+                    cone_axis_sum = Vec3.add(cone_axis_sum, mesh.triangleNormalForIndex(primitive.triangle_index));
+                }
+
+                var cone_axis = Vec3.new(0.0, 0.0, 1.0);
+                var cone_cutoff: f32 = -1.0;
+                const cone_axis_len = Vec3.length(cone_axis_sum);
+                if (cone_axis_len > 1e-6) {
+                    cone_axis = Vec3.scale(cone_axis_sum, 1.0 / cone_axis_len);
+                    cone_cutoff = 1.0;
+                    for (primitives.items) |primitive| {
+                        const tri_normal = mesh.triangleNormalForIndex(primitive.triangle_index);
+                        const alignment = std.math.clamp(Vec3.dot(cone_axis, tri_normal), -1.0, 1.0);
+                        if (alignment < cone_cutoff) cone_cutoff = alignment;
+                    }
+                }
+
+                const vertex_offset = packed_vertices.items.len;
+                const primitive_offset = packed_primitives.items.len;
+                try packed_vertices.appendSlice(mesh.allocator, vertex_indices.items);
+                try packed_primitives.appendSlice(mesh.allocator, primitives.items);
+
                 const meshlet = Meshlet{
-                    .vertex_indices = vert_slice,
-                    .triangle_indices = tri_slice,
+                    .vertex_offset = vertex_offset,
+                    .vertex_count = vertex_indices.items.len,
+                    .primitive_offset = primitive_offset,
+                    .primitive_count = primitives.items.len,
                     .bounds_center = centroid,
                     .bounds_radius = radius,
+                    .normal_cone_axis = cone_axis,
+                    .normal_cone_cutoff = cone_cutoff,
                 };
                 try meshlets.append(mesh.allocator, meshlet);
             }
@@ -338,38 +399,108 @@ pub const Mesh = struct {
                 }
 
                 const too_many_vertices = current_vertices.items.len + additional_vertices > safe_vertex_limit;
-                const too_many_tris = current_triangles.items.len >= safe_triangle_limit;
+                const too_many_tris = current_primitives.items.len >= safe_triangle_limit;
 
-                if ((too_many_vertices or too_many_tris) and current_triangles.items.len > 0) {
-                    try Flush.emit(self, &meshlets_temp, &current_vertices, &current_triangles);
+                if ((too_many_vertices or too_many_tris) and current_primitives.items.len > 0) {
+                    try Flush.emit(self, &meshlets_temp, &packed_vertices_temp, &packed_primitives_temp, &current_vertices, &current_primitives);
                     current_vertices.clearRetainingCapacity();
-                    current_triangles.clearRetainingCapacity();
+                    current_primitives.clearRetainingCapacity();
                     vertex_map.clearRetainingCapacity();
                     continue;
                 }
 
-                try current_triangles.append(self.allocator, tri_idx);
+                var local_vertices: [3]u16 = undefined;
                 for (tri_vertices) |vi| {
                     const put_result = try vertex_map.getOrPut(vi);
                     if (!put_result.found_existing) {
-                        put_result.value_ptr.* = true;
+                        if (current_vertices.items.len > std.math.maxInt(u16)) return error.MeshletVertexLimitExceeded;
+                        const local_index: u16 = @intCast(current_vertices.items.len);
+                        put_result.value_ptr.* = local_index;
                         try current_vertices.append(self.allocator, vi);
                     }
                 }
+                local_vertices[0] = vertex_map.get(tri.v0).?;
+                local_vertices[1] = vertex_map.get(tri.v1).?;
+                local_vertices[2] = vertex_map.get(tri.v2).?;
+                try current_primitives.append(self.allocator, MeshletPrimitive{
+                    .triangle_index = tri_idx,
+                    .local_v0 = local_vertices[0],
+                    .local_v1 = local_vertices[1],
+                    .local_v2 = local_vertices[2],
+                });
                 break;
             }
         }
 
-        try Flush.emit(self, &meshlets_temp, &current_vertices, &current_triangles);
+        try Flush.emit(self, &meshlets_temp, &packed_vertices_temp, &packed_primitives_temp, &current_vertices, &current_primitives);
 
         if (meshlets_temp.items.len == 0) {
             self.meshlets = &[_]Meshlet{};
-            release_meshlets = false;
+            self.meshlet_vertices = &[_]usize{};
+            self.meshlet_primitives = &[_]MeshletPrimitive{};
             return;
         }
 
-        self.meshlets = try self.allocator.alloc(Meshlet, meshlets_temp.items.len);
-        std.mem.copyForwards(Meshlet, self.meshlets, meshlets_temp.items);
-        release_meshlets = false;
+        const meshlet_slice = try meshlets_temp.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(meshlet_slice);
+        const meshlet_vertex_slice = try packed_vertices_temp.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(meshlet_vertex_slice);
+        const meshlet_primitive_slice = try packed_primitives_temp.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(meshlet_primitive_slice);
+
+        self.meshlets = meshlet_slice;
+        self.meshlet_vertices = meshlet_vertex_slice;
+        self.meshlet_primitives = meshlet_primitive_slice;
     }
 };
+
+test "generateMeshlets packs vertices and primitives contiguously" {
+    var mesh = try Mesh.cube(std.testing.allocator);
+    defer mesh.deinit();
+
+    try mesh.generateMeshlets(64, 126);
+
+    try std.testing.expect(mesh.meshlets.len > 0);
+    try std.testing.expect(mesh.meshlet_vertices.len > 0);
+    try std.testing.expect(mesh.meshlet_primitives.len > 0);
+
+    var total_vertex_count: usize = 0;
+    var total_primitive_count: usize = 0;
+    for (mesh.meshlets) |meshlet| {
+        total_vertex_count += meshlet.vertex_count;
+        total_primitive_count += meshlet.primitive_count;
+
+        const vertex_slice = mesh.meshletVertexSlice(&meshlet);
+        const primitive_slice = mesh.meshletPrimitiveSlice(&meshlet);
+        try std.testing.expectEqual(meshlet.vertex_count, vertex_slice.len);
+        try std.testing.expectEqual(meshlet.primitive_count, primitive_slice.len);
+        try std.testing.expect(meshlet.normal_cone_cutoff >= -1.0);
+        try std.testing.expect(meshlet.normal_cone_cutoff <= 1.0);
+
+        for (primitive_slice) |primitive| {
+            try std.testing.expect(primitive.triangle_index < mesh.triangles.len);
+            try std.testing.expect(@as(usize, primitive.local_v0) < meshlet.vertex_count);
+            try std.testing.expect(@as(usize, primitive.local_v1) < meshlet.vertex_count);
+            try std.testing.expect(@as(usize, primitive.local_v2) < meshlet.vertex_count);
+            try std.testing.expect(mesh.meshletGlobalVertexIndex(&meshlet, primitive.local_v0) < mesh.vertices.len);
+            try std.testing.expect(mesh.meshletGlobalVertexIndex(&meshlet, primitive.local_v1) < mesh.vertices.len);
+            try std.testing.expect(mesh.meshletGlobalVertexIndex(&meshlet, primitive.local_v2) < mesh.vertices.len);
+        }
+    }
+
+    try std.testing.expectEqual(total_vertex_count, mesh.meshlet_vertices.len);
+    try std.testing.expectEqual(total_primitive_count, mesh.meshlet_primitives.len);
+}
+
+test "generateMeshlets respects primitive budget" {
+    var mesh = try Mesh.cube(std.testing.allocator);
+    defer mesh.deinit();
+
+    try mesh.generateMeshlets(64, 1);
+
+    try std.testing.expectEqual(mesh.triangles.len, mesh.meshlets.len);
+    for (mesh.meshlets) |meshlet| {
+        try std.testing.expect(meshlet.primitive_count <= 1);
+        try std.testing.expect(meshlet.vertex_count <= 3);
+    }
+}
