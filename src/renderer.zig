@@ -84,6 +84,62 @@ const HybridShadowReceiverBounds = struct {
     min_depth: f32,
 };
 
+const min_rows_per_parallel_job: usize = 16;
+
+const LightSpaceSample = struct {
+    u: f32,
+    v: f32,
+    depth: f32,
+};
+
+const CameraToLightTransform = struct {
+    origin_u: f32,
+    origin_v: f32,
+    origin_depth: f32,
+    camera_u: math.Vec3,
+    camera_v: math.Vec3,
+    camera_depth: math.Vec3,
+
+    fn init(
+        camera_position: math.Vec3,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        light_basis_right: math.Vec3,
+        light_basis_up: math.Vec3,
+        light_dir_world: math.Vec3,
+    ) CameraToLightTransform {
+        return .{
+            .origin_u = math.Vec3.dot(camera_position, light_basis_right),
+            .origin_v = math.Vec3.dot(camera_position, light_basis_up),
+            .origin_depth = math.Vec3.dot(camera_position, light_dir_world),
+            .camera_u = math.Vec3.new(
+                math.Vec3.dot(basis_right, light_basis_right),
+                math.Vec3.dot(basis_up, light_basis_right),
+                math.Vec3.dot(basis_forward, light_basis_right),
+            ),
+            .camera_v = math.Vec3.new(
+                math.Vec3.dot(basis_right, light_basis_up),
+                math.Vec3.dot(basis_up, light_basis_up),
+                math.Vec3.dot(basis_forward, light_basis_up),
+            ),
+            .camera_depth = math.Vec3.new(
+                math.Vec3.dot(basis_right, light_dir_world),
+                math.Vec3.dot(basis_up, light_dir_world),
+                math.Vec3.dot(basis_forward, light_dir_world),
+            ),
+        };
+    }
+
+    fn project(self: CameraToLightTransform, camera_pos: math.Vec3) LightSpaceSample {
+        return .{
+            .u = self.origin_u + math.Vec3.dot(camera_pos, self.camera_u),
+            .v = self.origin_v + math.Vec3.dot(camera_pos, self.camera_v),
+            .depth = self.origin_depth + math.Vec3.dot(camera_pos, self.camera_depth),
+        };
+    }
+};
+
 const HybridShadowGrid = struct {
     basis_right: math.Vec3 = math.Vec3.new(1.0, 0.0, 0.0),
     basis_up: math.Vec3 = math.Vec3.new(0.0, 1.0, 0.0),
@@ -102,6 +158,10 @@ const HybridShadowStats = struct {
     grid_candidate_count: usize = 0,
     unique_candidate_count: usize = 0,
     final_candidate_count: usize = 0,
+    accel_rebuild_ms: f32 = 0.0,
+    candidate_ms: f32 = 0.0,
+    cache_clear_ms: f32 = 0.0,
+    execute_ms: f32 = 0.0,
 };
 
 const HybridShadowDebugState = struct {
@@ -526,7 +586,7 @@ fn extractBloomDownsampleRows(
 ) void {
     var y = start_row;
     while (y < end_row) : (y += 1) {
-        const sy0 = @min(src_height - 1, y * 4);
+        const sy0 = @min(src_height - 1, y << 2);
         const sy1 = @min(src_height - 1, sy0 + 1);
         const sy2 = @min(src_height - 1, sy0 + 2);
         const sy3 = @min(src_height - 1, sy0 + 3);
@@ -537,7 +597,7 @@ fn extractBloomDownsampleRows(
         const dst_row = y * bloom.width;
         var x: usize = 0;
         while (x < bloom.width) : (x += 1) {
-            const sx = x * 4;
+            const sx = x << 2;
             var r_sum: u32 = 0;
             var g_sum: u32 = 0;
             var b_sum: u32 = 0;
@@ -694,7 +754,7 @@ fn compositeBloomRows(
     const max_channel: GradeVec = @splat(255);
     var y = start_row;
     while (y < end_row) : (y += 1) {
-        const by = @min(bloom.height - 1, y / 4);
+        const by = @min(bloom.height - 1, y >> 2);
         const bloom_row = bloom.ping[by * bloom.width ..][0..bloom.width];
         const row_start = y * dst_width;
         var x: usize = 0;
@@ -710,7 +770,7 @@ fn compositeBloomRows(
             inline for (0..color_grade_simd_lanes) |lane| {
                 const dst_idx = row_start + x + lane;
                 const dst_pixel = dst[dst_idx];
-                const bloom_pixel = bloom_row[@min(bloom.width - 1, (x + lane) / 4)];
+                const bloom_pixel = bloom_row[@min(bloom.width - 1, (x + lane) >> 2)];
                 alpha[lane] = dst_pixel & 0xFF000000;
                 r_arr[lane] = @intCast((dst_pixel >> 16) & 0xFF);
                 g_arr[lane] = @intCast((dst_pixel >> 8) & 0xFF);
@@ -742,7 +802,7 @@ fn compositeBloomRows(
         }
 
         while (x < dst_width) : (x += 1) {
-            const bloom_pixel = bloom_row[@min(bloom.width - 1, x / 4)];
+            const bloom_pixel = bloom_row[@min(bloom.width - 1, x >> 2)];
             const idx = row_start + x;
             const dst_pixel = dst[idx];
             const a = dst_pixel & 0xFF000000;
@@ -877,6 +937,7 @@ const AdaptiveShadowTileJob = struct {
     basis_up: math.Vec3,
     basis_forward: math.Vec3,
     light_dir_world: math.Vec3,
+    camera_to_light: CameraToLightTransform,
     darkness_scale: f32,
     valid_min_x: i32,
     valid_min_y: i32,
@@ -974,14 +1035,8 @@ const AdaptiveShadowTileJob = struct {
             return .{ .valid = false, .coverage = 0.0 };
         }
 
-        const world_pos = cameraToWorldPosition(
-            ctx.camera_position,
-            ctx.basis_right,
-            ctx.basis_up,
-            ctx.basis_forward,
-            camera_pos,
-        );
-        return .{ .valid = true, .coverage = if (ctx.isPointShadowed(world_pos)) 1.0 else 0.0 };
+        const light_sample = ctx.camera_to_light.project(camera_pos);
+        return .{ .valid = true, .coverage = if (ctx.isPointShadowed(camera_pos, light_sample)) 1.0 else 0.0 };
     }
 
     fn evaluateShadowCellAtScale(ctx: *AdaptiveShadowTileJob, cache_x: usize, cache_y: usize, shadow_scale: i32) ShadowSample {
@@ -1140,32 +1195,31 @@ const AdaptiveShadowTileJob = struct {
         return ctx.sampleShadowCoarse(screen_x, screen_y);
     }
 
-    fn isPointShadowed(ctx: *AdaptiveShadowTileJob, world_pos: math.Vec3) bool {
-        if (!ctx.renderer.hybrid_shadow_grid.active) return false;
+    fn isPointShadowed(ctx: *AdaptiveShadowTileJob, camera_pos: math.Vec3, light_sample: LightSpaceSample) bool {
+        if (ctx.candidate_count == 0) return false;
 
-        const grid = ctx.renderer.hybrid_shadow_grid;
-        const sample_u = math.Vec3.dot(world_pos, grid.basis_right);
-        const sample_v = math.Vec3.dot(world_pos, grid.basis_up);
-        if (sample_u < grid.min_u or sample_u > grid.max_u or sample_v < grid.min_v or sample_v > grid.max_v) return false;
+        const candidates = ctx.renderer.hybrid_shadow_tile_candidates[ctx.candidate_offset .. ctx.candidate_offset + ctx.candidate_count];
+        var ray_origin: math.Vec3 = undefined;
+        var ray_origin_ready = false;
+        for (candidates) |caster_index| {
+            if (caster_index >= ctx.renderer.hybrid_shadow_caster_count) continue;
+            const caster = ctx.renderer.hybrid_shadow_caster_bounds[caster_index];
+            if (caster.max_depth <= light_sample.depth + config.POST_HYBRID_SHADOW_RAY_BIAS) continue;
+            if (light_sample.u < caster.min_u or light_sample.u > caster.max_u or light_sample.v < caster.min_v or light_sample.v > caster.max_v) continue;
 
-        const cell_x = std.math.clamp(
-            @as(i32, @intFromFloat((sample_u - grid.min_u) * grid.inv_cell_u)),
-            0,
-            @as(i32, hybrid_shadow_grid_dim - 1),
-        );
-        const cell_y = std.math.clamp(
-            @as(i32, @intFromFloat((sample_v - grid.min_v) * grid.inv_cell_v)),
-            0,
-            @as(i32, hybrid_shadow_grid_dim - 1),
-        );
-        const cell_index = @as(usize, @intCast(cell_y)) * hybrid_shadow_grid_dim + @as(usize, @intCast(cell_x));
-        const cell_range = ctx.renderer.hybrid_shadow_grid_ranges[cell_index];
-        if (cell_range.count == 0) return false;
+            if (!ray_origin_ready) {
+                const world_pos = cameraToWorldPosition(
+                    ctx.camera_position,
+                    ctx.basis_right,
+                    ctx.basis_up,
+                    ctx.basis_forward,
+                    camera_pos,
+                );
+                ray_origin = math.Vec3.add(world_pos, math.Vec3.scale(ctx.light_dir_world, config.POST_HYBRID_SHADOW_RAY_BIAS));
+                ray_origin_ready = true;
+            }
 
-        const ray_origin = math.Vec3.add(world_pos, math.Vec3.scale(ctx.light_dir_world, config.POST_HYBRID_SHADOW_RAY_BIAS));
-        const candidates = ctx.renderer.hybrid_shadow_grid_candidates[cell_range.offset .. cell_range.offset + cell_range.count];
-        for (candidates) |meshlet_index| {
-            const meshlet = &ctx.mesh.meshlets[meshlet_index];
+            const meshlet = &ctx.mesh.meshlets[caster.meshlet_index];
             if (!rayIntersectsSphere(ray_origin, ctx.light_dir_world, meshlet.bounds_center, meshlet.bounds_radius)) continue;
             for (ctx.mesh.meshletPrimitiveSlice(meshlet)) |primitive| {
                 const tri = ctx.mesh.triangles[primitive.triangle_index];
@@ -1538,11 +1592,14 @@ pub const Renderer = struct {
     keys_pressed: u32, // Bitmask of currently pressed keys.
     camera_fov_deg: f32,
     frame_count: u32,
+    total_frames_rendered: u64,
     last_time: i128,
     last_frame_time: i128,
     current_fps: u32,
     target_frame_time_ns: i128,
     pending_fov_delta: f32,
+    profile_capture_frame: u64,
+    profile_capture_emitted: bool,
 
     // Tiled rendering resources
     tile_grid: ?TileGrid, // The grid layout of tiles on the screen.
@@ -1725,6 +1782,7 @@ pub const Renderer = struct {
             .camera_fov_deg = config.CAMERA_FOV_INITIAL,
             .keys_pressed = 0,
             .frame_count = 0,
+            .total_frames_rendered = 0,
             .last_time = current_time,
             .last_frame_time = current_time,
             .current_fps = 0,
@@ -1735,6 +1793,8 @@ pub const Renderer = struct {
             .last_reported_fov_deg = config.CAMERA_FOV_INITIAL,
             .light_marker_visible_last_frame = true,
             .pending_fov_delta = 0.0,
+            .profile_capture_frame = try parseProfileCaptureFrame(allocator),
+            .profile_capture_emitted = false,
             .tile_grid = tile_grid,
             .tile_buffers = tile_buffers,
             .texture = null,
@@ -1824,6 +1884,15 @@ pub const Renderer = struct {
             .color_grade_job_contexts = color_grade_job_contexts,
             .color_grade_jobs = color_grade_jobs,
         };
+    }
+
+    fn parseProfileCaptureFrame(allocator: std.mem.Allocator) !u64 {
+        const raw_value = std.process.getEnvVarOwned(allocator, "ZIG_RENDER_PROFILE_FRAME") catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => return 0,
+            else => return err,
+        };
+        defer allocator.free(raw_value);
+        return std.fmt.parseUnsigned(u64, raw_value, 10) catch 0;
     }
 
     /// Cleans up all renderer resources in the reverse order of creation.
@@ -3451,6 +3520,7 @@ pub const Renderer = struct {
             projection,
         );
         if (needs_update) {
+            const mesh_work_start = std.time.nanoTimestamp();
             meshlet_logger.debugSub(
                 "work",
                 "refreshing mesh work cache (vertices={} triangles={})",
@@ -3470,6 +3540,7 @@ pub const Renderer = struct {
                 light_dir,
             );
             cache.finalizeUpdate(mesh, self.camera_position, right, up, forward, light_dir, projection);
+            self.recordRenderPassTiming("mesh_work_update", mesh_work_start);
         } else {
             meshlet_logger.debugSub("work", "reusing cached mesh work", .{});
         }
@@ -3501,10 +3572,14 @@ pub const Renderer = struct {
                 self.drawLightMarker(light_camera, light_camera_z, center_x, center_y, x_scale, y_scale);
             }
         }
+        const present_start = std.time.nanoTimestamp();
         self.drawBitmap();
+        self.recordRenderPassTiming("present", present_start);
         pipeline_logger.debugSub("present", "bitmap presented", .{});
 
         self.frame_count += 1;
+        self.total_frames_rendered += 1;
+        self.maybeEmitSingleFrameProfile();
         const current_time = std.time.nanoTimestamp();
         self.finalizeFrame(current_time);
 
@@ -3530,6 +3605,36 @@ pub const Renderer = struct {
         if (delta_seconds > 0.1) delta_seconds = 0.1;
         if (delta_seconds <= 0.0) delta_seconds = 1.0 / 120.0;
         return delta_seconds;
+    }
+
+    fn maybeEmitSingleFrameProfile(self: *Renderer) void {
+        if (self.profile_capture_emitted or self.profile_capture_frame == 0) return;
+        if (self.total_frames_rendered != self.profile_capture_frame) return;
+
+        self.profile_capture_emitted = true;
+        renderer_logger.infoSub("frame_profile", "frame={} exact pass timings follow", .{self.total_frames_rendered});
+
+        for (self.render_pass_timings[0..self.render_pass_count]) |pass| {
+            renderer_logger.infoSub("frame_profile", "{s}: {d:.3} ms", .{ pass.name, pass.frame_duration_ms });
+        }
+
+        if (self.hybrid_shadow_stats.job_count != 0) {
+            renderer_logger.infoSub(
+                "frame_profile",
+                "hybrid_shadow detail accel={d:.3} candidate={d:.3} clear={d:.3} execute={d:.3} jobs={} active_tiles={} grid={} unique={} final={}",
+                .{
+                    self.hybrid_shadow_stats.accel_rebuild_ms,
+                    self.hybrid_shadow_stats.candidate_ms,
+                    self.hybrid_shadow_stats.cache_clear_ms,
+                    self.hybrid_shadow_stats.execute_ms,
+                    self.hybrid_shadow_stats.job_count,
+                    self.hybrid_shadow_stats.active_tile_count,
+                    self.hybrid_shadow_stats.grid_candidate_count,
+                    self.hybrid_shadow_stats.unique_candidate_count,
+                    self.hybrid_shadow_stats.final_candidate_count,
+                },
+            );
+        }
     }
 
     fn consumePendingFovDelta(self: *Renderer) f32 {
@@ -3592,9 +3697,19 @@ pub const Renderer = struct {
         self.recordRenderPassDuration(name, elapsed_ns);
     }
 
+    fn nanosecondsToMs(elapsed_ns: i128) f32 {
+        return @as(f32, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+    }
+
+    fn computeStripeCount(max_jobs: usize, row_count: usize) usize {
+        if (row_count == 0 or max_jobs == 0) return 0;
+        const desired = @max(@as(usize, 1), (row_count + min_rows_per_parallel_job - 1) / min_rows_per_parallel_job);
+        return @min(max_jobs, desired);
+    }
+
     fn recordRenderPassDuration(self: *Renderer, name: []const u8, elapsed_ns: i128) void {
         if (self.render_pass_count >= self.render_pass_timings.len) return;
-        const elapsed_ms = @as(f32, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+        const elapsed_ms = nanosecondsToMs(elapsed_ns);
         var timing = &self.render_pass_timings[self.render_pass_count];
         if (timing.name.len == 0 or !std.mem.eql(u8, timing.name, name)) {
             timing.* = .{
@@ -3838,7 +3953,7 @@ pub const Renderer = struct {
         self.shadow_map.active = true;
         @memset(self.shadow_map.depth, std.math.inf(f32));
 
-        const stripe_count = @min(self.shadow_raster_job_contexts.len, @max(@as(usize, 1), self.shadow_map.height));
+        const stripe_count = computeStripeCount(self.shadow_raster_job_contexts.len, self.shadow_map.height);
         const rows_per_job = if (stripe_count <= 1) self.shadow_map.height else (self.shadow_map.height + stripe_count - 1) / stripe_count;
 
         if (stripe_count <= 1 or self.job_system == null) {
@@ -3894,7 +4009,7 @@ pub const Renderer = struct {
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
         const height: usize = @intCast(self.bitmap.height);
-        const stripe_count = @min(self.shadow_resolve_job_contexts.len, @max(@as(usize, 1), height));
+        const stripe_count = computeStripeCount(self.shadow_resolve_job_contexts.len, height);
         const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
         const resolve_config = ShadowResolveConfig{
             .camera_position = camera_position,
@@ -4056,7 +4171,7 @@ pub const Renderer = struct {
                     if (caster.max_u < receiver_bounds.min_u or caster.min_u > receiver_bounds.max_u) continue;
                     if (caster.max_v < receiver_bounds.min_v or caster.min_v > receiver_bounds.max_v) continue;
 
-                    self.hybrid_shadow_tile_candidates[candidate_write.*] = caster.meshlet_index;
+                    self.hybrid_shadow_tile_candidates[candidate_write.*] = caster_index;
                     candidate_write.* += 1;
                     stats.final_candidate_count += 1;
                 }
@@ -4069,18 +4184,13 @@ pub const Renderer = struct {
     fn buildHybridShadowReceiverBounds(
         self: *Renderer,
         tile: *const TileRenderer.Tile,
-        camera_position: math.Vec3,
-        basis_right: math.Vec3,
-        basis_up: math.Vec3,
-        basis_forward: math.Vec3,
-        light_basis_right: math.Vec3,
-        light_basis_up: math.Vec3,
-        light_dir_world: math.Vec3,
+        camera_to_light: CameraToLightTransform,
     ) ?HybridShadowReceiverBounds {
-        var valid_min_x = tile.x + tile.width;
-        var valid_min_y = tile.y + tile.height;
-        var valid_max_x = tile.x - 1;
-        var valid_max_y = tile.y - 1;
+        const tile_min_x = std.math.clamp(tile.x, 0, self.bitmap.width - 1);
+        const tile_min_y = std.math.clamp(tile.y, 0, self.bitmap.height - 1);
+        const tile_max_x = std.math.clamp(tile.x + tile.width - 1, 0, self.bitmap.width - 1);
+        const tile_max_y = std.math.clamp(tile.y + tile.height - 1, 0, self.bitmap.height - 1);
+        const sample_stride = @max(1, config.POST_HYBRID_SHADOW_EDGE_DOWNSAMPLE);
         var min_u = std.math.inf(f32);
         var max_u = -std.math.inf(f32);
         var min_v = std.math.inf(f32);
@@ -4088,49 +4198,38 @@ pub const Renderer = struct {
         var min_depth = std.math.inf(f32);
         var found_valid = false;
 
-        var screen_y = tile.y;
-        while (screen_y < tile.y + tile.height) : (screen_y += 1) {
-            if (screen_y < 0 or screen_y >= self.bitmap.height) continue;
+        var screen_y = tile_min_y;
+        while (screen_y <= tile_max_y) {
             const row_base = @as(usize, @intCast(screen_y * self.bitmap.width));
-            var screen_x = tile.x;
-            while (screen_x < tile.x + tile.width) : (screen_x += 1) {
-                if (screen_x < 0 or screen_x >= self.bitmap.width) continue;
+            var screen_x = tile_min_x;
+            while (screen_x <= tile_max_x) {
                 const idx = row_base + @as(usize, @intCast(screen_x));
-                if (idx >= self.scene_camera.len) continue;
-
                 const camera_pos = self.scene_camera[idx];
-                if (!std.math.isFinite(camera_pos.z) or camera_pos.z <= NEAR_CLIP) continue;
+                if (std.math.isFinite(camera_pos.z) and camera_pos.z > NEAR_CLIP) {
+                    const light_sample = camera_to_light.project(camera_pos);
 
-                const world_pos = cameraToWorldPosition(
-                    camera_position,
-                    basis_right,
-                    basis_up,
-                    basis_forward,
-                    camera_pos,
-                );
-                const u = math.Vec3.dot(world_pos, light_basis_right);
-                const v = math.Vec3.dot(world_pos, light_basis_up);
-                const depth = math.Vec3.dot(world_pos, light_dir_world);
+                    found_valid = true;
+                    if (light_sample.u < min_u) min_u = light_sample.u;
+                    if (light_sample.u > max_u) max_u = light_sample.u;
+                    if (light_sample.v < min_v) min_v = light_sample.v;
+                    if (light_sample.v > max_v) max_v = light_sample.v;
+                    if (light_sample.depth < min_depth) min_depth = light_sample.depth;
+                }
 
-                found_valid = true;
-                if (screen_x < valid_min_x) valid_min_x = screen_x;
-                if (screen_y < valid_min_y) valid_min_y = screen_y;
-                if (screen_x > valid_max_x) valid_max_x = screen_x;
-                if (screen_y > valid_max_y) valid_max_y = screen_y;
-                if (u < min_u) min_u = u;
-                if (u > max_u) max_u = u;
-                if (v < min_v) min_v = v;
-                if (v > max_v) max_v = v;
-                if (depth < min_depth) min_depth = depth;
+                if (screen_x == tile_max_x) break;
+                screen_x = @min(tile_max_x, screen_x + sample_stride);
             }
+
+            if (screen_y == tile_max_y) break;
+            screen_y = @min(tile_max_y, screen_y + sample_stride);
         }
 
         if (!found_valid) return null;
         return .{
-            .valid_min_x = valid_min_x,
-            .valid_min_y = valid_min_y,
-            .valid_max_x = valid_max_x,
-            .valid_max_y = valid_max_y,
+            .valid_min_x = tile_min_x,
+            .valid_min_y = tile_min_y,
+            .valid_max_x = tile_max_x,
+            .valid_max_y = tile_max_y,
             .min_u = min_u,
             .max_u = max_u,
             .min_v = min_v,
@@ -4236,6 +4335,16 @@ pub const Renderer = struct {
         const darkness_scale = 1.0 - (@as(f32, @floatFromInt(config.POST_SHADOW_STRENGTH_PERCENT)) / 100.0);
         const normalized_light_dir = math.Vec3.normalize(light_dir_world);
         const light_basis = chooseShadowBasis(normalized_light_dir);
+        const camera_to_light = CameraToLightTransform.init(
+            camera_position,
+            basis_right,
+            basis_up,
+            basis_forward,
+            light_basis.right,
+            light_basis.up,
+            normalized_light_dir,
+        );
+        var accel_elapsed_ns: i128 = 0;
         var active_tile_capacity: usize = 0;
         for (grid.tiles, 0..) |_, tile_index| {
             if (tile_index < active_flags.len and active_flags[tile_index]) active_tile_capacity += 1;
@@ -4254,6 +4363,7 @@ pub const Renderer = struct {
             math.Vec3.dot(self.hybrid_shadow_cached_light_dir, normalized_light_dir) < shadow_rebuild_dot_threshold;
 
         if (accel_needs_rebuild) {
+            const accel_start = std.time.nanoTimestamp();
             var caster_count: usize = 0;
             for (mesh.meshlets, 0..) |meshlet, meshlet_index| {
                 if (meshlet.primitive_count == 0 or meshlet.bounds_radius <= 0.0) continue;
@@ -4280,11 +4390,13 @@ pub const Renderer = struct {
             self.hybrid_shadow_accel_valid = caster_count != 0;
             if (caster_count == 0) return;
             self.buildHybridShadowGrid(caster_count, light_basis.right, light_basis.up);
+            accel_elapsed_ns = std.time.nanoTimestamp() - accel_start;
         }
 
         const caster_count = self.hybrid_shadow_caster_count;
         if (caster_count == 0) return;
 
+        const candidate_start = std.time.nanoTimestamp();
         var candidate_write: usize = 0;
         var shadow_job_count: usize = 0;
         for (grid.tiles, 0..) |*tile, tile_index| {
@@ -4294,13 +4406,7 @@ pub const Renderer = struct {
 
             const receiver_bounds = self.buildHybridShadowReceiverBounds(
                 tile,
-                camera_position,
-                basis_right,
-                basis_up,
-                basis_forward,
-                light_basis.right,
-                light_basis.up,
-                normalized_light_dir,
+                camera_to_light,
             ) orelse continue;
 
             const candidate_offset = candidate_write;
@@ -4322,6 +4428,7 @@ pub const Renderer = struct {
                 .basis_up = basis_up,
                 .basis_forward = basis_forward,
                 .light_dir_world = normalized_light_dir,
+                .camera_to_light = camera_to_light,
                 .darkness_scale = darkness_scale,
                 .valid_min_x = receiver_bounds.valid_min_x,
                 .valid_min_y = receiver_bounds.valid_min_y,
@@ -4334,12 +4441,17 @@ pub const Renderer = struct {
             shadow_job_count += 1;
         }
 
+        self.hybrid_shadow_stats.accel_rebuild_ms = nanosecondsToMs(accel_elapsed_ns);
+        self.hybrid_shadow_stats.candidate_ms = nanosecondsToMs(std.time.nanoTimestamp() - candidate_start);
         self.hybrid_shadow_stats.job_count = shadow_job_count;
         if (shadow_job_count == 0) return;
+        const cache_clear_start = std.time.nanoTimestamp();
         @memset(self.hybrid_shadow_coarse_cache, 0xFF);
         @memset(self.hybrid_shadow_edge_cache, 0xFF);
+        self.hybrid_shadow_stats.cache_clear_ms = nanosecondsToMs(std.time.nanoTimestamp() - cache_clear_start);
 
         if (self.hybrid_shadow_debug.enabled) {
+            const execute_start = std.time.nanoTimestamp();
             if (self.hybrid_shadow_debug.completed_jobs > shadow_job_count) {
                 self.hybrid_shadow_debug.completed_jobs = shadow_job_count;
             }
@@ -4351,10 +4463,12 @@ pub const Renderer = struct {
             for (active_indices[0..self.hybrid_shadow_debug.completed_jobs]) |tile_index| {
                 AdaptiveShadowTileJob.run(@ptrCast(&shadow_jobs[tile_index]));
             }
+            self.hybrid_shadow_stats.execute_ms = nanosecondsToMs(std.time.nanoTimestamp() - execute_start);
             self.recordRenderPassTiming("hybrid_shadow_step", pass_start);
             return;
         }
 
+        const execute_start = std.time.nanoTimestamp();
         if (self.job_system) |job_sys| {
             var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
             const main_tile_idx = active_indices[0];
@@ -4379,6 +4493,7 @@ pub const Renderer = struct {
             }
         }
 
+        self.hybrid_shadow_stats.execute_ms = nanosecondsToMs(std.time.nanoTimestamp() - execute_start);
         self.recordRenderPassTiming("hybrid_shadow", pass_start);
     }
 
@@ -4406,7 +4521,7 @@ pub const Renderer = struct {
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
         const height: usize = @intCast(self.bitmap.height);
-        const stripe_count = @min(self.fog_job_contexts.len, @max(@as(usize, 1), height));
+        const stripe_count = computeStripeCount(self.fog_job_contexts.len, height);
         const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
 
         if (stripe_count <= 1 or self.job_system == null) {
@@ -4472,7 +4587,7 @@ pub const Renderer = struct {
         intensity_percent: i32,
     ) void {
         if (row_count == 0) return;
-        const stripe_count = @min(self.bloom_job_contexts.len, @max(@as(usize, 1), row_count));
+        const stripe_count = computeStripeCount(self.bloom_job_contexts.len, row_count);
         const rows_per_job = if (stripe_count <= 1) row_count else (row_count + stripe_count - 1) / stripe_count;
 
         if (stripe_count <= 1 or self.job_system == null) {
@@ -4560,7 +4675,7 @@ pub const Renderer = struct {
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
         const height: usize = @intCast(self.bitmap.height);
-        const stripe_count = @min(self.color_grade_job_contexts.len, @max(@as(usize, 1), height));
+        const stripe_count = computeStripeCount(self.color_grade_job_contexts.len, height);
         const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
 
         if (stripe_count <= 1 or self.job_system == null) {
@@ -4790,7 +4905,6 @@ pub const Renderer = struct {
         const active_indices = self.active_tile_indices.?;
         BinningStage.clearTileTriangleLists(tile_lists);
         @memset(active_flags, false);
-        @memset(self.bitmap.pixels, 0xFF000000);
         @memset(self.scene_depth, std.math.inf(f32));
         @memset(self.scene_camera, math.Vec3.new(0.0, 0.0, 0.0));
 

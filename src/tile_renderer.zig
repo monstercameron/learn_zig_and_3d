@@ -144,28 +144,16 @@ pub const TileGrid = struct {
 pub fn compositeTileToScreen(tile: *const Tile, tile_buffer: *const TileBuffer, bitmap: *Bitmap, depth_buffer: ?[]f32, camera_buffer: ?[]math.Vec3) void {
     var y: i32 = 0;
     while (y < tile.height) : (y += 1) {
-        const screen_y = tile.y + y;
-        if (screen_y < 0 or screen_y >= bitmap.height) continue;
-        var x: i32 = 0;
-        while (x < tile.width) : (x += 1) {
-            const screen_x = tile.x + x;
-            if (screen_x < 0 or screen_x >= bitmap.width) continue;
+        const tile_row_start = @as(usize, @intCast(y * tile_buffer.width));
+        const tile_row_end = tile_row_start + @as(usize, @intCast(tile.width));
+        const screen_row_start = @as(usize, @intCast((tile.y + y) * bitmap.width + tile.x));
+        const screen_row_end = screen_row_start + @as(usize, @intCast(tile.width));
 
-            const tile_idx = @as(usize, @intCast(y * tile_buffer.width + x));
-            const screen_idx = @as(usize, @intCast(screen_y * bitmap.width + screen_x));
-
-            if (tile_idx < tile_buffer.pixels.len and screen_idx < bitmap.pixels.len) {
-                bitmap.pixels[screen_idx] = tile_buffer.pixels[tile_idx];
-                if (depth_buffer) |buffer| {
-                    if (tile_idx < tile_buffer.depth.len and screen_idx < buffer.len and std.math.isFinite(tile_buffer.depth[tile_idx])) {
-                        buffer[screen_idx] = tile_buffer.depth[tile_idx];
-                        if (camera_buffer) |camera_out| {
-                            if (tile_idx < tile_buffer.camera.len and screen_idx < camera_out.len) {
-                                camera_out[screen_idx] = tile_buffer.camera[tile_idx];
-                            }
-                        }
-                    }
-                }
+        std.mem.copyForwards(u32, bitmap.pixels[screen_row_start..screen_row_end], tile_buffer.pixels[tile_row_start..tile_row_end]);
+        if (depth_buffer) |buffer| {
+            std.mem.copyForwards(f32, buffer[screen_row_start..screen_row_end], tile_buffer.depth[tile_row_start..tile_row_end]);
+            if (camera_buffer) |camera_out| {
+                std.mem.copyForwards(math.Vec3, camera_out[screen_row_start..screen_row_end], tile_buffer.camera[tile_row_start..tile_row_end]);
             }
         }
     }

@@ -27,6 +27,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("user32"); // For window management functions
     exe.linkSystemLibrary("gdi32"); // For graphics device interface functions
     exe.linkSystemLibrary("kernel32"); // For kernel functions
+    exe.linkSystemLibrary("winmm"); // For timer resolution control
 
     // Install the executable so it can be run with 'zig build run'
     b.installArtifact(exe);
