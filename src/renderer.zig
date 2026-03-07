@@ -194,7 +194,7 @@ const MeshletTelemetry = struct {
     touched_tiles: usize = 0,
 };
 
-const max_render_passes = 10;
+const max_render_passes = 16;
 
 const RenderPassTiming = struct {
     name: []const u8,
@@ -245,6 +245,128 @@ const DepthOfFieldScratch = struct {
     pixels: []u32,
     width: usize,
     height: usize,
+};
+
+const SSRJobContext = struct {
+    renderer: *Renderer,
+    scene_pixels: []u32,
+    scratch_pixels: []u32,
+    scene_camera: []math.Vec3,
+    scene_depth: []f32,
+    width: usize,
+    height: usize,
+    start_row: usize,
+    end_row: usize,
+    projection: ProjectionParams,
+    max_samples: i32,
+    step_size: f32,
+    max_distance: f32,
+    thickness: f32,
+    intensity: f32,
+
+    fn run(ctx_ptr: *anyopaque) void {
+        const ctx: *SSRJobContext = @ptrCast(@alignCast(ctx_ptr));
+        const pixels = ctx.scene_pixels;
+        const out_pixels = ctx.scratch_pixels;
+        const camera = ctx.scene_camera;
+        const depth = ctx.scene_depth;
+        const w = ctx.width;
+        const h = ctx.height;
+
+        for (ctx.start_row..ctx.end_row) |y| {
+            for (0..w) |x| {
+                const idx = y * w + x;
+                const p = camera[idx];
+                out_pixels[idx] = pixels[idx];
+
+                if (!validSceneCameraSample(p)) continue;
+                if (depth[idx] > 1000.0) continue;
+
+                const n = estimateSceneNormal(camera, w, h, p, @intCast(x), @intCast(y), 2);
+                if (n.x == 0.0 and n.y == 0.0 and n.z == 0.0) continue;
+
+                const v = math.Vec3.normalize(p);
+                const dot_vn = math.Vec3.dot(v, n);
+                if (dot_vn > 0.0) continue;
+
+                const r = math.Vec3.normalize(math.Vec3.sub(v, math.Vec3.scale(n, 2.0 * dot_vn)));
+
+                var ray_pos = p;
+                var hit = false;
+                var hit_color: u32 = 0;
+
+                const step = math.Vec3.scale(r, ctx.step_size);
+
+                // Edge falloff for SSR blending
+                var edge_blend: f32 = 1.0;
+
+                var s: i32 = 0;
+                while (s < ctx.max_samples) : (s += 1) {
+                    ray_pos = math.Vec3.add(ray_pos, step);
+
+                    if (ray_pos.z < 0.1) break;
+
+                    const dist_vec = math.Vec3.sub(ray_pos, p);
+                    if (math.Vec3.length(dist_vec) > ctx.max_distance) break;
+
+                    const proj = projectCameraPositionFloat(ray_pos, ctx.projection);
+                    const sx_float = proj.x;
+                    const sy_float = proj.y;
+
+                    if (sx_float < 0 or sx_float >= @as(f32, @floatFromInt(w)) or sy_float < 0 or sy_float >= @as(f32, @floatFromInt(h))) {
+                        break;
+                    }
+
+                    const sx: usize = @intFromFloat(sx_float);
+                    const sy: usize = @intFromFloat(sy_float);
+                    const hit_idx = sy * w + sx;
+
+                    const sampled_depth = depth[hit_idx];
+                    if (!std.math.isFinite(sampled_depth) or sampled_depth > 1000.0) continue;
+
+                    if (ray_pos.z > sampled_depth) {
+                        const depth_diff = ray_pos.z - sampled_depth;
+                        if (depth_diff < ctx.thickness) {
+                            hit = true;
+                            hit_color = pixels[hit_idx];
+
+                            // Fade based on how close to screen edge we are
+                            const edge_x = @min(sx_float, @as(f32, @floatFromInt(w)) - sx_float) / @as(f32, @floatFromInt(w));
+                            const edge_y = @min(sy_float, @as(f32, @floatFromInt(h)) - sy_float) / @as(f32, @floatFromInt(h));
+                            const edge_dist = @min(edge_x, edge_y) * 4.0;
+                            edge_blend = @max(0.0, @min(1.0, edge_dist));
+
+                            // Fade based on reflection vector pointing towards camera
+                            const facing_ratio = @max(0.0, -r.z);
+                            edge_blend *= @max(0.0, @min(1.0, 1.0 - facing_ratio * 0.8));
+                            break;
+                        }
+                    }
+                }
+
+                if (hit and edge_blend > 0.0) {
+                    const base_c = pixels[idx];
+                    const r_r = @as(f32, @floatFromInt((hit_color >> 16) & 0xFF));
+                    const r_g = @as(f32, @floatFromInt((hit_color >> 8) & 0xFF));
+                    const r_b = @as(f32, @floatFromInt(hit_color & 0xFF));
+
+                    const b_r = @as(f32, @floatFromInt((base_c >> 16) & 0xFF));
+                    const b_g = @as(f32, @floatFromInt((base_c >> 8) & 0xFF));
+                    const b_b = @as(f32, @floatFromInt(base_c & 0xFF));
+
+                    // Fresnel approximation
+                    const fresnel = @max(0.0, @min(1.0, std.math.pow(f32, 1.0 + dot_vn, 3.0)));
+                    const reflectivity = ctx.intensity * fresnel * edge_blend;
+
+                    const final_r = @as(u32, @intFromFloat(@max(0.0, @min(255.0, b_r * (1.0 - reflectivity) + r_r * reflectivity))));
+                    const final_g = @as(u32, @intFromFloat(@max(0.0, @min(255.0, b_g * (1.0 - reflectivity) + r_g * reflectivity))));
+                    const final_b = @as(u32, @intFromFloat(@max(0.0, @min(255.0, b_b * (1.0 - reflectivity) + r_b * reflectivity))));
+
+                    out_pixels[idx] = (final_r << 16) | (final_g << 8) | final_b | 0xFF000000;
+                }
+            }
+        }
+    }
 };
 
 const DepthOfFieldJobContext = struct {
@@ -1713,18 +1835,30 @@ const AdaptiveShadowTileJob = struct {
         const corner_b = ctx.evaluateShadowPoint(max_x, origin_y);
         const corner_c = ctx.evaluateShadowPoint(origin_x, max_y);
         const corner_d = ctx.evaluateShadowPoint(max_x, max_y);
-        
+
         var min_c = center.coverage;
         var max_c = center.coverage;
-        if (corner_a.valid) { min_c = @min(min_c, corner_a.coverage); max_c = @max(max_c, corner_a.coverage); }
-        if (corner_b.valid) { min_c = @min(min_c, corner_b.coverage); max_c = @max(max_c, corner_b.coverage); }
-        if (corner_c.valid) { min_c = @min(min_c, corner_c.coverage); max_c = @max(max_c, corner_c.coverage); }
-        if (corner_d.valid) { min_c = @min(min_c, corner_d.coverage); max_c = @max(max_c, corner_d.coverage); }
-        
+        if (corner_a.valid) {
+            min_c = @min(min_c, corner_a.coverage);
+            max_c = @max(max_c, corner_a.coverage);
+        }
+        if (corner_b.valid) {
+            min_c = @min(min_c, corner_b.coverage);
+            max_c = @max(max_c, corner_b.coverage);
+        }
+        if (corner_c.valid) {
+            min_c = @min(min_c, corner_c.coverage);
+            max_c = @max(max_c, corner_c.coverage);
+        }
+        if (corner_d.valid) {
+            min_c = @min(min_c, corner_d.coverage);
+            max_c = @max(max_c, corner_d.coverage);
+        }
+
         if (min_c == max_c) {
             return .{ .valid = true, .coverage = min_c };
         }
-        
+
         return .{ .valid = true, .coverage = 0.5 };
     }
 
@@ -2396,6 +2530,8 @@ pub const Renderer = struct {
     shadow_raster_job_contexts: []ShadowRasterJobContext,
     bloom_job_contexts: []BloomJobContext,
     dof_scratch: DepthOfFieldScratch,
+    ssr_job_contexts: []SSRJobContext,
+    ssr_scratch_pixels: []u32,
     dof_job_contexts: []DepthOfFieldJobContext,
     dof_focal_distance: f32,
     dof_target_focal_distance: f32,
@@ -2468,7 +2604,11 @@ pub const Renderer = struct {
         const fb_pix_count = @as(usize, @intCast(width)) * @as(usize, @intCast(height));
         const dof_scratch_pixels = try allocator.alloc(u32, fb_pix_count);
         errdefer allocator.free(dof_scratch_pixels);
+        const ssr_scratch_pixels = try allocator.alloc(u32, fb_pix_count);
+        errdefer allocator.free(ssr_scratch_pixels);
         const dof_job_contexts = try allocator.alloc(DepthOfFieldJobContext, color_grade_job_count);
+        const ssr_job_contexts = try allocator.alloc(SSRJobContext, color_grade_job_count);
+        errdefer allocator.free(ssr_job_contexts);
         errdefer allocator.free(dof_job_contexts);
         const color_grade_jobs = try allocator.alloc(Job, color_grade_job_count);
         errdefer allocator.free(color_grade_jobs);
@@ -2688,6 +2828,8 @@ pub const Renderer = struct {
             .bloom_job_contexts = bloom_job_contexts,
             .dof_scratch = .{ .pixels = dof_scratch_pixels, .width = @intCast(width), .height = @intCast(height) },
             .dof_job_contexts = dof_job_contexts,
+            .ssr_job_contexts = ssr_job_contexts,
+            .ssr_scratch_pixels = ssr_scratch_pixels,
             .dof_focal_distance = config.POST_DOF_FOCAL_DISTANCE,
             .dof_target_focal_distance = config.POST_DOF_FOCAL_DISTANCE,
             .taa_job_contexts = taa_job_contexts,
@@ -2745,6 +2887,8 @@ pub const Renderer = struct {
         self.allocator.free(self.shadow_raster_job_contexts);
         self.allocator.free(self.bloom_job_contexts);
         self.allocator.free(self.dof_scratch.pixels);
+        self.allocator.free(self.ssr_scratch_pixels);
+        self.allocator.free(self.ssr_job_contexts);
         self.allocator.free(self.dof_job_contexts);
         self.allocator.free(self.taa_job_contexts);
         self.allocator.free(self.color_grade_job_contexts);
@@ -5370,6 +5514,7 @@ pub const Renderer = struct {
         }
         if (config.POST_HYBRID_SHADOW_ENABLED) self.applyAdaptiveShadowPass(mesh, camera_position, basis_right, basis_up, basis_forward, light_dir_world);
         if (config.POST_SSAO_ENABLED) self.applyAmbientOcclusionPass();
+        if (config.POST_SSR_ENABLED) self.applySSRPass(projection);
         if (config.POST_DEPTH_FOG_ENABLED) self.applyDepthFogPass();
         if (config.POST_TAA_ENABLED) self.applyTemporalAAPass(current_view);
         if (config.POST_BLOOM_ENABLED) self.applyBloomPass();
@@ -5648,6 +5793,79 @@ pub const Renderer = struct {
         self.taa_previous_view = current_view;
         self.taa_scratch.valid = true;
         self.recordRenderPassTiming("taa", pass_start);
+    }
+
+    fn applySSRPass(self: *Renderer, projection: ProjectionParams) void {
+        if (self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
+        const pass_start = std.time.nanoTimestamp();
+
+        const scene_width: usize = @intCast(self.bitmap.width);
+        const scene_height: usize = @intCast(self.bitmap.height);
+
+        const stripe_count = computeStripeCount(self.ssr_job_contexts.len, scene_height);
+        const rows_per_job = if (stripe_count <= 1) scene_height else (scene_height + stripe_count - 1) / stripe_count;
+
+        if (stripe_count <= 1 or self.job_system == null) {
+            self.ssr_job_contexts[0] = .{
+                .renderer = self,
+                .scene_pixels = self.bitmap.pixels,
+                .scratch_pixels = self.ssr_scratch_pixels,
+                .scene_camera = self.scene_camera,
+                .scene_depth = self.scene_depth,
+                .width = scene_width,
+                .height = scene_height,
+                .start_row = 0,
+                .end_row = scene_height,
+                .projection = projection,
+                .max_samples = config.POST_SSR_MAX_SAMPLES,
+                .step_size = config.POST_SSR_STEP,
+                .max_distance = config.POST_SSR_MAX_DISTANCE,
+                .thickness = config.POST_SSR_THICKNESS,
+                .intensity = config.POST_SSR_INTENSITY,
+            };
+            SSRJobContext.run(&self.ssr_job_contexts[0]);
+        } else {
+            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+            var stripe_index: usize = 0;
+            while (stripe_index < stripe_count) : (stripe_index += 1) {
+                const start_row = stripe_index * rows_per_job;
+                if (start_row >= scene_height) break;
+                const end_row = @min(scene_height, start_row + rows_per_job);
+
+                self.ssr_job_contexts[stripe_index] = .{
+                    .renderer = self,
+                    .scene_pixels = self.bitmap.pixels,
+                    .scratch_pixels = self.ssr_scratch_pixels,
+                    .scene_camera = self.scene_camera,
+                    .scene_depth = self.scene_depth,
+                    .width = scene_width,
+                    .height = scene_height,
+                    .start_row = start_row,
+                    .end_row = end_row,
+                    .projection = projection,
+                    .max_samples = config.POST_SSR_MAX_SAMPLES,
+                    .step_size = config.POST_SSR_STEP,
+                    .max_distance = config.POST_SSR_MAX_DISTANCE,
+                    .thickness = config.POST_SSR_THICKNESS,
+                    .intensity = config.POST_SSR_INTENSITY,
+                };
+
+                self.color_grade_jobs[stripe_index] = Job.init(
+                    SSRJobContext.run,
+                    @ptrCast(&self.ssr_job_contexts[stripe_index]),
+                    &parent_job,
+                );
+
+                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+                    SSRJobContext.run(@ptrCast(&self.ssr_job_contexts[stripe_index]));
+                }
+            }
+            parent_job.complete();
+            parent_job.wait();
+        }
+
+        @memcpy(self.bitmap.pixels, self.ssr_scratch_pixels);
+        self.recordRenderPassTiming("ssr", pass_start);
     }
 
     fn applyDepthOfFieldPass(self: *Renderer) void {

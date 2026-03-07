@@ -74,6 +74,15 @@ pub var POST_HYBRID_SHADOW_EDGE_MAX_COVERAGE: f32 = 0.78;
 /// The interpolation blend mapping for hybrid shadow penumbras.
 pub var POST_HYBRID_SHADOW_EDGE_BLEND: f32 = 0.4;
 /// Enables Screen Space Ambient Occlusion for realistic corner shading.
+
+/// Screen Space Reflections (SSR)
+pub var POST_SSR_ENABLED: bool = true;
+pub var POST_SSR_MAX_SAMPLES: i32 = 32;
+pub var POST_SSR_STEP: f32 = 0.05;
+pub var POST_SSR_MAX_DISTANCE: f32 = 100.0;
+pub var POST_SSR_THICKNESS: f32 = 0.5;
+pub var POST_SSR_INTENSITY: f32 = 0.8;
+
 pub var POST_SSAO_ENABLED: bool = true;
 /// SSAO rendering resolution divisor (higher = lower res & faster).
 pub var POST_SSAO_DOWNSAMPLE: i32 = 4;
@@ -121,8 +130,8 @@ pub var POST_DOF_BLUR_RADIUS: i32 = 1;
 pub var POST_MOTION_BLUR_ENABLED: bool = true;
 /// The number of samples gathered along the velocity vector for motion blur.
 pub var POST_MOTION_BLUR_SAMPLES: i32 = 6;
-/// The intensity multiplier for motion blur trail length.
-pub var POST_MOTION_BLUR_INTENSITY: f32 = 1.0;
+/// The intensity multiplier for motion blur trail length. (0.5 simulates a cinematic 180-degree shutter)
+pub var POST_MOTION_BLUR_INTENSITY: f32 = 0.5;
 
 // --- Global Color Profile ---
 /// The name of the LUT or graded preset mapped onto the final output color.
