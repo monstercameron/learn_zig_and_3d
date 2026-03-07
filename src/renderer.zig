@@ -142,6 +142,9 @@ pub const Renderer = struct {
     tile_jobs_buffer: ?[]TileRenderJob,
     job_buffer: ?[]Job,
     job_completion_buffer: ?[]bool,
+    tile_triangle_lists: ?[]BinningStage.TileTriangleList,
+    active_tile_flags: ?[]bool,
+    active_tile_indices: ?[]usize,
     mesh_work_cache: MeshWorkCache = MeshWorkCache.init(),
 
     // Rendering options and data
@@ -189,6 +192,13 @@ pub const Renderer = struct {
         const job_completion_buffer = try allocator.alloc(bool, tile_count);
         errdefer allocator.free(job_completion_buffer);
         @memset(job_completion_buffer, false);
+        const tile_triangle_lists = try BinningStage.createTileTriangleLists(&tile_grid, allocator);
+        errdefer BinningStage.freeTileTriangleLists(tile_triangle_lists, allocator);
+        const active_tile_flags = try allocator.alloc(bool, tile_count);
+        errdefer allocator.free(active_tile_flags);
+        @memset(active_tile_flags, false);
+        const active_tile_indices = try allocator.alloc(usize, tile_count);
+        errdefer allocator.free(active_tile_indices);
 
         const job_system = try JobSystem.init(allocator);
 
@@ -243,6 +253,9 @@ pub const Renderer = struct {
             .tile_jobs_buffer = tile_jobs_buffer,
             .job_buffer = job_buffer,
             .job_completion_buffer = job_completion_buffer,
+            .tile_triangle_lists = tile_triangle_lists,
+            .active_tile_flags = active_tile_flags,
+            .active_tile_indices = active_tile_indices,
         };
     }
 
@@ -254,6 +267,9 @@ pub const Renderer = struct {
         if (self.job_buffer) |jobs| self.allocator.free(jobs);
         if (self.tile_jobs_buffer) |tile_jobs| self.allocator.free(tile_jobs);
         if (self.job_completion_buffer) |completion| self.allocator.free(completion);
+        if (self.tile_triangle_lists) |lists| BinningStage.freeTileTriangleLists(lists, self.allocator);
+        if (self.active_tile_flags) |flags| self.allocator.free(flags);
+        if (self.active_tile_indices) |indices| self.allocator.free(indices);
         if (self.tile_buffers) |buffers| {
             for (buffers) |*buf| buf.deinit();
             self.allocator.free(buffers);
@@ -2175,20 +2191,20 @@ pub const Renderer = struct {
         _ = light_dir;
         const grid = self.tile_grid.?;
         const tile_buffers = self.tile_buffers.?;
-        for (tile_buffers) |*buf| buf.clear();
+        const tile_lists = self.tile_triangle_lists.?;
+        const active_flags = self.active_tile_flags.?;
+        const active_indices = self.active_tile_indices.?;
+        BinningStage.clearTileTriangleLists(tile_lists);
+        @memset(active_flags, false);
+        @memset(self.bitmap.pixels, 0xFF000000);
 
         const triangles = mesh_work.triangleSlice();
         self.meshlet_telemetry.touched_tiles = 0;
 
         if (triangles.len == 0) {
-            pipeline_logger.debugSub("tiled", "no triangles; compositing {} tiles", .{grid.tiles.len});
-            for (grid.tiles, 0..) |*tile, tile_idx| {
-                TileRenderer.compositeTileToScreen(tile, &tile_buffers[tile_idx], &self.bitmap);
-            }
+            pipeline_logger.debugSub("tiled", "no triangles; bitmap cleared", .{});
             return;
         }
-        const tile_lists = try BinningStage.createTileTriangleLists(&grid, self.allocator);
-        defer BinningStage.freeTileTriangleLists(tile_lists, self.allocator);
 
         if (self.job_system != null and mesh_work.*.meshlet_len != 0) {
             self.populateTilesFromMeshlets(tile_lists, mesh_work);
@@ -2200,11 +2216,20 @@ pub const Renderer = struct {
 
         const tile_jobs = self.tile_jobs_buffer.?;
         std.debug.assert(tile_jobs.len == grid.tiles.len);
+        var active_tile_count: usize = 0;
+        for (tile_lists, 0..) |*tile_list, tile_idx| {
+            if (tile_list.count() == 0) continue;
+            active_flags[tile_idx] = true;
+            active_indices[active_tile_count] = tile_idx;
+            active_tile_count += 1;
+        }
 
-        for (grid.tiles, 0..) |*tile, tile_idx| {
+        for (active_indices[0..active_tile_count]) |tile_idx| {
             if (pump) |p| {
                 if ((tile_idx & 7) == 0 and !p(self)) return error.RenderInterrupted;
             }
+            const tile = &grid.tiles[tile_idx];
+            tile_buffers[tile_idx].clear();
             tile_jobs[tile_idx] = TileRenderJob{
                 .tile = tile,
                 .tile_buffer = &tile_buffers[tile_idx],
@@ -2218,7 +2243,8 @@ pub const Renderer = struct {
         }
 
         // 4. Compositing: Copy the pixels from each completed tile buffer to the main screen bitmap.
-        for (grid.tiles, 0..) |*tile, tile_idx| {
+        for (active_indices[0..active_tile_count]) |tile_idx| {
+            const tile = &grid.tiles[tile_idx];
             TileRenderer.compositeTileToScreen(tile, &tile_buffers[tile_idx], &self.bitmap);
         }
     }
