@@ -34,7 +34,7 @@
         "hybridShadowMaxDepth": 8,
         "hybridShadowRayBias": 0.03,
         "hybridShadowSampleStride": 1,
-        "hybridShadowCoarseDownsample": 1,
+        "hybridShadowCoarseDownsample": 4,
         "hybridShadowEdgeDownsample": 1,
         "hybridShadowEdgeMinCoverage": 0.22,
         "hybridShadowEdgeMaxCoverage": 0.78,
