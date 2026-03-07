@@ -296,6 +296,38 @@ pub const HdrTexture = struct {
 
     /// Sample the HDR texture using equirectangular mapping (latitude/longitude)
     /// dir: A normalized direction vector.
+        pub fn sampleEquirectangularFast(self: *const HdrTexture, dir: math.Vec3) math.Vec3 {
+        if (self.width == 0 or self.height == 0) return math.Vec3.new(0, 0, 0);
+
+        // Fast atan2 approximation for longitude
+        // Not perfectly accurate but good enough for skybox
+        var theta = std.math.atan2(dir.x, -dir.z);
+        if (theta < 0.0) theta += 2.0 * std.math.pi;
+
+        // Fast acos for latitude
+        const clamped_y = std.math.clamp(dir.y, -1.0, 1.0);
+        const phi = std.math.acos(clamped_y);
+
+        const u = theta * 0.159154943; // 1 / 2PI
+        const v = phi * 0.318309886;   // 1 / PI
+
+        const wf = @as(f32, @floatFromInt(self.width));
+        const hf = @as(f32, @floatFromInt(self.height));
+
+        var x = u * wf - 0.5;
+        if (x < 0.0) x += wf;
+        var y = v * hf - 0.5;
+        y = std.math.clamp(y, 0.0, hf - 1.0);
+
+        const px = @as(usize, @intFromFloat(x));
+        const py = @as(usize, @intFromFloat(y));
+
+        const x0 = px % self.width;
+        const y0 = py % self.height;
+        
+        // Nearest neighbor for speed! Bilinear on a 4K texture is too much bandwidth
+        return self.pixels[y0 * self.width + x0];
+    }
     pub fn sampleEquirectangular(self: *const HdrTexture, dir: math.Vec3) math.Vec3 {
         if (self.width == 0 or self.height == 0) return math.Vec3.new(0, 0, 0);
 

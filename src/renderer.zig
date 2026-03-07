@@ -247,26 +247,7 @@ const DepthOfFieldScratch = struct {
     height: usize,
 };
 
-
-
-const ssgi_sample_offsets = [_][2]f32{
-    .{ -0.184342, 0.168873 },
-    .{ 0.030910, -0.352200 },
-    .{ 0.263462, 0.343639 },
-    .{ -0.492357, -0.087091 },
-    .{ 0.471674, -0.300040 },
-    .{ -0.158975, 0.591377 },
-    .{ -0.304861, -0.586992 },
-    .{ 0.664200, 0.242565 },
-    .{ -0.693259, 0.286167 },
-    .{ 0.335080, -0.716046 },
-    .{ 0.248153, 0.791151 },
-    .{ -0.749295, -0.434232 },
-    .{ 0.880364, -0.193545 },
-    .{ -0.537984, 0.765227 },
-    .{ -0.124430, -0.960217 },
-    .{ 0.764649, 0.644447 }
-};
+const ssgi_sample_offsets = [_][2]f32{ .{ -0.184342, 0.168873 }, .{ 0.030910, -0.352200 }, .{ 0.263462, 0.343639 }, .{ -0.492357, -0.087091 }, .{ 0.471674, -0.300040 }, .{ -0.158975, 0.591377 }, .{ -0.304861, -0.586992 }, .{ 0.664200, 0.242565 }, .{ -0.693259, 0.286167 }, .{ 0.335080, -0.716046 }, .{ 0.248153, 0.791151 }, .{ -0.749295, -0.434232 }, .{ 0.880364, -0.193545 }, .{ -0.537984, 0.765227 }, .{ -0.124430, -0.960217 }, .{ 0.764649, 0.644447 } };
 
 const SSGIJobContext = struct {
     renderer: *Renderer,
@@ -294,19 +275,17 @@ const SSGIJobContext = struct {
             while (x < width) : (x += 1) {
                 const idx = y * width + x;
                 const pos = camera[idx];
-                
+
                 if (!validSceneCameraSample(pos)) {
                     out_pixels[idx] = pixels[idx];
                     continue;
                 }
 
-                const normal = estimateSceneNormal(
-                    camera, width, height, pos, @intCast(x), @intCast(y), 1
-                );
+                const normal = estimateSceneNormal(camera, width, height, pos, @intCast(x), @intCast(y), 1);
 
                 const seed = @as(u32, @intCast(x)) *% 73856093 ^ @as(u32, @intCast(y)) *% 19349663;
                 var rand = std.Random.DefaultPrng.init(seed);
-                
+
                 var accum_r: f32 = 0;
                 var accum_g: f32 = 0;
                 var accum_b: f32 = 0;
@@ -325,42 +304,42 @@ const SSGIJobContext = struct {
                     const jitter_r = 0.8 + 0.4 * rand.random().float(f32);
                     const u = ssgi_sample_offsets[s][0] * jitter_r;
                     const v = ssgi_sample_offsets[s][1] * jitter_r;
-                    
+
                     // Rotate
                     const rot_u = u * r_cos - v * r_sin;
                     const rot_v = u * r_sin + v * r_cos;
-                    
+
                     const dx = @as(i32, @intFromFloat(rot_u * sample_max_dist));
                     const dy = @as(i32, @intFromFloat(rot_v * sample_max_dist));
-                    
+
                     const nx = @as(i32, @intCast(x)) + dx;
                     const ny = @as(i32, @intCast(y)) + dy;
-                    
+
                     if (nx < 0 or ny < 0 or nx >= width or ny >= height) continue;
-                    
+
                     const n_idx = @as(usize, @intCast(ny)) * width + @as(usize, @intCast(nx));
                     const n_pos = camera[n_idx];
                     if (!validSceneCameraSample(n_pos)) continue;
-                    
+
                     const delta = math.Vec3.sub(n_pos, pos);
                     const dist_sq = math.Vec3.dot(delta, delta);
                     if (dist_sq < 0.001) continue;
-                    
+
                     const dist = @sqrt(dist_sq);
                     const dir = math.Vec3.scale(delta, 1.0 / dist);
                     const ndot = math.Vec3.dot(normal, dir);
-                    
+
                     // Only points in front of the normal can bounce light
                     if (ndot > 0.0) {
                         const neighbor_color = pixels[n_idx];
                         const r_val = @as(f32, @floatFromInt((neighbor_color >> 16) & 0xFF)) / 255.0;
                         const g_val = @as(f32, @floatFromInt((neighbor_color >> 8) & 0xFF)) / 255.0;
                         const b_val = @as(f32, @floatFromInt(neighbor_color & 0xFF)) / 255.0;
-                        
+
                         // Inverse square falloff bounded by max bounce dist
                         const falloff = 1.0 / (1.0 + dist_sq * bounce_decay);
                         const weight = ndot * falloff;
-                        
+
                         accum_r += r_val * weight;
                         accum_g += g_val * weight;
                         accum_b += b_val * weight;
@@ -373,16 +352,16 @@ const SSGIJobContext = struct {
                     const avg_r = accum_r / valid_samples * intensity;
                     const avg_g = accum_g / valid_samples * intensity;
                     const avg_b = accum_b / valid_samples * intensity;
-                    
+
                     const br = @as(f32, @floatFromInt((base_color >> 16) & 0xFF)) / 255.0;
                     const bg = @as(f32, @floatFromInt((base_color >> 8) & 0xFF)) / 255.0;
                     const bb = @as(f32, @floatFromInt(base_color & 0xFF)) / 255.0;
-                    
+
                     // Add indirect light to base color (assuming base color is surface albedo approx)
                     const fr = std.math.clamp(br + br * avg_r, 0.0, 1.0) * 255.0;
                     const fg = std.math.clamp(bg + bg * avg_g, 0.0, 1.0) * 255.0;
                     const fb = std.math.clamp(bb + bb * avg_b, 0.0, 1.0) * 255.0;
-                    
+
                     out_pixels[idx] = (0xFF << 24) | (@as(u32, @intFromFloat(fr)) << 16) | (@as(u32, @intFromFloat(fg)) << 8) | @as(u32, @intFromFloat(fb));
                 } else {
                     out_pixels[idx] = base_color;
@@ -2749,15 +2728,15 @@ pub const Renderer = struct {
         errdefer allocator.free(moblur_job_contexts);
         const moblur_scratch_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(moblur_scratch_pixels);
-        
+
         const god_rays_job_contexts = try allocator.alloc(GodRaysJobContext, color_grade_job_count);
         errdefer allocator.free(god_rays_job_contexts);
         const god_rays_scratch_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(god_rays_scratch_pixels);
-        
+
         const chromatic_aberration_job_contexts = try allocator.alloc(ChromaticAberrationJobContext, color_grade_job_count);
         errdefer allocator.free(chromatic_aberration_job_contexts);
-        
+
         const film_grain_job_contexts = try allocator.alloc(FilmGrainVignetteJobContext, color_grade_job_count);
         errdefer allocator.free(film_grain_job_contexts);
 
@@ -5700,7 +5679,6 @@ pub const Renderer = struct {
         self.recordRenderPassTiming("hybrid_shadow", pass_start);
     }
 
-    
     const SkyboxJobContext = struct {
         renderer: *Renderer,
         right: math.Vec3,
@@ -5716,47 +5694,47 @@ pub const Renderer = struct {
         const ctx: *SkyboxJobContext = @ptrCast(@alignCast(ctx_ptr));
         applySkyboxRows(ctx);
     }
-    
+
     fn applySkyboxRows(ctx: *SkyboxJobContext) void {
         const width: usize = @intCast(ctx.renderer.bitmap.width);
         const center_x = ctx.projection.center_x;
         const center_y = ctx.projection.center_y;
-        
+
         var y: usize = ctx.start_row;
         while (y < ctx.end_row) : (y += 1) {
             const py_f = @as(f32, @floatFromInt(y));
             const ndc_y = (center_y - py_f) / center_y;
             const camera_y = ndc_y / ctx.projection.y_scale;
-            
+
             var x: usize = 0;
             while (x < width) : (x += 1) {
                 const idx = y * width + x;
-                
+
                 // Only draw skybox where depth is infinite (background)
                 if (ctx.renderer.scene_depth[idx] < std.math.inf(f32)) continue;
-                
+
                 const px_f = @as(f32, @floatFromInt(x));
                 const ndc_x = (px_f - center_x) / center_x;
                 const camera_x = ndc_x / ctx.projection.x_scale;
-                
+
                 const dir_local = math.Vec3.normalize(math.Vec3.new(camera_x, camera_y, 1.0));
-                
+
                 const right_term = math.Vec3.scale(ctx.right, dir_local.x);
                 const up_term = math.Vec3.scale(ctx.up, dir_local.y);
                 const fwd_term = math.Vec3.scale(ctx.forward, dir_local.z);
                 const dir_world = math.Vec3.normalize(math.Vec3.add(right_term, math.Vec3.add(up_term, fwd_term)));
-                
+
                 const hdr_color = ctx.hdri_map.sampleEquirectangularFast(dir_world);
-                
+
                 // Extremely simple basic tonemap (reinhard) just to get it to 8-bit ARGB
                 const r_ldr = hdr_color.x / (1.0 + hdr_color.x);
                 const g_ldr = hdr_color.y / (1.0 + hdr_color.y);
                 const b_ldr = hdr_color.z / (1.0 + hdr_color.z);
-                
+
                 const r = @as(u32, @intFromFloat(std.math.clamp(r_ldr * 255.0, 0.0, 255.0)));
                 const g = @as(u32, @intFromFloat(std.math.clamp(g_ldr * 255.0, 0.0, 255.0)));
                 const b = @as(u32, @intFromFloat(std.math.clamp(b_ldr * 255.0, 0.0, 255.0)));
-                
+
                 ctx.renderer.bitmap.pixels[idx] = (0xFF << 24) | (r << 16) | (g << 8) | b;
             }
         }
@@ -5771,10 +5749,10 @@ pub const Renderer = struct {
     ) void {
         const hdri = self.hdri_map orelse return;
         const pass_start = std.time.nanoTimestamp();
-        
+
         const height: usize = @intCast(self.bitmap.height);
-        
-        // Instead of multi-threading immediately, let's just do it sequentially 
+
+        // Instead of multi-threading immediately, let's just do it sequentially
         // to see if threading was the issue!
         var ctx = SkyboxJobContext{
             .renderer = self,
@@ -5825,7 +5803,6 @@ pub const Renderer = struct {
         self.applyBlockbusterColorGradePass();
     }
 
-    
     fn applySSGIPass(self: *Renderer) void {
         const pass_start = std.time.nanoTimestamp();
         const height: usize = @intCast(self.bitmap.height);
@@ -6090,88 +6067,86 @@ pub const Renderer = struct {
         }
     }
 
+    const GodRaysJobContext = struct {
+        renderer: *Renderer,
+        start_row: usize,
+        end_row: usize,
+        width: usize,
+        height: usize,
+        light_screen_pos: math.Vec2,
 
-const GodRaysJobContext = struct {
-    renderer: *Renderer,
-    start_row: usize,
-    end_row: usize,
-    width: usize,
-    height: usize,
-    light_screen_pos: math.Vec2,
+        pub fn run(ctx_ptr: *anyopaque) void {
+            const ctx: *GodRaysJobContext = @ptrCast(@alignCast(ctx_ptr));
+            ctx.renderer.applyGodRaysRows(
+                ctx.start_row,
+                ctx.end_row,
+                ctx.width,
+                ctx.height,
+                ctx.light_screen_pos,
+            );
+        }
+    };
 
-    pub fn run(ctx_ptr: *anyopaque) void {
-        const ctx: *GodRaysJobContext = @ptrCast(@alignCast(ctx_ptr));
-        ctx.renderer.applyGodRaysRows(
-            ctx.start_row,
-            ctx.end_row,
-            ctx.width,
-            ctx.height,
-            ctx.light_screen_pos,
-        );
-    }
-};
+    const ChromaticAberrationJobContext = struct {
+        renderer: *Renderer,
+        start_row: usize,
+        end_row: usize,
+        width: usize,
+        height: usize,
 
-const ChromaticAberrationJobContext = struct {
-    renderer: *Renderer,
-    start_row: usize,
-    end_row: usize,
-    width: usize,
-    height: usize,
+        pub fn run(ctx_ptr: *anyopaque) void {
+            const ctx: *ChromaticAberrationJobContext = @ptrCast(@alignCast(ctx_ptr));
+            ctx.renderer.applyChromaticAberrationRows(ctx.start_row, ctx.end_row, ctx.width, ctx.height);
+        }
+    };
 
-    pub fn run(ctx_ptr: *anyopaque) void {
-        const ctx: *ChromaticAberrationJobContext = @ptrCast(@alignCast(ctx_ptr));
-        ctx.renderer.applyChromaticAberrationRows(ctx.start_row, ctx.end_row, ctx.width, ctx.height);
-    }
-};
+    const FilmGrainVignetteJobContext = struct {
+        renderer: *Renderer,
+        start_row: usize,
+        end_row: usize,
+        width: usize,
+        height: usize,
 
-const FilmGrainVignetteJobContext = struct {
-    renderer: *Renderer,
-    start_row: usize,
-    end_row: usize,
-    width: usize,
-    height: usize,
+        pub fn run(ctx_ptr: *anyopaque) void {
+            const ctx: *FilmGrainVignetteJobContext = @ptrCast(@alignCast(ctx_ptr));
+            ctx.renderer.applyFilmGrainVignetteRows(ctx.start_row, ctx.end_row, ctx.width, ctx.height);
+        }
+    };
 
-    pub fn run(ctx_ptr: *anyopaque) void {
-        const ctx: *FilmGrainVignetteJobContext = @ptrCast(@alignCast(ctx_ptr));
-        ctx.renderer.applyFilmGrainVignetteRows(ctx.start_row, ctx.end_row, ctx.width, ctx.height);
-    }
-};
+    const LensFlareJobContext = struct {
+        renderer: *Renderer,
+        start_row: usize,
+        end_row: usize,
+        width: usize,
+        height: usize,
 
-const LensFlareJobContext = struct {
-    renderer: *Renderer,
-    start_row: usize,
-    end_row: usize,
-    width: usize,
-    height: usize,
+        pub fn run(ctx_ptr: *anyopaque) void {
+            const ctx: *LensFlareJobContext = @ptrCast(@alignCast(ctx_ptr));
+            ctx.renderer.applyLensFlareRows(ctx.start_row, ctx.end_row, ctx.width, ctx.height);
+        }
+    };
 
-    pub fn run(ctx_ptr: *anyopaque) void {
-        const ctx: *LensFlareJobContext = @ptrCast(@alignCast(ctx_ptr));
-        ctx.renderer.applyLensFlareRows(ctx.start_row, ctx.end_row, ctx.width, ctx.height);
-    }
-};
+    const MotionBlurJobContext = struct {
+        renderer: *Renderer,
+        current_view: TemporalAAViewState,
+        previous_view: TemporalAAViewState,
+        start_row: usize,
+        end_row: usize,
+        width: usize,
+        height: usize,
 
-const MotionBlurJobContext = struct {
-    renderer: *Renderer,
-    current_view: TemporalAAViewState,
-    previous_view: TemporalAAViewState,
-    start_row: usize,
-    end_row: usize,
-    width: usize,
-    height: usize,
-
-    pub fn run(ctx_ptr: *anyopaque) void {
-        const ctx: *MotionBlurJobContext = @ptrCast(@alignCast(ctx_ptr));
-        ctx.renderer.applyMotionBlurRows(
-            ctx.current_view,
-            ctx.previous_view,
-            ctx.start_row,
-            ctx.end_row,
-            ctx.width,
-            ctx.height,
-        );
-    }
-};
-
+        pub fn run(ctx_ptr: *anyopaque) void {
+            const ctx: *MotionBlurJobContext = @ptrCast(@alignCast(ctx_ptr));
+            ctx.renderer.applyMotionBlurRows(
+                ctx.current_view,
+                ctx.previous_view,
+                ctx.start_row,
+                ctx.end_row,
+                ctx.width,
+                ctx.height,
+            );
+        }
+    };
 
     // --- God Rays ---
     fn applyGodRaysPass(self: *Renderer, projection: ProjectionParams, light_dir_world: math.Vec3) void {
@@ -6180,16 +6155,12 @@ const MotionBlurJobContext = struct {
         const width: usize = @intCast(self.bitmap.width);
         const height: usize = @intCast(self.bitmap.height);
 
-
         // actually we can just project the light_dir_world as a point relative to camera since it's directional.
         // Actually, we already have self.scene_camera setup, so we know our view.
         // But for god rays we usually just want a screen coordinate where the light is. Let's simplify.
-        const light_pos_view = math.Vec3.new(
-            math.Vec3.dot(light_dir_world, self.taa_previous_view.basis_right), // just using any active view basis
-            math.Vec3.dot(light_dir_world, self.taa_previous_view.basis_up),
-            math.Vec3.dot(light_dir_world, self.taa_previous_view.basis_forward)
-        );
-        
+        const light_pos_view = math.Vec3.new(math.Vec3.dot(light_dir_world, self.taa_previous_view.basis_right), // just using any active view basis
+            math.Vec3.dot(light_dir_world, self.taa_previous_view.basis_up), math.Vec3.dot(light_dir_world, self.taa_previous_view.basis_forward));
+
         var light_screen_pos = math.Vec2.new(-1000, -1000);
         if (light_pos_view.z > 0.0) {
             // Light is in front
@@ -6284,7 +6255,7 @@ const MotionBlurJobContext = struct {
                     if (sx >= 0 and sx < @as(i32, @intCast(width)) and sy >= 0 and sy < @as(i32, @intCast(height))) {
                         const s_idx = @as(usize, @intCast(sy)) * width + @as(usize, @intCast(sx));
                         const px = self.bitmap.pixels[s_idx];
-                        
+
                         // Treat bright pixels as scattering objects (poor man's occlusion/sun proxy)
                         r_sum += @as(f32, @floatFromInt((px >> 16) & 0xFF)) * illumination_decay * weight;
                         g_sum += @as(f32, @floatFromInt((px >> 8) & 0xFF)) * illumination_decay * weight;
@@ -6357,7 +6328,7 @@ const MotionBlurJobContext = struct {
         _ = _height;
         const threshold = config.POST_LENS_FLARE_THRESHOLD;
         const intensity = @as(f32, @floatFromInt(config.POST_LENS_FLARE_INTENSITY_PERCENT)) / 100.0;
-        
+
         var y = start_row;
         while (y < end_row) : (y += 1) {
             const row_start = y * width;
@@ -6365,7 +6336,7 @@ const MotionBlurJobContext = struct {
             while (x < width) : (x += 1) {
                 const idx = row_start + x;
                 const current_px = self.bitmap.pixels[idx];
-                
+
                 var r_sum: f32 = 0;
                 var g_sum: f32 = 0;
                 var b_sum: f32 = 0;
@@ -6374,7 +6345,7 @@ const MotionBlurJobContext = struct {
                 const signed_x = @as(i32, @intCast(x));
                 const min_sx = @max(0, signed_x - 60);
                 const max_sx = @min(@as(i32, @intCast(width)) - 1, signed_x + 60);
-                                
+
                 var s_x: i32 = min_sx;
                 // Align step so it still hops the same points roughly
                 if (@rem((s_x - (signed_x - 60)), @as(i32, 4)) != 0) {
@@ -6393,7 +6364,7 @@ const MotionBlurJobContext = struct {
                         const falloff = 1.0 - (@as(f32, @floatFromInt(dist)) * 0.0166666); // /60
                         const base_w = falloff * 0.1 * intensity;
                         const factor_r = base_w * (if (pr > pb) @as(f32, 1.2) else 0.5);
-                        
+
                         r_sum += @as(f32, @floatFromInt(pr)) * factor_r;
                         g_sum += @as(f32, @floatFromInt(pg)) * base_w * 0.8;
                         b_sum += @as(f32, @floatFromInt(pb)) * base_w * 1.5;
@@ -6464,27 +6435,27 @@ const MotionBlurJobContext = struct {
         const strong = config.POST_CHROMATIC_ABERRATION_STRENGTH;
         const cx = @as(f32, @floatFromInt(width)) * 0.5;
         const cy = @as(f32, @floatFromInt(height)) * 0.5;
-        
+
         var y = start_row;
         while (y < end_row) : (y += 1) {
             const row_start = y * width;
             var x: usize = 0;
             while (x < width) : (x += 1) {
                 const idx = row_start + x;
-                
+
                 // Vector from center
                 const dx = (@as(f32, @floatFromInt(x)) - cx) / cx;
                 const dy = (@as(f32, @floatFromInt(y)) - cy) / cy;
                 const dist = dx * dx + dy * dy; // squared dist to push mostly to edges
-                
+
                 const shift = dist * strong;
-                
+
                 const r_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(x)) + shift));
                 const b_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(x)) - shift));
-                
+
                 const safe_r_x = @max(0, @min(@as(i32, @intCast(width)) - 1, r_x));
                 const safe_b_x = @max(0, @min(@as(i32, @intCast(width)) - 1, b_x));
-                
+
                 const px_r = self.bitmap.pixels[y * width + @as(usize, @intCast(safe_r_x))];
                 const px_g = self.bitmap.pixels[idx];
                 const px_b = self.bitmap.pixels[y * width + @as(usize, @intCast(safe_b_x))];
@@ -6550,7 +6521,7 @@ const MotionBlurJobContext = struct {
 
         // pseudo-random seed based on frame so it moves
         const seed = @as(u32, @intCast(self.total_frames_rendered % 1000));
-        
+
         var y = start_row;
         while (y < end_row) : (y += 1) {
             const row_start = y * width;
@@ -6568,7 +6539,7 @@ const MotionBlurJobContext = struct {
                 const dy = (@as(f32, @floatFromInt(y)) - cy) / cy;
                 const dist = @sqrt(dx * dx + dy * dy);
                 const vig_factor = 1.0 - @max(0, @min(1.0, dist * vig_str));
-                
+
                 r *= vig_factor;
                 g *= vig_factor;
                 b *= vig_factor;
@@ -6578,7 +6549,7 @@ const MotionBlurJobContext = struct {
                 var hash = (@as(u32, @intCast(x)) *% 73856093) ^ (@as(u32, @intCast(y)) *% 19349663) ^ (seed *% 83492791);
                 hash = (hash ^ (hash >> 16)) *% 2654435769;
                 hash = hash ^ (hash >> 16);
-                
+
                 const noise = (@as(f32, @floatFromInt(hash & 0xFF)) / 255.0) - 0.5; // -0.5 to 0.5
                 const grain_factor = 1.0 + (noise * grain_str);
 
@@ -6677,7 +6648,7 @@ const MotionBlurJobContext = struct {
                     current_view.basis_forward,
                     current_camera,
                 );
-                
+
                 // Project back into previous frame
                 const previous_relative = math.Vec3.sub(world_pos, previous_view.camera_position);
                 const previous_camera = math.Vec3.new(
@@ -6692,7 +6663,7 @@ const MotionBlurJobContext = struct {
                 // The actual velocity vector in screen pixels:
                 const vec_x = previous_screen_raw.x - @as(f32, @floatFromInt(x));
                 const vec_y = previous_screen_raw.y - @as(f32, @floatFromInt(y));
-                
+
                 const vel_mag_sq = vec_x * vec_x + vec_y * vec_y;
                 if (vel_mag_sq < 0.25) continue; // Skip sub-pixel blur
 
@@ -6703,10 +6674,10 @@ const MotionBlurJobContext = struct {
                 var s: i32 = 1;
                 while (s <= samples) : (s += 1) {
                     const t = @as(f32, @floatFromInt(s)) / @as(f32, @floatFromInt(samples + 1));
-                    
+
                     const p_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(x)) + vec_x * t * intensity));
                     const p_y = @as(i32, @intFromFloat(@as(f32, @floatFromInt(y)) + vec_y * t * intensity));
-                    
+
                     if (p_x >= 0 and p_x < @as(i32, @intCast(width)) and p_y >= 0 and p_y < @as(i32, @intCast(height))) {
                         const s_idx = @as(usize, @intCast(p_y)) * width + @as(usize, @intCast(p_x));
                         const sample_px = self.bitmap.pixels[s_idx];
@@ -6720,11 +6691,11 @@ const MotionBlurJobContext = struct {
                         b_sum += @as(f32, @floatFromInt(current_pixel & 0xFF));
                     }
                 }
-                
+
                 const final_r = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(r_sum * inv_samples_plus_one))))));
                 const final_g = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(g_sum * inv_samples_plus_one))))));
                 const final_b = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(b_sum * inv_samples_plus_one))))));
-                
+
                 self.moblur_scratch_pixels[idx] = 0xFF000000 | (final_r << 16) | (final_g << 8) | final_b;
             }
         }
