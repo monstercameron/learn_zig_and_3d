@@ -2657,6 +2657,7 @@ pub const Renderer = struct {
     bloom_threshold_curve: [256]u8,
     bloom_intensity_lut: [256]u8,
     fog_job_contexts: []FogJobContext,
+    skybox_job_contexts: []SkyboxJobContext,
     shadow_resolve_job_contexts: []ShadowResolveJobContext,
     shadow_raster_job_contexts: []ShadowRasterJobContext,
     bloom_job_contexts: []BloomJobContext,
@@ -2754,6 +2755,8 @@ pub const Renderer = struct {
         errdefer allocator.free(ao_job_contexts);
         const fog_job_contexts = try allocator.alloc(FogJobContext, color_grade_job_count);
         errdefer allocator.free(fog_job_contexts);
+        const skybox_job_contexts = try allocator.alloc(SkyboxJobContext, color_grade_job_count);
+        errdefer allocator.free(skybox_job_contexts);
         const taa_job_contexts = try allocator.alloc(TAAJobContext, color_grade_job_count);
         errdefer allocator.free(taa_job_contexts);
         const shadow_resolve_job_contexts = try allocator.alloc(ShadowResolveJobContext, color_grade_job_count);
@@ -2991,6 +2994,7 @@ pub const Renderer = struct {
             .bloom_threshold_curve = buildBloomThresholdCurve(config.POST_BLOOM_THRESHOLD),
             .bloom_intensity_lut = buildBloomIntensityLut(config.POST_BLOOM_INTENSITY_PERCENT),
             .fog_job_contexts = fog_job_contexts,
+            .skybox_job_contexts = skybox_job_contexts,
             .shadow_resolve_job_contexts = shadow_resolve_job_contexts,
             .shadow_raster_job_contexts = shadow_raster_job_contexts,
             .bloom_job_contexts = bloom_job_contexts,
@@ -3062,6 +3066,7 @@ pub const Renderer = struct {
         self.allocator.free(self.bloom_scratch.pong);
         self.allocator.free(self.ao_job_contexts);
         self.allocator.free(self.fog_job_contexts);
+        self.allocator.free(self.skybox_job_contexts);
         self.allocator.free(self.shadow_resolve_job_contexts);
         self.allocator.free(self.shadow_raster_job_contexts);
         self.allocator.free(self.bloom_job_contexts);
@@ -5777,24 +5782,60 @@ pub const Renderer = struct {
         basis_forward: math.Vec3,
         projection: ProjectionParams,
     ) void {
-        const hdri = self.hdri_map orelse return;
+        const hdri_map = self.hdri_map orelse return;
         const pass_start = std.time.nanoTimestamp();
-
         const height: usize = @intCast(self.bitmap.height);
 
-        // Instead of multi-threading immediately, let's just do it sequentially
-        // to see if threading was the issue!
-        var ctx = SkyboxJobContext{
-            .renderer = self,
-            .right = basis_right,
-            .up = basis_up,
-            .forward = basis_forward,
-            .projection = projection,
-            .hdri_map = &hdri,
-            .start_row = 0,
-            .end_row = height,
-        };
-        applySkyboxRows(&ctx);
+        const stripe_count = computeStripeCount(self.skybox_job_contexts.len, height);
+        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
+
+        if (stripe_count <= 1 or self.job_system == null) {
+            var ctx = SkyboxJobContext{
+                .renderer = self,
+                .right = basis_right,
+                .up = basis_up,
+                .forward = basis_forward,
+                .projection = projection,
+                .hdri_map = &hdri_map,
+                .start_row = 0,
+                .end_row = height,
+            };
+            applySkyboxRows(&ctx);
+            self.recordRenderPassTiming("skybox", pass_start);
+            return;
+        }
+
+        var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+        var stripe_index: usize = 0;
+        while (stripe_index < stripe_count) : (stripe_index += 1) {
+            const start_row = stripe_index * rows_per_job;
+            if (start_row >= height) break;
+            const end_row = @min(height, start_row + rows_per_job);
+
+            self.skybox_job_contexts[stripe_index] = .{
+                .renderer = self,
+                .right = basis_right,
+                .up = basis_up,
+                .forward = basis_forward,
+                .projection = projection,
+                .hdri_map = &hdri_map,
+                .start_row = start_row,
+                .end_row = end_row,
+            };
+
+            self.color_grade_jobs[stripe_index] = Job.init(
+                runSkyboxJobWrapper,
+                @ptrCast(&self.skybox_job_contexts[stripe_index]),
+                &parent_job,
+            );
+            if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+                runSkyboxJobWrapper(@ptrCast(&self.skybox_job_contexts[stripe_index]));
+            }
+        }
+
+        runSkyboxJobWrapper(@ptrCast(&self.skybox_job_contexts[0]));
+        parent_job.complete();
+        parent_job.wait();
         self.recordRenderPassTiming("skybox", pass_start);
     }
 
@@ -6055,6 +6096,34 @@ pub const Renderer = struct {
         width: usize,
         height: usize,
     ) void {
+        const offset_w = math.Vec3.sub(current_view.camera_position, previous_view.camera_position);
+        const offset_x = math.Vec3.dot(offset_w, previous_view.basis_right);
+        const offset_y = math.Vec3.dot(offset_w, previous_view.basis_up);
+        const offset_z = math.Vec3.dot(offset_w, previous_view.basis_forward);
+
+        const m00 = math.Vec3.dot(current_view.basis_right, previous_view.basis_right);
+        const m01 = math.Vec3.dot(current_view.basis_up, previous_view.basis_right);
+        const m02 = math.Vec3.dot(current_view.basis_forward, previous_view.basis_right);
+
+        const m10 = math.Vec3.dot(current_view.basis_right, previous_view.basis_up);
+        const m11 = math.Vec3.dot(current_view.basis_up, previous_view.basis_up);
+        const m12 = math.Vec3.dot(current_view.basis_forward, previous_view.basis_up);
+
+        const m20 = math.Vec3.dot(current_view.basis_right, previous_view.basis_forward);
+        const m21 = math.Vec3.dot(current_view.basis_up, previous_view.basis_forward);
+        const m22 = math.Vec3.dot(current_view.basis_forward, previous_view.basis_forward);
+
+        const p_near = previous_view.projection.near_plane + NEAR_EPSILON;
+        const jitter_x_diff = current_view.projection.jitter_x - previous_view.projection.jitter_x;
+        const jitter_y_diff = current_view.projection.jitter_y - previous_view.projection.jitter_y;
+        
+        const p_cx = previous_view.projection.center_x;
+        const p_cy = previous_view.projection.center_y;
+        const p_jx = previous_view.projection.jitter_x;
+        const p_jy = previous_view.projection.jitter_y;
+        const p_xs = previous_view.projection.x_scale;
+        const p_ys = previous_view.projection.y_scale;
+
         var y = start_row;
         while (y < end_row) : (y += 1) {
             const row_start = y * width;
@@ -6067,28 +6136,29 @@ pub const Renderer = struct {
                 const current_camera = self.scene_camera[idx];
                 if (!validSceneCameraSample(current_camera)) continue;
 
-                const world_pos = cameraToWorldPosition(
-                    current_view.camera_position,
-                    current_view.basis_right,
-                    current_view.basis_up,
-                    current_view.basis_forward,
-                    current_camera,
-                );
-                const previous_relative = math.Vec3.sub(world_pos, previous_view.camera_position);
-                const previous_camera = math.Vec3.new(
-                    math.Vec3.dot(previous_relative, previous_view.basis_right),
-                    math.Vec3.dot(previous_relative, previous_view.basis_up),
-                    math.Vec3.dot(previous_relative, previous_view.basis_forward),
-                );
-                if (previous_camera.z <= previous_view.projection.near_plane + NEAR_EPSILON) continue;
+                const cx = current_camera.x;
+                const cy = current_camera.y;
+                const cz = current_camera.z;
 
-                const previous_screen_raw = projectCameraPositionFloat(previous_camera, previous_view.projection);
+                const prev_z = offset_z + cx * m20 + cy * m21 + cz * m22;
+                if (prev_z <= p_near) continue;
+
+                const prev_x = offset_x + cx * m00 + cy * m01 + cz * m02;
+                const prev_y = offset_y + cx * m10 + cy * m11 + cz * m12;
+
+                const inv_z = 1.0 / prev_z;
+                const ndc_x = prev_x * inv_z * p_xs;
+                const ndc_y = prev_y * inv_z * p_ys;
+                const previous_screen_raw_x = ndc_x * p_cx + p_cx + p_jx;
+                const previous_screen_raw_y = -ndc_y * p_cy + p_cy + p_jy;
+
                 const previous_screen = math.Vec2.new(
-                    previous_screen_raw.x - previous_view.projection.jitter_x + current_view.projection.jitter_x,
-                    previous_screen_raw.y - previous_view.projection.jitter_y + current_view.projection.jitter_y,
+                    previous_screen_raw_x + jitter_x_diff,
+                    previous_screen_raw_y + jitter_y_diff,
                 );
+
                 const previous_depth = sampleHistoryDepthNearest(self.taa_scratch.history_depth, width, height, previous_screen) orelse continue;
-                if (@abs(previous_depth - previous_camera.z) > self.temporal_aa_config.depth_threshold) continue;
+                if (@abs(previous_depth - prev_z) > self.temporal_aa_config.depth_threshold) continue;
 
                 const previous_color = sampleHistoryColor(self.taa_scratch.history_pixels, width, height, previous_screen) orelse continue;
                 const clamped_history = clampHistoryToNeighborhood(self.bitmap.pixels, width, height, x, y, previous_color);
