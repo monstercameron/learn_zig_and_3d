@@ -69,6 +69,7 @@ pub const Tile = struct {
 pub const TileBuffer = struct {
     pixels: []u32, // The local pixel buffer for this tile.
     depth: []f32, // The local depth buffer (z-buffer) for this tile.
+    camera: []math.Vec3, // Per-pixel camera-space position for post passes.
     width: i32,
     height: i32,
     allocator: std.mem.Allocator,
@@ -78,7 +79,9 @@ pub const TileBuffer = struct {
         const pixels = try allocator.alloc(u32, pixel_count);
         errdefer allocator.free(pixels);
         const depth = try allocator.alloc(f32, pixel_count);
-        return TileBuffer{ .pixels = pixels, .depth = depth, .width = width, .height = height, .allocator = allocator };
+        errdefer allocator.free(depth);
+        const camera = try allocator.alloc(math.Vec3, pixel_count);
+        return TileBuffer{ .pixels = pixels, .depth = depth, .camera = camera, .width = width, .height = height, .allocator = allocator };
     }
 
     /// Clears the tile for a new frame. Fills with a background color and resets the depth buffer.
@@ -86,11 +89,13 @@ pub const TileBuffer = struct {
         @memset(self.pixels, 0xFF000000); // Black background.
         // Reset all depth values to infinity. The first pixel drawn at any location will always be closer.
         @memset(self.depth, std.math.inf(f32));
+        @memset(self.camera, math.Vec3.new(0.0, 0.0, 0.0));
     }
 
     pub fn deinit(self: *TileBuffer) void {
         self.allocator.free(self.pixels);
         self.allocator.free(self.depth);
+        self.allocator.free(self.camera);
     }
 };
 
@@ -134,9 +139,9 @@ pub const TileGrid = struct {
 
 // ========== TILE RENDERING UTILITIES ==========
 
-/// Copies the pixels from a completed tile buffer to the main screen bitmap.
+/// Copies the pixels and geometry buffers from a completed tile buffer to the main screen surfaces.
 /// JS Analogy: `main_context.drawImage(tile_canvas, tile.x, tile.y);`
-pub fn compositeTileToScreen(tile: *const Tile, tile_buffer: *const TileBuffer, bitmap: *Bitmap) void {
+pub fn compositeTileToScreen(tile: *const Tile, tile_buffer: *const TileBuffer, bitmap: *Bitmap, depth_buffer: ?[]f32, camera_buffer: ?[]math.Vec3) void {
     var y: i32 = 0;
     while (y < tile.height) : (y += 1) {
         const screen_y = tile.y + y;
@@ -151,6 +156,16 @@ pub fn compositeTileToScreen(tile: *const Tile, tile_buffer: *const TileBuffer, 
 
             if (tile_idx < tile_buffer.pixels.len and screen_idx < bitmap.pixels.len) {
                 bitmap.pixels[screen_idx] = tile_buffer.pixels[tile_idx];
+                if (depth_buffer) |buffer| {
+                    if (tile_idx < tile_buffer.depth.len and screen_idx < buffer.len and std.math.isFinite(tile_buffer.depth[tile_idx])) {
+                        buffer[screen_idx] = tile_buffer.depth[tile_idx];
+                        if (camera_buffer) |camera_out| {
+                            if (tile_idx < tile_buffer.camera.len and screen_idx < camera_out.len) {
+                                camera_out[screen_idx] = tile_buffer.camera[tile_idx];
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -204,6 +219,7 @@ pub fn rasterizeTriangleToTile(
     p0_screen: [2]i32,
     p1_screen: [2]i32,
     p2_screen: [2]i32,
+    camera_positions: [3]math.Vec3,
     depths: [3]f32,
     shading: ShadingParams,
 ) void {
@@ -230,6 +246,9 @@ pub fn rasterizeTriangleToTile(
     const denom = (v1y - v2y) * (v0x - v2x) + (v2x - v1x) * (v0y - v2y);
     if (@abs(denom) < 1e-6) return; // Degenerate triangle.
     const inv_denom = 1.0 / denom;
+    const inv_depth0 = 1.0 / @max(depths[0], 1e-6);
+    const inv_depth1 = 1.0 / @max(depths[1], 1e-6);
+    const inv_depth2 = 1.0 / @max(depths[2], 1e-6);
 
     // 4. Iterate over every pixel within the triangle's bounding box.
     var y = min_y;
@@ -249,12 +268,27 @@ pub fn rasterizeTriangleToTile(
             // 6. Check if the pixel is inside the triangle.
             if (lambda0 < 0 or lambda1 < 0 or lambda2 < 0) continue;
 
-            const depth = depths[0] * lambda0 + depths[1] * lambda1 + depths[2] * lambda2;
+            const persp0 = lambda0 * inv_depth0;
+            const persp1 = lambda1 * inv_depth1;
+            const persp2 = lambda2 * inv_depth2;
+            const persp_sum = persp0 + persp1 + persp2;
+            if (persp_sum <= 1e-6) continue;
+            const inv_persp_sum = 1.0 / persp_sum;
+            const weight0 = persp0 * inv_persp_sum;
+            const weight1 = persp1 * inv_persp_sum;
+            const weight2 = persp2 * inv_persp_sum;
+
+            const camera_pos = math.Vec3.new(
+                camera_positions[0].x * weight0 + camera_positions[1].x * weight1 + camera_positions[2].x * weight2,
+                camera_positions[0].y * weight0 + camera_positions[1].y * weight1 + camera_positions[2].y * weight2,
+                camera_positions[0].z * weight0 + camera_positions[1].z * weight1 + camera_positions[2].z * weight2,
+            );
+            const depth = camera_pos.z;
 
             // 7. Interpolate UV coordinates using the barycentric weights.
             const uv = math.Vec2.new(
-                shading.uv0.x * lambda0 + shading.uv1.x * lambda1 + shading.uv2.x * lambda2,
-                shading.uv0.y * lambda0 + shading.uv1.y * lambda1 + shading.uv2.y * lambda2,
+                shading.uv0.x * weight0 + shading.uv1.x * weight1 + shading.uv2.x * weight2,
+                shading.uv0.y * weight0 + shading.uv1.y * weight1 + shading.uv2.y * weight2,
             );
 
             // 8. Sample the texture and apply lighting to get the final pixel color.
@@ -264,9 +298,10 @@ pub fn rasterizeTriangleToTile(
 
             // 9. Write the final color to the tile's local pixel buffer.
             const idx = @as(usize, @intCast(y * tile_buffer.width + x));
-            if (idx >= tile_buffer.pixels.len or idx >= tile_buffer.depth.len) continue;
+            if (idx >= tile_buffer.pixels.len or idx >= tile_buffer.depth.len or idx >= tile_buffer.camera.len) continue;
             if (depth >= tile_buffer.depth[idx]) continue;
             tile_buffer.depth[idx] = depth;
+            tile_buffer.camera[idx] = camera_pos;
             tile_buffer.pixels[idx] = final_color;
         }
     }

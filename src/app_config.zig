@@ -38,6 +38,23 @@ pub const LIGHT_DISTANCE_INITIAL: f32 = 3.0;
 // Enables the first post-processing stage layered over the meshlet render output.
 pub const POST_COLOR_CORRECTION_ENABLED = true;
 pub const POST_BLOOM_ENABLED = true;
+pub const POST_DEPTH_FOG_ENABLED = true;
+pub const POST_SHADOW_ENABLED = false;
+pub const POST_SHADOW_MAP_SIZE: usize = 1024;
+pub const POST_SHADOW_STRENGTH_PERCENT: i32 = 38;
+pub const POST_SHADOW_DEPTH_BIAS: f32 = 0.07;
+pub const POST_HYBRID_SHADOW_ENABLED = true;
+pub const POST_HYBRID_SHADOW_MIN_BLOCK_SIZE: i32 = 8;
+pub const POST_HYBRID_SHADOW_MAX_DEPTH: u32 = 3;
+pub const POST_HYBRID_SHADOW_RAY_BIAS: f32 = 0.03;
+pub const POST_HYBRID_SHADOW_SAMPLE_STRIDE: i32 = 4;
+pub const POST_HYBRID_SHADOW_DOWNSAMPLE: i32 = 4;
+pub const POST_DEPTH_FOG_NEAR: f32 = 5.5;
+pub const POST_DEPTH_FOG_FAR: f32 = 16.0;
+pub const POST_DEPTH_FOG_COLOR_R: u8 = 92;
+pub const POST_DEPTH_FOG_COLOR_G: u8 = 118;
+pub const POST_DEPTH_FOG_COLOR_B: u8 = 142;
+pub const POST_DEPTH_FOG_STRENGTH_PERCENT: i32 = 72;
 pub const POST_BLOOM_THRESHOLD: i32 = 168;
 pub const POST_BLOOM_INTENSITY_PERCENT: i32 = 55;
 

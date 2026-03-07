@@ -54,6 +54,47 @@ const NEAR_CLIP: f32 = 0.01;
 const NEAR_EPSILON: f32 = 1e-4;
 const INVALID_PROJECTED_COORD: i32 = -1000;
 const ENABLE_MESHLET_CONE_CULL = false;
+const shadow_rebuild_dot_threshold: f32 = 0.9986; // about 3 degrees
+const hybrid_shadow_grid_dim: usize = 32;
+const hybrid_shadow_grid_cells: usize = hybrid_shadow_grid_dim * hybrid_shadow_grid_dim;
+
+const HybridShadowCasterBounds = struct {
+    meshlet_index: usize,
+    min_u: f32,
+    max_u: f32,
+    min_v: f32,
+    max_v: f32,
+    max_depth: f32,
+};
+
+const HybridShadowTileRange = struct {
+    offset: usize = 0,
+    count: usize = 0,
+};
+
+const HybridShadowReceiverBounds = struct {
+    valid_min_x: i32,
+    valid_min_y: i32,
+    valid_max_x: i32,
+    valid_max_y: i32,
+    min_u: f32,
+    max_u: f32,
+    min_v: f32,
+    max_v: f32,
+    min_depth: f32,
+};
+
+const HybridShadowGrid = struct {
+    basis_right: math.Vec3 = math.Vec3.new(1.0, 0.0, 0.0),
+    basis_up: math.Vec3 = math.Vec3.new(0.0, 1.0, 0.0),
+    min_u: f32 = 0.0,
+    max_u: f32 = 0.0,
+    min_v: f32 = 0.0,
+    max_v: f32 = 0.0,
+    inv_cell_u: f32 = 0.0,
+    inv_cell_v: f32 = 0.0,
+    active: bool = false,
+};
 
 const GroundReason = struct {
     pub const near_plane: u8 = 1 << 0;
@@ -98,6 +139,62 @@ const BloomScratch = struct {
     pong: []u32,
 };
 
+const DepthFogConfig = struct {
+    near: f32,
+    far: f32,
+    inv_range: f32,
+    strength: f32,
+    color_r: i32,
+    color_g: i32,
+    color_b: i32,
+};
+
+const ShadowMap = struct {
+    width: usize,
+    height: usize,
+    depth: []f32,
+    basis_right: math.Vec3,
+    basis_up: math.Vec3,
+    basis_forward: math.Vec3,
+    min_x: f32,
+    max_x: f32,
+    min_y: f32,
+    max_y: f32,
+    min_z: f32,
+    max_z: f32,
+    inv_extent_x: f32,
+    inv_extent_y: f32,
+    depth_bias: f32,
+    texel_bias: f32,
+    active: bool,
+};
+
+const ShadowResolveConfig = struct {
+    camera_position: math.Vec3,
+    basis_right: math.Vec3,
+    basis_up: math.Vec3,
+    basis_forward: math.Vec3,
+    center_x: f32,
+    center_y: f32,
+    x_scale: f32,
+    y_scale: f32,
+    near_plane: f32,
+    darkness_percent: i32,
+};
+
+const max_shadow_meshlet_vertices: usize = 64;
+const hybrid_shadow_cache_unknown: u8 = 0xFF;
+const hybrid_shadow_cache_invalid: u8 = 0xFE;
+
+const ShadowSample = struct {
+    valid: bool,
+    coverage: f32,
+
+    fn occluded(self: ShadowSample) bool {
+        return self.coverage >= 0.5;
+    }
+};
+
 fn fastScale255(value: u32, factor: u32) u8 {
     const scaled = ((value * factor) + 128) * 257;
     return @intCast(@min(scaled >> 16, 255));
@@ -126,6 +223,277 @@ fn buildBloomIntensityLut(intensity_percent: i32) [256]u8 {
         lut[idx] = clampByte(@divTrunc(@as(i32, @intCast(idx)) * intensity_percent, 100));
     }
     return lut;
+}
+
+fn chooseShadowBasis(light_dir_world: math.Vec3) struct { right: math.Vec3, up: math.Vec3, forward: math.Vec3 } {
+    const forward = math.Vec3.normalize(math.Vec3.scale(light_dir_world, -1.0));
+    const world_up = if (@abs(forward.y) > 0.98)
+        math.Vec3.new(1.0, 0.0, 0.0)
+    else
+        math.Vec3.new(0.0, 1.0, 0.0);
+    const right = math.Vec3.normalize(math.Vec3.cross(world_up, forward));
+    const up = math.Vec3.normalize(math.Vec3.cross(forward, right));
+    return .{ .right = right, .up = up, .forward = forward };
+}
+
+fn shadowEdge(a: [2]f32, b: [2]f32, p: [2]f32) f32 {
+    return (p[0] - a[0]) * (b[1] - a[1]) - (p[1] - a[1]) * (b[0] - a[0]);
+}
+
+fn rasterizeShadowTriangleRows(shadow: *ShadowMap, start_row: usize, end_row: usize, p0: math.Vec3, p1: math.Vec3, p2: math.Vec3) void {
+    if (!shadow.active) return;
+    if (start_row >= end_row or end_row > shadow.height) return;
+
+    const scale_x = @as(f32, @floatFromInt(shadow.width - 1)) * shadow.inv_extent_x;
+    const scale_y = @as(f32, @floatFromInt(shadow.height - 1)) * shadow.inv_extent_y;
+
+    const s0 = [2]f32{ (p0.x - shadow.min_x) * scale_x, (shadow.max_y - p0.y) * scale_y };
+    const s1 = [2]f32{ (p1.x - shadow.min_x) * scale_x, (shadow.max_y - p1.y) * scale_y };
+    const s2 = [2]f32{ (p2.x - shadow.min_x) * scale_x, (shadow.max_y - p2.y) * scale_y };
+
+    const area = shadowEdge(s0, s1, s2);
+    if (@abs(area) < 1e-5) return;
+
+    const min_x = std.math.clamp(@as(i32, @intFromFloat(@floor(@min(s0[0], @min(s1[0], s2[0]))))), 0, @as(i32, @intCast(shadow.width - 1)));
+    const max_x = std.math.clamp(@as(i32, @intFromFloat(@ceil(@max(s0[0], @max(s1[0], s2[0]))))), 0, @as(i32, @intCast(shadow.width - 1)));
+    const min_y = std.math.clamp(
+        @as(i32, @intFromFloat(@floor(@min(s0[1], @min(s1[1], s2[1]))))),
+        @as(i32, @intCast(start_row)),
+        @as(i32, @intCast(end_row - 1)),
+    );
+    const max_y = std.math.clamp(
+        @as(i32, @intFromFloat(@ceil(@max(s0[1], @max(s1[1], s2[1]))))),
+        @as(i32, @intCast(start_row)),
+        @as(i32, @intCast(end_row - 1)),
+    );
+    if (min_y > max_y) return;
+
+    var y = min_y;
+    while (y <= max_y) : (y += 1) {
+        var x = min_x;
+        while (x <= max_x) : (x += 1) {
+            const sample = [2]f32{
+                @as(f32, @floatFromInt(x)) + 0.5,
+                @as(f32, @floatFromInt(y)) + 0.5,
+            };
+            const w0 = shadowEdge(s1, s2, sample);
+            const w1 = shadowEdge(s2, s0, sample);
+            const w2 = shadowEdge(s0, s1, sample);
+
+            if ((area > 0.0 and (w0 < 0.0 or w1 < 0.0 or w2 < 0.0)) or
+                (area < 0.0 and (w0 > 0.0 or w1 > 0.0 or w2 > 0.0)))
+            {
+                continue;
+            }
+
+            const inv_area = 1.0 / area;
+            const depth = (w0 * p0.z + w1 * p1.z + w2 * p2.z) * inv_area;
+            const idx = @as(usize, @intCast(y)) * shadow.width + @as(usize, @intCast(x));
+            if (depth < shadow.depth[idx]) shadow.depth[idx] = depth;
+        }
+    }
+}
+
+fn reconstructWorldPosition(
+    x: usize,
+    y: usize,
+    depth: f32,
+    config_value: ShadowResolveConfig,
+) math.Vec3 {
+    const sample_x = @as(f32, @floatFromInt(x)) + 0.5;
+    const sample_y = @as(f32, @floatFromInt(y)) + 0.5;
+    const ndc_x = (sample_x - config_value.center_x) / config_value.center_x;
+    const ndc_y = (sample_y - config_value.center_y) / config_value.center_y;
+    const camera_x = ndc_x * depth / config_value.x_scale;
+    const camera_y = -ndc_y * depth / config_value.y_scale;
+    const camera_z = depth;
+    return math.Vec3.add(
+        config_value.camera_position,
+        math.Vec3.add(
+            math.Vec3.add(
+                math.Vec3.scale(config_value.basis_right, camera_x),
+                math.Vec3.scale(config_value.basis_up, camera_y),
+            ),
+            math.Vec3.scale(config_value.basis_forward, camera_z),
+        ),
+    );
+}
+
+fn sampleShadowOcclusion(shadow: *const ShadowMap, world_pos: math.Vec3) f32 {
+    if (!shadow.active) return 0.0;
+
+    const lx = math.Vec3.dot(world_pos, shadow.basis_right);
+    const ly = math.Vec3.dot(world_pos, shadow.basis_up);
+    const lz = math.Vec3.dot(world_pos, shadow.basis_forward);
+    if (lx < shadow.min_x or lx > shadow.max_x or ly < shadow.min_y or ly > shadow.max_y or lz < shadow.min_z or lz > shadow.max_z) return 0.0;
+
+    const tex_x = (lx - shadow.min_x) * shadow.inv_extent_x * @as(f32, @floatFromInt(shadow.width - 1));
+    const tex_y = (shadow.max_y - ly) * shadow.inv_extent_y * @as(f32, @floatFromInt(shadow.height - 1));
+    const center_x = @as(i32, @intFromFloat(@round(tex_x)));
+    const center_y = @as(i32, @intFromFloat(@round(tex_y)));
+
+    const offsets = [_][2]i32{
+        .{ 0, 0 },
+        .{ -1, 0 },
+        .{ 1, 0 },
+        .{ 0, -1 },
+        .{ 0, 1 },
+    };
+
+    var occluded: f32 = 0.0;
+    var weight_sum: f32 = 0.0;
+    for (offsets, 0..) |offset, tap_index| {
+        const sx = std.math.clamp(center_x + offset[0], 0, @as(i32, @intCast(shadow.width - 1)));
+        const sy = std.math.clamp(center_y + offset[1], 0, @as(i32, @intCast(shadow.height - 1)));
+        const sample_idx = @as(usize, @intCast(sy)) * shadow.width + @as(usize, @intCast(sx));
+        const stored_depth = shadow.depth[sample_idx];
+        if (!std.math.isFinite(stored_depth)) continue;
+
+        const weight: f32 = if (tap_index == 0) 0.4 else 0.15;
+        weight_sum += weight;
+        if (lz > stored_depth + shadow.depth_bias + shadow.texel_bias) occluded += weight;
+    }
+
+    if (weight_sum <= 0.0) return 0.0;
+    return occluded / weight_sum;
+}
+
+fn darkenPackedColor(pixel: u32, scale: f32) u32 {
+    const alpha = pixel & 0xFF000000;
+    const r = @as(i32, @intFromFloat(@as(f32, @floatFromInt((pixel >> 16) & 0xFF)) * scale));
+    const g = @as(i32, @intFromFloat(@as(f32, @floatFromInt((pixel >> 8) & 0xFF)) * scale));
+    const b = @as(i32, @intFromFloat(@as(f32, @floatFromInt(pixel & 0xFF)) * scale));
+    return alpha |
+        (@as(u32, clampByte(r)) << 16) |
+        (@as(u32, clampByte(g)) << 8) |
+        @as(u32, clampByte(b));
+}
+
+fn darkenPixelSpan(pixels: []u32, start_index: usize, end_index: usize, scale: f32) void {
+    if (start_index >= end_index) return;
+
+    const scale_vec: ShadowFloatVec = @splat(scale);
+    const max_channel: ShadowFloatVec = @splat(255.0);
+    var i = start_index;
+    while (i + color_grade_simd_lanes <= end_index) : (i += color_grade_simd_lanes) {
+        var alpha: [color_grade_simd_lanes]u32 = undefined;
+        var r_arr: [color_grade_simd_lanes]f32 = undefined;
+        var g_arr: [color_grade_simd_lanes]f32 = undefined;
+        var b_arr: [color_grade_simd_lanes]f32 = undefined;
+
+        inline for (0..color_grade_simd_lanes) |lane| {
+            const pixel = pixels[i + lane];
+            alpha[lane] = pixel & 0xFF000000;
+            r_arr[lane] = @floatFromInt((pixel >> 16) & 0xFF);
+            g_arr[lane] = @floatFromInt((pixel >> 8) & 0xFF);
+            b_arr[lane] = @floatFromInt(pixel & 0xFF);
+        }
+
+        const r_scaled = @min(@as(ShadowFloatVec, @bitCast(r_arr)) * scale_vec, max_channel);
+        const g_scaled = @min(@as(ShadowFloatVec, @bitCast(g_arr)) * scale_vec, max_channel);
+        const b_scaled = @min(@as(ShadowFloatVec, @bitCast(b_arr)) * scale_vec, max_channel);
+        const r_out: [color_grade_simd_lanes]i32 = @bitCast(@as(ShadowIntVec, @intFromFloat(r_scaled)));
+        const g_out: [color_grade_simd_lanes]i32 = @bitCast(@as(ShadowIntVec, @intFromFloat(g_scaled)));
+        const b_out: [color_grade_simd_lanes]i32 = @bitCast(@as(ShadowIntVec, @intFromFloat(b_scaled)));
+
+        inline for (0..color_grade_simd_lanes) |lane| {
+            pixels[i + lane] = alpha[lane] |
+                (@as(u32, @intCast(r_out[lane])) << 16) |
+                (@as(u32, @intCast(g_out[lane])) << 8) |
+                @as(u32, @intCast(b_out[lane]));
+        }
+    }
+
+    while (i < end_index) : (i += 1) {
+        pixels[i] = darkenPackedColor(pixels[i], scale);
+    }
+}
+
+fn cameraToWorldPosition(
+    camera_position: math.Vec3,
+    basis_right: math.Vec3,
+    basis_up: math.Vec3,
+    basis_forward: math.Vec3,
+    camera_pos: math.Vec3,
+) math.Vec3 {
+    return math.Vec3.add(
+        camera_position,
+        math.Vec3.add(
+            math.Vec3.add(
+                math.Vec3.scale(basis_right, camera_pos.x),
+                math.Vec3.scale(basis_up, camera_pos.y),
+            ),
+            math.Vec3.scale(basis_forward, camera_pos.z),
+        ),
+    );
+}
+
+fn rayIntersectsSphere(origin: math.Vec3, direction: math.Vec3, center: math.Vec3, radius: f32) bool {
+    const oc = math.Vec3.sub(origin, center);
+    const b = math.Vec3.dot(oc, direction);
+    const c = math.Vec3.dot(oc, oc) - radius * radius;
+    if (c <= 0.0) return true;
+    const discriminant = b * b - c;
+    if (discriminant < 0.0) return false;
+    const t = -b - @sqrt(discriminant);
+    return t > 0.0;
+}
+
+fn rayIntersectsTriangle(origin: math.Vec3, direction: math.Vec3, v0: math.Vec3, v1: math.Vec3, v2: math.Vec3) bool {
+    const eps: f32 = 1e-6;
+    const edge1 = math.Vec3.sub(v1, v0);
+    const edge2 = math.Vec3.sub(v2, v0);
+    const pvec = math.Vec3.cross(direction, edge2);
+    const det = math.Vec3.dot(edge1, pvec);
+    if (@abs(det) < eps) return false;
+
+    const inv_det = 1.0 / det;
+    const tvec = math.Vec3.sub(origin, v0);
+    const u = math.Vec3.dot(tvec, pvec) * inv_det;
+    if (u < 0.0 or u > 1.0) return false;
+
+    const qvec = math.Vec3.cross(tvec, edge1);
+    const v = math.Vec3.dot(direction, qvec) * inv_det;
+    if (v < 0.0 or (u + v) > 1.0) return false;
+
+    const t = math.Vec3.dot(edge2, qvec) * inv_det;
+    return t > eps;
+}
+
+fn rasterizeShadowMeshRange(mesh: *const Mesh, shadow: *ShadowMap, start_row: usize, end_row: usize, light_dir_world: math.Vec3) void {
+    if (!shadow.active) return;
+
+    const basis = shadow.basis_right;
+    const basis_up = shadow.basis_up;
+    const basis_forward = shadow.basis_forward;
+
+    for (mesh.meshlets) |*meshlet| {
+        const meshlet_vertices = mesh.meshletVertexSlice(meshlet);
+        if (meshlet_vertices.len > max_shadow_meshlet_vertices) continue;
+
+        var local_light_vertices: [max_shadow_meshlet_vertices]math.Vec3 = undefined;
+        for (meshlet_vertices, 0..) |global_idx, local_idx| {
+            const world = mesh.vertices[global_idx];
+            local_light_vertices[local_idx] = math.Vec3.new(
+                math.Vec3.dot(world, basis),
+                math.Vec3.dot(world, basis_up),
+                math.Vec3.dot(world, basis_forward),
+            );
+        }
+
+        for (mesh.meshletPrimitiveSlice(meshlet)) |primitive| {
+            const tri_idx = primitive.triangle_index;
+            if (tri_idx >= mesh.normals.len) continue;
+
+            const normal = mesh.normals[tri_idx];
+            if (math.Vec3.dot(normal, light_dir_world) <= 0.0) continue;
+
+            const p0 = local_light_vertices[@as(usize, primitive.local_v0)];
+            const p1 = local_light_vertices[@as(usize, primitive.local_v1)];
+            const p2 = local_light_vertices[@as(usize, primitive.local_v2)];
+            rasterizeShadowTriangleRows(shadow, start_row, end_row, p0, p1, p2);
+        }
+    }
 }
 
 fn extractBloomDownsampleRows(
@@ -385,6 +753,8 @@ fn colorGradeSimdLanes() comptime_int {
 
 const color_grade_simd_lanes = colorGradeSimdLanes();
 const GradeVec = @Vector(color_grade_simd_lanes, i16);
+const ShadowFloatVec = @Vector(color_grade_simd_lanes, f32);
+const ShadowIntVec = @Vector(color_grade_simd_lanes, i32);
 
 // HGDIOBJ: A "handle" (like an ID) to a Windows graphics object.
 const HGDIOBJ = *anyopaque;
@@ -437,6 +807,337 @@ const BloomPassStage = enum {
     composite,
 };
 
+const FogJobContext = struct {
+    pixels: []u32,
+    depth: []const f32,
+    width: usize,
+    start_row: usize,
+    end_row: usize,
+    config: DepthFogConfig,
+
+    fn run(ctx_ptr: *anyopaque) void {
+        const ctx: *FogJobContext = @ptrCast(@alignCast(ctx_ptr));
+        applyDepthFogRows(ctx.pixels, ctx.depth, ctx.width, ctx.start_row, ctx.end_row, ctx.config);
+    }
+};
+
+const ShadowResolveJobContext = struct {
+    pixels: []u32,
+    camera_buffer: []const math.Vec3,
+    width: usize,
+    start_row: usize,
+    end_row: usize,
+    config: ShadowResolveConfig,
+    shadow: *const ShadowMap,
+
+    fn run(ctx_ptr: *anyopaque) void {
+        const ctx: *ShadowResolveJobContext = @ptrCast(@alignCast(ctx_ptr));
+        applyShadowRows(ctx.pixels, ctx.camera_buffer, ctx.width, ctx.start_row, ctx.end_row, ctx.config, ctx.shadow);
+    }
+};
+
+const ShadowRasterJobContext = struct {
+    mesh: *const Mesh,
+    shadow: *ShadowMap,
+    start_row: usize,
+    end_row: usize,
+    light_dir_world: math.Vec3,
+
+    fn run(ctx_ptr: *anyopaque) void {
+        const ctx: *ShadowRasterJobContext = @ptrCast(@alignCast(ctx_ptr));
+        rasterizeShadowMeshRange(ctx.mesh, ctx.shadow, ctx.start_row, ctx.end_row, ctx.light_dir_world);
+    }
+};
+
+const AdaptiveShadowTileJob = struct {
+    renderer: *Renderer,
+    mesh: *const Mesh,
+    tile: *const TileRenderer.Tile,
+    camera_position: math.Vec3,
+    basis_right: math.Vec3,
+    basis_up: math.Vec3,
+    basis_forward: math.Vec3,
+    light_dir_world: math.Vec3,
+    darkness_scale: f32,
+    valid_min_x: i32,
+    valid_min_y: i32,
+    valid_max_x: i32,
+    valid_max_y: i32,
+    candidate_offset: usize,
+    candidate_count: usize,
+
+    fn run(ctx_ptr: *anyopaque) void {
+        const ctx: *AdaptiveShadowTileJob = @ptrCast(@alignCast(ctx_ptr));
+        if (ctx.candidate_count == 0 or ctx.valid_max_x < ctx.valid_min_x or ctx.valid_max_y < ctx.valid_min_y) return;
+        const width = ctx.valid_max_x - ctx.valid_min_x + 1;
+        const height = ctx.valid_max_y - ctx.valid_min_y + 1;
+        if (width <= 0 or height <= 0) return;
+        ctx.processBlock(ctx.valid_min_x, ctx.valid_min_y, width, height, 0);
+    }
+
+    fn processBlock(ctx: *AdaptiveShadowTileJob, x: i32, y: i32, width: i32, height: i32, depth: u32) void {
+        if (width <= 0 or height <= 0) return;
+
+        const classification = ctx.classifyBlock(x, y, width, height);
+        if (!classification.mixed) {
+            if (classification.shadowed) ctx.darkenBlock(x, y, width, height);
+            return;
+        }
+
+        if (width <= config.POST_HYBRID_SHADOW_MIN_BLOCK_SIZE or height <= config.POST_HYBRID_SHADOW_MIN_BLOCK_SIZE or depth >= config.POST_HYBRID_SHADOW_MAX_DEPTH) {
+            ctx.resolveBlockExact(x, y, width, height);
+            return;
+        }
+
+        const half_w = @max(1, @divTrunc(width, 2));
+        const half_h = @max(1, @divTrunc(height, 2));
+        const rem_w = width - half_w;
+        const rem_h = height - half_h;
+        ctx.processBlock(x, y, half_w, half_h, depth + 1);
+        if (rem_w > 0) ctx.processBlock(x + half_w, y, rem_w, half_h, depth + 1);
+        if (rem_h > 0) ctx.processBlock(x, y + half_h, half_w, rem_h, depth + 1);
+        if (rem_w > 0 and rem_h > 0) ctx.processBlock(x + half_w, y + half_h, rem_w, rem_h, depth + 1);
+    }
+
+    const BlockClassification = struct {
+        mixed: bool,
+        shadowed: bool,
+    };
+
+    fn classifyBlock(ctx: *AdaptiveShadowTileJob, x: i32, y: i32, width: i32, height: i32) BlockClassification {
+        const max_x = x + width - 1;
+        const max_y = y + height - 1;
+        const center_x = x + @divTrunc(width - 1, 2);
+        const center_y = y + @divTrunc(height - 1, 2);
+        const sample_points = [_][2]i32{
+            .{ x, y },
+            .{ max_x, y },
+            .{ x, max_y },
+            .{ max_x, max_y },
+            .{ center_x, center_y },
+        };
+
+        var any_valid = false;
+        var any_occluded = false;
+        var any_lit = false;
+        var any_invalid = false;
+        for (sample_points) |point| {
+            const sample = ctx.sampleShadow(point[0], point[1]);
+            if (!sample.valid) {
+                any_invalid = true;
+                continue;
+            }
+            any_valid = true;
+            if (sample.coverage >= 0.65) any_occluded = true;
+            if (sample.coverage <= 0.15) any_lit = true;
+            if (sample.coverage > 0.15 and sample.coverage < 0.65) {
+                any_occluded = true;
+                any_lit = true;
+            }
+        }
+
+        if (!any_valid) return .{ .mixed = false, .shadowed = false };
+        if (any_invalid) return .{ .mixed = true, .shadowed = false };
+        if (any_occluded and any_lit) return .{ .mixed = true, .shadowed = false };
+        return .{ .mixed = false, .shadowed = any_occluded };
+    }
+
+    fn evaluateShadowPoint(ctx: *AdaptiveShadowTileJob, screen_x: i32, screen_y: i32) ShadowSample {
+        if (screen_x < 0 or screen_y < 0 or screen_x >= ctx.renderer.bitmap.width or screen_y >= ctx.renderer.bitmap.height) {
+            return .{ .valid = false, .coverage = 0.0 };
+        }
+
+        const scene_idx = @as(usize, @intCast(screen_y * ctx.renderer.bitmap.width + screen_x));
+        if (scene_idx >= ctx.renderer.scene_camera.len) return .{ .valid = false, .coverage = 0.0 };
+
+        const camera_pos = ctx.renderer.scene_camera[scene_idx];
+        if (!std.math.isFinite(camera_pos.z) or camera_pos.z <= NEAR_CLIP) {
+            return .{ .valid = false, .coverage = 0.0 };
+        }
+
+        const world_pos = cameraToWorldPosition(
+            ctx.camera_position,
+            ctx.basis_right,
+            ctx.basis_up,
+            ctx.basis_forward,
+            camera_pos,
+        );
+        return .{ .valid = true, .coverage = if (ctx.isPointShadowed(world_pos)) 1.0 else 0.0 };
+    }
+
+    fn evaluateShadowCell(ctx: *AdaptiveShadowTileJob, cache_x: usize, cache_y: usize) ShadowSample {
+        const shadow_scale = @max(1, config.POST_HYBRID_SHADOW_DOWNSAMPLE);
+        const origin_x = @as(i32, @intCast(cache_x * @as(usize, @intCast(shadow_scale))));
+        const origin_y = @as(i32, @intCast(cache_y * @as(usize, @intCast(shadow_scale))));
+        const max_x = @min(origin_x + shadow_scale - 1, ctx.renderer.bitmap.width - 1);
+        const max_y = @min(origin_y + shadow_scale - 1, ctx.renderer.bitmap.height - 1);
+        const center_x = @min(origin_x + @divTrunc(shadow_scale, 2), ctx.renderer.bitmap.width - 1);
+        const center_y = @min(origin_y + @divTrunc(shadow_scale, 2), ctx.renderer.bitmap.height - 1);
+        const center = ctx.evaluateShadowPoint(center_x, center_y);
+        if (!center.valid) return .{ .valid = false, .coverage = 0.0 };
+        if (center.coverage >= 1.0) return center;
+
+        const corner_a = ctx.evaluateShadowPoint(origin_x, origin_y);
+        const corner_b = ctx.evaluateShadowPoint(max_x, max_y);
+        var max_coverage = center.coverage;
+        if (corner_a.valid and corner_a.coverage > max_coverage) max_coverage = corner_a.coverage;
+        if (corner_b.valid and corner_b.coverage > max_coverage) max_coverage = corner_b.coverage;
+        if (max_coverage <= 0.0) return .{ .valid = true, .coverage = 0.0 };
+        if (max_coverage >= 1.0) return .{ .valid = true, .coverage = 0.5 };
+        return .{ .valid = true, .coverage = max_coverage };
+    }
+
+    fn sampleShadow(ctx: *AdaptiveShadowTileJob, screen_x: i32, screen_y: i32) ShadowSample {
+        const shadow_scale = @max(1, config.POST_HYBRID_SHADOW_DOWNSAMPLE);
+        if (screen_x < 0 or screen_y < 0 or screen_x >= ctx.renderer.bitmap.width or screen_y >= ctx.renderer.bitmap.height) {
+            return .{ .valid = false, .coverage = 0.0 };
+        }
+
+        const sample_x = @as(f32, @floatFromInt(screen_x)) / @as(f32, @floatFromInt(shadow_scale));
+        const sample_y = @as(f32, @floatFromInt(screen_y)) / @as(f32, @floatFromInt(shadow_scale));
+        const base_x = std.math.clamp(@as(i32, @intFromFloat(@floor(sample_x))), 0, @as(i32, @intCast(ctx.renderer.hybrid_shadow_cache_width - 1)));
+        const base_y = std.math.clamp(@as(i32, @intFromFloat(@floor(sample_y))), 0, @as(i32, @intCast(ctx.renderer.hybrid_shadow_cache_height - 1)));
+        const next_x = @min(base_x + 1, @as(i32, @intCast(ctx.renderer.hybrid_shadow_cache_width - 1)));
+        const next_y = @min(base_y + 1, @as(i32, @intCast(ctx.renderer.hybrid_shadow_cache_height - 1)));
+        const frac_x = std.math.clamp(sample_x - @as(f32, @floatFromInt(base_x)), 0.0, 1.0);
+        const frac_y = std.math.clamp(sample_y - @as(f32, @floatFromInt(base_y)), 0.0, 1.0);
+
+        const CacheTap = struct { valid: bool, coverage: f32 };
+        var taps: [4]CacheTap = undefined;
+        const coords = [_][2]i32{
+            .{ base_x, base_y },
+            .{ next_x, base_y },
+            .{ base_x, next_y },
+            .{ next_x, next_y },
+        };
+
+        for (coords, 0..) |coord, tap_index| {
+            const cache_idx = @as(usize, @intCast(coord[1])) * ctx.renderer.hybrid_shadow_cache_width + @as(usize, @intCast(coord[0]));
+            var cached = ctx.renderer.hybrid_shadow_cache[cache_idx];
+            if (cached == hybrid_shadow_cache_unknown) {
+                const evaluated = ctx.evaluateShadowCell(@intCast(coord[0]), @intCast(coord[1]));
+                cached = if (!evaluated.valid)
+                    hybrid_shadow_cache_invalid
+                else
+                    @intCast(std.math.clamp(@as(i32, @intFromFloat(@round(evaluated.coverage * 253.0))), 0, 253));
+                ctx.renderer.hybrid_shadow_cache[cache_idx] = cached;
+            }
+
+            if (cached == hybrid_shadow_cache_invalid) {
+                taps[tap_index] = .{ .valid = false, .coverage = 0.0 };
+            } else {
+                taps[tap_index] = .{ .valid = true, .coverage = @as(f32, @floatFromInt(cached)) / 253.0 };
+            }
+        }
+
+        const weights = [_]f32{
+            (1.0 - frac_x) * (1.0 - frac_y),
+            frac_x * (1.0 - frac_y),
+            (1.0 - frac_x) * frac_y,
+            frac_x * frac_y,
+        };
+        var weight_sum: f32 = 0.0;
+        var coverage_sum: f32 = 0.0;
+        for (taps, 0..) |tap, tap_index| {
+            if (!tap.valid) continue;
+            weight_sum += weights[tap_index];
+            coverage_sum += tap.coverage * weights[tap_index];
+        }
+
+        if (weight_sum <= 1e-5) return .{ .valid = false, .coverage = 0.0 };
+        return .{ .valid = true, .coverage = coverage_sum / weight_sum };
+    }
+
+    fn isPointShadowed(ctx: *AdaptiveShadowTileJob, world_pos: math.Vec3) bool {
+        if (!ctx.renderer.hybrid_shadow_grid.active) return false;
+
+        const grid = ctx.renderer.hybrid_shadow_grid;
+        const sample_u = math.Vec3.dot(world_pos, grid.basis_right);
+        const sample_v = math.Vec3.dot(world_pos, grid.basis_up);
+        if (sample_u < grid.min_u or sample_u > grid.max_u or sample_v < grid.min_v or sample_v > grid.max_v) return false;
+
+        const cell_x = std.math.clamp(
+            @as(i32, @intFromFloat((sample_u - grid.min_u) * grid.inv_cell_u)),
+            0,
+            @as(i32, hybrid_shadow_grid_dim - 1),
+        );
+        const cell_y = std.math.clamp(
+            @as(i32, @intFromFloat((sample_v - grid.min_v) * grid.inv_cell_v)),
+            0,
+            @as(i32, hybrid_shadow_grid_dim - 1),
+        );
+        const cell_index = @as(usize, @intCast(cell_y)) * hybrid_shadow_grid_dim + @as(usize, @intCast(cell_x));
+        const cell_range = ctx.renderer.hybrid_shadow_grid_ranges[cell_index];
+        if (cell_range.count == 0) return false;
+
+        const ray_origin = math.Vec3.add(world_pos, math.Vec3.scale(ctx.light_dir_world, config.POST_HYBRID_SHADOW_RAY_BIAS));
+        const candidates = ctx.renderer.hybrid_shadow_grid_candidates[cell_range.offset .. cell_range.offset + cell_range.count];
+        for (candidates) |meshlet_index| {
+            const meshlet = &ctx.mesh.meshlets[meshlet_index];
+            if (!rayIntersectsSphere(ray_origin, ctx.light_dir_world, meshlet.bounds_center, meshlet.bounds_radius)) continue;
+            for (ctx.mesh.meshletPrimitiveSlice(meshlet)) |primitive| {
+                const tri = ctx.mesh.triangles[primitive.triangle_index];
+                const v0 = ctx.mesh.vertices[tri.v0];
+                const v1 = ctx.mesh.vertices[tri.v1];
+                const v2 = ctx.mesh.vertices[tri.v2];
+                if (rayIntersectsTriangle(ray_origin, ctx.light_dir_world, v0, v1, v2)) return true;
+            }
+        }
+        return false;
+    }
+
+    fn resolveBlockExact(ctx: *AdaptiveShadowTileJob, x: i32, y: i32, width: i32, height: i32) void {
+        var py = y;
+        while (py < y + height) : (py += 1) {
+            if (py < 0 or py >= ctx.renderer.bitmap.height) continue;
+            var run_start: ?usize = null;
+            var px = x;
+            while (px < x + width) : (px += 1) {
+                const sample = ctx.sampleShadow(px, py);
+                const idx = @as(usize, @intCast(py * ctx.renderer.bitmap.width + px));
+                if (idx >= ctx.renderer.bitmap.pixels.len) continue;
+                if (!sample.valid or sample.coverage <= 0.02) {
+                    if (run_start) |start| {
+                        darkenPixelSpan(ctx.renderer.bitmap.pixels, start, idx, ctx.darkness_scale);
+                        run_start = null;
+                    }
+                    continue;
+                }
+
+                if (sample.coverage >= 0.98) {
+                    if (run_start == null) run_start = idx;
+                    continue;
+                }
+
+                if (run_start) |start| {
+                    darkenPixelSpan(ctx.renderer.bitmap.pixels, start, idx, ctx.darkness_scale);
+                    run_start = null;
+                }
+                const pixel_scale = 1.0 - ((1.0 - ctx.darkness_scale) * sample.coverage);
+                ctx.renderer.bitmap.pixels[idx] = darkenPackedColor(ctx.renderer.bitmap.pixels[idx], pixel_scale);
+            }
+
+            if (run_start) |start| {
+                const row_end = @min(
+                    @as(usize, @intCast(py * ctx.renderer.bitmap.width + x + width)),
+                    ctx.renderer.bitmap.pixels.len,
+                );
+                darkenPixelSpan(ctx.renderer.bitmap.pixels, start, row_end, ctx.darkness_scale);
+            }
+        }
+    }
+
+    fn darkenBlock(ctx: *AdaptiveShadowTileJob, x: i32, y: i32, width: i32, height: i32) void {
+        var py = y;
+        while (py < y + height) : (py += 1) {
+            if (py < 0 or py >= ctx.renderer.bitmap.height) continue;
+            const row_start = @as(usize, @intCast(py * ctx.renderer.bitmap.width + x));
+            const row_end = @as(usize, @intCast(py * ctx.renderer.bitmap.width + x + width));
+            darkenPixelSpan(ctx.renderer.bitmap.pixels, row_start, row_end, ctx.darkness_scale);
+        }
+    }
+};
+
 const BloomJobContext = struct {
     stage: BloomPassStage,
     scene_pixels: []u32,
@@ -476,6 +1177,145 @@ const BloomJobContext = struct {
 
 fn noopRenderPassJob(ctx: *anyopaque) void {
     _ = ctx;
+}
+
+fn applyDepthFogRows(
+    pixels: []u32,
+    depth_buffer: []const f32,
+    width: usize,
+    start_row: usize,
+    end_row: usize,
+    fog: DepthFogConfig,
+) void {
+    var y = start_row;
+    while (y < end_row) : (y += 1) {
+        const row_start = y * width;
+        const row_end = row_start + width;
+        var idx = row_start;
+        while (idx < row_end) : (idx += 1) {
+            const depth = depth_buffer[idx];
+            if (!std.math.isFinite(depth) or depth <= fog.near) continue;
+
+            const normalized = std.math.clamp((depth - fog.near) * fog.inv_range, 0.0, 1.0);
+            if (normalized <= 0.0) continue;
+
+            const factor = normalized * fog.strength;
+            if (factor <= 0.001) continue;
+
+            const pixel = pixels[idx];
+            const alpha = pixel & 0xFF000000;
+            const inv = 1.0 - factor;
+
+            const r = @as(i32, @intFromFloat(@as(f32, @floatFromInt((pixel >> 16) & 0xFF)) * inv + @as(f32, @floatFromInt(fog.color_r)) * factor));
+            const g = @as(i32, @intFromFloat(@as(f32, @floatFromInt((pixel >> 8) & 0xFF)) * inv + @as(f32, @floatFromInt(fog.color_g)) * factor));
+            const b = @as(i32, @intFromFloat(@as(f32, @floatFromInt(pixel & 0xFF)) * inv + @as(f32, @floatFromInt(fog.color_b)) * factor));
+
+            pixels[idx] = alpha |
+                (@as(u32, clampByte(r)) << 16) |
+                (@as(u32, clampByte(g)) << 8) |
+                @as(u32, clampByte(b));
+        }
+    }
+}
+
+fn applyShadowRows(
+    pixels: []u32,
+    camera_buffer: []const math.Vec3,
+    width: usize,
+    start_row: usize,
+    end_row: usize,
+    config_value: ShadowResolveConfig,
+    shadow: *const ShadowMap,
+) void {
+    if (!shadow.active) return;
+    const max_channel: ShadowFloatVec = @splat(255.0);
+    const darkness_scale = @as(f32, @floatFromInt(config_value.darkness_percent)) / 100.0;
+
+    var y = start_row;
+    while (y < end_row) : (y += 1) {
+        const row_start = y * width;
+        const row_end = row_start + width;
+        var x: usize = 0;
+        while (x + color_grade_simd_lanes <= width) : (x += color_grade_simd_lanes) {
+            var alpha: [color_grade_simd_lanes]u32 = undefined;
+            var r_arr: [color_grade_simd_lanes]f32 = undefined;
+            var g_arr: [color_grade_simd_lanes]f32 = undefined;
+            var b_arr: [color_grade_simd_lanes]f32 = undefined;
+            var scale_arr: [color_grade_simd_lanes]f32 = undefined;
+
+            inline for (0..color_grade_simd_lanes) |lane| {
+                const idx = row_start + x + lane;
+                const pixel = pixels[idx];
+                alpha[lane] = pixel & 0xFF000000;
+                r_arr[lane] = @floatFromInt((pixel >> 16) & 0xFF);
+                g_arr[lane] = @floatFromInt((pixel >> 8) & 0xFF);
+                b_arr[lane] = @floatFromInt(pixel & 0xFF);
+                scale_arr[lane] = 1.0;
+
+                const camera_pos = camera_buffer[idx];
+                if (std.math.isFinite(camera_pos.z) and camera_pos.z > config_value.near_plane) {
+                    const world_pos = math.Vec3.add(
+                        config_value.camera_position,
+                        math.Vec3.add(
+                            math.Vec3.add(
+                                math.Vec3.scale(config_value.basis_right, camera_pos.x),
+                                math.Vec3.scale(config_value.basis_up, camera_pos.y),
+                            ),
+                            math.Vec3.scale(config_value.basis_forward, camera_pos.z),
+                        ),
+                    );
+                    const occlusion = sampleShadowOcclusion(shadow, world_pos);
+                    if (occlusion > 0.0) scale_arr[lane] = 1.0 - darkness_scale * occlusion;
+                }
+            }
+
+            const scale_vec: ShadowFloatVec = @bitCast(scale_arr);
+            const r_scaled = @min(@as(ShadowFloatVec, @bitCast(r_arr)) * scale_vec, max_channel);
+            const g_scaled = @min(@as(ShadowFloatVec, @bitCast(g_arr)) * scale_vec, max_channel);
+            const b_scaled = @min(@as(ShadowFloatVec, @bitCast(b_arr)) * scale_vec, max_channel);
+            const r_out: [color_grade_simd_lanes]i32 = @bitCast(@as(ShadowIntVec, @intFromFloat(r_scaled)));
+            const g_out: [color_grade_simd_lanes]i32 = @bitCast(@as(ShadowIntVec, @intFromFloat(g_scaled)));
+            const b_out: [color_grade_simd_lanes]i32 = @bitCast(@as(ShadowIntVec, @intFromFloat(b_scaled)));
+
+            inline for (0..color_grade_simd_lanes) |lane| {
+                pixels[row_start + x + lane] = alpha[lane] |
+                    (@as(u32, @intCast(r_out[lane])) << 16) |
+                    (@as(u32, @intCast(g_out[lane])) << 8) |
+                    @as(u32, @intCast(b_out[lane]));
+            }
+        }
+
+        while (row_start + x < row_end) : (x += 1) {
+            const idx = row_start + x;
+            const camera_pos = camera_buffer[idx];
+            if (!std.math.isFinite(camera_pos.z) or camera_pos.z <= config_value.near_plane) continue;
+
+            const world_pos = math.Vec3.add(
+                config_value.camera_position,
+                math.Vec3.add(
+                    math.Vec3.add(
+                        math.Vec3.scale(config_value.basis_right, camera_pos.x),
+                        math.Vec3.scale(config_value.basis_up, camera_pos.y),
+                    ),
+                    math.Vec3.scale(config_value.basis_forward, camera_pos.z),
+                ),
+            );
+            const occlusion = sampleShadowOcclusion(shadow, world_pos);
+            if (occlusion <= 0.0) continue;
+
+            const shadow_scale = 1.0 - darkness_scale * occlusion;
+            const pixel = pixels[idx];
+            const alpha = pixel & 0xFF000000;
+            const r = @as(i32, @intFromFloat(@as(f32, @floatFromInt((pixel >> 16) & 0xFF)) * shadow_scale));
+            const g = @as(i32, @intFromFloat(@as(f32, @floatFromInt((pixel >> 8) & 0xFF)) * shadow_scale));
+            const b = @as(i32, @intFromFloat(@as(f32, @floatFromInt(pixel & 0xFF)) * shadow_scale));
+
+            pixels[idx] = alpha |
+                (@as(u32, clampByte(r)) << 16) |
+                (@as(u32, clampByte(g)) << 8) |
+                @as(u32, clampByte(b));
+        }
+    }
 }
 
 fn applyBlockbusterGradeRange(pixels: []u32, start_index: usize, end_index: usize, grade: *const ColorGradeProfile) void {
@@ -612,6 +1452,7 @@ pub const Renderer = struct {
     tile_buffers: ?[]TileBuffer, // A buffer for each tile to be rendered into in parallel.
     job_system: ?*JobSystem, // The multi-threaded job system.
     tile_jobs_buffer: ?[]TileRenderJob,
+    shadow_tile_jobs_buffer: ?[]AdaptiveShadowTileJob,
     job_buffer: ?[]Job,
     job_completion_buffer: ?[]bool,
     tile_triangle_lists: ?[]BinningStage.TileTriangleList,
@@ -632,9 +1473,32 @@ pub const Renderer = struct {
     render_pass_timings: [max_render_passes]RenderPassTiming,
     render_pass_count: usize,
     color_grade_profile: ColorGradeProfile,
+    depth_fog_config: DepthFogConfig,
+    scene_depth: []f32,
+    scene_camera: []math.Vec3,
+    hybrid_shadow_cache: []u8,
+    hybrid_shadow_cache_width: usize,
+    hybrid_shadow_cache_height: usize,
+    hybrid_shadow_caster_indices: []usize,
+    hybrid_shadow_caster_bounds: []HybridShadowCasterBounds,
+    hybrid_shadow_caster_count: usize,
+    hybrid_shadow_tile_ranges: []HybridShadowTileRange,
+    hybrid_shadow_tile_candidates: []usize,
+    hybrid_shadow_grid: HybridShadowGrid,
+    hybrid_shadow_grid_ranges: [hybrid_shadow_grid_cells]HybridShadowTileRange,
+    hybrid_shadow_grid_candidates: []usize,
+    hybrid_shadow_accel_valid: bool,
+    hybrid_shadow_cached_light_dir: math.Vec3,
+    hybrid_shadow_cached_meshlet_count: usize,
+    hybrid_shadow_cached_meshlet_vertex_count: usize,
+    hybrid_shadow_cached_meshlet_primitive_count: usize,
+    shadow_map: ShadowMap,
     bloom_scratch: BloomScratch,
     bloom_threshold_curve: [256]u8,
     bloom_intensity_lut: [256]u8,
+    fog_job_contexts: []FogJobContext,
+    shadow_resolve_job_contexts: []ShadowResolveJobContext,
+    shadow_raster_job_contexts: []ShadowRasterJobContext,
     bloom_job_contexts: []BloomJobContext,
     color_grade_job_contexts: []ColorGradeJobContext,
     color_grade_jobs: []Job,
@@ -668,6 +1532,10 @@ pub const Renderer = struct {
         const tile_count = tile_grid.tiles.len;
         const tile_jobs_buffer = try allocator.alloc(TileRenderJob, tile_count);
         errdefer allocator.free(tile_jobs_buffer);
+        const shadow_tile_jobs_buffer = try allocator.alloc(AdaptiveShadowTileJob, tile_count);
+        errdefer allocator.free(shadow_tile_jobs_buffer);
+        const hybrid_shadow_tile_ranges = try allocator.alloc(HybridShadowTileRange, tile_count);
+        errdefer allocator.free(hybrid_shadow_tile_ranges);
         const job_buffer = try allocator.alloc(Job, tile_count);
         errdefer allocator.free(job_buffer);
         const job_completion_buffer = try allocator.alloc(bool, tile_count);
@@ -685,10 +1553,27 @@ pub const Renderer = struct {
         const color_grade_job_count = @max(@as(usize, 1), @as(usize, @intCast(job_system.worker_count * 2)));
         const color_grade_job_contexts = try allocator.alloc(ColorGradeJobContext, color_grade_job_count);
         errdefer allocator.free(color_grade_job_contexts);
+        const fog_job_contexts = try allocator.alloc(FogJobContext, color_grade_job_count);
+        errdefer allocator.free(fog_job_contexts);
+        const shadow_resolve_job_contexts = try allocator.alloc(ShadowResolveJobContext, color_grade_job_count);
+        errdefer allocator.free(shadow_resolve_job_contexts);
+        const shadow_raster_job_contexts = try allocator.alloc(ShadowRasterJobContext, color_grade_job_count);
+        errdefer allocator.free(shadow_raster_job_contexts);
         const bloom_job_contexts = try allocator.alloc(BloomJobContext, color_grade_job_count);
         errdefer allocator.free(bloom_job_contexts);
         const color_grade_jobs = try allocator.alloc(Job, color_grade_job_count);
         errdefer allocator.free(color_grade_jobs);
+        const scene_depth = try allocator.alloc(f32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        errdefer allocator.free(scene_depth);
+        const scene_camera = try allocator.alloc(math.Vec3, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        errdefer allocator.free(scene_camera);
+        const hybrid_shadow_downsample = @max(1, config.POST_HYBRID_SHADOW_DOWNSAMPLE);
+        const hybrid_shadow_cache_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + hybrid_shadow_downsample - 1, hybrid_shadow_downsample))));
+        const hybrid_shadow_cache_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + hybrid_shadow_downsample - 1, hybrid_shadow_downsample))));
+        const hybrid_shadow_cache = try allocator.alloc(u8, hybrid_shadow_cache_width * hybrid_shadow_cache_height);
+        errdefer allocator.free(hybrid_shadow_cache);
+        const shadow_depth = try allocator.alloc(f32, config.POST_SHADOW_MAP_SIZE * config.POST_SHADOW_MAP_SIZE);
+        errdefer allocator.free(shadow_depth);
         const bloom_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + 3, 4))));
         const bloom_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + 3, 4))));
         const bloom_pixel_count = bloom_width * bloom_height;
@@ -746,6 +1631,7 @@ pub const Renderer = struct {
             .use_tiled_rendering = true,
             .job_system = job_system,
             .tile_jobs_buffer = tile_jobs_buffer,
+            .shadow_tile_jobs_buffer = shadow_tile_jobs_buffer,
             .job_buffer = job_buffer,
             .job_completion_buffer = job_completion_buffer,
             .tile_triangle_lists = tile_triangle_lists,
@@ -760,6 +1646,52 @@ pub const Renderer = struct {
             }} ** max_render_passes,
             .render_pass_count = 0,
             .color_grade_profile = buildBlockbusterGradeProfile(),
+            .depth_fog_config = .{
+                .near = config.POST_DEPTH_FOG_NEAR,
+                .far = config.POST_DEPTH_FOG_FAR,
+                .inv_range = 1.0 / @max(0.001, config.POST_DEPTH_FOG_FAR - config.POST_DEPTH_FOG_NEAR),
+                .strength = @as(f32, @floatFromInt(config.POST_DEPTH_FOG_STRENGTH_PERCENT)) / 100.0,
+                .color_r = config.POST_DEPTH_FOG_COLOR_R,
+                .color_g = config.POST_DEPTH_FOG_COLOR_G,
+                .color_b = config.POST_DEPTH_FOG_COLOR_B,
+            },
+            .scene_depth = scene_depth,
+            .scene_camera = scene_camera,
+            .hybrid_shadow_cache = hybrid_shadow_cache,
+            .hybrid_shadow_cache_width = hybrid_shadow_cache_width,
+            .hybrid_shadow_cache_height = hybrid_shadow_cache_height,
+            .hybrid_shadow_caster_indices = &[_]usize{},
+            .hybrid_shadow_caster_bounds = &[_]HybridShadowCasterBounds{},
+            .hybrid_shadow_caster_count = 0,
+            .hybrid_shadow_tile_ranges = hybrid_shadow_tile_ranges,
+            .hybrid_shadow_tile_candidates = &[_]usize{},
+            .hybrid_shadow_grid = .{},
+            .hybrid_shadow_grid_ranges = [_]HybridShadowTileRange{.{}} ** hybrid_shadow_grid_cells,
+            .hybrid_shadow_grid_candidates = &[_]usize{},
+            .hybrid_shadow_accel_valid = false,
+            .hybrid_shadow_cached_light_dir = math.Vec3.new(0.0, 0.0, 0.0),
+            .hybrid_shadow_cached_meshlet_count = 0,
+            .hybrid_shadow_cached_meshlet_vertex_count = 0,
+            .hybrid_shadow_cached_meshlet_primitive_count = 0,
+            .shadow_map = .{
+                .width = config.POST_SHADOW_MAP_SIZE,
+                .height = config.POST_SHADOW_MAP_SIZE,
+                .depth = shadow_depth,
+                .basis_right = math.Vec3.new(1.0, 0.0, 0.0),
+                .basis_up = math.Vec3.new(0.0, 1.0, 0.0),
+                .basis_forward = math.Vec3.new(0.0, 0.0, 1.0),
+                .min_x = -1.0,
+                .max_x = 1.0,
+                .min_y = -1.0,
+                .max_y = 1.0,
+                .min_z = -1.0,
+                .max_z = 1.0,
+                .inv_extent_x = 1.0,
+                .inv_extent_y = 1.0,
+                .depth_bias = config.POST_SHADOW_DEPTH_BIAS,
+                .texel_bias = 0.0,
+                .active = false,
+            },
             .bloom_scratch = .{
                 .width = bloom_width,
                 .height = bloom_height,
@@ -768,6 +1700,9 @@ pub const Renderer = struct {
             },
             .bloom_threshold_curve = buildBloomThresholdCurve(config.POST_BLOOM_THRESHOLD),
             .bloom_intensity_lut = buildBloomIntensityLut(config.POST_BLOOM_INTENSITY_PERCENT),
+            .fog_job_contexts = fog_job_contexts,
+            .shadow_resolve_job_contexts = shadow_resolve_job_contexts,
+            .shadow_raster_job_contexts = shadow_raster_job_contexts,
             .bloom_job_contexts = bloom_job_contexts,
             .color_grade_job_contexts = color_grade_job_contexts,
             .color_grade_jobs = color_grade_jobs,
@@ -781,12 +1716,25 @@ pub const Renderer = struct {
         if (self.job_system) |js| js.deinit();
         if (self.job_buffer) |jobs| self.allocator.free(jobs);
         if (self.tile_jobs_buffer) |tile_jobs| self.allocator.free(tile_jobs);
+        if (self.shadow_tile_jobs_buffer) |shadow_jobs| self.allocator.free(shadow_jobs);
         if (self.job_completion_buffer) |completion| self.allocator.free(completion);
         if (self.tile_triangle_lists) |lists| BinningStage.freeTileTriangleLists(lists, self.allocator);
         if (self.active_tile_flags) |flags| self.allocator.free(flags);
         if (self.active_tile_indices) |indices| self.allocator.free(indices);
+        self.allocator.free(self.scene_depth);
+        self.allocator.free(self.scene_camera);
+        self.allocator.free(self.hybrid_shadow_cache);
+        if (self.hybrid_shadow_caster_indices.len != 0) self.allocator.free(self.hybrid_shadow_caster_indices);
+        if (self.hybrid_shadow_caster_bounds.len != 0) self.allocator.free(self.hybrid_shadow_caster_bounds);
+        self.allocator.free(self.hybrid_shadow_tile_ranges);
+        if (self.hybrid_shadow_tile_candidates.len != 0) self.allocator.free(self.hybrid_shadow_tile_candidates);
+        if (self.hybrid_shadow_grid_candidates.len != 0) self.allocator.free(self.hybrid_shadow_grid_candidates);
+        self.allocator.free(self.shadow_map.depth);
         self.allocator.free(self.bloom_scratch.ping);
         self.allocator.free(self.bloom_scratch.pong);
+        self.allocator.free(self.fog_job_contexts);
+        self.allocator.free(self.shadow_resolve_job_contexts);
+        self.allocator.free(self.shadow_raster_job_contexts);
         self.allocator.free(self.bloom_job_contexts);
         self.allocator.free(self.color_grade_job_contexts);
         self.allocator.free(self.color_grade_jobs);
@@ -901,9 +1849,11 @@ pub const Renderer = struct {
 
             var screen_pts: [max_clipped_vertices][2]i32 = undefined;
             var depths: [max_clipped_vertices]f32 = undefined;
+            var camera_positions: [max_clipped_vertices]math.Vec3 = undefined;
             for (vertices, 0..) |v, idx| {
                 screen_pts[idx] = job.projectToScreen(v.position);
                 depths[idx] = v.position.z;
+                camera_positions[idx] = v.position;
             }
 
             var tri_idx: usize = 1;
@@ -926,7 +1876,12 @@ pub const Renderer = struct {
                     depths[tri_idx],
                     depths[tri_idx + 1],
                 };
-                TileRenderer.rasterizeTriangleToTile(job.tile, job.tile_buffer, p0, p1, p2, depth_values, shading);
+                const camera_values = [3]math.Vec3{
+                    camera_positions[0],
+                    camera_positions[tri_idx],
+                    camera_positions[tri_idx + 1],
+                };
+                TileRenderer.rasterizeTriangleToTile(job.tile, job.tile_buffer, p0, p1, p2, camera_values, depth_values, shading);
             }
         }
 
@@ -2375,6 +3330,7 @@ pub const Renderer = struct {
         }
 
         const mesh_work = &cache.work;
+        const shadow_elapsed_ns: i128 = if (config.POST_SHADOW_ENABLED) self.buildShadowMap(mesh, light_dir_world) else 0;
 
         const scene_pass_start = std.time.nanoTimestamp();
         if (self.use_tiled_rendering and self.tile_grid != null and self.tile_buffers != null) {
@@ -2389,7 +3345,7 @@ pub const Renderer = struct {
             self.recordRenderPassTiming("meshlet_direct", scene_pass_start);
         }
 
-        self.applyPostProcessingPasses();
+        self.applyPostProcessingPasses(mesh, self.camera_position, right, up, forward, projection, light_dir_world, shadow_elapsed_ns);
         if (self.show_light_orb) {
             const light_camera_z = light_camera.z;
             if (light_camera_z > NEAR_CLIP) {
@@ -2483,8 +3439,12 @@ pub const Renderer = struct {
     }
 
     fn recordRenderPassTiming(self: *Renderer, name: []const u8, start_ns: i128) void {
-        if (self.render_pass_count >= self.render_pass_timings.len) return;
         const elapsed_ns = std.time.nanoTimestamp() - start_ns;
+        self.recordRenderPassDuration(name, elapsed_ns);
+    }
+
+    fn recordRenderPassDuration(self: *Renderer, name: []const u8, elapsed_ns: i128) void {
+        if (self.render_pass_count >= self.render_pass_timings.len) return;
         const elapsed_ms = @as(f32, @floatFromInt(elapsed_ns)) / 1_000_000.0;
         var timing = &self.render_pass_timings[self.render_pass_count];
         if (timing.name.len == 0 or !std.mem.eql(u8, timing.name, name)) {
@@ -2670,10 +3630,572 @@ pub const Renderer = struct {
         }
     }
 
-    fn applyPostProcessingPasses(self: *Renderer) void {
+    fn buildShadowMap(self: *Renderer, mesh: *const Mesh, light_dir_world: math.Vec3) i128 {
+        if (!config.POST_SHADOW_ENABLED or mesh.meshlets.len == 0) {
+            self.shadow_map.active = false;
+            return 0;
+        }
+
+        const pass_start = std.time.nanoTimestamp();
+        const basis = chooseShadowBasis(light_dir_world);
+        var min_x = std.math.inf(f32);
+        var max_x = -std.math.inf(f32);
+        var min_y = std.math.inf(f32);
+        var max_y = -std.math.inf(f32);
+        var min_z = std.math.inf(f32);
+        var max_z = -std.math.inf(f32);
+
+        for (mesh.vertices) |vertex| {
+            const lx = math.Vec3.dot(vertex, basis.right);
+            const ly = math.Vec3.dot(vertex, basis.up);
+            const lz = math.Vec3.dot(vertex, basis.forward);
+            min_x = @min(min_x, lx);
+            max_x = @max(max_x, lx);
+            min_y = @min(min_y, ly);
+            max_y = @max(max_y, ly);
+            min_z = @min(min_z, lz);
+            max_z = @max(max_z, lz);
+        }
+
+        if (!std.math.isFinite(min_x) or !std.math.isFinite(max_x)) {
+            self.shadow_map.active = false;
+            return std.time.nanoTimestamp() - pass_start;
+        }
+
+        const range_x = @max(0.001, max_x - min_x);
+        const range_y = @max(0.001, max_y - min_y);
+        const range_z = @max(0.001, max_z - min_z);
+        const margin = @max(0.25, @max(range_x, @max(range_y, range_z)) * 0.08);
+
+        self.shadow_map.basis_right = basis.right;
+        self.shadow_map.basis_up = basis.up;
+        self.shadow_map.basis_forward = basis.forward;
+        self.shadow_map.min_x = min_x - margin;
+        self.shadow_map.max_x = max_x + margin;
+        self.shadow_map.min_y = min_y - margin;
+        self.shadow_map.max_y = max_y + margin;
+        self.shadow_map.min_z = min_z - margin;
+        self.shadow_map.max_z = max_z + margin;
+        self.shadow_map.inv_extent_x = 1.0 / @max(0.001, self.shadow_map.max_x - self.shadow_map.min_x);
+        self.shadow_map.inv_extent_y = 1.0 / @max(0.001, self.shadow_map.max_y - self.shadow_map.min_y);
+        self.shadow_map.depth_bias = config.POST_SHADOW_DEPTH_BIAS;
+        self.shadow_map.texel_bias = @max(
+            0.001,
+            @max(
+                (self.shadow_map.max_x - self.shadow_map.min_x) / @as(f32, @floatFromInt(self.shadow_map.width)),
+                (self.shadow_map.max_y - self.shadow_map.min_y) / @as(f32, @floatFromInt(self.shadow_map.height)),
+            ) * 0.35,
+        );
+        self.shadow_map.active = true;
+        @memset(self.shadow_map.depth, std.math.inf(f32));
+
+        const stripe_count = @min(self.shadow_raster_job_contexts.len, @max(@as(usize, 1), self.shadow_map.height));
+        const rows_per_job = if (stripe_count <= 1) self.shadow_map.height else (self.shadow_map.height + stripe_count - 1) / stripe_count;
+
+        if (stripe_count <= 1 or self.job_system == null) {
+            rasterizeShadowMeshRange(mesh, &self.shadow_map, 0, self.shadow_map.height, light_dir_world);
+            return std.time.nanoTimestamp() - pass_start;
+        }
+
+        var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+        var stripe_index: usize = 0;
+        while (stripe_index < stripe_count) : (stripe_index += 1) {
+            const start_row = stripe_index * rows_per_job;
+            if (start_row >= self.shadow_map.height) break;
+            const end_row = @min(self.shadow_map.height, start_row + rows_per_job);
+
+            self.shadow_raster_job_contexts[stripe_index] = .{
+                .mesh = mesh,
+                .shadow = &self.shadow_map,
+                .start_row = start_row,
+                .end_row = end_row,
+                .light_dir_world = light_dir_world,
+            };
+
+            if (stripe_index == 0) continue;
+
+            self.color_grade_jobs[stripe_index] = Job.init(
+                ShadowRasterJobContext.run,
+                @ptrCast(&self.shadow_raster_job_contexts[stripe_index]),
+                &parent_job,
+            );
+            if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+                ShadowRasterJobContext.run(@ptrCast(&self.shadow_raster_job_contexts[stripe_index]));
+            }
+        }
+
+        ShadowRasterJobContext.run(@ptrCast(&self.shadow_raster_job_contexts[0]));
+        parent_job.complete();
+        parent_job.wait();
+
+        return std.time.nanoTimestamp() - pass_start;
+    }
+
+    fn applyShadowPass(
+        self: *Renderer,
+        camera_position: math.Vec3,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        projection: ProjectionParams,
+        build_elapsed_ns: i128,
+    ) void {
+        if (!self.shadow_map.active or self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
+
+        const pass_start = std.time.nanoTimestamp();
+        const width: usize = @intCast(self.bitmap.width);
+        const height: usize = @intCast(self.bitmap.height);
+        const stripe_count = @min(self.shadow_resolve_job_contexts.len, @max(@as(usize, 1), height));
+        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
+        const resolve_config = ShadowResolveConfig{
+            .camera_position = camera_position,
+            .basis_right = basis_right,
+            .basis_up = basis_up,
+            .basis_forward = basis_forward,
+            .center_x = projection.center_x,
+            .center_y = projection.center_y,
+            .x_scale = projection.x_scale,
+            .y_scale = projection.y_scale,
+            .near_plane = projection.near_plane,
+            .darkness_percent = config.POST_SHADOW_STRENGTH_PERCENT,
+        };
+
+        if (stripe_count <= 1 or self.job_system == null) {
+            applyShadowRows(self.bitmap.pixels, self.scene_camera, width, 0, height, resolve_config, &self.shadow_map);
+            self.recordRenderPassDuration("shadow_pass", build_elapsed_ns + (std.time.nanoTimestamp() - pass_start));
+            return;
+        }
+
+        var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+        var stripe_index: usize = 0;
+        while (stripe_index < stripe_count) : (stripe_index += 1) {
+            const start_row = stripe_index * rows_per_job;
+            if (start_row >= height) break;
+            const end_row = @min(height, start_row + rows_per_job);
+
+            self.shadow_resolve_job_contexts[stripe_index] = .{
+                .pixels = self.bitmap.pixels,
+                .camera_buffer = self.scene_camera,
+                .width = width,
+                .start_row = start_row,
+                .end_row = end_row,
+                .config = resolve_config,
+                .shadow = &self.shadow_map,
+            };
+
+            if (stripe_index == 0) continue;
+
+            self.color_grade_jobs[stripe_index] = Job.init(
+                ShadowResolveJobContext.run,
+                @ptrCast(&self.shadow_resolve_job_contexts[stripe_index]),
+                &parent_job,
+            );
+            if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+                ShadowResolveJobContext.run(@ptrCast(&self.shadow_resolve_job_contexts[stripe_index]));
+            }
+        }
+
+        ShadowResolveJobContext.run(@ptrCast(&self.shadow_resolve_job_contexts[0]));
+        parent_job.complete();
+        parent_job.wait();
+        self.recordRenderPassDuration("shadow_pass", build_elapsed_ns + (std.time.nanoTimestamp() - pass_start));
+    }
+
+    fn ensureHybridShadowScratch(self: *Renderer, caster_capacity: usize, tile_candidate_capacity: usize, grid_candidate_capacity: usize) !void {
+        if (caster_capacity > self.hybrid_shadow_caster_indices.len) {
+            self.hybrid_shadow_caster_indices = if (self.hybrid_shadow_caster_indices.len == 0)
+                try self.allocator.alloc(usize, caster_capacity)
+            else
+                try self.allocator.realloc(self.hybrid_shadow_caster_indices, caster_capacity);
+        }
+
+        if (caster_capacity > self.hybrid_shadow_caster_bounds.len) {
+            self.hybrid_shadow_caster_bounds = if (self.hybrid_shadow_caster_bounds.len == 0)
+                try self.allocator.alloc(HybridShadowCasterBounds, caster_capacity)
+            else
+                try self.allocator.realloc(self.hybrid_shadow_caster_bounds, caster_capacity);
+        }
+
+        if (tile_candidate_capacity > self.hybrid_shadow_tile_candidates.len) {
+            self.hybrid_shadow_tile_candidates = if (self.hybrid_shadow_tile_candidates.len == 0)
+                try self.allocator.alloc(usize, tile_candidate_capacity)
+            else
+                try self.allocator.realloc(self.hybrid_shadow_tile_candidates, tile_candidate_capacity);
+        }
+
+        if (grid_candidate_capacity > self.hybrid_shadow_grid_candidates.len) {
+            self.hybrid_shadow_grid_candidates = if (self.hybrid_shadow_grid_candidates.len == 0)
+                try self.allocator.alloc(usize, grid_candidate_capacity)
+            else
+                try self.allocator.realloc(self.hybrid_shadow_grid_candidates, grid_candidate_capacity);
+        }
+    }
+
+    fn buildHybridShadowReceiverBounds(
+        self: *Renderer,
+        tile: *const TileRenderer.Tile,
+        camera_position: math.Vec3,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        light_basis_right: math.Vec3,
+        light_basis_up: math.Vec3,
+        light_dir_world: math.Vec3,
+    ) ?HybridShadowReceiverBounds {
+        var valid_min_x = tile.x + tile.width;
+        var valid_min_y = tile.y + tile.height;
+        var valid_max_x = tile.x - 1;
+        var valid_max_y = tile.y - 1;
+        var min_u = std.math.inf(f32);
+        var max_u = -std.math.inf(f32);
+        var min_v = std.math.inf(f32);
+        var max_v = -std.math.inf(f32);
+        var min_depth = std.math.inf(f32);
+        var found_valid = false;
+
+        var screen_y = tile.y;
+        while (screen_y < tile.y + tile.height) : (screen_y += 1) {
+            if (screen_y < 0 or screen_y >= self.bitmap.height) continue;
+            const row_base = @as(usize, @intCast(screen_y * self.bitmap.width));
+            var screen_x = tile.x;
+            while (screen_x < tile.x + tile.width) : (screen_x += 1) {
+                if (screen_x < 0 or screen_x >= self.bitmap.width) continue;
+                const idx = row_base + @as(usize, @intCast(screen_x));
+                if (idx >= self.scene_camera.len) continue;
+
+                const camera_pos = self.scene_camera[idx];
+                if (!std.math.isFinite(camera_pos.z) or camera_pos.z <= NEAR_CLIP) continue;
+
+                const world_pos = cameraToWorldPosition(
+                    camera_position,
+                    basis_right,
+                    basis_up,
+                    basis_forward,
+                    camera_pos,
+                );
+                const u = math.Vec3.dot(world_pos, light_basis_right);
+                const v = math.Vec3.dot(world_pos, light_basis_up);
+                const depth = math.Vec3.dot(world_pos, light_dir_world);
+
+                found_valid = true;
+                if (screen_x < valid_min_x) valid_min_x = screen_x;
+                if (screen_y < valid_min_y) valid_min_y = screen_y;
+                if (screen_x > valid_max_x) valid_max_x = screen_x;
+                if (screen_y > valid_max_y) valid_max_y = screen_y;
+                if (u < min_u) min_u = u;
+                if (u > max_u) max_u = u;
+                if (v < min_v) min_v = v;
+                if (v > max_v) max_v = v;
+                if (depth < min_depth) min_depth = depth;
+            }
+        }
+
+        if (!found_valid) return null;
+        return .{
+            .valid_min_x = valid_min_x,
+            .valid_min_y = valid_min_y,
+            .valid_max_x = valid_max_x,
+            .valid_max_y = valid_max_y,
+            .min_u = min_u,
+            .max_u = max_u,
+            .min_v = min_v,
+            .max_v = max_v,
+            .min_depth = min_depth,
+        };
+    }
+
+    fn buildHybridShadowGrid(self: *Renderer, caster_count: usize, light_basis_right: math.Vec3, light_basis_up: math.Vec3) void {
+        if (caster_count == 0) {
+            self.hybrid_shadow_grid.active = false;
+            return;
+        }
+
+        var min_u = std.math.inf(f32);
+        var max_u = -std.math.inf(f32);
+        var min_v = std.math.inf(f32);
+        var max_v = -std.math.inf(f32);
+        for (self.hybrid_shadow_caster_bounds[0..caster_count]) |caster| {
+            if (caster.min_u < min_u) min_u = caster.min_u;
+            if (caster.max_u > max_u) max_u = caster.max_u;
+            if (caster.min_v < min_v) min_v = caster.min_v;
+            if (caster.max_v > max_v) max_v = caster.max_v;
+        }
+
+        const extent_u = @max(1e-3, max_u - min_u);
+        const extent_v = @max(1e-3, max_v - min_v);
+        self.hybrid_shadow_grid = .{
+            .basis_right = light_basis_right,
+            .basis_up = light_basis_up,
+            .min_u = min_u,
+            .max_u = max_u,
+            .min_v = min_v,
+            .max_v = max_v,
+            .inv_cell_u = @as(f32, @floatFromInt(hybrid_shadow_grid_dim)) / extent_u,
+            .inv_cell_v = @as(f32, @floatFromInt(hybrid_shadow_grid_dim)) / extent_v,
+            .active = true,
+        };
+
+        var counts = [_]usize{0} ** hybrid_shadow_grid_cells;
+        for (self.hybrid_shadow_caster_bounds[0..caster_count]) |caster| {
+            const min_cell_x = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.min_u - min_u) * self.hybrid_shadow_grid.inv_cell_u))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
+            const max_cell_x = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.max_u - min_u) * self.hybrid_shadow_grid.inv_cell_u))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
+            const min_cell_y = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.min_v - min_v) * self.hybrid_shadow_grid.inv_cell_v))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
+            const max_cell_y = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.max_v - min_v) * self.hybrid_shadow_grid.inv_cell_v))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
+
+            var cell_y = min_cell_y;
+            while (cell_y <= max_cell_y) : (cell_y += 1) {
+                var cell_x = min_cell_x;
+                while (cell_x <= max_cell_x) : (cell_x += 1) {
+                    const cell_index = @as(usize, @intCast(cell_y)) * hybrid_shadow_grid_dim + @as(usize, @intCast(cell_x));
+                    counts[cell_index] += 1;
+                }
+            }
+        }
+
+        var offset: usize = 0;
+        for (&self.hybrid_shadow_grid_ranges, 0..) |*range, cell_index| {
+            range.offset = offset;
+            range.count = counts[cell_index];
+            offset += counts[cell_index];
+        }
+
+        var write_offsets = [_]usize{0} ** hybrid_shadow_grid_cells;
+        for (self.hybrid_shadow_caster_bounds[0..caster_count]) |caster| {
+            const min_cell_x = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.min_u - min_u) * self.hybrid_shadow_grid.inv_cell_u))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
+            const max_cell_x = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.max_u - min_u) * self.hybrid_shadow_grid.inv_cell_u))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
+            const min_cell_y = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.min_v - min_v) * self.hybrid_shadow_grid.inv_cell_v))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
+            const max_cell_y = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.max_v - min_v) * self.hybrid_shadow_grid.inv_cell_v))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
+
+            var cell_y = min_cell_y;
+            while (cell_y <= max_cell_y) : (cell_y += 1) {
+                var cell_x = min_cell_x;
+                while (cell_x <= max_cell_x) : (cell_x += 1) {
+                    const cell_index = @as(usize, @intCast(cell_y)) * hybrid_shadow_grid_dim + @as(usize, @intCast(cell_x));
+                    const write_index = self.hybrid_shadow_grid_ranges[cell_index].offset + write_offsets[cell_index];
+                    self.hybrid_shadow_grid_candidates[write_index] = caster.meshlet_index;
+                    write_offsets[cell_index] += 1;
+                }
+            }
+        }
+    }
+
+    fn applyAdaptiveShadowPass(
+        self: *Renderer,
+        mesh: *const Mesh,
+        camera_position: math.Vec3,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        light_dir_world: math.Vec3,
+    ) void {
+        if (!config.POST_HYBRID_SHADOW_ENABLED or self.bitmap.pixels.len == 0 or self.tile_grid == null or self.active_tile_flags == null) return;
+
+        const pass_start = std.time.nanoTimestamp();
+        const grid = self.tile_grid.?;
+        const active_flags = self.active_tile_flags.?;
+        const active_indices = self.active_tile_indices.?;
+        const shadow_jobs = self.shadow_tile_jobs_buffer.?;
+        const tile_ranges = self.hybrid_shadow_tile_ranges;
+        const jobs = self.job_buffer.?;
+        const darkness_scale = 1.0 - (@as(f32, @floatFromInt(config.POST_SHADOW_STRENGTH_PERCENT)) / 100.0);
+        const normalized_light_dir = math.Vec3.normalize(light_dir_world);
+        const light_basis = chooseShadowBasis(normalized_light_dir);
+        var active_tile_capacity: usize = 0;
+        for (grid.tiles, 0..) |_, tile_index| {
+            if (tile_index < active_flags.len and active_flags[tile_index]) active_tile_capacity += 1;
+        }
+
+        if (active_tile_capacity == 0 or mesh.meshlets.len == 0) return;
+        self.ensureHybridShadowScratch(mesh.meshlets.len, active_tile_capacity * mesh.meshlets.len, mesh.meshlets.len * hybrid_shadow_grid_cells) catch |err| {
+            pipeline_logger.errorSub("hybrid_shadow", "scratch allocation failed: {s}", .{@errorName(err)});
+            return;
+        };
+
+        @memset(self.hybrid_shadow_cache, 0xFF);
+
+        const accel_needs_rebuild = !self.hybrid_shadow_accel_valid or
+            self.hybrid_shadow_cached_meshlet_count != mesh.meshlets.len or
+            self.hybrid_shadow_cached_meshlet_vertex_count != mesh.meshlet_vertices.len or
+            self.hybrid_shadow_cached_meshlet_primitive_count != mesh.meshlet_primitives.len or
+            math.Vec3.dot(self.hybrid_shadow_cached_light_dir, normalized_light_dir) < shadow_rebuild_dot_threshold;
+
+        if (accel_needs_rebuild) {
+            var caster_count: usize = 0;
+            for (mesh.meshlets, 0..) |meshlet, meshlet_index| {
+                if (meshlet.primitive_count == 0 or meshlet.bounds_radius <= 0.0) continue;
+                const center_u = math.Vec3.dot(meshlet.bounds_center, light_basis.right);
+                const center_v = math.Vec3.dot(meshlet.bounds_center, light_basis.up);
+                const center_depth = math.Vec3.dot(meshlet.bounds_center, normalized_light_dir);
+
+                self.hybrid_shadow_caster_indices[caster_count] = meshlet_index;
+                self.hybrid_shadow_caster_bounds[caster_count] = .{
+                    .meshlet_index = meshlet_index,
+                    .min_u = center_u - meshlet.bounds_radius,
+                    .max_u = center_u + meshlet.bounds_radius,
+                    .min_v = center_v - meshlet.bounds_radius,
+                    .max_v = center_v + meshlet.bounds_radius,
+                    .max_depth = center_depth + meshlet.bounds_radius,
+                };
+                caster_count += 1;
+            }
+            self.hybrid_shadow_caster_count = caster_count;
+            self.hybrid_shadow_cached_light_dir = normalized_light_dir;
+            self.hybrid_shadow_cached_meshlet_count = mesh.meshlets.len;
+            self.hybrid_shadow_cached_meshlet_vertex_count = mesh.meshlet_vertices.len;
+            self.hybrid_shadow_cached_meshlet_primitive_count = mesh.meshlet_primitives.len;
+            self.hybrid_shadow_accel_valid = caster_count != 0;
+            if (caster_count == 0) return;
+            self.buildHybridShadowGrid(caster_count, light_basis.right, light_basis.up);
+        }
+
+        const caster_count = self.hybrid_shadow_caster_count;
+        if (caster_count == 0) return;
+
+        var candidate_write: usize = 0;
+        var shadow_job_count: usize = 0;
+        for (grid.tiles, 0..) |*tile, tile_index| {
+            tile_ranges[tile_index] = .{};
+            if (tile_index >= active_flags.len or !active_flags[tile_index]) continue;
+
+            const receiver_bounds = self.buildHybridShadowReceiverBounds(
+                tile,
+                camera_position,
+                basis_right,
+                basis_up,
+                basis_forward,
+                light_basis.right,
+                light_basis.up,
+                normalized_light_dir,
+            ) orelse continue;
+
+            const candidate_offset = candidate_write;
+            for (self.hybrid_shadow_caster_bounds[0..caster_count]) |caster| {
+                if (caster.max_depth <= receiver_bounds.min_depth + config.POST_HYBRID_SHADOW_RAY_BIAS) continue;
+                if (caster.max_u < receiver_bounds.min_u or caster.min_u > receiver_bounds.max_u) continue;
+                if (caster.max_v < receiver_bounds.min_v or caster.min_v > receiver_bounds.max_v) continue;
+                self.hybrid_shadow_tile_candidates[candidate_write] = caster.meshlet_index;
+                candidate_write += 1;
+            }
+
+            const candidate_count = candidate_write - candidate_offset;
+            if (candidate_count == 0) continue;
+
+            tile_ranges[tile_index] = .{ .offset = candidate_offset, .count = candidate_count };
+            shadow_jobs[tile_index] = .{
+                .renderer = self,
+                .mesh = mesh,
+                .tile = tile,
+                .camera_position = camera_position,
+                .basis_right = basis_right,
+                .basis_up = basis_up,
+                .basis_forward = basis_forward,
+                .light_dir_world = normalized_light_dir,
+                .darkness_scale = darkness_scale,
+                .valid_min_x = receiver_bounds.valid_min_x,
+                .valid_min_y = receiver_bounds.valid_min_y,
+                .valid_max_x = receiver_bounds.valid_max_x,
+                .valid_max_y = receiver_bounds.valid_max_y,
+                .candidate_offset = candidate_offset,
+                .candidate_count = candidate_count,
+            };
+            active_indices[shadow_job_count] = tile_index;
+            shadow_job_count += 1;
+        }
+
+        if (shadow_job_count == 0) return;
+
+        if (self.job_system) |job_sys| {
+            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+            const main_tile_idx = active_indices[0];
+
+            for (active_indices[1..shadow_job_count]) |tile_index| {
+                jobs[tile_index] = Job.init(
+                    AdaptiveShadowTileJob.run,
+                    @ptrCast(&shadow_jobs[tile_index]),
+                    &parent_job,
+                );
+                if (!job_sys.submitJobAuto(&jobs[tile_index])) {
+                    AdaptiveShadowTileJob.run(@ptrCast(&shadow_jobs[tile_index]));
+                }
+            }
+
+            AdaptiveShadowTileJob.run(@ptrCast(&shadow_jobs[main_tile_idx]));
+            parent_job.complete();
+            parent_job.wait();
+        } else {
+            for (active_indices[0..shadow_job_count]) |tile_index| {
+                AdaptiveShadowTileJob.run(@ptrCast(&shadow_jobs[tile_index]));
+            }
+        }
+
+        self.recordRenderPassTiming("hybrid_shadow", pass_start);
+    }
+
+    fn applyPostProcessingPasses(
+        self: *Renderer,
+        mesh: *const Mesh,
+        camera_position: math.Vec3,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        projection: ProjectionParams,
+        light_dir_world: math.Vec3,
+        shadow_elapsed_ns: i128,
+    ) void {
+        if (config.POST_SHADOW_ENABLED) self.applyShadowPass(camera_position, basis_right, basis_up, basis_forward, projection, shadow_elapsed_ns);
+        if (config.POST_HYBRID_SHADOW_ENABLED) self.applyAdaptiveShadowPass(mesh, camera_position, basis_right, basis_up, basis_forward, light_dir_world);
+        if (config.POST_DEPTH_FOG_ENABLED) self.applyDepthFogPass();
         if (config.POST_BLOOM_ENABLED) self.applyBloomPass();
         if (!config.POST_COLOR_CORRECTION_ENABLED) return;
         self.applyBlockbusterColorGradePass();
+    }
+
+    fn applyDepthFogPass(self: *Renderer) void {
+        if (self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
+        const pass_start = std.time.nanoTimestamp();
+        const width: usize = @intCast(self.bitmap.width);
+        const height: usize = @intCast(self.bitmap.height);
+        const stripe_count = @min(self.fog_job_contexts.len, @max(@as(usize, 1), height));
+        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
+
+        if (stripe_count <= 1 or self.job_system == null) {
+            applyDepthFogRows(self.bitmap.pixels, self.scene_depth, width, 0, height, self.depth_fog_config);
+            self.recordRenderPassTiming("depth_fog", pass_start);
+            return;
+        }
+
+        var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+        var stripe_index: usize = 0;
+        while (stripe_index < stripe_count) : (stripe_index += 1) {
+            const start_row = stripe_index * rows_per_job;
+            if (start_row >= height) break;
+            const end_row = @min(height, start_row + rows_per_job);
+
+            self.fog_job_contexts[stripe_index] = .{
+                .pixels = self.bitmap.pixels,
+                .depth = self.scene_depth,
+                .width = width,
+                .start_row = start_row,
+                .end_row = end_row,
+                .config = self.depth_fog_config,
+            };
+
+            if (stripe_index == 0) continue;
+
+            self.color_grade_jobs[stripe_index] = Job.init(
+                FogJobContext.run,
+                @ptrCast(&self.fog_job_contexts[stripe_index]),
+                &parent_job,
+            );
+            if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+                FogJobContext.run(@ptrCast(&self.fog_job_contexts[stripe_index]));
+            }
+        }
+
+        FogJobContext.run(@ptrCast(&self.fog_job_contexts[0]));
+        parent_job.complete();
+        parent_job.wait();
+        self.recordRenderPassTiming("depth_fog", pass_start);
     }
 
     fn applyBloomPass(self: *Renderer) void {
@@ -2980,6 +4502,8 @@ pub const Renderer = struct {
         BinningStage.clearTileTriangleLists(tile_lists);
         @memset(active_flags, false);
         @memset(self.bitmap.pixels, 0xFF000000);
+        @memset(self.scene_depth, std.math.inf(f32));
+        @memset(self.scene_camera, math.Vec3.new(0.0, 0.0, 0.0));
 
         const triangles = mesh_work.triangleSlice();
         self.meshlet_telemetry.touched_tiles = 0;
@@ -3066,7 +4590,7 @@ pub const Renderer = struct {
         // 4. Compositing: Copy the pixels from each completed tile buffer to the main screen bitmap.
         for (active_indices[0..active_tile_count]) |tile_idx| {
             const tile = &grid.tiles[tile_idx];
-            TileRenderer.compositeTileToScreen(tile, &tile_buffers[tile_idx], &self.bitmap);
+            TileRenderer.compositeTileToScreen(tile, &tile_buffers[tile_idx], &self.bitmap, self.scene_depth, self.scene_camera);
         }
     }
 
