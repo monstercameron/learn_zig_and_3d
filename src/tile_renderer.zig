@@ -287,10 +287,28 @@ pub fn rasterizeTriangleToTile(
             // 9. Write the final color to the tile's local pixel buffer.
             const idx = @as(usize, @intCast(y * tile_buffer.width + x));
             if (idx >= tile_buffer.pixels.len or idx >= tile_buffer.depth.len or idx >= tile_buffer.camera.len) continue;
+            
+            // 10. Alpha Blending Pass & Depth Testing
+            const a = (final_color >> 24) & 0xFF;
+            if (a == 0) continue; // Fully transparent pixel, skip depth/write entirely
+            
             if (depth >= tile_buffer.depth[idx]) continue;
-            tile_buffer.depth[idx] = depth;
-            tile_buffer.camera[idx] = camera_pos;
-            tile_buffer.pixels[idx] = final_color;
+            
+            if (a == 255) {
+                // Opaque: Overwrite and update depth
+                tile_buffer.depth[idx] = depth;
+                tile_buffer.camera[idx] = camera_pos;
+                tile_buffer.pixels[idx] = final_color;
+            } else {
+                // Alpha blend with background
+                const bg = tile_buffer.pixels[idx];
+                const inv_a = 255 - a;
+                const r = (((final_color >> 16) & 0xFF) * a + ((bg >> 16) & 0xFF) * inv_a) / 255;
+                const g = (((final_color >> 8) & 0xFF) * a + ((bg >> 8) & 0xFF) * inv_a) / 255;
+                const b = ((final_color & 0xFF) * a + (bg & 0xFF) * inv_a) / 255;
+                tile_buffer.pixels[idx] = (bg & 0xFF000000) | (r << 16) | (g << 8) | b;
+                // Note: We don't write depth for partial transparency to allow back-to-front layering to succeed
+            }
         }
     }
 }

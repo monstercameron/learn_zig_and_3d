@@ -45,10 +45,15 @@ inline fn readI32le(bytes: []const u8) i32 {
 pub const Texture = struct {
     width: usize,
     height: usize,
-    pixels: []u32, // A flat array of 32-bit integer colors (0xAARRGGBB).
+    pixels: []u32, // Array for LOD 0
+    mip_levels: std.ArrayList([]u32), // Precomputed mipmaps
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *Texture) void {
+        for (self.mip_levels.items) |mip| {
+            self.allocator.free(mip);
+        }
+        self.mip_levels.deinit(self.allocator);
         self.allocator.free(self.pixels);
     }
 
@@ -56,39 +61,52 @@ pub const Texture = struct {
     /// This process is called "sampling".
     /// - `uv`: A 2D vector with components from 0.0 to 1.0.
     pub fn sample(self: *const Texture, uv: math.Vec2) u32 {
-        if (self.width == 0 or self.height == 0) return 0xFF000000; // Return black for invalid textures.
+        return self.sampleLod(uv, 0.0);
+    }
+    
+    pub fn sampleLod(self: *const Texture, uv: math.Vec2, lod: f32) u32 {
+        if (self.width == 0 or self.height == 0) return 0xFF000000;
+        
+        var target_pixels = self.pixels;
+        var target_w = self.width;
+        var target_h = self.height;
+        
+        const mip_level = @as(usize, @intFromFloat(lod));
+        if (mip_level > 0 and self.mip_levels.items.len > 0) {
+            const level = @min(mip_level - 1, self.mip_levels.items.len - 1);
+            target_pixels = self.mip_levels.items[level];
+            target_w = @max(1, self.width >> @as(u5, @intCast(level + 1)));
+            target_h = @max(1, self.height >> @as(u5, @intCast(level + 1)));
+        }
 
         if (config.TEXTURE_FILTERING_BILINEAR) {
-            return self.sampleBilinear(uv);
+            return sampleBilinearImpl(target_pixels, target_w, target_h, uv);
         } else {
-            return self.sampleNearest(uv);
+            return sampleNearestImpl(target_pixels, target_w, target_h, uv);
         }
     }
 
-    fn sampleNearest(self: *const Texture, uv: math.Vec2) u32 {
-        // Clamp UV coordinates to the [0, 1] range to prevent out-of-bounds access.
+    fn sampleNearestImpl(pixels: []const u32, w: usize, h: usize, uv: math.Vec2) u32 {
         const u = std.math.clamp(uv.x, 0.0, 1.0);
         const v = std.math.clamp(uv.y, 0.0, 1.0);
 
-        // Convert normalized UV coordinates to integer pixel coordinates.
-        const max_x = if (self.width > 0) self.width - 1 else 0;
-        const max_y = if (self.height > 0) self.height - 1 else 0;
+        const max_x = if (w > 0) w - 1 else 0;
+        const max_y = if (h > 0) h - 1 else 0;
         const x_f = u * @as(f32, @floatFromInt(max_x));
         const y_f = v * @as(f32, @floatFromInt(max_y));
 
-        // This is "Nearest Neighbor" filtering: we just round to the nearest pixel.
         const x = @min(@as(usize, @intFromFloat(@floor(x_f + 0.5))), max_x);
         const y = @min(@as(usize, @intFromFloat(@floor(y_f + 0.5))), max_y);
 
-        return self.pixels[y * self.width + x];
+        return pixels[y * w + x];
     }
     
-    fn sampleBilinear(self: *const Texture, uv: math.Vec2) u32 {
+    fn sampleBilinearImpl(pixels: []const u32, w: usize, h: usize, uv: math.Vec2) u32 {
         const u = std.math.clamp(uv.x, 0.0, 1.0);
         const v = std.math.clamp(uv.y, 0.0, 1.0);
 
-        const w_f = @as(f32, @floatFromInt(self.width)) - 1.0;
-        const h_f = @as(f32, @floatFromInt(self.height)) - 1.0;
+        const w_f = @as(f32, @floatFromInt(w)) - 1.0;
+        const h_f = @as(f32, @floatFromInt(h)) - 1.0;
 
         const x_coord = std.math.clamp(u * w_f, 0.0, w_f);
         const y_coord = std.math.clamp(v * h_f, 0.0, h_f);
@@ -101,13 +119,13 @@ pub const Texture = struct {
 
         const ux0 = @as(usize, @intFromFloat(x_floor));
         const uy0 = @as(usize, @intFromFloat(y_floor));
-        const ux1 = @min(ux0 + 1, self.width - 1);
-        const uy1 = @min(uy0 + 1, self.height - 1);
+        const ux1 = @min(ux0 + 1, w - 1);
+        const uy1 = @min(uy0 + 1, h - 1);
 
-        const c00 = self.pixels[uy0 * self.width + ux0];
-        const c10 = self.pixels[uy0 * self.width + ux1];
-        const c01 = self.pixels[uy1 * self.width + ux0];
-        const c11 = self.pixels[uy1 * self.width + ux1];
+        const c00 = pixels[uy0 * w + ux0];
+        const c10 = pixels[uy0 * w + ux1];
+        const c01 = pixels[uy1 * w + ux0];
+        const c11 = pixels[uy1 * w + ux1];
 
         const frac_x = @as(u32, @intFromFloat(dx * 255.0));
         const frac_y = @as(u32, @intFromFloat(dy * 255.0));
@@ -201,7 +219,7 @@ pub fn loadBmp(allocator: std.mem.Allocator, path: []const u8) !Texture {
             const b = row[base];
             const g = row[base + 1];
             const r = row[base + 2];
-            const a: u8 = if (bytes_per_pixel == 4) row[base + 3] else 0xFF; // Default to full alpha if not present.
+            const a: u8 = if (bytes_per_pixel == 4) row[base + 3] else 0xFF;
 
             // Pack the components into a single 0xAARRGGBB integer.
             const dest_index = y * width + x;
@@ -209,5 +227,54 @@ pub fn loadBmp(allocator: std.mem.Allocator, path: []const u8) !Texture {
         }
     }
 
-    return Texture{ .width = width, .height = height, .pixels = pixels, .allocator = allocator };
+    var mip_levels = std.ArrayList([]u32){};
+    var current_w = width;
+    var current_h = height;
+    var current_pixels = pixels;
+    
+    // Generate mipmaps down to 1x1
+    while (current_w > 1 or current_h > 1) {
+        const next_w = @max(1, current_w / 2);
+        const next_h = @max(1, current_h / 2);
+        const next_pixels = allocator.alloc(u32, next_w * next_h) catch break; // Break out if memory fails
+        
+        // Simple box filter
+        for (0..next_h) |ny| {
+            for (0..next_w) |nx| {
+                const px0 = nx * 2;
+                const py0 = ny * 2;
+                var sum_r: u32 = 0; var sum_g: u32 = 0; var sum_b: u32 = 0; var sum_a: u32 = 0;
+                var count: u32 = 0;
+                
+                for (0..2) |dy| {
+                    for (0..2) |dx| {
+                        const px = px0 + dx;
+                        const py = py0 + dy;
+                        if (px < current_w and py < current_h) {
+                            const c = current_pixels[py * current_w + px];
+                            sum_a += (c >> 24) & 0xFF;
+                            sum_r += (c >> 16) & 0xFF;
+                            sum_g += (c >> 8) & 0xFF;
+                            sum_b += c & 0xFF;
+                            count += 1;
+                        }
+                    }
+                }
+                const a = sum_a / count;
+                const r = sum_r / count;
+                const g = sum_g / count;
+                const b = sum_b / count;
+                next_pixels[ny * next_w + nx] = (a << 24) | (r << 16) | (g << 8) | b;
+            }
+        }
+        mip_levels.append(allocator, next_pixels) catch {
+            allocator.free(next_pixels);
+            break;
+        };
+        current_pixels = next_pixels;
+        current_w = next_w;
+        current_h = next_h;
+    }
+
+    return Texture{ .width = width, .height = height, .pixels = pixels, .mip_levels = mip_levels, .allocator = allocator };
 }
