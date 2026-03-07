@@ -194,7 +194,7 @@ const MeshletTelemetry = struct {
     touched_tiles: usize = 0,
 };
 
-const max_render_passes = 16;
+const max_render_passes = 32;
 
 const RenderPassTiming = struct {
     name: []const u8,
@@ -248,6 +248,26 @@ const DepthOfFieldScratch = struct {
 };
 
 
+
+const ssgi_sample_offsets = [_][2]f32{
+    .{ -0.184342, 0.168873 },
+    .{ 0.030910, -0.352200 },
+    .{ 0.263462, 0.343639 },
+    .{ -0.492357, -0.087091 },
+    .{ 0.471674, -0.300040 },
+    .{ -0.158975, 0.591377 },
+    .{ -0.304861, -0.586992 },
+    .{ 0.664200, 0.242565 },
+    .{ -0.693259, 0.286167 },
+    .{ 0.335080, -0.716046 },
+    .{ 0.248153, 0.791151 },
+    .{ -0.749295, -0.434232 },
+    .{ 0.880364, -0.193545 },
+    .{ -0.537984, 0.765227 },
+    .{ -0.124430, -0.960217 },
+    .{ 0.764649, 0.644447 }
+};
+
 const SSGIJobContext = struct {
     renderer: *Renderer,
     scene_pixels: []u32,
@@ -261,8 +281,8 @@ const SSGIJobContext = struct {
         const pixels = ctx.scene_pixels;
         const out_pixels = ctx.scratch_pixels;
         const camera = ctx.scene_camera;
-        const width = ctx.renderer.bitmap.width;
-        const height = ctx.renderer.bitmap.height;
+        const width: usize = @intCast(ctx.renderer.bitmap.width);
+        const height: usize = @intCast(ctx.renderer.bitmap.height);
 
         const max_dist = config.POST_SSGI_RADIUS;
         const intensity = config.POST_SSGI_INTENSITY;
@@ -285,20 +305,33 @@ const SSGIJobContext = struct {
                 );
 
                 const seed = @as(u32, @intCast(x)) *% 73856093 ^ @as(u32, @intCast(y)) *% 19349663;
-                var rand = std.rand.DefaultPrng.init(seed);
+                var rand = std.Random.DefaultPrng.init(seed);
                 
                 var accum_r: f32 = 0;
                 var accum_g: f32 = 0;
                 var accum_b: f32 = 0;
                 var valid_samples: f32 = 0;
 
-                var s: i32 = 0;
-                while (s < config.POST_SSGI_SAMPLES) : (s += 1) {
-                    const angle = rand.random().float(f32) * 2.0 * std.math.pi;
-                    const r = rand.random().float(f32) * @as(f32, @floatFromInt(max_dist));
+                // Precalculate rotation and scale
+                const rand_angle = rand.random().float(f32) * 2.0 * std.math.pi;
+                const r_cos = @cos(rand_angle);
+                const r_sin = @sin(rand_angle);
+                const sample_max_dist = @as(f32, @floatFromInt(max_dist));
+
+                var s: usize = 0;
+                const num_samples = @as(usize, @intCast(config.POST_SSGI_SAMPLES));
+                while (s < num_samples and s < ssgi_sample_offsets.len) : (s += 1) {
+                    // Get precalculated point and jitter radius slightly
+                    const jitter_r = 0.8 + 0.4 * rand.random().float(f32);
+                    const u = ssgi_sample_offsets[s][0] * jitter_r;
+                    const v = ssgi_sample_offsets[s][1] * jitter_r;
                     
-                    const dx = @as(i32, @intFromFloat(@cos(angle) * r));
-                    const dy = @as(i32, @intFromFloat(@sin(angle) * r));
+                    // Rotate
+                    const rot_u = u * r_cos - v * r_sin;
+                    const rot_v = u * r_sin + v * r_cos;
+                    
+                    const dx = @as(i32, @intFromFloat(rot_u * sample_max_dist));
+                    const dy = @as(i32, @intFromFloat(rot_v * sample_max_dist));
                     
                     const nx = @as(i32, @intCast(x)) + dx;
                     const ny = @as(i32, @intCast(y)) + dy;
@@ -310,7 +343,7 @@ const SSGIJobContext = struct {
                     if (!validSceneCameraSample(n_pos)) continue;
                     
                     const delta = math.Vec3.sub(n_pos, pos);
-                    const dist_sq = math.Vec3.lengthSq(delta);
+                    const dist_sq = math.Vec3.dot(delta, delta);
                     if (dist_sq < 0.001) continue;
                     
                     const dist = @sqrt(dist_sq);
@@ -5679,6 +5712,11 @@ pub const Renderer = struct {
         end_row: usize,
     };
 
+    fn runSkyboxJobWrapper(ctx_ptr: *anyopaque) void {
+        const ctx: *SkyboxJobContext = @ptrCast(@alignCast(ctx_ptr));
+        applySkyboxRows(ctx);
+    }
+    
     fn applySkyboxRows(ctx: *SkyboxJobContext) void {
         const width: usize = @intCast(ctx.renderer.bitmap.width);
         const center_x = ctx.projection.center_x;
@@ -5708,7 +5746,7 @@ pub const Renderer = struct {
                 const fwd_term = math.Vec3.scale(ctx.forward, dir_local.z);
                 const dir_world = math.Vec3.normalize(math.Vec3.add(right_term, math.Vec3.add(up_term, fwd_term)));
                 
-                const hdr_color = ctx.hdri_map.sampleEquirectangular(dir_world);
+                const hdr_color = ctx.hdri_map.sampleEquirectangularFast(dir_world);
                 
                 // Extremely simple basic tonemap (reinhard) just to get it to 8-bit ARGB
                 const r_ldr = hdr_color.x / (1.0 + hdr_color.x);
@@ -5772,6 +5810,7 @@ pub const Renderer = struct {
         }
         if (config.POST_HYBRID_SHADOW_ENABLED) self.applyAdaptiveShadowPass(mesh, camera_position, basis_right, basis_up, basis_forward, light_dir_world);
         if (config.POST_SSAO_ENABLED) self.applyAmbientOcclusionPass();
+        if (config.POST_SSGI_ENABLED) self.applySSGIPass();
         if (config.POST_SSR_ENABLED) self.applySSRPass(projection);
         if (config.POST_DEPTH_FOG_ENABLED) self.applyDepthFogPass();
         if (config.POST_TAA_ENABLED) self.applyTemporalAAPass(current_view);
@@ -5786,6 +5825,62 @@ pub const Renderer = struct {
         self.applyBlockbusterColorGradePass();
     }
 
+    
+    fn applySSGIPass(self: *Renderer) void {
+        const pass_start = std.time.nanoTimestamp();
+        const height: usize = @intCast(self.bitmap.height);
+
+        const stripe_count = computeStripeCount(self.ssgi_job_contexts.len, height);
+        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
+
+        if (stripe_count <= 1 or self.job_system == null) {
+            var ctx = SSGIJobContext{
+                .renderer = self,
+                .scene_pixels = self.bitmap.pixels,
+                .scratch_pixels = self.ssgi_scratch_pixels,
+                .scene_camera = self.scene_camera,
+                .start_row = 0,
+                .end_row = height,
+            };
+            SSGIJobContext.run(@ptrCast(&ctx));
+        } else {
+            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+            var stripe_index: usize = 0;
+            while (stripe_index < stripe_count) : (stripe_index += 1) {
+                const start_row = stripe_index * rows_per_job;
+                if (start_row >= height) break;
+                const end_row = @min(height, start_row + rows_per_job);
+
+                self.ssgi_job_contexts[stripe_index] = .{
+                    .renderer = self,
+                    .scene_pixels = self.bitmap.pixels,
+                    .scratch_pixels = self.ssgi_scratch_pixels,
+                    .scene_camera = self.scene_camera,
+                    .start_row = start_row,
+                    .end_row = end_row,
+                };
+
+                if (stripe_index == 0) continue;
+
+                self.color_grade_jobs[stripe_index] = Job.init(
+                    SSGIJobContext.run,
+                    @ptrCast(&self.ssgi_job_contexts[stripe_index]),
+                    &parent_job,
+                );
+                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+                    SSGIJobContext.run(@ptrCast(&self.ssgi_job_contexts[stripe_index]));
+                }
+            }
+
+            SSGIJobContext.run(@ptrCast(&self.ssgi_job_contexts[0]));
+            parent_job.complete();
+            parent_job.wait();
+        }
+
+        // Copy back to scene_pixels
+        @memcpy(self.bitmap.pixels, self.ssgi_scratch_pixels);
+        self.recordRenderPassTiming("ssgi", pass_start);
+    }
     fn applyAmbientOcclusionPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
