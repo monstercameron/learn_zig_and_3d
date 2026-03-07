@@ -69,40 +69,43 @@ pub const Tile = struct {
 
 /// A per-tile rendering buffer. Each worker thread renders into one of these.
 /// JS Analogy: This is like a small, off-screen `<canvas>` for a single worker.
+pub const PixelData = struct {
+    color: math.Vec4,
+    camera: math.Vec3,
+    normal: math.Vec3,
+};
+
 pub const TileBuffer = struct {
-    pixels: []math.Vec4, // The local pixel buffer for this tile.
-    depth: []f32, // The local depth buffer (z-buffer) for this tile.
-    camera: []math.Vec3, // Per-pixel camera-space position for post passes.
-    normal: []math.Vec3, // Per-pixel normal for deferred shading.
+    data: []PixelData, // The fat buffer for colors, camera, and normal
+    depth: []f32, // Kept separate for fast dense Early-Z testing
     width: i32,
     height: i32,
     allocator: std.mem.Allocator,
 
     pub fn init(width: i32, height: i32, allocator: std.mem.Allocator) !TileBuffer {
         const pixel_count = @as(usize, @intCast(width * height));
-        const pixels = try allocator.alloc(math.Vec4, pixel_count);
-        errdefer allocator.free(pixels);
+        const data = try allocator.alloc(PixelData, pixel_count);
+        errdefer allocator.free(data);
         const depth = try allocator.alloc(f32, pixel_count);
-        errdefer allocator.free(depth);
-        const camera = try allocator.alloc(math.Vec3, pixel_count);
-        const normal = try allocator.alloc(math.Vec3, pixel_count);
-        return TileBuffer{ .pixels = pixels, .depth = depth, .camera = camera, .normal = normal, .width = width, .height = height, .allocator = allocator };
+        
+        return TileBuffer{ 
+            .data = data, 
+            .depth = depth, 
+            .width = width, 
+            .height = height, 
+            .allocator = allocator 
+        };
     }
 
-    /// Clears the tile for a new frame. Fills with a background color and resets the depth buffer.
+    /// Clears the tile for a new frame.
     pub fn clear(self: *TileBuffer) void {
-        @memset(self.pixels, math.Vec4.new(0.0, 0.0, 0.0, 1.0)); // Black background.
-        // Reset all depth values to infinity. The first pixel drawn at any location will always be closer.
+        @memset(self.data, .{ .color = math.Vec4.new(0.0, 0.0, 0.0, 1.0), .camera = math.Vec3.new(0,0,0), .normal = math.Vec3.new(0,0,0) });
         @memset(self.depth, std.math.inf(f32));
-        @memset(self.camera, math.Vec3.new(0.0, 0.0, 0.0));
-        @memset(self.normal, math.Vec3.new(0.0, 0.0, 0.0));
     }
 
     pub fn deinit(self: *TileBuffer) void {
-        self.allocator.free(self.pixels);
+        self.allocator.free(self.data);
         self.allocator.free(self.depth);
-        self.allocator.free(self.camera);
-        self.allocator.free(self.normal);
     }
 };
 
@@ -159,21 +162,23 @@ pub fn compositeTileToScreen(tile: *const Tile, tile_buffer: *const TileBuffer, 
         var cx: usize = 0;
         const width_usize = @as(usize, @intCast(tile.width));
         while (cx < width_usize) : (cx += 1) {
-            const final_color_hdr = tile_buffer.pixels[tile_row_start + cx];
+            const final_color_hdr = tile_buffer.data[tile_row_start + cx].color;
             const final_color_rgb = math.Vec3.new(final_color_hdr.x, final_color_hdr.y, final_color_hdr.z);
             const a = @as(u32, @intFromFloat(final_color_hdr.w * 255.0));
             // pack and tonemap to sRGB
             const packed_u32 = lighting.packColorTonemapped(final_color_rgb, a);
             bitmap.pixels[screen_row_start + cx] = packed_u32;
+            
+            // Re-interleave the structural data out from AoS to SoA Global buffers
+            if (camera_buffer) |camera_out| {
+                camera_out[screen_row_start + cx] = tile_buffer.data[tile_row_start + cx].camera;
+            }
+            if (normal_buffer) |normal_out| {
+                normal_out[screen_row_start + cx] = tile_buffer.data[tile_row_start + cx].normal;
+            }
         }
         if (depth_buffer) |buffer| {
             std.mem.copyForwards(f32, buffer[screen_row_start..screen_row_end], tile_buffer.depth[tile_row_start..tile_row_end]);
-            if (camera_buffer) |camera_out| {
-                std.mem.copyForwards(math.Vec3, camera_out[screen_row_start..screen_row_end], tile_buffer.camera[tile_row_start..tile_row_end]);
-            }
-            if (normal_buffer) |normal_out| {
-                std.mem.copyForwards(math.Vec3, normal_out[screen_row_start..screen_row_end], tile_buffer.normal[tile_row_start..tile_row_end]);
-            }
         }
     }
 }
@@ -254,6 +259,30 @@ pub fn rasterizeTriangleToTile(
     // 3. Pre-calculate values for barycentric coordinate calculation.
     const denom = (v1y - v2y) * (v0x - v2x) + (v2x - v1x) * (v0y - v2y);
     if (@abs(denom) < 1e-6) return; // Degenerate triangle.
+    
+    // Per-triangle LOD selection for memory locality (drastically improves cache hits)
+    var lod: f32 = 0.0;
+    if (shading.texture) |tex| {
+        const tex_w = @as(f32, @floatFromInt(tex.width));
+        const tex_h = @as(f32, @floatFromInt(tex.height));
+        const uvx0 = shading.uv0.x * tex_w;
+        const uvy0 = shading.uv0.y * tex_h;
+        const uvx1 = shading.uv1.x * tex_w;
+        const uvy1 = shading.uv1.y * tex_h;
+        const uvx2 = shading.uv2.x * tex_w;
+        const uvy2 = shading.uv2.y * tex_h;
+        
+        const uv_denom = (uvy1 - uvy2) * (uvx0 - uvx2) + (uvx2 - uvx1) * (uvy0 - uvy2);
+        
+        const screen_area = @abs(denom);
+        const uv_area = @abs(uv_denom);
+        
+        if (uv_area > screen_area) {
+            const ratio = uv_area / screen_area;
+            lod = 0.5 * @log2(ratio);
+        }
+    }
+
     const inv_denom = 1.0 / denom;
     const inv_depth0 = 1.0 / @max(depths[0], 1e-6);
     const inv_depth1 = 1.0 / @max(depths[1], 1e-6);
@@ -302,7 +331,7 @@ pub fn rasterizeTriangleToTile(
 
             // 8. Sample the texture and apply lighting to get the final pixel color.
             var base_color_u32 = shading.base_color;
-            if (shading.texture) |tex| base_color_u32 = tex.sample(uv);
+            if (shading.texture) |tex| base_color_u32 = tex.sampleLod(uv, lod);
             const a = (base_color_u32 >> 24) & 0xFF;
             if (a == 0) continue;
 
@@ -331,22 +360,22 @@ pub fn rasterizeTriangleToTile(
 
             // 9. Write the final color to the tile's local pixel buffer.
             const idx = @as(usize, @intCast(y * tile_buffer.width + x));
-            if (idx >= tile_buffer.pixels.len or idx >= tile_buffer.depth.len or idx >= tile_buffer.camera.len) continue;
+            if (idx >= tile_buffer.data.len or idx >= tile_buffer.depth.len) continue;
 
             if (depth >= tile_buffer.depth[idx]) continue;
 
             if (a == 255) {
                 // Opaque: Overwrite and update depth
                 tile_buffer.depth[idx] = depth;
-                tile_buffer.camera[idx] = camera_pos;
-                tile_buffer.pixels[idx] = final_color;
-                tile_buffer.normal[idx] = normal;
+                tile_buffer.data[idx].camera = camera_pos;
+                tile_buffer.data[idx].color = final_color;
+                tile_buffer.data[idx].normal = normal;
             } else {
                 // Alpha blend with background
-                const dst_c = tile_buffer.pixels[idx];
+                const dst_c = tile_buffer.data[idx].color;
                 const alpha = final_color.w;
                 const inv_alpha = 1.0 - alpha;
-                tile_buffer.pixels[idx] = math.Vec4.new(
+                tile_buffer.data[idx].color = math.Vec4.new(
                     final_color.x * alpha + dst_c.x * inv_alpha,
                     final_color.y * alpha + dst_c.y * inv_alpha,
                     final_color.z * alpha + dst_c.z * inv_alpha,
@@ -379,12 +408,12 @@ pub fn drawLineToTile(tile: *const Tile, tile_buffer: *TileBuffer, p0_screen: ma
     while (true) {
         if (clamp.inBounds(x0, y0, tile_buffer.width, tile_buffer.height)) {
             const idx = @as(usize, @intCast(y0 * tile_buffer.width + x0));
-            if (idx < tile_buffer.pixels.len) {
+            if (idx < tile_buffer.data.len) {
                 const r = @as(f32, @floatFromInt((color >> 16) & 0xFF)) / 255.0;
                 const g = @as(f32, @floatFromInt((color >> 8) & 0xFF)) / 255.0;
                 const b = @as(f32, @floatFromInt(color & 0xFF)) / 255.0;
                 const a = @as(f32, @floatFromInt((color >> 24) & 0xFF)) / 255.0;
-                tile_buffer.pixels[idx] = math.Vec4.new(r, g, b, a);
+                tile_buffer.data[idx].color = math.Vec4.new(r, g, b, a);
             }
         }
 
