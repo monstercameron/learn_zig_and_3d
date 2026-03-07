@@ -29,6 +29,7 @@
 //! ```
 
 const std = @import("std");
+const shadow_system = @import("shadow_system.zig");
 const profiler = @import("profiler.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
@@ -2576,6 +2577,7 @@ pub const Renderer = struct {
 
     // Light state
     lights: std.ArrayList(LightInfo),
+    sys_shadows: shadow_system.ShadowSystem,
 
     // Input and timing state
     keys_pressed: u32, // Bitmask of currently pressed keys.
@@ -2871,6 +2873,7 @@ pub const Renderer = struct {
             .mouse_initialized = false,
             .mouse_last_pos = .{ .x = 0, .y = 0 },
             .lights = lights,
+            .sys_shadows = shadow_system.ShadowSystem.init(allocator),
             .camera_fov_deg = config.CAMERA_FOV_INITIAL,
             .keys_pressed = 0,
             .frame_count = 0,
@@ -3110,6 +3113,13 @@ pub const Renderer = struct {
         draw_wireframe: bool,
         textures: []const ?*const texture.Texture,
         projection: ProjectionParams,
+        sys_shadows: ?*shadow_system.ShadowSystem,
+        light_direction: math.Vec3,
+        mesh_ptr: *const Mesh,
+        cam_pos: math.Vec3,
+        cam_right: math.Vec3,
+        cam_up: math.Vec3,
+        cam_fwd: math.Vec3,
 
         const max_clipped_vertices: usize = 5;
         const wire_color: u32 = 0xFFFFFFFF;
@@ -3276,6 +3286,72 @@ pub const Renderer = struct {
                     TileRenderer.drawLineToTile(job.tile, job.tile_buffer, p0, p1, wire_color);
                     TileRenderer.drawLineToTile(job.tile, job.tile_buffer, p1, p2, wire_color);
                     TileRenderer.drawLineToTile(job.tile, job.tile_buffer, p2, p0, wire_color);
+                }
+            }
+
+            if (job.sys_shadows) |sys| {
+                const total_pixels = @as(usize, @intCast(job.tile.width)) * @as(usize, @intCast(job.tile.height));
+                var packet = shadow_system.RayPacket{
+                    .origins_x = undefined, .origins_y = undefined, .origins_z = undefined,
+                    .dirs_x = undefined, .dirs_y = undefined, .dirs_z = undefined,
+                    .active_mask = 0, .occluded_mask = 0,
+                };
+                
+                const ray_dir = math.Vec3.normalize(math.Vec3.scale(job.light_direction, -1.0));
+
+                var pixel_idx: usize = 0;
+                while (pixel_idx < total_pixels) {
+                    packet.active_mask = 0;
+                    packet.occluded_mask = 0;
+
+                    const batch_size = @min(64, total_pixels - pixel_idx);
+                    for (0..batch_size) |i| {
+                        const idx = pixel_idx + i;
+                        const depth = job.tile_buffer.depth[idx];
+                        if (depth < std.math.inf(f32) and depth > 0.0) {
+                            const cs_pos = job.tile_buffer.data[idx].camera;
+                            const xs = math.Vec3.scale(job.cam_right, cs_pos.x);
+                            const ys = math.Vec3.scale(job.cam_up, cs_pos.y);
+                            const zs = math.Vec3.scale(job.cam_fwd, cs_pos.z);
+                            const ws_relative = math.Vec3.add(xs, math.Vec3.add(ys, zs));
+                            const world_pos = math.Vec3.add(job.cam_pos, ws_relative);
+
+                            packet.origins_x[i] = world_pos.x;
+                            packet.origins_y[i] = world_pos.y;
+                            packet.origins_z[i] = world_pos.z;
+                            
+                            packet.dirs_x[i] = ray_dir.x;
+                            packet.dirs_y[i] = ray_dir.y;
+                            packet.dirs_z[i] = ray_dir.z;
+                            
+                            packet.active_mask |= (@as(u64, 1) << @intCast(i));
+                        }
+                    }
+
+                    if (packet.active_mask != 0) {
+                        for (0..batch_size) |i| {
+                            if ((packet.active_mask & (@as(u64, 1) << @intCast(i))) != 0) {
+                                packet.origins_x[i] += ray_dir.x * 0.01;
+                                packet.origins_y[i] += ray_dir.y * 0.01;
+                                packet.origins_z[i] += ray_dir.z * 0.01;
+                            }
+                        }
+
+                        sys.tracePacketAnyHit(job.mesh_ptr, &packet);
+
+                        for (0..batch_size) |i| {
+                            if ((packet.occluded_mask & (@as(u64, 1) << @intCast(i))) != 0) {
+                                const idx = pixel_idx + i;
+                                var color = job.tile_buffer.data[idx].color;
+                                color.x *= 0.2;
+                                color.y *= 0.2;
+                                color.z *= 0.2;
+                                job.tile_buffer.data[idx].color = color;
+                            }
+                        }
+                    }
+                    
+                    pixel_idx += batch_size;
                 }
             }
         }
@@ -4563,6 +4639,13 @@ pub const Renderer = struct {
         }
         const _zone = profiler.zone("Renderer.render");
         defer if (_zone) |z| z.end();
+        
+        if (config.MESHLET_SHADOWS_ENABLED and self.sys_shadows.blas_nodes.items.len == 0 and mesh.meshlets.len > 0) {
+            _ = try self.sys_shadows.buildBLAS(mesh.meshlets);
+            var instances = [_]math.Mat4{ math.Mat4.identity() };
+            try self.sys_shadows.buildTLAS(&instances);
+        }
+
         @memset(self.bitmap.pixels, 0xFF000000);
         self.resetRenderPassTimings();
 
@@ -7405,8 +7488,6 @@ if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.l
     ) !void {
         const _z_renderTiled = profiler.zone("renderTiled");
         defer if (_z_renderTiled) |z| z.end();
-        _ = mesh;
-        _ = transform;
         _ = light_dir;
         const grid = self.tile_grid.?;
         const tile_buffers = self.tile_buffers.?;
@@ -7459,6 +7540,13 @@ if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.l
                 .draw_wireframe = self.show_wireframe,
                 .textures = self.textures,
                 .projection = projection,
+                .sys_shadows = if (config.MESHLET_SHADOWS_ENABLED) &self.sys_shadows else null,
+                .light_direction = if (self.lights.items.len > 0) self.lights.items[0].direction else math.Vec3.new(0,-1,0),
+                .mesh_ptr = mesh,
+                .cam_pos = self.camera_position,
+                .cam_right = math.Vec3.new(transform.data[0], transform.data[4], transform.data[8]),
+                .cam_up = math.Vec3.new(transform.data[1], transform.data[5], transform.data[9]),
+                .cam_fwd = math.Vec3.new(-transform.data[2], -transform.data[6], -transform.data[10]),
             };
         }
 
@@ -7946,10 +8034,10 @@ if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.l
     ) !void {
         _ = self;
         _ = mesh;
-        _ = transform;
         _ = light_dir;
         _ = projection;
         _ = mesh_work;
+        _ = transform;
     }
 
     fn drawShadedTriangle(self: *Renderer, p0: [2]i32, p1: [2]i32, p2: [2]i32, shading: TileRenderer.ShadingParams) void {
