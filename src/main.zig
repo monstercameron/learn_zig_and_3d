@@ -123,10 +123,15 @@ pub fn main() !void {
     // that `gpa.deinit()` is called at the end of the `main` function, cleaning up the allocator.
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const renderer_ttl_ns = loadRendererTtlNs(allocator);
+    const renderer_start_ns = std.time.nanoTimestamp();
 
     log.init(allocator);
     defer log.deinit();
     app_logger.infoSub("bootstrap", "log manager initialized", .{});
+    if (renderer_ttl_ns) |ttl_ns| {
+        app_logger.infoSub("bootstrap", "renderer TTL active {d:.3}s", .{@as(f64, @floatFromInt(ttl_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s))});
+    }
 
     // Create a window.
     // JS Analogy: `const window = new Window(800, 600);`
@@ -326,6 +331,14 @@ pub fn main() !void {
     // The main event loop.
     // JS Analogy: `while(true)` combined with `requestAnimationFrame`.
     while (running) {
+        if (renderer_ttl_ns) |ttl_ns| {
+            if (std.time.nanoTimestamp() - renderer_start_ns >= ttl_ns) {
+                app_logger.info("renderer TTL expired, exiting", .{});
+                running = false;
+                break;
+            }
+        }
+
         // First, process all pending user input and window events.
         if (!MessagePump.pump(&renderer)) {
             app_logger.info("message pump requested shutdown", .{});
@@ -396,6 +409,30 @@ pub fn main() !void {
     }
 
     app_logger.info("exited main loop after {} frames", .{frame_count});
+}
+
+fn loadRendererTtlNs(allocator: std.mem.Allocator) ?i128 {
+    const raw_value = std.process.getEnvVarOwned(allocator, "ZIG_RENDER_TTL_SECONDS") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return null,
+        else => {
+            app_logger.warn("failed to read ZIG_RENDER_TTL_SECONDS: {s}", .{@errorName(err)});
+            return null;
+        },
+    };
+    defer allocator.free(raw_value);
+
+    const trimmed = std.mem.trim(u8, raw_value, " \t\r\n");
+    const ttl_seconds = std.fmt.parseFloat(f64, trimmed) catch {
+        app_logger.warn("invalid ZIG_RENDER_TTL_SECONDS value: {s}", .{trimmed});
+        return null;
+    };
+    if (!std.math.isFinite(ttl_seconds) or ttl_seconds <= 0.0) {
+        app_logger.warn("ignoring non-positive ZIG_RENDER_TTL_SECONDS: {d}", .{ttl_seconds});
+        return null;
+    }
+
+    const ttl_ns_f64 = ttl_seconds * @as(f64, @floatFromInt(std.time.ns_per_s));
+    return @as(i128, @intFromFloat(ttl_ns_f64));
 }
 
 fn loadPrimaryMesh(allocator: std.mem.Allocator) !SceneAsset {

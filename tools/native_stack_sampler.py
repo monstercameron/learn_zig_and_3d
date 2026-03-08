@@ -397,7 +397,10 @@ def main():
         exe_path = sys.argv[2]
         warmup = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
         duration = float(sys.argv[4]) if len(sys.argv) > 4 else 1.0
-        launched = subprocess.Popen([exe_path])
+        ttl_seconds = max(3.0, warmup + duration + 1.0)
+        launch_env = os.environ.copy()
+        launch_env["ZIG_RENDER_TTL_SECONDS"] = f"{ttl_seconds:g}"
+        launched = subprocess.Popen([exe_path], env=launch_env)
         time.sleep(warmup)
         pid = launched.pid
     else:

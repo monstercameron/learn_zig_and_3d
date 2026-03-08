@@ -56,6 +56,8 @@ pub const ShadowMeshlet = struct {
     normal_cone_cutoff: f32,
     triangle_offset: u32,
     triangle_count: u16,
+    triangle_packet_offset: u32,
+    triangle_packet_count: u16,
     micro_bvh_offset: u32,
 };
 
@@ -65,6 +67,23 @@ pub const ShadowTriangle = struct {
     edge2: math.Vec3,
     source_triangle_id: u32,
 };
+
+pub const ShadowTrianglePacket = struct {
+    v0x: PacketFloat8,
+    v0y: PacketFloat8,
+    v0z: PacketFloat8,
+    edge1_x: PacketFloat8,
+    edge1_y: PacketFloat8,
+    edge1_z: PacketFloat8,
+    edge2_x: PacketFloat8,
+    edge2_y: PacketFloat8,
+    edge2_z: PacketFloat8,
+    source_triangle_ids: [8]u32,
+    active_mask: PacketBool8,
+};
+
+const PacketFloat8 = @Vector(8, f32);
+const PacketBool8 = @Vector(8, bool);
 
 // Represents a packet of rays for SIMD-style traversal within a screen tile
 pub const RayPacket = struct {
@@ -87,6 +106,7 @@ pub const ShadowSystem = struct {
     blas_nodes: std.ArrayList(BLASNode),
     shadow_meshlets: std.ArrayList(ShadowMeshlet),
     shadow_triangles: std.ArrayList(ShadowTriangle),
+    shadow_triangle_packets: std.ArrayList(ShadowTrianglePacket),
 
     pub fn init(allocator: std.mem.Allocator) ShadowSystem {
         return .{
@@ -95,6 +115,7 @@ pub const ShadowSystem = struct {
             .blas_nodes = std.ArrayList(BLASNode){},
             .shadow_meshlets = std.ArrayList(ShadowMeshlet){},
             .shadow_triangles = std.ArrayList(ShadowTriangle){},
+            .shadow_triangle_packets = std.ArrayList(ShadowTrianglePacket){},
         };
     }
 
@@ -103,6 +124,7 @@ pub const ShadowSystem = struct {
         self.blas_nodes.deinit(self.allocator);
         self.shadow_meshlets.deinit(self.allocator);
         self.shadow_triangles.deinit(self.allocator);
+        self.shadow_triangle_packets.deinit(self.allocator);
     }
 
     pub fn reset(self: *ShadowSystem) void {
@@ -110,6 +132,23 @@ pub const ShadowSystem = struct {
         self.blas_nodes.clearRetainingCapacity();
         self.shadow_meshlets.clearRetainingCapacity();
         self.shadow_triangles.clearRetainingCapacity();
+        self.shadow_triangle_packets.clearRetainingCapacity();
+    }
+
+    fn initTrianglePacket() ShadowTrianglePacket {
+        return .{
+            .v0x = @splat(0.0),
+            .v0y = @splat(0.0),
+            .v0z = @splat(0.0),
+            .edge1_x = @splat(0.0),
+            .edge1_y = @splat(0.0),
+            .edge1_z = @splat(0.0),
+            .edge2_x = @splat(0.0),
+            .edge2_y = @splat(0.0),
+            .edge2_z = @splat(0.0),
+            .source_triangle_ids = @splat(std.math.maxInt(u32)),
+            .active_mask = @splat(false),
+        };
     }
 
     const BLASBuildEntry = struct {
@@ -138,7 +177,11 @@ pub const ShadowSystem = struct {
         for (meshlets, 0..) |m, i| {
             const aabb = AABB{ .min = m.aabb_min, .max = m.aabb_max };
             const triangle_offset = @as(u32, @intCast(self.shadow_triangles.items.len));
+            const triangle_packet_offset = @as(u32, @intCast(self.shadow_triangle_packets.items.len));
             var triangle_count: u16 = 0;
+            var triangle_packet_count: u16 = 0;
+            var triangle_packet = initTrianglePacket();
+            var triangle_packet_lane: usize = 0;
             const primitive_start = m.primitive_offset;
             const primitive_end = primitive_start + m.primitive_count;
             for (mesh_ptr.meshlet_primitives[primitive_start..primitive_end]) |primitive| {
@@ -147,13 +190,38 @@ pub const ShadowSystem = struct {
                 const p0 = mesh_ptr.vertices[tri.v0];
                 const p1 = mesh_ptr.vertices[tri.v1];
                 const p2 = mesh_ptr.vertices[tri.v2];
+                const source_triangle_id = @as(u32, @intCast(@min(primitive.triangle_index, std.math.maxInt(u32))));
                 try self.shadow_triangles.append(self.allocator, .{
                     .v0 = p0,
                     .edge1 = math.Vec3.sub(p1, p0),
                     .edge2 = math.Vec3.sub(p2, p0),
-                    .source_triangle_id = @intCast(@min(primitive.triangle_index, std.math.maxInt(u32))),
+                    .source_triangle_id = source_triangle_id,
                 });
+
+                triangle_packet.v0x[triangle_packet_lane] = p0.x;
+                triangle_packet.v0y[triangle_packet_lane] = p0.y;
+                triangle_packet.v0z[triangle_packet_lane] = p0.z;
+                triangle_packet.edge1_x[triangle_packet_lane] = p1.x - p0.x;
+                triangle_packet.edge1_y[triangle_packet_lane] = p1.y - p0.y;
+                triangle_packet.edge1_z[triangle_packet_lane] = p1.z - p0.z;
+                triangle_packet.edge2_x[triangle_packet_lane] = p2.x - p0.x;
+                triangle_packet.edge2_y[triangle_packet_lane] = p2.y - p0.y;
+                triangle_packet.edge2_z[triangle_packet_lane] = p2.z - p0.z;
+                triangle_packet.source_triangle_ids[triangle_packet_lane] = source_triangle_id;
+                triangle_packet.active_mask[triangle_packet_lane] = true;
+                triangle_packet_lane += 1;
+
+                if (triangle_packet_lane == 8) {
+                    try self.shadow_triangle_packets.append(self.allocator, triangle_packet);
+                    triangle_packet_count += 1;
+                    triangle_packet = initTrianglePacket();
+                    triangle_packet_lane = 0;
+                }
                 triangle_count += 1;
+            }
+            if (triangle_packet_lane > 0) {
+                try self.shadow_triangle_packets.append(self.allocator, triangle_packet);
+                triangle_packet_count += 1;
             }
             entries[i] = .{
                 .aabb = aabb,
@@ -167,6 +235,8 @@ pub const ShadowSystem = struct {
                 .normal_cone_cutoff = m.normal_cone_cutoff,
                 .triangle_offset = triangle_offset,
                 .triangle_count = triangle_count,
+                .triangle_packet_offset = triangle_packet_offset,
+                .triangle_packet_count = triangle_packet_count,
                 .micro_bvh_offset = 0,
             });
         }
@@ -291,21 +361,99 @@ pub const ShadowSystem = struct {
         return distance_sq <= radius_sq;
     }
 
-    fn meshletOccludesRay(self: *const ShadowSystem, meshlet_index: u32, origin: math.Vec3, dir: math.Vec3, skip_triangle_id: u32) bool {
+    fn intersectTriangle8Any(
+        orig_x: PacketFloat8,
+        orig_y: PacketFloat8,
+        orig_z: PacketFloat8,
+        dir_x: PacketFloat8,
+        dir_y: PacketFloat8,
+        dir_z: PacketFloat8,
+        v0x: PacketFloat8,
+        v0y: PacketFloat8,
+        v0z: PacketFloat8,
+        edge1_x: PacketFloat8,
+        edge1_y: PacketFloat8,
+        edge1_z: PacketFloat8,
+        edge2_x: PacketFloat8,
+        edge2_y: PacketFloat8,
+        edge2_z: PacketFloat8,
+        active_mask: PacketBool8,
+    ) bool {
+        const eps: PacketFloat8 = @splat(1e-6);
+        const zeros: PacketFloat8 = @splat(0.0);
+        const ones: PacketFloat8 = @splat(1.0);
+
+        const pvec_x = dir_y * edge2_z - dir_z * edge2_y;
+        const pvec_y = dir_z * edge2_x - dir_x * edge2_z;
+        const pvec_z = dir_x * edge2_y - dir_y * edge2_x;
+
+        const det = edge1_x * pvec_x + edge1_y * pvec_y + edge1_z * pvec_z;
+        const valid_det = @abs(det) >= eps;
+        const inv_det = ones / det;
+
+        const tvec_x = orig_x - v0x;
+        const tvec_y = orig_y - v0y;
+        const tvec_z = orig_z - v0z;
+
+        const u = (tvec_x * pvec_x + tvec_y * pvec_y + tvec_z * pvec_z) * inv_det;
+        const valid_u_min = u >= zeros;
+        const valid_u_max = u <= ones;
+
+        const qvec_x = tvec_y * edge1_z - tvec_z * edge1_y;
+        const qvec_y = tvec_z * edge1_x - tvec_x * edge1_z;
+        const qvec_z = tvec_x * edge1_y - tvec_y * edge1_x;
+
+        const v = (dir_x * qvec_x + dir_y * qvec_y + dir_z * qvec_z) * inv_det;
+        const valid_v_min = v >= zeros;
+        const valid_v_max = (u + v) <= ones;
+
+        const t = (edge2_x * qvec_x + edge2_y * qvec_y + edge2_z * qvec_z) * inv_det;
+        const valid_t = t > eps;
+
+        var hit = active_mask;
+        hit = @select(bool, hit, valid_det, @as(PacketBool8, @splat(false)));
+        hit = @select(bool, hit, valid_u_min, @as(PacketBool8, @splat(false)));
+        hit = @select(bool, hit, valid_u_max, @as(PacketBool8, @splat(false)));
+        hit = @select(bool, hit, valid_v_min, @as(PacketBool8, @splat(false)));
+        hit = @select(bool, hit, valid_v_max, @as(PacketBool8, @splat(false)));
+        hit = @select(bool, hit, valid_t, @as(PacketBool8, @splat(false)));
+
+        return @reduce(.Or, hit);
+    }
+
+    fn meshletOccludesRay(self: *const ShadowSystem, meshlet_index: u32, origin: math.Vec3, inv_dir: math.Vec3, dir: math.Vec3, skip_triangle_id: u32) bool {
         const shadow_meshlet = self.shadow_meshlets.items[meshlet_index];
         if (shadow_meshlet.normal_cone_cutoff > -1.0) {
             const cone_sine = @sqrt(@max(0.0, 1.0 - shadow_meshlet.normal_cone_cutoff * shadow_meshlet.normal_cone_cutoff));
             if (math.Vec3.dot(shadow_meshlet.normal_cone_axis, dir) < -cone_sine) return false;
         }
+        if (!intersectAABB(shadow_meshlet.bound_aabb, origin, inv_dir)) return false;
         if (!intersectSphere(shadow_meshlet.bound_sphere, origin, dir)) return false;
 
-        const triangle_start = @as(usize, @intCast(shadow_meshlet.triangle_offset));
-        const triangle_end = triangle_start + @as(usize, @intCast(shadow_meshlet.triangle_count));
-        if (triangle_end > self.shadow_triangles.items.len) return false;
+        const triangle_packet_start = @as(usize, @intCast(shadow_meshlet.triangle_packet_offset));
+        const triangle_packet_end = triangle_packet_start + @as(usize, @intCast(shadow_meshlet.triangle_packet_count));
+        if (triangle_packet_end > self.shadow_triangle_packets.items.len) return false;
 
-        for (self.shadow_triangles.items[triangle_start..triangle_end]) |triangle| {
-            if (triangle.source_triangle_id == skip_triangle_id) continue;
-            if (intersectTriangle(origin, dir, triangle)) return true;
+        const origin_x: PacketFloat8 = @splat(origin.x);
+        const origin_y: PacketFloat8 = @splat(origin.y);
+        const origin_z: PacketFloat8 = @splat(origin.z);
+        const dir_x: PacketFloat8 = @splat(dir.x);
+        const dir_y: PacketFloat8 = @splat(dir.y);
+        const dir_z: PacketFloat8 = @splat(dir.z);
+
+        for (self.shadow_triangle_packets.items[triangle_packet_start..triangle_packet_end]) |triangle_packet| {
+            var active_mask = triangle_packet.active_mask;
+            if (skip_triangle_id != std.math.maxInt(u32)) {
+                for (0..8) |lane| {
+                    if (triangle_packet.source_triangle_ids[lane] == skip_triangle_id) {
+                        active_mask[lane] = false;
+                    }
+                }
+            }
+
+            if (@reduce(.Or, active_mask) and intersectTriangle8Any(origin_x, origin_y, origin_z, dir_x, dir_y, dir_z, triangle_packet.v0x, triangle_packet.v0y, triangle_packet.v0z, triangle_packet.edge1_x, triangle_packet.edge1_y, triangle_packet.edge1_z, triangle_packet.edge2_x, triangle_packet.edge2_y, triangle_packet.edge2_z, active_mask)) {
+                return true;
+            }
         }
 
         return false;
@@ -342,7 +490,7 @@ pub const ShadowSystem = struct {
 
                             if (intersectAABB(node.aabb, origin, inv_dir)) {
                                 if (node.is_leaf) {
-                                    if (self.meshletOccludesRay(node.left_child_or_meshlet, origin, dir, skip_triangle_id)) {
+                                    if (self.meshletOccludesRay(node.left_child_or_meshlet, origin, inv_dir, dir, skip_triangle_id)) {
                                         packet.occluded_mask |= ray_bit;
                                         break;
                                     }

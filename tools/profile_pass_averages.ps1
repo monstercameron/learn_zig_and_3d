@@ -4,7 +4,8 @@ param(
     [ValidateSet('Debug', 'ReleaseSafe', 'ReleaseFast', 'ReleaseSmall')]
     [string]$Optimize = 'ReleaseFast',
     [switch]$BuildProfile = $true,
-    [string]$OutputJson = ''
+    [string]$OutputJson = '',
+    [double]$RendererTtlSeconds = 3.0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,6 +38,7 @@ while ($runs.Count -lt $Iterations -and $attempt -lt $maxAttempts) {
     Write-Host "run $run/$Iterations frame=$Frame optimize=$Optimize attempt=$attempt/$maxAttempts"
 
     $env:ZIG_RENDER_PROFILE_FRAME = "$Frame"
+    $env:ZIG_RENDER_TTL_SECONDS = $RendererTtlSeconds.ToString([System.Globalization.CultureInfo]::InvariantCulture)
     try {
         $cmdLine = '"' + $exePath + '" 2>&1'
         $output = & cmd /c $cmdLine | Out-String
@@ -46,6 +48,7 @@ while ($runs.Count -lt $Iterations -and $attempt -lt $maxAttempts) {
     }
     finally {
         Remove-Item Env:ZIG_RENDER_PROFILE_FRAME -ErrorAction SilentlyContinue
+        Remove-Item Env:ZIG_RENDER_TTL_SECONDS -ErrorAction SilentlyContinue
     }
 
     $passMap = [ordered]@{}

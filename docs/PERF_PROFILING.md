@@ -77,6 +77,8 @@ Launch, warm up, sample for one second, then terminate automatically:
 python tools\native_stack_sampler.py --launch zig-out\bin\zig-windows-app.exe 12 1
 ```
 
+When launched through the local profiling tools, the renderer also gets a wall-clock TTL through `ZIG_RENDER_TTL_SECONDS` so it closes itself automatically instead of leaving a window open.
+
 Recommended combined workflow:
 
 ```powershell
