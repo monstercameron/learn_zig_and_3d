@@ -1925,7 +1925,7 @@ const AdaptiveShadowTileJob = struct {
             }
         }
 
-                if (!any_valid) return .{ .mixed = false, .shadowed = false };
+        if (!any_valid) return .{ .mixed = false, .shadowed = false };
         if (any_invalid) return .{ .mixed = true, .shadowed = false };
 
         if (any_occluded and any_lit) return .{ .mixed = true, .shadowed = false };
@@ -3035,6 +3035,7 @@ pub const Renderer = struct {
     pub fn deinit(self: *Renderer) void {
         renderer_logger.infoSub("shutdown", "deinitializing renderer frame_counter={}", .{self.frame_count});
         self.mesh_work_cache.deinit(self.allocator);
+        self.sys_shadows.deinit();
         if (self.job_system) |js| js.deinit();
         if (self.job_buffer) |jobs| self.allocator.free(jobs);
         if (self.tile_jobs_buffer) |tile_jobs| self.allocator.free(tile_jobs);
@@ -3250,8 +3251,8 @@ pub const Renderer = struct {
         }
 
         fn renderTileJob(ctx: *anyopaque) void {
-        const _z_renderTileJob = profiler.zone("renderTileJob");
-        defer if (_z_renderTileJob) |z| z.end();
+            const _z_renderTileJob = profiler.zone("renderTileJob");
+            defer if (_z_renderTileJob) |z| z.end();
             const job: *TileRenderJob = @ptrCast(@alignCast(ctx));
             const near_plane = job.projection.near_plane;
             job.tile_buffer.clear();
@@ -3290,14 +3291,26 @@ pub const Renderer = struct {
             }
 
             if (job.sys_shadows) |sys| {
+                const _z_meshletShadowTile = profiler.zone("meshletShadowTile");
+                defer if (_z_meshletShadowTile) |z| z.end();
                 const total_pixels = @as(usize, @intCast(job.tile.width)) * @as(usize, @intCast(job.tile.height));
                 var packet = shadow_system.RayPacket{
-                    .origins_x = undefined, .origins_y = undefined, .origins_z = undefined,
-                    .dirs_x = undefined, .dirs_y = undefined, .dirs_z = undefined,
-                    .active_mask = 0, .occluded_mask = 0,
+                    .origins_x = undefined,
+                    .origins_y = undefined,
+                    .origins_z = undefined,
+                    .dirs_x = undefined,
+                    .dirs_y = undefined,
+                    .dirs_z = undefined,
+                    .active_mask = 0,
+                    .occluded_mask = 0,
                 };
-                
-                const ray_dir = math.Vec3.normalize(math.Vec3.scale(job.light_direction, -1.0));
+
+                const ray_dir = math.Vec3.normalize(job.light_direction);
+                const light_dir_camera = math.Vec3.normalize(math.Vec3.new(
+                    math.Vec3.dot(ray_dir, job.cam_right),
+                    math.Vec3.dot(ray_dir, job.cam_up),
+                    math.Vec3.dot(ray_dir, job.cam_fwd),
+                ));
 
                 var pixel_idx: usize = 0;
                 while (pixel_idx < total_pixels) {
@@ -3309,6 +3322,9 @@ pub const Renderer = struct {
                         const idx = pixel_idx + i;
                         const depth = job.tile_buffer.depth[idx];
                         if (depth < std.math.inf(f32) and depth > 0.0) {
+                            const normal = job.tile_buffer.data[idx].normal;
+                            if (math.Vec3.dot(normal, light_dir_camera) <= 0.0) continue;
+
                             const cs_pos = job.tile_buffer.data[idx].camera;
                             const xs = math.Vec3.scale(job.cam_right, cs_pos.x);
                             const ys = math.Vec3.scale(job.cam_up, cs_pos.y);
@@ -3319,38 +3335,39 @@ pub const Renderer = struct {
                             packet.origins_x[i] = world_pos.x;
                             packet.origins_y[i] = world_pos.y;
                             packet.origins_z[i] = world_pos.z;
-                            
+
                             packet.dirs_x[i] = ray_dir.x;
                             packet.dirs_y[i] = ray_dir.y;
                             packet.dirs_z[i] = ray_dir.z;
-                            
+
                             packet.active_mask |= (@as(u64, 1) << @intCast(i));
                         }
                     }
 
                     if (packet.active_mask != 0) {
-                        for (0..batch_size) |i| {
-                            if ((packet.active_mask & (@as(u64, 1) << @intCast(i))) != 0) {
-                                packet.origins_x[i] += ray_dir.x * 0.01;
-                                packet.origins_y[i] += ray_dir.y * 0.01;
-                                packet.origins_z[i] += ray_dir.z * 0.01;
-                            }
+                        {
+                            const _z_meshletShadowTrace = profiler.zone("meshletShadowTrace");
+                            defer if (_z_meshletShadowTrace) |z| z.end();
+                            _ = job.mesh_ptr;
+                            sys.tracePacketAnyHit(&packet);
                         }
 
-                        sys.tracePacketAnyHit(job.mesh_ptr, &packet);
-
-                        for (0..batch_size) |i| {
-                            if ((packet.occluded_mask & (@as(u64, 1) << @intCast(i))) != 0) {
-                                const idx = pixel_idx + i;
-                                var color = job.tile_buffer.data[idx].color;
-                                color.x *= 0.2;
-                                color.y *= 0.2;
-                                color.z *= 0.2;
-                                job.tile_buffer.data[idx].color = color;
+                        if (packet.occluded_mask != 0) {
+                            const _z_meshletShadowApply = profiler.zone("meshletShadowApply");
+                            defer if (_z_meshletShadowApply) |z| z.end();
+                            for (0..batch_size) |i| {
+                                if ((packet.occluded_mask & (@as(u64, 1) << @intCast(i))) != 0) {
+                                    const idx = pixel_idx + i;
+                                    var color = job.tile_buffer.data[idx].color;
+                                    color.x *= 0.2;
+                                    color.y *= 0.2;
+                                    color.z *= 0.2;
+                                    job.tile_buffer.data[idx].color = color;
+                                }
                             }
                         }
                     }
-                    
+
                     pixel_idx += batch_size;
                 }
             }
@@ -4570,6 +4587,10 @@ pub const Renderer = struct {
         self.rotation_angle = yaw;
     }
 
+    pub fn invalidateMeshWork(self: *Renderer) void {
+        self.mesh_work_cache.invalidate();
+    }
+
     fn consumeMouseDelta(self: *Renderer) math.Vec2 {
         const delta = self.pending_mouse_delta;
         self.pending_mouse_delta = math.Vec2.new(0.0, 0.0);
@@ -4639,12 +4660,6 @@ pub const Renderer = struct {
         }
         const _zone = profiler.zone("Renderer.render");
         defer if (_zone) |z| z.end();
-        
-        if (config.MESHLET_SHADOWS_ENABLED and self.sys_shadows.blas_nodes.items.len == 0 and mesh.meshlets.len > 0) {
-            _ = try self.sys_shadows.buildBLAS(mesh.meshlets);
-            var instances = [_]math.Mat4{ math.Mat4.identity() };
-            try self.sys_shadows.buildTLAS(&instances);
-        }
 
         @memset(self.bitmap.pixels, 0xFF000000);
         self.resetRenderPassTimings();
@@ -4842,6 +4857,13 @@ pub const Renderer = struct {
             meshlet_logger.debugSub("work", "reusing cached mesh work", .{});
         }
 
+        if (config.MESHLET_SHADOWS_ENABLED and mesh.meshlets.len > 0) {
+            self.sys_shadows.reset();
+            _ = try self.sys_shadows.buildBLAS(mesh);
+            var instances = [_]math.Mat4{math.Mat4.identity()};
+            try self.sys_shadows.buildTLAS(&instances);
+        }
+
         if (builtin.mode == .Debug and cache.full_vertex_cache_valid and cache.transformed_vertices.len == mesh.vertices.len) {
             self.debugGroundPlane(mesh, cache.transformed_vertices, view_rotation);
         }
@@ -4910,7 +4932,6 @@ pub const Renderer = struct {
     }
 
     fn maybeEmitSingleFrameProfile(self: *Renderer) void {
-
         if (self.profile_capture_emitted or self.profile_capture_frame == 0) return;
         if (self.total_frames_rendered != self.profile_capture_frame) return;
 
@@ -6897,10 +6918,9 @@ pub const Renderer = struct {
     }
 
     fn applyTemporalAAPass(self: *Renderer, current_view: TemporalAAViewState) void {
-        
         const _zone = profiler.zone("applyTemporalAAPass");
         defer if (_zone) |z| z.end();
-if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
+        if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
         const height: usize = @intCast(self.bitmap.height);
@@ -7541,7 +7561,7 @@ if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.l
                 .textures = self.textures,
                 .projection = projection,
                 .sys_shadows = if (config.MESHLET_SHADOWS_ENABLED) &self.sys_shadows else null,
-                .light_direction = if (self.lights.items.len > 0) self.lights.items[0].direction else math.Vec3.new(0,-1,0),
+                .light_direction = if (self.lights.items.len > 0) self.lights.items[0].direction else math.Vec3.new(0, -1, 0),
                 .mesh_ptr = mesh,
                 .cam_pos = self.camera_position,
                 .cam_right = math.Vec3.new(transform.data[0], transform.data[1], transform.data[2]),

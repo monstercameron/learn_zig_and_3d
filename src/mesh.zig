@@ -280,6 +280,59 @@ pub const Mesh = struct {
         return self.meshlet_vertices[meshlet.vertex_offset + @as(usize, @intCast(local_index))];
     }
 
+    pub fn refreshMeshlets(self: *Mesh) void {
+        if (self.meshlets.len == 0) return;
+
+        for (self.meshlets) |*meshlet| {
+            const vertex_indices = self.meshletVertexSlice(meshlet);
+            const primitive_slice = self.meshletPrimitiveSlice(meshlet);
+            if (vertex_indices.len == 0 or primitive_slice.len == 0) continue;
+
+            var centroid = Vec3.new(0.0, 0.0, 0.0);
+            for (vertex_indices) |vertex_index| {
+                centroid = Vec3.add(centroid, self.vertices[vertex_index]);
+            }
+            centroid = Vec3.scale(centroid, 1.0 / @as(f32, @floatFromInt(vertex_indices.len)));
+
+            var radius: f32 = 0.0;
+            var aabb_min = Vec3.new(std.math.inf(f32), std.math.inf(f32), std.math.inf(f32));
+            var aabb_max = Vec3.new(-std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32));
+            for (vertex_indices) |vertex_index| {
+                const pos = self.vertices[vertex_index];
+                const delta = Vec3.sub(pos, centroid);
+                const distance = Vec3.length(delta);
+                if (distance > radius) radius = distance;
+                aabb_min = Vec3.min(aabb_min, pos);
+                aabb_max = Vec3.max(aabb_max, pos);
+            }
+
+            var cone_axis_sum = Vec3.new(0.0, 0.0, 0.0);
+            for (primitive_slice) |primitive| {
+                cone_axis_sum = Vec3.add(cone_axis_sum, self.triangleNormalForIndex(primitive.triangle_index));
+            }
+
+            var cone_axis = Vec3.new(0.0, 0.0, 1.0);
+            var cone_cutoff: f32 = -1.0;
+            const cone_axis_len = Vec3.length(cone_axis_sum);
+            if (cone_axis_len > 1e-6) {
+                cone_axis = Vec3.scale(cone_axis_sum, 1.0 / cone_axis_len);
+                cone_cutoff = 1.0;
+                for (primitive_slice) |primitive| {
+                    const tri_normal = self.triangleNormalForIndex(primitive.triangle_index);
+                    const alignment = std.math.clamp(Vec3.dot(cone_axis, tri_normal), -1.0, 1.0);
+                    if (alignment < cone_cutoff) cone_cutoff = alignment;
+                }
+            }
+
+            meshlet.bounds_center = centroid;
+            meshlet.bounds_radius = radius;
+            meshlet.normal_cone_axis = cone_axis;
+            meshlet.normal_cone_cutoff = cone_cutoff;
+            meshlet.aabb_min = aabb_min;
+            meshlet.aabb_max = aabb_max;
+        }
+    }
+
     fn triangleNormalForIndex(self: *const Mesh, tri_idx: usize) Vec3 {
         if (tri_idx < self.normals.len) {
             const normal = self.normals[tri_idx];

@@ -57,6 +57,12 @@ pub const ShadowMeshlet = struct {
     micro_bvh_offset: u32,
 };
 
+pub const ShadowTriangle = struct {
+    v0: math.Vec3,
+    edge1: math.Vec3,
+    edge2: math.Vec3,
+};
+
 // Represents a packet of rays for SIMD-style traversal within a screen tile
 pub const RayPacket = struct {
     origins_x: [64]f32,
@@ -74,6 +80,7 @@ pub const ShadowSystem = struct {
     tlas_nodes: std.ArrayList(TLASNode),
     blas_nodes: std.ArrayList(BLASNode),
     shadow_meshlets: std.ArrayList(ShadowMeshlet),
+    shadow_triangles: std.ArrayList(ShadowTriangle),
 
     pub fn init(allocator: std.mem.Allocator) ShadowSystem {
         return .{
@@ -81,6 +88,7 @@ pub const ShadowSystem = struct {
             .tlas_nodes = std.ArrayList(TLASNode){},
             .blas_nodes = std.ArrayList(BLASNode){},
             .shadow_meshlets = std.ArrayList(ShadowMeshlet){},
+            .shadow_triangles = std.ArrayList(ShadowTriangle){},
         };
     }
 
@@ -88,6 +96,14 @@ pub const ShadowSystem = struct {
         self.tlas_nodes.deinit(self.allocator);
         self.blas_nodes.deinit(self.allocator);
         self.shadow_meshlets.deinit(self.allocator);
+        self.shadow_triangles.deinit(self.allocator);
+    }
+
+    pub fn reset(self: *ShadowSystem) void {
+        self.tlas_nodes.clearRetainingCapacity();
+        self.blas_nodes.clearRetainingCapacity();
+        self.shadow_meshlets.clearRetainingCapacity();
+        self.shadow_triangles.clearRetainingCapacity();
     }
 
     const BLASBuildEntry = struct {
@@ -105,7 +121,8 @@ pub const ShadowSystem = struct {
         node.aabb.expandAABB(right.aabb);
     }
 
-    pub fn buildBLAS(self: *ShadowSystem, meshlets: []const mesh.Meshlet) !u32 {
+    pub fn buildBLAS(self: *ShadowSystem, mesh_ptr: *const mesh.Mesh) !u32 {
+        const meshlets = mesh_ptr.meshlets;
         if (meshlets.len == 0) return std.math.maxInt(u32);
 
         var entries = try self.allocator.alloc(BLASBuildEntry, meshlets.len);
@@ -114,6 +131,23 @@ pub const ShadowSystem = struct {
         const sm_start_index = @as(u32, @intCast(self.shadow_meshlets.items.len));
         for (meshlets, 0..) |m, i| {
             const aabb = AABB{ .min = m.aabb_min, .max = m.aabb_max };
+            const triangle_offset = @as(u32, @intCast(self.shadow_triangles.items.len));
+            var triangle_count: u16 = 0;
+            const primitive_start = m.primitive_offset;
+            const primitive_end = primitive_start + m.primitive_count;
+            for (mesh_ptr.meshlet_primitives[primitive_start..primitive_end]) |primitive| {
+                if (primitive.triangle_index >= mesh_ptr.triangles.len) continue;
+                const tri = mesh_ptr.triangles[primitive.triangle_index];
+                const p0 = mesh_ptr.vertices[tri.v0];
+                const p1 = mesh_ptr.vertices[tri.v1];
+                const p2 = mesh_ptr.vertices[tri.v2];
+                try self.shadow_triangles.append(self.allocator, .{
+                    .v0 = p0,
+                    .edge1 = math.Vec3.sub(p1, p0),
+                    .edge2 = math.Vec3.sub(p2, p0),
+                });
+                triangle_count += 1;
+            }
             entries[i] = .{
                 .aabb = aabb,
                 .centroid = aabb.centroid(),
@@ -122,8 +156,8 @@ pub const ShadowSystem = struct {
             try self.shadow_meshlets.append(self.allocator, .{
                 .bound_sphere = .{ .center = m.bounds_center, .radius = m.bounds_radius },
                 .bound_aabb = aabb,
-                .triangle_offset = @intCast(m.primitive_offset),
-                .triangle_count = @intCast(m.primitive_count),
+                .triangle_offset = triangle_offset,
+                .triangle_count = triangle_count,
                 .micro_bvh_offset = 0,
             });
         }
@@ -218,9 +252,40 @@ pub const ShadowSystem = struct {
         return tmax >= tmin and tmax >= 0.0;
     }
 
-    pub fn tracePacketAnyHit(self: *ShadowSystem, mesh_ptr: *const mesh.Mesh, packet: *RayPacket) void {
-        _ = mesh_ptr; // TODO: true triangle intersection. Currently using meshlet box.
+    fn intersectTriangle(origin: math.Vec3, dir: math.Vec3, triangle: ShadowTriangle) bool {
+        const epsilon: f32 = 1e-5;
+        const pvec = math.Vec3.cross(dir, triangle.edge2);
+        const det = math.Vec3.dot(triangle.edge1, pvec);
 
+        if (@abs(det) < epsilon) return false;
+
+        const inv_det = 1.0 / det;
+        const tvec = math.Vec3.sub(origin, triangle.v0);
+        const u = math.Vec3.dot(tvec, pvec) * inv_det;
+        if (u < 0.0 or u > 1.0) return false;
+
+        const qvec = math.Vec3.cross(tvec, triangle.edge1);
+        const v = math.Vec3.dot(dir, qvec) * inv_det;
+        if (v < 0.0 or u + v > 1.0) return false;
+
+        const t = math.Vec3.dot(triangle.edge2, qvec) * inv_det;
+        return t > epsilon;
+    }
+
+    fn meshletOccludesRay(self: *const ShadowSystem, meshlet_index: u32, origin: math.Vec3, dir: math.Vec3) bool {
+        const shadow_meshlet = self.shadow_meshlets.items[meshlet_index];
+        const triangle_start = @as(usize, @intCast(shadow_meshlet.triangle_offset));
+        const triangle_end = triangle_start + @as(usize, @intCast(shadow_meshlet.triangle_count));
+        if (triangle_end > self.shadow_triangles.items.len) return false;
+
+        for (self.shadow_triangles.items[triangle_start..triangle_end]) |triangle| {
+            if (intersectTriangle(origin, dir, triangle)) return true;
+        }
+
+        return false;
+    }
+
+    pub fn tracePacketAnyHit(self: *ShadowSystem, packet: *RayPacket) void {
         var ray_idx: usize = 0;
         while (ray_idx < 64) : (ray_idx += 1) {
             const ray_bit = @as(u64, 1) << @intCast(ray_idx);
@@ -229,7 +294,7 @@ pub const ShadowSystem = struct {
 
             const origin = math.Vec3.new(packet.origins_x[ray_idx], packet.origins_y[ray_idx], packet.origins_z[ray_idx]);
             const dir = math.Vec3.new(packet.dirs_x[ray_idx], packet.dirs_y[ray_idx], packet.dirs_z[ray_idx]);
-            const origin_biased = math.Vec3.add(origin, math.Vec3.scale(dir, 0.05));
+            const origin_biased = math.Vec3.add(origin, math.Vec3.scale(dir, 0.01));
             const inv_dir = math.Vec3.new(if (@abs(dir.x) < 1e-6) (if (dir.x < 0) @as(f32, -1e6) else @as(f32, 1e6)) else 1.0 / dir.x, if (@abs(dir.y) < 1e-6) (if (dir.y < 0) @as(f32, -1e6) else @as(f32, 1e6)) else 1.0 / dir.y, if (@abs(dir.z) < 1e-6) (if (dir.z < 0) @as(f32, -1e6) else @as(f32, 1e6)) else 1.0 / dir.z);
 
             // Traverse TLAS -> BLAS
@@ -250,10 +315,10 @@ pub const ShadowSystem = struct {
 
                             if (intersectAABB(node.aabb, origin_biased, inv_dir)) {
                                 if (node.is_leaf) {
-                                    // Hit a meshlet!
-                                    // For now, treat any meshlet box hit as occluded for test performance
-                                    packet.occluded_mask |= ray_bit;
-                                    break;
+                                    if (self.meshletOccludesRay(node.left_child_or_meshlet, origin_biased, dir)) {
+                                        packet.occluded_mask |= ray_bit;
+                                        break;
+                                    }
                                 } else {
                                     stack[stack_ptr] = node.left_child_or_meshlet;
                                     stack_ptr += 1;

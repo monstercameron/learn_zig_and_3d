@@ -365,7 +365,8 @@ pub fn main() !void {
             n.z = rot[2]*on.x + rot[5]*on.y + rot[8]*on.z;
         }
 
-        scene_asset.mesh.clearMeshlets();
+        scene_asset.mesh.refreshMeshlets();
+        renderer.invalidateMeshWork();
 
         // Check if it's time to render a new frame, based on our target FPS.
 
