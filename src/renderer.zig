@@ -1251,6 +1251,107 @@ fn blendTemporalColor(current_pixel: u32, history_color: [3]f32, history_weight:
         @as(u32, clampByte(out_b));
 }
 
+fn blendTemporalColorBatch(
+    current_pixels: *const [color_grade_simd_lanes]u32,
+    history_colors: *const [color_grade_simd_lanes][3]f32,
+    history_weights: *const [color_grade_simd_lanes]f32,
+) [color_grade_simd_lanes]u32 {
+    var alpha: [color_grade_simd_lanes]u32 = undefined;
+    var current_r_arr: [color_grade_simd_lanes]f32 = undefined;
+    var current_g_arr: [color_grade_simd_lanes]f32 = undefined;
+    var current_b_arr: [color_grade_simd_lanes]f32 = undefined;
+    var history_r_arr: [color_grade_simd_lanes]f32 = undefined;
+    var history_g_arr: [color_grade_simd_lanes]f32 = undefined;
+    var history_b_arr: [color_grade_simd_lanes]f32 = undefined;
+
+    inline for (0..color_grade_simd_lanes) |lane| {
+        const pixel = current_pixels[lane];
+        alpha[lane] = pixel & 0xFF000000;
+        current_r_arr[lane] = @floatFromInt((pixel >> 16) & 0xFF);
+        current_g_arr[lane] = @floatFromInt((pixel >> 8) & 0xFF);
+        current_b_arr[lane] = @floatFromInt(pixel & 0xFF);
+        history_r_arr[lane] = history_colors[lane][0];
+        history_g_arr[lane] = history_colors[lane][1];
+        history_b_arr[lane] = history_colors[lane][2];
+    }
+
+    const history_weight_vec: ShadowFloatVec = @bitCast(history_weights.*);
+    const current_weight_vec: ShadowFloatVec = @as(ShadowFloatVec, @splat(1.0)) - history_weight_vec;
+    const half_vec: ShadowFloatVec = @as(ShadowFloatVec, @splat(0.5));
+
+    const out_r_vec = (@as(ShadowFloatVec, @bitCast(current_r_arr)) * current_weight_vec) + (@as(ShadowFloatVec, @bitCast(history_r_arr)) * history_weight_vec) + half_vec;
+    const out_g_vec = (@as(ShadowFloatVec, @bitCast(current_g_arr)) * current_weight_vec) + (@as(ShadowFloatVec, @bitCast(history_g_arr)) * history_weight_vec) + half_vec;
+    const out_b_vec = (@as(ShadowFloatVec, @bitCast(current_b_arr)) * current_weight_vec) + (@as(ShadowFloatVec, @bitCast(history_b_arr)) * history_weight_vec) + half_vec;
+
+    const out_r: [color_grade_simd_lanes]i32 = @bitCast(@as(ShadowIntVec, @intFromFloat(out_r_vec)));
+    const out_g: [color_grade_simd_lanes]i32 = @bitCast(@as(ShadowIntVec, @intFromFloat(out_g_vec)));
+    const out_b: [color_grade_simd_lanes]i32 = @bitCast(@as(ShadowIntVec, @intFromFloat(out_b_vec)));
+
+    var result: [color_grade_simd_lanes]u32 = undefined;
+    inline for (0..color_grade_simd_lanes) |lane| {
+        result[lane] = alpha[lane] |
+            (@as(u32, clampByte(out_r[lane])) << 16) |
+            (@as(u32, clampByte(out_g[lane])) << 8) |
+            @as(u32, clampByte(out_b[lane]));
+    }
+    return result;
+}
+
+fn addPackedColorBatch(
+    current_pixels: *const [color_grade_simd_lanes]u32,
+    add_r_arr: *const [color_grade_simd_lanes]f32,
+    add_g_arr: *const [color_grade_simd_lanes]f32,
+    add_b_arr: *const [color_grade_simd_lanes]f32,
+) [color_grade_simd_lanes]u32 {
+    var alpha: [color_grade_simd_lanes]u32 = undefined;
+    var current_r_arr: [color_grade_simd_lanes]f32 = undefined;
+    var current_g_arr: [color_grade_simd_lanes]f32 = undefined;
+    var current_b_arr: [color_grade_simd_lanes]f32 = undefined;
+
+    inline for (0..color_grade_simd_lanes) |lane| {
+        const pixel = current_pixels[lane];
+        alpha[lane] = pixel & 0xFF000000;
+        current_r_arr[lane] = @floatFromInt((pixel >> 16) & 0xFF);
+        current_g_arr[lane] = @floatFromInt((pixel >> 8) & 0xFF);
+        current_b_arr[lane] = @floatFromInt(pixel & 0xFF);
+    }
+
+    const max_channel: ShadowFloatVec = @as(ShadowFloatVec, @splat(255.0));
+    const min_channel: ShadowFloatVec = @as(ShadowFloatVec, @splat(0.0));
+    const out_r_vec = @max(min_channel, @min(max_channel, @as(ShadowFloatVec, @bitCast(current_r_arr)) + @as(ShadowFloatVec, @bitCast(add_r_arr.*))));
+    const out_g_vec = @max(min_channel, @min(max_channel, @as(ShadowFloatVec, @bitCast(current_g_arr)) + @as(ShadowFloatVec, @bitCast(add_g_arr.*))));
+    const out_b_vec = @max(min_channel, @min(max_channel, @as(ShadowFloatVec, @bitCast(current_b_arr)) + @as(ShadowFloatVec, @bitCast(add_b_arr.*))));
+
+    const out_r: [color_grade_simd_lanes]i32 = @bitCast(@as(ShadowIntVec, @intFromFloat(out_r_vec)));
+    const out_g: [color_grade_simd_lanes]i32 = @bitCast(@as(ShadowIntVec, @intFromFloat(out_g_vec)));
+    const out_b: [color_grade_simd_lanes]i32 = @bitCast(@as(ShadowIntVec, @intFromFloat(out_b_vec)));
+
+    var result: [color_grade_simd_lanes]u32 = undefined;
+    inline for (0..color_grade_simd_lanes) |lane| {
+        result[lane] = alpha[lane] |
+            (@as(u32, clampByte(out_r[lane])) << 16) |
+            (@as(u32, clampByte(out_g[lane])) << 8) |
+            @as(u32, clampByte(out_b[lane]));
+    }
+    return result;
+}
+
+fn packShiftedColorBatch(
+    alpha: *const [color_grade_simd_lanes]u32,
+    r_arr: *const [color_grade_simd_lanes]u32,
+    g_arr: *const [color_grade_simd_lanes]u32,
+    b_arr: *const [color_grade_simd_lanes]u32,
+) [color_grade_simd_lanes]u32 {
+    var result: [color_grade_simd_lanes]u32 = undefined;
+    inline for (0..color_grade_simd_lanes) |lane| {
+        result[lane] = alpha[lane] |
+            (r_arr[lane] << 16) |
+            (g_arr[lane] << 8) |
+            b_arr[lane];
+    }
+    return result;
+}
+
 fn pixelLuma(pixel: u32) f32 {
     const r = @as(f32, @floatFromInt((pixel >> 16) & 0xFF));
     const g = @as(f32, @floatFromInt((pixel >> 8) & 0xFF));
@@ -1260,6 +1361,107 @@ fn pixelLuma(pixel: u32) f32 {
 
 fn colorLuma(color: [3]f32) f32 {
     return (color[0] * 0.299) + (color[1] * 0.587) + (color[2] * 0.114);
+}
+
+fn tryApplyTemporalAAMeshletBatch(
+    self: *Renderer,
+    mesh: *const Mesh,
+    current_view: TemporalAAViewState,
+    previous_view: TemporalAAViewState,
+    row_start: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) bool {
+    if (x + color_grade_simd_lanes > width) return false;
+
+    var current_pixels: [color_grade_simd_lanes]u32 = undefined;
+    var history_colors: [color_grade_simd_lanes][3]f32 = undefined;
+    var history_weights: [color_grade_simd_lanes]f32 = undefined;
+
+    inline for (0..color_grade_simd_lanes) |lane| {
+        const idx = row_start + x + lane;
+        const current_pixel = self.bitmap.pixels[idx];
+        current_pixels[lane] = current_pixel;
+
+        const current_camera = self.scene_camera[idx];
+        if (!validSceneCameraSample(current_camera)) return false;
+
+        const current_surface = self.scene_surface[idx];
+        var reprojection: ?ReprojectedHistorySample = null;
+
+        if (current_surface.isValid() and self.taa_previous_mesh_valid and current_surface.triangle_id < mesh.triangles.len and self.taa_previous_mesh_triangle_count == mesh.triangles.len) {
+            const tri = mesh.triangles[current_surface.triangle_id];
+            if (tri.v0 < self.taa_previous_mesh_vertex_count and tri.v1 < self.taa_previous_mesh_vertex_count and tri.v2 < self.taa_previous_mesh_vertex_count) {
+                const bary = current_surface.barycentrics();
+                const prev_v0 = self.taa_previous_mesh_vertices[tri.v0];
+                const prev_v1 = self.taa_previous_mesh_vertices[tri.v1];
+                const prev_v2 = self.taa_previous_mesh_vertices[tri.v2];
+                const previous_world = math.Vec3.new(
+                    prev_v0.x * bary.x + prev_v1.x * bary.y + prev_v2.x * bary.z,
+                    prev_v0.y * bary.x + prev_v1.y * bary.y + prev_v2.y * bary.z,
+                    prev_v0.z * bary.x + prev_v1.z * bary.y + prev_v2.z * bary.z,
+                );
+                const previous_relative = math.Vec3.sub(previous_world, previous_view.camera_position);
+                const previous_camera = math.Vec3.new(
+                    math.Vec3.dot(previous_relative, previous_view.basis_right),
+                    math.Vec3.dot(previous_relative, previous_view.basis_up),
+                    math.Vec3.dot(previous_relative, previous_view.basis_forward),
+                );
+                if (previous_camera.z > previous_view.projection.near_plane + NEAR_EPSILON) {
+                    reprojection = .{
+                        .screen = projectCameraPositionFloat(previous_camera, previous_view.projection),
+                        .depth = previous_camera.z,
+                        .used_surface_path = true,
+                    };
+                }
+            }
+        }
+
+        if (reprojection == null) {
+            const world_pos = cameraToWorldPosition(
+                current_view.camera_position,
+                current_view.basis_right,
+                current_view.basis_up,
+                current_view.basis_forward,
+                current_camera,
+            );
+            const previous_relative = math.Vec3.sub(world_pos, previous_view.camera_position);
+            const previous_camera = math.Vec3.new(
+                math.Vec3.dot(previous_relative, previous_view.basis_right),
+                math.Vec3.dot(previous_relative, previous_view.basis_up),
+                math.Vec3.dot(previous_relative, previous_view.basis_forward),
+            );
+            if (previous_camera.z <= previous_view.projection.near_plane + NEAR_EPSILON) return false;
+            reprojection = .{
+                .screen = projectCameraPositionFloat(previous_camera, previous_view.projection),
+                .depth = previous_camera.z,
+                .used_surface_path = false,
+            };
+        }
+
+        const previous_sample = reprojection orelse return false;
+        const previous_depth = sampleHistoryDepthNearest(self.taa_scratch.history_depth, width, height, previous_sample.screen) orelse return false;
+        const depth_delta = @abs(previous_depth - previous_sample.depth);
+        const depth_factor = 1.0 - std.math.clamp(depth_delta / @max(1e-4, self.temporal_aa_config.depth_threshold), 0.0, 1.0);
+        if (depth_factor <= 0.0) return false;
+
+        const previous_tag = sampleHistorySurfaceTagNearest(self.taa_scratch.history_surface_tags, width, height, previous_sample.screen) orelse invalid_surface_tag;
+        const current_tag = surfaceTagForHandle(current_surface);
+        if (current_tag == invalid_surface_tag or previous_tag != current_tag) return false;
+
+        const previous_color = sampleHistoryColorNearest(self.taa_scratch.history_pixels, width, height, previous_sample.screen) orelse return false;
+        history_colors[lane] = previous_color;
+        history_weights[lane] = std.math.clamp(self.temporal_aa_config.history_weight * (0.6 + 0.15 * depth_factor), 0.0, self.temporal_aa_config.history_weight);
+    }
+
+    const blended = blendTemporalColorBatch(&current_pixels, &history_colors, &history_weights);
+    inline for (0..color_grade_simd_lanes) |lane| {
+        self.taa_scratch.resolve_pixels[row_start + x + lane] = blended[lane];
+    }
+    _ = y;
+    return true;
 }
 
 fn rayIntersectsSphere(origin: math.Vec3, direction: math.Vec3, center: math.Vec3, radius: f32) bool {
@@ -1420,6 +1622,91 @@ fn extractBloomDownsampleRows(
         const row3 = sy3 * src_width;
         const dst_row = y * bloom.width;
         var x: usize = 0;
+        while (x + color_grade_simd_lanes <= bloom.width) : (x += color_grade_simd_lanes) {
+            var alpha: [color_grade_simd_lanes]u32 = undefined;
+            var r_arr: [color_grade_simd_lanes]u32 = undefined;
+            var g_arr: [color_grade_simd_lanes]u32 = undefined;
+            var b_arr: [color_grade_simd_lanes]u32 = undefined;
+
+            inline for (0..color_grade_simd_lanes) |lane| {
+                const sx = (x + lane) << 2;
+                var r_sum: u32 = 0;
+                var g_sum: u32 = 0;
+                var b_sum: u32 = 0;
+
+                if (sx + 3 < src_width) {
+                    inline for (0..4) |dx| {
+                        const p0 = src[row0 + sx + dx];
+                        const p1 = src[row1 + sx + dx];
+                        const p2 = src[row2 + sx + dx];
+                        const p3 = src[row3 + sx + dx];
+
+                        r_sum += (p0 >> 16) & 0xFF;
+                        g_sum += (p0 >> 8) & 0xFF;
+                        b_sum += p0 & 0xFF;
+
+                        r_sum += (p1 >> 16) & 0xFF;
+                        g_sum += (p1 >> 8) & 0xFF;
+                        b_sum += p1 & 0xFF;
+
+                        r_sum += (p2 >> 16) & 0xFF;
+                        g_sum += (p2 >> 8) & 0xFF;
+                        b_sum += p2 & 0xFF;
+
+                        r_sum += (p3 >> 16) & 0xFF;
+                        g_sum += (p3 >> 8) & 0xFF;
+                        b_sum += p3 & 0xFF;
+                    }
+                } else {
+                    inline for (0..4) |dx| {
+                        const sample_x = @min(src_width - 1, sx + dx);
+                        const p0 = src[row0 + sample_x];
+                        const p1 = src[row1 + sample_x];
+                        const p2 = src[row2 + sample_x];
+                        const p3 = src[row3 + sample_x];
+
+                        r_sum += (p0 >> 16) & 0xFF;
+                        g_sum += (p0 >> 8) & 0xFF;
+                        b_sum += p0 & 0xFF;
+
+                        r_sum += (p1 >> 16) & 0xFF;
+                        g_sum += (p1 >> 8) & 0xFF;
+                        b_sum += p1 & 0xFF;
+
+                        r_sum += (p2 >> 16) & 0xFF;
+                        g_sum += (p2 >> 8) & 0xFF;
+                        b_sum += p2 & 0xFF;
+
+                        r_sum += (p3 >> 16) & 0xFF;
+                        g_sum += (p3 >> 8) & 0xFF;
+                        b_sum += p3 & 0xFF;
+                    }
+                }
+
+                const r = r_sum >> 4;
+                const g = g_sum >> 4;
+                const b = b_sum >> 4;
+                const luma: usize = @intCast((r_sum * 77 + g_sum * 150 + b_sum * 29) >> 12);
+                const factor = threshold_curve[luma];
+                alpha[lane] = 0xFF000000;
+
+                if (factor == 0) {
+                    r_arr[lane] = 0;
+                    g_arr[lane] = 0;
+                    b_arr[lane] = 0;
+                } else {
+                    r_arr[lane] = fastScale255(r, factor);
+                    g_arr[lane] = fastScale255(g, factor);
+                    b_arr[lane] = fastScale255(b, factor);
+                }
+            }
+
+            const packed_pixels = packShiftedColorBatch(&alpha, &r_arr, &g_arr, &b_arr);
+            inline for (0..color_grade_simd_lanes) |lane| {
+                bloom.ping[dst_row + x + lane] = packed_pixels[lane];
+            }
+        }
+
         while (x < bloom.width) : (x += 1) {
             const sx = x << 2;
             var r_sum: u32 = 0;
@@ -1512,6 +1799,42 @@ fn blurBloomHorizontalRows(bloom: *BloomScratch, start_row: usize, end_row: usiz
         var g: i32 = @intCast(((p0 >> 8) & 0xFF) * 3 + ((p1 >> 8) & 0xFF) + ((p2 >> 8) & 0xFF));
         var b: i32 = @intCast((p0 & 0xFF) * 3 + (p1 & 0xFF) + (p2 & 0xFF));
         var x: usize = 0;
+        while (x + color_grade_simd_lanes <= bloom.width) : (x += color_grade_simd_lanes) {
+            var alpha: [color_grade_simd_lanes]u32 = undefined;
+            var r_arr: [color_grade_simd_lanes]u32 = undefined;
+            var g_arr: [color_grade_simd_lanes]u32 = undefined;
+            var b_arr: [color_grade_simd_lanes]u32 = undefined;
+            var lane_r = r;
+            var lane_g = g;
+            var lane_b = b;
+
+            inline for (0..color_grade_simd_lanes) |lane| {
+                alpha[lane] = 0xFF000000;
+                r_arr[lane] = averageBlur5(lane_r);
+                g_arr[lane] = averageBlur5(lane_g);
+                b_arr[lane] = averageBlur5(lane_b);
+
+                const cur_x = x + lane;
+                if (cur_x + 1 < bloom.width) {
+                    const remove_idx = if (cur_x >= 2) cur_x - 2 else 0;
+                    const add_idx = @min(bloom.width - 1, cur_x + 3);
+                    const remove_pixel = src_row[remove_idx];
+                    const add_pixel = src_row[add_idx];
+                    lane_r += @as(i32, @intCast((add_pixel >> 16) & 0xFF)) - @as(i32, @intCast((remove_pixel >> 16) & 0xFF));
+                    lane_g += @as(i32, @intCast((add_pixel >> 8) & 0xFF)) - @as(i32, @intCast((remove_pixel >> 8) & 0xFF));
+                    lane_b += @as(i32, @intCast(add_pixel & 0xFF)) - @as(i32, @intCast(remove_pixel & 0xFF));
+                }
+            }
+
+            const packed_pixels = packShiftedColorBatch(&alpha, &r_arr, &g_arr, &b_arr);
+            inline for (0..color_grade_simd_lanes) |lane| {
+                dst_row[x + lane] = packed_pixels[lane];
+            }
+            r = lane_r;
+            g = lane_g;
+            b = lane_b;
+        }
+
         while (x < bloom.width) : (x += 1) {
             dst_row[x] = 0xFF000000 |
                 (@as(u32, averageBlur5(r)) << 16) |
@@ -1549,6 +1872,42 @@ fn blurBloomVerticalRows(bloom: *BloomScratch, start_row: usize, end_row: usize)
         }
 
         var current_y = start_row;
+        while (current_y + color_grade_simd_lanes <= end_row) : (current_y += color_grade_simd_lanes) {
+            var alpha: [color_grade_simd_lanes]u32 = undefined;
+            var r_arr: [color_grade_simd_lanes]u32 = undefined;
+            var g_arr: [color_grade_simd_lanes]u32 = undefined;
+            var b_arr: [color_grade_simd_lanes]u32 = undefined;
+            var lane_r = r;
+            var lane_g = g;
+            var lane_b = b;
+
+            inline for (0..color_grade_simd_lanes) |lane| {
+                alpha[lane] = 0xFF000000;
+                r_arr[lane] = averageBlur5(lane_r);
+                g_arr[lane] = averageBlur5(lane_g);
+                b_arr[lane] = averageBlur5(lane_b);
+
+                const y_pos = current_y + lane;
+                if (y_pos + 1 < end_row) {
+                    const remove_idx = if (y_pos >= 2) y_pos - 2 else 0;
+                    const add_idx = @min(bloom.height - 1, y_pos + 3);
+                    const remove_pixel = bloom.pong[remove_idx * bloom.width + x];
+                    const add_pixel = bloom.pong[add_idx * bloom.width + x];
+                    lane_r += @as(i32, @intCast((add_pixel >> 16) & 0xFF)) - @as(i32, @intCast((remove_pixel >> 16) & 0xFF));
+                    lane_g += @as(i32, @intCast((add_pixel >> 8) & 0xFF)) - @as(i32, @intCast((remove_pixel >> 8) & 0xFF));
+                    lane_b += @as(i32, @intCast(add_pixel & 0xFF)) - @as(i32, @intCast(remove_pixel & 0xFF));
+                }
+            }
+
+            const packed_pixels = packShiftedColorBatch(&alpha, &r_arr, &g_arr, &b_arr);
+            inline for (0..color_grade_simd_lanes) |lane| {
+                bloom.ping[(current_y + lane) * bloom.width + x] = packed_pixels[lane];
+            }
+            r = lane_r;
+            g = lane_g;
+            b = lane_b;
+        }
+
         while (current_y < end_row) : (current_y += 1) {
             bloom.ping[current_y * bloom.width + x] = 0xFF000000 |
                 (@as(u32, averageBlur5(r)) << 16) |
@@ -1659,6 +2018,73 @@ fn renderAmbientOcclusionRows(
         const scene_y = @min(scene_height - 1, y * config_value.downsample + @as(usize, @intCast(half_step)));
         const dst_row = y * ao.width;
         var x: usize = 0;
+        while (x + color_grade_simd_lanes <= ao.width) : (x += color_grade_simd_lanes) {
+            var visibility_arr: [color_grade_simd_lanes]f32 = undefined;
+            var depth_arr: [color_grade_simd_lanes]f32 = undefined;
+
+            inline for (0..color_grade_simd_lanes) |lane| {
+                const scene_x = @min(scene_width - 1, (x + lane) * config_value.downsample + @as(usize, @intCast(half_step)));
+                const center = scene_camera[scene_y * scene_width + scene_x];
+                if (!validSceneCameraSample(center)) {
+                    visibility_arr[lane] = 1.0;
+                    depth_arr[lane] = std.math.inf(f32);
+                } else {
+                    depth_arr[lane] = center.z;
+                    const normal = estimateSceneNormal(
+                        scene_camera,
+                        scene_width,
+                        scene_height,
+                        center,
+                        @intCast(scene_x),
+                        @intCast(scene_y),
+                        sample_step,
+                    );
+
+                    var occlusion: f32 = 0.0;
+                    var sample_count: usize = 0;
+                    for (ao_sample_offsets) |offset| {
+                        const sample = sampleSceneCameraClamped(
+                            scene_camera,
+                            scene_width,
+                            scene_height,
+                            @as(i32, @intCast(scene_x)) + offset[0] * sample_step,
+                            @as(i32, @intCast(scene_y)) + offset[1] * sample_step,
+                        );
+                        if (!validSceneCameraSample(sample)) continue;
+
+                        const delta = math.Vec3.sub(sample, center);
+                        const distance_sq = math.Vec3.dot(delta, delta);
+                        if (distance_sq <= 1e-5 or distance_sq > radius_sq) continue;
+
+                        const distance = @sqrt(distance_sq);
+                        const ndot = math.Vec3.dot(normal, math.Vec3.scale(delta, 1.0 / distance)) - config_value.bias;
+                        if (ndot <= 0.0) continue;
+
+                        const range_weight = 1.0 - (distance_sq / radius_sq);
+                        occlusion += ndot * range_weight;
+                        sample_count += 1;
+                    }
+
+                    if (sample_count == 0) {
+                        visibility_arr[lane] = 1.0;
+                    } else {
+                        const normalized = occlusion / @as(f32, @floatFromInt(sample_count));
+                        visibility_arr[lane] = @max(0.0, 1.0 - @min(1.0, normalized * config_value.strength));
+                    }
+                }
+            }
+
+            const scale_vec: ShadowFloatVec = @as(ShadowFloatVec, @splat(255.0));
+            const bias_vec: ShadowFloatVec = @as(ShadowFloatVec, @splat(0.5));
+            const visibility_vec: ShadowFloatVec = @bitCast(visibility_arr);
+            const ping_i32: [color_grade_simd_lanes]i32 = @bitCast(@as(ShadowIntVec, @intFromFloat(visibility_vec * scale_vec + bias_vec)));
+            inline for (0..color_grade_simd_lanes) |lane| {
+                const dst_idx = dst_row + x + lane;
+                ao.ping[dst_idx] = @intCast(std.math.clamp(ping_i32[lane], 0, 255));
+                ao.depth[dst_idx] = depth_arr[lane];
+            }
+        }
+
         while (x < ao.width) : (x += 1) {
             const scene_x = @min(scene_width - 1, x * config_value.downsample + @as(usize, @intCast(half_step)));
             const dst_idx = dst_row + x;
@@ -1723,6 +2149,41 @@ fn blurAmbientOcclusionHorizontalRows(ao: *AOScratch, depth_threshold: f32, star
     while (y < end_row) : (y += 1) {
         const row_start = y * ao.width;
         var x: usize = 0;
+        while (x + color_grade_simd_lanes <= ao.width) : (x += color_grade_simd_lanes) {
+            var out_arr: [color_grade_simd_lanes]u8 = undefined;
+
+            inline for (0..color_grade_simd_lanes) |lane| {
+                const lane_x = x + lane;
+                const idx = row_start + lane_x;
+                const center_depth = ao.depth[idx];
+                if (!std.math.isFinite(center_depth)) {
+                    out_arr[lane] = 255;
+                } else {
+                    var sum: u32 = 0;
+                    var weight_sum: u32 = 0;
+                    var tap: usize = 0;
+                    while (tap < weights.len) : (tap += 1) {
+                        const offset: i32 = @intCast(tap);
+                        const sample_x: usize = @intCast(@min(
+                            @as(i32, @intCast(ao.width - 1)),
+                            @max(0, @as(i32, @intCast(lane_x)) + offset - 2),
+                        ));
+                        const sample_idx = row_start + sample_x;
+                        const sample_depth = ao.depth[sample_idx];
+                        if (!std.math.isFinite(sample_depth) or @abs(sample_depth - center_depth) > depth_threshold) continue;
+                        sum += @as(u32, ao.ping[sample_idx]) * weights[tap];
+                        weight_sum += weights[tap];
+                    }
+
+                    out_arr[lane] = if (weight_sum == 0) ao.ping[idx] else @intCast(@divTrunc(sum + (weight_sum / 2), weight_sum));
+                }
+            }
+
+            inline for (0..color_grade_simd_lanes) |lane| {
+                ao.pong[row_start + x + lane] = out_arr[lane];
+            }
+        }
+
         while (x < ao.width) : (x += 1) {
             const idx = row_start + x;
             const center_depth = ao.depth[idx];
@@ -1758,6 +2219,40 @@ fn blurAmbientOcclusionVerticalRows(ao: *AOScratch, depth_threshold: f32, start_
     while (y < end_row) : (y += 1) {
         const row_start = y * ao.width;
         var x: usize = 0;
+        while (x + color_grade_simd_lanes <= ao.width) : (x += color_grade_simd_lanes) {
+            var out_arr: [color_grade_simd_lanes]u8 = undefined;
+
+            inline for (0..color_grade_simd_lanes) |lane| {
+                const idx = row_start + x + lane;
+                const center_depth = ao.depth[idx];
+                if (!std.math.isFinite(center_depth)) {
+                    out_arr[lane] = 255;
+                } else {
+                    var sum: u32 = 0;
+                    var weight_sum: u32 = 0;
+                    var tap: usize = 0;
+                    while (tap < weights.len) : (tap += 1) {
+                        const offset: i32 = @intCast(tap);
+                        const sample_y: usize = @intCast(@min(
+                            @as(i32, @intCast(ao.height - 1)),
+                            @max(0, @as(i32, @intCast(y)) + offset - 2),
+                        ));
+                        const sample_idx = sample_y * ao.width + x + lane;
+                        const sample_depth = ao.depth[sample_idx];
+                        if (!std.math.isFinite(sample_depth) or @abs(sample_depth - center_depth) > depth_threshold) continue;
+                        sum += @as(u32, ao.pong[sample_idx]) * weights[tap];
+                        weight_sum += weights[tap];
+                    }
+
+                    out_arr[lane] = if (weight_sum == 0) ao.pong[idx] else @intCast(@divTrunc(sum + (weight_sum / 2), weight_sum));
+                }
+            }
+
+            inline for (0..color_grade_simd_lanes) |lane| {
+                ao.ping[row_start + x + lane] = out_arr[lane];
+            }
+        }
+
         while (x < ao.width) : (x += 1) {
             const idx = row_start + x;
             const center_depth = ao.depth[idx];
@@ -1823,6 +2318,31 @@ fn compositeAmbientOcclusionRows(
     while (y < end_row) : (y += 1) {
         const row_start = y * dst_width;
         var x: usize = 0;
+        while (x + color_grade_simd_lanes <= dst_width) : (x += color_grade_simd_lanes) {
+            var current_pixels: [color_grade_simd_lanes]u32 = undefined;
+            var black_colors: [color_grade_simd_lanes][3]f32 = undefined;
+            var history_weights: [color_grade_simd_lanes]f32 = undefined;
+
+            inline for (0..color_grade_simd_lanes) |lane| {
+                const idx = row_start + x + lane;
+                current_pixels[lane] = dst[idx];
+                black_colors[lane] = .{ 0.0, 0.0, 0.0 };
+                history_weights[lane] = 0.0;
+
+                if (validSceneCameraSample(scene_camera[idx])) {
+                    const visibility = sampleAmbientOcclusionVisibility(ao, dst_width, dst_height, x + lane, y);
+                    if (visibility < 0.999) {
+                        history_weights[lane] = 1.0 - visibility;
+                    }
+                }
+            }
+
+            const blended = blendTemporalColorBatch(&current_pixels, &black_colors, &history_weights);
+            inline for (0..color_grade_simd_lanes) |lane| {
+                dst[row_start + x + lane] = blended[lane];
+            }
+        }
+
         while (x < dst_width) : (x += 1) {
             const idx = row_start + x;
             if (!validSceneCameraSample(scene_camera[idx])) continue;
@@ -2492,6 +3012,40 @@ fn applyDepthFogRows(
         const row_start = y * width;
         const row_end = row_start + width;
         var idx = row_start;
+        const fog_rgb = [3]f32{
+            @floatFromInt(fog.color_r),
+            @floatFromInt(fog.color_g),
+            @floatFromInt(fog.color_b),
+        };
+        while (idx + color_grade_simd_lanes <= row_end) : (idx += color_grade_simd_lanes) {
+            var current_pixels: [color_grade_simd_lanes]u32 = undefined;
+            var history_colors: [color_grade_simd_lanes][3]f32 = undefined;
+            var history_weights: [color_grade_simd_lanes]f32 = undefined;
+
+            inline for (0..color_grade_simd_lanes) |lane| {
+                const lane_idx = idx + lane;
+                current_pixels[lane] = pixels[lane_idx];
+                history_colors[lane] = fog_rgb;
+                history_weights[lane] = 0.0;
+
+                const depth = depth_buffer[lane_idx];
+                if (std.math.isFinite(depth) and depth > fog.near) {
+                    const normalized = std.math.clamp((depth - fog.near) * fog.inv_range, 0.0, 1.0);
+                    if (normalized > 0.0) {
+                        const factor = normalized * fog.strength;
+                        if (factor > 0.001) {
+                            history_weights[lane] = factor;
+                        }
+                    }
+                }
+            }
+
+            const blended = blendTemporalColorBatch(&current_pixels, &history_colors, &history_weights);
+            inline for (0..color_grade_simd_lanes) |lane| {
+                pixels[idx + lane] = blended[lane];
+            }
+        }
+
         while (idx < row_end) : (idx += 1) {
             const depth = depth_buffer[idx];
             if (!std.math.isFinite(depth) or depth <= fog.near) continue;
@@ -6120,6 +6674,54 @@ pub const Renderer = struct {
             const camera_y = ndc_y / ctx.projection.y_scale;
 
             var x: usize = 0;
+            while (x + color_grade_simd_lanes <= width) : (x += color_grade_simd_lanes) {
+                var alpha: [color_grade_simd_lanes]u32 = undefined;
+                var r_arr: [color_grade_simd_lanes]u32 = undefined;
+                var g_arr: [color_grade_simd_lanes]u32 = undefined;
+                var b_arr: [color_grade_simd_lanes]u32 = undefined;
+
+                inline for (0..color_grade_simd_lanes) |lane| {
+                    const idx = y * width + x + lane;
+                    const current_pixel = ctx.renderer.bitmap.pixels[idx];
+                    alpha[lane] = 0xFF000000;
+
+                    if (ctx.renderer.scene_depth[idx] < std.math.inf(f32)) {
+                        r_arr[lane] = (current_pixel >> 16) & 0xFF;
+                        g_arr[lane] = (current_pixel >> 8) & 0xFF;
+                        b_arr[lane] = current_pixel & 0xFF;
+                    } else {
+                        const px_f = @as(f32, @floatFromInt(x + lane));
+                        const ndc_x = (px_f - center_x) / center_x;
+                        const camera_x = ndc_x / ctx.projection.x_scale;
+
+                        const dir_local = math.Vec3.normalize(math.Vec3.new(camera_x, camera_y, 1.0));
+                        const right_term = math.Vec3.scale(ctx.right, dir_local.x);
+                        const up_term = math.Vec3.scale(ctx.up, dir_local.y);
+                        const fwd_term = math.Vec3.scale(ctx.forward, dir_local.z);
+                        const dir_world = math.Vec3.normalize(math.Vec3.add(right_term, math.Vec3.add(up_term, fwd_term)));
+                        const hdr_color = ctx.hdri_map.sampleEquirectangularFast(dir_world);
+
+                        const exposure: f32 = 2.5;
+                        const r_ldr = (hdr_color.x * exposure) / (1.0 + (hdr_color.x * exposure));
+                        const g_ldr = (hdr_color.y * exposure) / (1.0 + (hdr_color.y * exposure));
+                        const b_ldr = (hdr_color.z * exposure) / (1.0 + (hdr_color.z * exposure));
+
+                        const r_gamma = std.math.sqrt(r_ldr);
+                        const g_gamma = std.math.sqrt(g_ldr);
+                        const b_gamma = std.math.sqrt(b_ldr);
+
+                        r_arr[lane] = @as(u32, @intFromFloat(std.math.clamp(r_gamma * 255.0, 0.0, 255.0)));
+                        g_arr[lane] = @as(u32, @intFromFloat(std.math.clamp(g_gamma * 255.0, 0.0, 255.0)));
+                        b_arr[lane] = @as(u32, @intFromFloat(std.math.clamp(b_gamma * 255.0, 0.0, 255.0)));
+                    }
+                }
+
+                const packed_pixels = packShiftedColorBatch(&alpha, &r_arr, &g_arr, &b_arr);
+                inline for (0..color_grade_simd_lanes) |lane| {
+                    ctx.renderer.bitmap.pixels[y * width + x + lane] = packed_pixels[lane];
+                }
+            }
+
             while (x < width) : (x += 1) {
                 const idx = y * width + x;
 
@@ -6485,6 +7087,11 @@ pub const Renderer = struct {
             const row_start = y * width;
             var x: usize = 0;
             while (x < width) : (x += 1) {
+                if (tryApplyTemporalAAMeshletBatch(self, mesh, current_view, previous_view, row_start, x, y, width, height)) {
+                    x += color_grade_simd_lanes - 1;
+                    continue;
+                }
+
                 const idx = row_start + x;
                 const current_pixel = self.bitmap.pixels[idx];
                 self.taa_scratch.resolve_pixels[idx] = current_pixel;
@@ -6784,6 +7391,59 @@ pub const Renderer = struct {
         while (y < end_row) : (y += 1) {
             const row_start = y * width;
             var x: usize = 0;
+            while (x + color_grade_simd_lanes <= width) : (x += color_grade_simd_lanes) {
+                var current_pixels: [color_grade_simd_lanes]u32 = undefined;
+                var add_r_arr: [color_grade_simd_lanes]f32 = undefined;
+                var add_g_arr: [color_grade_simd_lanes]f32 = undefined;
+                var add_b_arr: [color_grade_simd_lanes]f32 = undefined;
+
+                inline for (0..color_grade_simd_lanes) |lane| {
+                    const idx = row_start + x + lane;
+                    const original_px = self.bitmap.pixels[idx];
+                    current_pixels[lane] = original_px;
+
+                    const delta_x = (@as(f32, @floatFromInt(x + lane)) - light_screen_pos.x);
+                    const delta_y = (@as(f32, @floatFromInt(y)) - light_screen_pos.y);
+                    const vec_x = delta_x * density / @as(f32, @floatFromInt(samples));
+                    const vec_y = delta_y * density / @as(f32, @floatFromInt(samples));
+
+                    var r_sum: f32 = 0;
+                    var g_sum: f32 = 0;
+                    var b_sum: f32 = 0;
+                    var illumination_decay: f32 = 1.0;
+                    var cur_x = @as(f32, @floatFromInt(x + lane));
+                    var cur_y = @as(f32, @floatFromInt(y));
+
+                    var s: i32 = 0;
+                    while (s < samples) : (s += 1) {
+                        cur_x -= vec_x;
+                        cur_y -= vec_y;
+
+                        const sx = @as(i32, @intFromFloat(cur_x));
+                        const sy = @as(i32, @intFromFloat(cur_y));
+
+                        if (sx >= 0 and sx < @as(i32, @intCast(width)) and sy >= 0 and sy < @as(i32, @intCast(height))) {
+                            const s_idx = @as(usize, @intCast(sy)) * width + @as(usize, @intCast(sx));
+                            const px = self.bitmap.pixels[s_idx];
+                            r_sum += @as(f32, @floatFromInt((px >> 16) & 0xFF)) * illumination_decay * weight;
+                            g_sum += @as(f32, @floatFromInt((px >> 8) & 0xFF)) * illumination_decay * weight;
+                            b_sum += @as(f32, @floatFromInt(px & 0xFF)) * illumination_decay * weight;
+                        }
+
+                        illumination_decay *= decay;
+                    }
+
+                    add_r_arr[lane] = r_sum * exposure;
+                    add_g_arr[lane] = g_sum * exposure;
+                    add_b_arr[lane] = b_sum * exposure;
+                }
+
+                const blended = addPackedColorBatch(&current_pixels, &add_r_arr, &add_g_arr, &add_b_arr);
+                inline for (0..color_grade_simd_lanes) |lane| {
+                    self.god_rays_scratch_pixels[row_start + x + lane] = blended[lane];
+                }
+            }
+
             while (x < width) : (x += 1) {
                 const idx = row_start + x;
                 const original_px = self.bitmap.pixels[idx];
@@ -6891,6 +7551,54 @@ pub const Renderer = struct {
         while (y < end_row) : (y += 1) {
             const row_start = y * width;
             var x: usize = 0;
+            while (x + color_grade_simd_lanes <= width) : (x += color_grade_simd_lanes) {
+                var current_pixels: [color_grade_simd_lanes]u32 = undefined;
+                var add_r_arr: [color_grade_simd_lanes]f32 = undefined;
+                var add_g_arr: [color_grade_simd_lanes]f32 = undefined;
+                var add_b_arr: [color_grade_simd_lanes]f32 = undefined;
+
+                inline for (0..color_grade_simd_lanes) |lane| {
+                    const idx = row_start + x + lane;
+                    current_pixels[lane] = self.bitmap.pixels[idx];
+                    add_r_arr[lane] = 0.0;
+                    add_g_arr[lane] = 0.0;
+                    add_b_arr[lane] = 0.0;
+
+                    const signed_x = @as(i32, @intCast(x + lane));
+                    const min_sx = @max(0, signed_x - 60);
+                    const max_sx = @min(@as(i32, @intCast(width)) - 1, signed_x + 60);
+
+                    var s_x: i32 = min_sx;
+                    if (@rem((s_x - (signed_x - 60)), @as(i32, 4)) != 0) {
+                        s_x += @as(i32, 4) - @rem((s_x - (signed_x - 60)), @as(i32, 4));
+                    }
+                    while (s_x <= max_sx) : (s_x += 4) {
+                        const s_idx = y * width + @as(usize, @intCast(s_x));
+                        const px = self.bitmap.pixels[s_idx];
+                        const pr = @as(i32, @intCast((px >> 16) & 0xFF));
+                        const pg = @as(i32, @intCast((px >> 8) & 0xFF));
+                        const pb = @as(i32, @intCast(px & 0xFF));
+
+                        const lumen = @divTrunc(pr * 299 + pg * 587 + pb * 114, 1000);
+                        if (lumen > threshold) {
+                            const dist = @abs(s_x - signed_x);
+                            const falloff = 1.0 - (@as(f32, @floatFromInt(dist)) * 0.0166666);
+                            const base_w = falloff * 0.1 * intensity;
+                            const factor_r = base_w * (if (pr > pb) @as(f32, 1.2) else 0.5);
+
+                            add_r_arr[lane] += @as(f32, @floatFromInt(pr)) * factor_r;
+                            add_g_arr[lane] += @as(f32, @floatFromInt(pg)) * base_w * 0.8;
+                            add_b_arr[lane] += @as(f32, @floatFromInt(pb)) * base_w * 1.5;
+                        }
+                    }
+                }
+
+                const blended = addPackedColorBatch(&current_pixels, &add_r_arr, &add_g_arr, &add_b_arr);
+                inline for (0..color_grade_simd_lanes) |lane| {
+                    self.lens_flare_scratch_pixels[row_start + x + lane] = blended[lane];
+                }
+            }
+
             while (x < width) : (x += 1) {
                 const idx = row_start + x;
                 const current_px = self.bitmap.pixels[idx];
@@ -6998,6 +7706,37 @@ pub const Renderer = struct {
         while (y < end_row) : (y += 1) {
             const row_start = y * width;
             var x: usize = 0;
+            while (x + color_grade_simd_lanes <= width) : (x += color_grade_simd_lanes) {
+                var alpha: [color_grade_simd_lanes]u32 = undefined;
+                var r_arr: [color_grade_simd_lanes]u32 = undefined;
+                var g_arr: [color_grade_simd_lanes]u32 = undefined;
+                var b_arr: [color_grade_simd_lanes]u32 = undefined;
+
+                inline for (0..color_grade_simd_lanes) |lane| {
+                    const idx = row_start + x + lane;
+                    const dx = (@as(f32, @floatFromInt(x + lane)) - cx) / cx;
+                    const dy = (@as(f32, @floatFromInt(y)) - cy) / cy;
+                    const dist = dx * dx + dy * dy;
+                    const shift = dist * strong;
+                    const r_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(x + lane)) + shift));
+                    const b_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(x + lane)) - shift));
+                    const safe_r_x = @max(0, @min(@as(i32, @intCast(width)) - 1, r_x));
+                    const safe_b_x = @max(0, @min(@as(i32, @intCast(width)) - 1, b_x));
+                    const px_r = self.bitmap.pixels[y * width + @as(usize, @intCast(safe_r_x))];
+                    const px_g = self.bitmap.pixels[idx];
+                    const px_b = self.bitmap.pixels[y * width + @as(usize, @intCast(safe_b_x))];
+                    alpha[lane] = 0xFF000000;
+                    r_arr[lane] = (px_r >> 16) & 0xFF;
+                    g_arr[lane] = (px_g >> 8) & 0xFF;
+                    b_arr[lane] = px_b & 0xFF;
+                }
+
+                const packed_pixels = packShiftedColorBatch(&alpha, &r_arr, &g_arr, &b_arr);
+                inline for (0..color_grade_simd_lanes) |lane| {
+                    self.moblur_scratch_pixels[row_start + x + lane] = packed_pixels[lane];
+                }
+            }
+
             while (x < width) : (x += 1) {
                 const idx = row_start + x;
 
@@ -7084,6 +7823,36 @@ pub const Renderer = struct {
         while (y < end_row) : (y += 1) {
             const row_start = y * width;
             var x: usize = 0;
+            while (x + color_grade_simd_lanes <= width) : (x += color_grade_simd_lanes) {
+                var current_pixels: [color_grade_simd_lanes]u32 = undefined;
+                var black_colors: [color_grade_simd_lanes][3]f32 = undefined;
+                var history_weights: [color_grade_simd_lanes]f32 = undefined;
+
+                inline for (0..color_grade_simd_lanes) |lane| {
+                    current_pixels[lane] = self.bitmap.pixels[row_start + x + lane];
+                    black_colors[lane] = .{ 0.0, 0.0, 0.0 };
+
+                    const dx = (@as(f32, @floatFromInt(x + lane)) - cx) / cx;
+                    const dy = (@as(f32, @floatFromInt(y)) - cy) / cy;
+                    const dist = @sqrt(dx * dx + dy * dy);
+                    const vig_factor = 1.0 - @max(0, @min(1.0, dist * vig_str));
+
+                    var hash = (@as(u32, @intCast(x + lane)) *% 73856093) ^ (@as(u32, @intCast(y)) *% 19349663) ^ (seed *% 83492791);
+                    hash = (hash ^ (hash >> 16)) *% 2654435769;
+                    hash = hash ^ (hash >> 16);
+
+                    const noise = (@as(f32, @floatFromInt(hash & 0xFF)) / 255.0) - 0.5;
+                    const grain_factor = 1.0 + (noise * grain_str);
+                    const final_factor = std.math.clamp(vig_factor * grain_factor, 0.0, 1.0);
+                    history_weights[lane] = 1.0 - final_factor;
+                }
+
+                const blended = blendTemporalColorBatch(&current_pixels, &black_colors, &history_weights);
+                inline for (0..color_grade_simd_lanes) |lane| {
+                    self.bitmap.pixels[row_start + x + lane] = blended[lane];
+                }
+            }
+
             while (x < width) : (x += 1) {
                 const idx = row_start + x;
                 const px = self.bitmap.pixels[idx];
@@ -7190,6 +7959,85 @@ pub const Renderer = struct {
         while (y < end_row) : (y += 1) {
             const row_start = y * width;
             var x: usize = 0;
+            while (x + color_grade_simd_lanes <= width) : (x += color_grade_simd_lanes) {
+                var current_pixels: [color_grade_simd_lanes]u32 = undefined;
+                var add_r_arr: [color_grade_simd_lanes]f32 = undefined;
+                var add_g_arr: [color_grade_simd_lanes]f32 = undefined;
+                var add_b_arr: [color_grade_simd_lanes]f32 = undefined;
+
+                inline for (0..color_grade_simd_lanes) |lane| {
+                    const idx = row_start + x + lane;
+                    const current_pixel = self.bitmap.pixels[idx];
+                    current_pixels[lane] = current_pixel;
+                    self.moblur_scratch_pixels[idx] = current_pixel;
+                    add_r_arr[lane] = 0.0;
+                    add_g_arr[lane] = 0.0;
+                    add_b_arr[lane] = 0.0;
+
+                    const current_camera = self.scene_camera[idx];
+                    if (validSceneCameraSample(current_camera)) {
+                        const world_pos = cameraToWorldPosition(
+                            current_view.camera_position,
+                            current_view.basis_right,
+                            current_view.basis_up,
+                            current_view.basis_forward,
+                            current_camera,
+                        );
+
+                        const previous_relative = math.Vec3.sub(world_pos, previous_view.camera_position);
+                        const previous_camera = math.Vec3.new(
+                            math.Vec3.dot(previous_relative, previous_view.basis_right),
+                            math.Vec3.dot(previous_relative, previous_view.basis_up),
+                            math.Vec3.dot(previous_relative, previous_view.basis_forward),
+                        );
+                        if (previous_camera.z > previous_view.projection.near_plane + NEAR_EPSILON) {
+                            const previous_screen_raw = projectCameraPositionFloat(previous_camera, previous_view.projection);
+                            const vec_x = previous_screen_raw.x - @as(f32, @floatFromInt(x + lane));
+                            const vec_y = previous_screen_raw.y - @as(f32, @floatFromInt(y));
+
+                            const vel_mag_sq = vec_x * vec_x + vec_y * vec_y;
+                            if (vel_mag_sq >= 0.25) {
+                                var r_sum: f32 = @as(f32, @floatFromInt((current_pixel >> 16) & 0xFF));
+                                var g_sum: f32 = @as(f32, @floatFromInt((current_pixel >> 8) & 0xFF));
+                                var b_sum: f32 = @as(f32, @floatFromInt(current_pixel & 0xFF));
+
+                                var s: i32 = 1;
+                                while (s <= samples) : (s += 1) {
+                                    const t = @as(f32, @floatFromInt(s)) / @as(f32, @floatFromInt(samples + 1));
+
+                                    const p_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(x + lane)) + vec_x * t * intensity));
+                                    const p_y = @as(i32, @intFromFloat(@as(f32, @floatFromInt(y)) + vec_y * t * intensity));
+
+                                    if (p_x >= 0 and p_x < @as(i32, @intCast(width)) and p_y >= 0 and p_y < @as(i32, @intCast(height))) {
+                                        const s_idx = @as(usize, @intCast(p_y)) * width + @as(usize, @intCast(p_x));
+                                        const sample_px = self.bitmap.pixels[s_idx];
+                                        r_sum += @as(f32, @floatFromInt((sample_px >> 16) & 0xFF));
+                                        g_sum += @as(f32, @floatFromInt((sample_px >> 8) & 0xFF));
+                                        b_sum += @as(f32, @floatFromInt(sample_px & 0xFF));
+                                    } else {
+                                        r_sum += @as(f32, @floatFromInt((current_pixel >> 16) & 0xFF));
+                                        g_sum += @as(f32, @floatFromInt((current_pixel >> 8) & 0xFF));
+                                        b_sum += @as(f32, @floatFromInt(current_pixel & 0xFF));
+                                    }
+                                }
+
+                                const current_r = @as(f32, @floatFromInt((current_pixel >> 16) & 0xFF));
+                                const current_g = @as(f32, @floatFromInt((current_pixel >> 8) & 0xFF));
+                                const current_b = @as(f32, @floatFromInt(current_pixel & 0xFF));
+                                add_r_arr[lane] = (r_sum * inv_samples_plus_one) - current_r;
+                                add_g_arr[lane] = (g_sum * inv_samples_plus_one) - current_g;
+                                add_b_arr[lane] = (b_sum * inv_samples_plus_one) - current_b;
+                            }
+                        }
+                    }
+                }
+
+                const blurred = addPackedColorBatch(&current_pixels, &add_r_arr, &add_g_arr, &add_b_arr);
+                inline for (0..color_grade_simd_lanes) |lane| {
+                    self.moblur_scratch_pixels[row_start + x + lane] = blurred[lane];
+                }
+            }
+
             while (x < width) : (x += 1) {
                 const idx = row_start + x;
                 const current_pixel = self.bitmap.pixels[idx];
