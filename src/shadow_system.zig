@@ -52,6 +52,8 @@ pub const BLASNode = struct {
 pub const ShadowMeshlet = struct {
     bound_sphere: BoundingSphere,
     bound_aabb: AABB,
+    normal_cone_axis: math.Vec3,
+    normal_cone_cutoff: f32,
     triangle_offset: u32,
     triangle_count: u16,
     micro_bvh_offset: u32,
@@ -72,6 +74,8 @@ pub const RayPacket = struct {
     dirs_x: [64]f32,
     dirs_y: [64]f32,
     dirs_z: [64]f32,
+    shared_dir: math.Vec3,
+    shared_inv_dir: math.Vec3,
     skip_triangle_ids: [64]u32,
     active_mask: u64,
     occluded_mask: u64,
@@ -159,6 +163,8 @@ pub const ShadowSystem = struct {
             try self.shadow_meshlets.append(self.allocator, .{
                 .bound_sphere = .{ .center = m.bounds_center, .radius = m.bounds_radius },
                 .bound_aabb = aabb,
+                .normal_cone_axis = m.normal_cone_axis,
+                .normal_cone_cutoff = m.normal_cone_cutoff,
                 .triangle_offset = triangle_offset,
                 .triangle_count = triangle_count,
                 .micro_bvh_offset = 0,
@@ -275,8 +281,24 @@ pub const ShadowSystem = struct {
         return t > epsilon;
     }
 
+    fn intersectSphere(sphere: BoundingSphere, origin: math.Vec3, dir: math.Vec3) bool {
+        const center_offset = math.Vec3.sub(sphere.center, origin);
+        const t_ca = math.Vec3.dot(center_offset, dir);
+        if (t_ca + sphere.radius < 0.0) return false;
+
+        const distance_sq = math.Vec3.dot(center_offset, center_offset) - t_ca * t_ca;
+        const radius_sq = sphere.radius * sphere.radius;
+        return distance_sq <= radius_sq;
+    }
+
     fn meshletOccludesRay(self: *const ShadowSystem, meshlet_index: u32, origin: math.Vec3, dir: math.Vec3, skip_triangle_id: u32) bool {
         const shadow_meshlet = self.shadow_meshlets.items[meshlet_index];
+        if (shadow_meshlet.normal_cone_cutoff > -1.0) {
+            const cone_sine = @sqrt(@max(0.0, 1.0 - shadow_meshlet.normal_cone_cutoff * shadow_meshlet.normal_cone_cutoff));
+            if (math.Vec3.dot(shadow_meshlet.normal_cone_axis, dir) < -cone_sine) return false;
+        }
+        if (!intersectSphere(shadow_meshlet.bound_sphere, origin, dir)) return false;
+
         const triangle_start = @as(usize, @intCast(shadow_meshlet.triangle_offset));
         const triangle_end = triangle_start + @as(usize, @intCast(shadow_meshlet.triangle_count));
         if (triangle_end > self.shadow_triangles.items.len) return false;
@@ -290,22 +312,22 @@ pub const ShadowSystem = struct {
     }
 
     pub fn tracePacketAnyHit(self: *ShadowSystem, packet: *RayPacket) void {
-        var ray_idx: usize = 0;
-        while (ray_idx < 64) : (ray_idx += 1) {
+        const dir = packet.shared_dir;
+        const inv_dir = packet.shared_inv_dir;
+        var remaining_mask = packet.active_mask & ~packet.occluded_mask;
+
+        while (remaining_mask != 0) {
+            const ray_idx: usize = @ctz(remaining_mask);
             const ray_bit = @as(u64, 1) << @intCast(ray_idx);
-            if ((packet.active_mask & ray_bit) == 0) continue;
-            if ((packet.occluded_mask & ray_bit) != 0) continue;
+            remaining_mask &= ~ray_bit;
 
             const origin = math.Vec3.new(packet.origins_x[ray_idx], packet.origins_y[ray_idx], packet.origins_z[ray_idx]);
-            const dir = math.Vec3.new(packet.dirs_x[ray_idx], packet.dirs_y[ray_idx], packet.dirs_z[ray_idx]);
             const skip_triangle_id = packet.skip_triangle_ids[ray_idx];
-            const origin_biased = math.Vec3.add(origin, math.Vec3.scale(dir, 0.01));
-            const inv_dir = math.Vec3.new(if (@abs(dir.x) < 1e-6) (if (dir.x < 0) @as(f32, -1e6) else @as(f32, 1e6)) else 1.0 / dir.x, if (@abs(dir.y) < 1e-6) (if (dir.y < 0) @as(f32, -1e6) else @as(f32, 1e6)) else 1.0 / dir.y, if (@abs(dir.z) < 1e-6) (if (dir.z < 0) @as(f32, -1e6) else @as(f32, 1e6)) else 1.0 / dir.z);
 
             // Traverse TLAS -> BLAS
             if (self.tlas_nodes.items.len > 0) {
                 const root_tlas = &self.tlas_nodes.items[0];
-                if (intersectAABB(root_tlas.aabb, origin_biased, inv_dir)) {
+                if (intersectAABB(root_tlas.aabb, origin, inv_dir)) {
                     // Start BLAS traversal from index 0
                     if (self.blas_nodes.items.len > 0) {
                         var stack: [64]u32 = undefined;
@@ -318,9 +340,9 @@ pub const ShadowSystem = struct {
                             const node_idx = stack[stack_ptr];
                             const node = &self.blas_nodes.items[node_idx];
 
-                            if (intersectAABB(node.aabb, origin_biased, inv_dir)) {
+                            if (intersectAABB(node.aabb, origin, inv_dir)) {
                                 if (node.is_leaf) {
-                                    if (self.meshletOccludesRay(node.left_child_or_meshlet, origin_biased, dir, skip_triangle_id)) {
+                                    if (self.meshletOccludesRay(node.left_child_or_meshlet, origin, dir, skip_triangle_id)) {
                                         packet.occluded_mask |= ray_bit;
                                         break;
                                     }

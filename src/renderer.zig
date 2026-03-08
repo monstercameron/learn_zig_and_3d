@@ -980,7 +980,11 @@ const ReprojectedHistorySample = struct {
 };
 
 fn taaJitterForFrame(frame_index: u64) math.Vec2 {
-    return taa_jitter_sequence[@as(usize, @intCast(frame_index % taa_jitter_sequence.len))];
+    const sample = taa_jitter_sequence[@as(usize, @intCast(frame_index % taa_jitter_sequence.len))];
+    return .{
+        .x = sample.x * 0.15,
+        .y = sample.y * 0.35,
+    };
 }
 
 fn projectCameraPositionFloat(position: math.Vec3, projection: ProjectionParams) math.Vec2 {
@@ -1245,6 +1249,17 @@ fn blendTemporalColor(current_pixel: u32, history_color: [3]f32, history_weight:
         (@as(u32, clampByte(out_r)) << 16) |
         (@as(u32, clampByte(out_g)) << 8) |
         @as(u32, clampByte(out_b));
+}
+
+fn pixelLuma(pixel: u32) f32 {
+    const r = @as(f32, @floatFromInt((pixel >> 16) & 0xFF));
+    const g = @as(f32, @floatFromInt((pixel >> 8) & 0xFF));
+    const b = @as(f32, @floatFromInt(pixel & 0xFF));
+    return (r * 0.299) + (g * 0.587) + (b * 0.114);
+}
+
+fn colorLuma(color: [3]f32) f32 {
+    return (color[0] * 0.299) + (color[1] * 0.587) + (color[2] * 0.114);
 }
 
 fn rayIntersectsSphere(origin: math.Vec3, direction: math.Vec3, center: math.Vec3, radius: f32) bool {
@@ -2970,7 +2985,7 @@ pub const Renderer = struct {
         for (0..2) |light_idx| {
             const sm_depth = try allocator.alloc(f32, config.POST_SHADOW_MAP_SIZE * config.POST_SHADOW_MAP_SIZE);
             errdefer allocator.free(sm_depth);
-            try lights.append(allocator, LightInfo{ .orbit_x = @as(f32, @floatFromInt(light_idx)) * 3.14159, .orbit_speed = 0.5 + @as(f32, @floatFromInt(light_idx)) * 0.2, .distance = config.LIGHT_DISTANCE_INITIAL, .elevation = 0.65, .color = if (light_idx == 0) math.Vec3.new(1.0, 0.9, 0.8) else math.Vec3.new(0.5, 0.6, 1.0), .shadow_map = .{
+            try lights.append(allocator, LightInfo{ .orbit_x = @as(f32, @floatFromInt(light_idx)) * 3.14159, .orbit_speed = 0.0, .distance = config.LIGHT_DISTANCE_INITIAL, .elevation = 0.65, .color = if (light_idx == 0) math.Vec3.new(1.0, 0.9, 0.8) else math.Vec3.new(0.5, 0.6, 1.0), .shadow_map = .{
                 .width = config.POST_SHADOW_MAP_SIZE,
                 .height = config.POST_SHADOW_MAP_SIZE,
                 .depth = sm_depth,
@@ -3486,12 +3501,19 @@ pub const Renderer = struct {
                     .dirs_x = undefined,
                     .dirs_y = undefined,
                     .dirs_z = undefined,
+                    .shared_dir = undefined,
+                    .shared_inv_dir = undefined,
                     .skip_triangle_ids = undefined,
                     .active_mask = 0,
                     .occluded_mask = 0,
                 };
 
                 const ray_dir = math.Vec3.normalize(job.light_direction);
+                const ray_inv_dir = math.Vec3.new(
+                    if (@abs(ray_dir.x) < 1e-6) (if (ray_dir.x < 0.0) @as(f32, -1e6) else @as(f32, 1e6)) else 1.0 / ray_dir.x,
+                    if (@abs(ray_dir.y) < 1e-6) (if (ray_dir.y < 0.0) @as(f32, -1e6) else @as(f32, 1e6)) else 1.0 / ray_dir.y,
+                    if (@abs(ray_dir.z) < 1e-6) (if (ray_dir.z < 0.0) @as(f32, -1e6) else @as(f32, 1e6)) else 1.0 / ray_dir.z,
+                );
                 const light_dir_camera = math.Vec3.normalize(math.Vec3.new(
                     math.Vec3.dot(ray_dir, job.cam_right),
                     math.Vec3.dot(ray_dir, job.cam_up),
@@ -3502,6 +3524,8 @@ pub const Renderer = struct {
                 while (pixel_idx < total_pixels) {
                     packet.active_mask = 0;
                     packet.occluded_mask = 0;
+                    packet.shared_dir = ray_dir;
+                    packet.shared_inv_dir = ray_inv_dir;
 
                     const batch_size = @min(64, total_pixels - pixel_idx);
                     for (0..batch_size) |i| {
@@ -6545,7 +6569,8 @@ pub const Renderer = struct {
                 const previous_normal = sampleHistoryNormalNearest(self.taa_scratch.history_normals, width, height, previous_sample.screen) orelse math.Vec3.new(0.0, 0.0, 0.0);
 
                 var identity_factor: f32 = if (previous_sample.used_surface_path) 0.35 else 0.2;
-                if (current_tag != invalid_surface_tag and previous_tag != invalid_surface_tag and surfaceTagMeshletId(previous_tag) == current_surface.meshlet_id) {
+                const same_meshlet_history = current_tag != invalid_surface_tag and previous_tag != invalid_surface_tag and surfaceTagMeshletId(previous_tag) == current_surface.meshlet_id;
+                if (same_meshlet_history) {
                     identity_factor = 0.6;
                 }
                 const normal_alignment = math.Vec3.dot(current_normal, previous_normal);
@@ -6555,23 +6580,46 @@ pub const Renderer = struct {
                     0.0
                 else
                     std.math.clamp((normal_alignment - 0.5) * 2.0, 0.0, 1.0);
-                if (normal_factor <= 0.0) continue;
-
                 const edge_factor = surfaceHistoryEdgeFactor(self.scene_surface, width, height, x, y);
                 const confidence = identity_factor * depth_factor * normal_factor * edge_factor;
-                if (confidence <= 0.05) continue;
-
-                const clamped_history = clampHistoryToSurfaceNeighborhood(
-                    self.bitmap.pixels,
-                    self.scene_surface,
-                    self.scene_normal,
-                    width,
-                    height,
-                    x,
-                    y,
-                    history_color,
-                );
-                const history_weight = std.math.clamp(self.temporal_aa_config.history_weight * confidence * 0.9, 0.0, self.temporal_aa_config.history_weight);
+                const fallback_history_weight = if (previous_sample.used_surface_path)
+                    self.temporal_aa_config.history_weight * 0.04 * depth_factor * edge_factor
+                else if (previous_tag != invalid_surface_tag or same_meshlet_history)
+                    self.temporal_aa_config.history_weight * 0.025 * depth_factor * edge_factor
+                else
+                    self.temporal_aa_config.history_weight * 0.015 * depth_factor * edge_factor;
+                const clamped_history = if (current_surface.isValid() or previous_tag != invalid_surface_tag)
+                    clampHistoryToSurfaceNeighborhood(
+                        self.bitmap.pixels,
+                        self.scene_surface,
+                        self.scene_normal,
+                        width,
+                        height,
+                        x,
+                        y,
+                        history_color,
+                    )
+                else
+                    clampHistoryToNeighborhood(
+                        self.bitmap.pixels,
+                        width,
+                        height,
+                        x,
+                        y,
+                        history_color,
+                    );
+                const current_luma = pixelLuma(current_pixel);
+                const history_luma = colorLuma(clamped_history);
+                const luma_delta = @abs(history_luma - current_luma) / 255.0;
+                const shadow_darkening = std.math.clamp((history_luma - current_luma - 10.0) / 72.0, 0.0, 1.0);
+                const luminance_factor = 1.0 - (std.math.clamp((luma_delta - 0.06) / 0.24, 0.0, 1.0) * 0.85);
+                const shadow_factor = 1.0 - (shadow_darkening * 0.9);
+                const history_weight = std.math.clamp(
+                    @max(self.temporal_aa_config.history_weight * confidence * 0.9, fallback_history_weight),
+                    0.0,
+                    self.temporal_aa_config.history_weight,
+                ) * luminance_factor * shadow_factor;
+                if (history_weight <= 0.0) continue;
                 self.taa_scratch.resolve_pixels[idx] = blendTemporalColor(current_pixel, clamped_history, history_weight);
             }
         }
@@ -7701,10 +7749,14 @@ pub const Renderer = struct {
 
             for (pass_order[0..self.render_pass_count]) |pass_idx| {
                 const pass = self.render_pass_timings[pass_idx];
-                const line = if (pass.has_sample)
-                    std.fmt.bufPrint(&line_buffer, "{s}: {d:.2} ms/frame", .{ pass.name, pass.sampled_ms_per_frame }) catch continue
+                const display_name = if (config.POST_TAA_ENABLED and std.mem.eql(u8, pass.name, "taa"))
+                    "meshlet_taa"
                 else
-                    std.fmt.bufPrint(&line_buffer, "{s}: sampling...", .{pass.name}) catch continue;
+                    pass.name;
+                const line = if (pass.has_sample)
+                    std.fmt.bufPrint(&line_buffer, "{s}: {d:.2} ms/frame", .{ display_name, pass.sampled_ms_per_frame }) catch continue
+                else
+                    std.fmt.bufPrint(&line_buffer, "{s}: sampling...", .{display_name}) catch continue;
                 self.drawOverlayTextLine(hdc_mem, 12, y, line);
                 y += 16;
             }
