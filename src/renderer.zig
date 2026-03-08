@@ -2403,6 +2403,7 @@ extern "gdi32" fn SetTextColor(hdc: windows.HDC, color: u32) u32;
 extern "gdi32" fn TextOutW(hdc: windows.HDC, x: i32, y: i32, lpString: [*]const u16, c: i32) bool;
 extern "user32" fn SetWindowTextW(hWnd: windows.HWND, lpString: [*:0]const u16) bool;
 extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
+extern "dwmapi" fn DwmFlush() callconv(.winapi) windows.HRESULT;
 
 // ========== MODULE IMPORTS ==========
 const Bitmap = @import("bitmap.zig").Bitmap;
@@ -3284,6 +3285,7 @@ pub const Renderer = struct {
     bitmap: Bitmap, // The main pixel buffer we draw into (our "canvas").
     hdc: ?windows.HDC, // The window's "device context" for drawing.
     hdc_mem: ?windows.HDC, // An in-memory device context for faster drawing operations.
+    hdc_mem_old_bitmap: ?HGDIOBJ,
     allocator: std.mem.Allocator,
 
     // Camera and object state
@@ -3307,6 +3309,7 @@ pub const Renderer = struct {
     total_frames_rendered: u64,
     last_time: i128,
     last_frame_time: i128,
+    next_frame_time: i128,
     current_fps: u32,
     target_frame_time_ns: i128,
     pending_fov_delta: f32,
@@ -3425,6 +3428,7 @@ pub const Renderer = struct {
         };
 
         const bitmap = try Bitmap.init(width, height);
+        const hdc_mem_old_bitmap = SelectObject(hdc_mem, bitmap.hbitmap);
         const current_time = std.time.nanoTimestamp();
         const tile_grid = try TileGrid.init(width, height, allocator);
 
@@ -3595,6 +3599,7 @@ pub const Renderer = struct {
             .bitmap = bitmap,
             .hdc = hdc,
             .hdc_mem = hdc_mem,
+            .hdc_mem_old_bitmap = hdc_mem_old_bitmap,
             .allocator = allocator,
             .rotation_angle = 0,
             .rotation_x = 0,
@@ -3612,6 +3617,7 @@ pub const Renderer = struct {
             .total_frames_rendered = 0,
             .last_time = current_time,
             .last_frame_time = current_time,
+            .next_frame_time = current_time,
             .current_fps = 0,
             .target_frame_time_ns = config.targetFrameTimeNs(),
             .last_brightness_min = 0,
@@ -3840,7 +3846,12 @@ pub const Renderer = struct {
         }
         if (self.tile_grid) |*grid| grid.deinit();
         self.bitmap.deinit();
-        if (self.hdc_mem) |hdc_mem| _ = DeleteDC(hdc_mem);
+        if (self.hdc_mem) |hdc_mem| {
+            if (self.hdc_mem_old_bitmap) |old_bitmap| {
+                _ = SelectObject(hdc_mem, old_bitmap);
+            }
+            _ = DeleteDC(hdc_mem);
+        }
         if (self.hdc) |hdc| _ = ReleaseDC(self.hwnd, hdc);
     }
 
@@ -5412,7 +5423,31 @@ pub const Renderer = struct {
     pub fn shouldRenderFrame(self: *Renderer) bool {
         if (self.target_frame_time_ns <= 0) return true;
         const now = std.time.nanoTimestamp();
-        return now - self.last_frame_time >= self.target_frame_time_ns;
+        return now >= self.next_frame_time;
+    }
+
+    pub fn waitUntilNextFrame(self: *Renderer) void {
+        if (self.target_frame_time_ns <= 0) return;
+
+        while (true) {
+            const now = std.time.nanoTimestamp();
+            const remaining_ns = self.next_frame_time - now;
+            if (remaining_ns <= 0) return;
+
+            if (remaining_ns > 2_000_000) {
+                const sleep_ns = remaining_ns - 500_000;
+                const sleep_ms = @max(@as(i128, 1), @divTrunc(sleep_ns, 1_000_000));
+                Sleep(@intCast(sleep_ms));
+                continue;
+            }
+
+            if (remaining_ns > 250_000) {
+                std.Thread.yield() catch {};
+                continue;
+            }
+
+            std.atomic.spinLoopHint();
+        }
     }
 
     pub fn handleCharInput(self: *Renderer, char_code: u32) void {
@@ -5723,6 +5758,9 @@ pub const Renderer = struct {
         self.maybeEmitSingleFrameProfile();
         const current_time = std.time.nanoTimestamp();
         self.finalizeFrame(current_time);
+        if (self.target_frame_time_ns > 0) {
+            self.next_frame_time = current_time + self.target_frame_time_ns;
+        }
 
         renderer_logger.debugSub(
             "frame",
@@ -8526,8 +8564,6 @@ pub const Renderer = struct {
     fn drawBitmap(self: *Renderer) void {
         if (self.hdc) |hdc| {
             if (self.hdc_mem) |hdc_mem| {
-                const old_bitmap = SelectObject(hdc_mem, self.bitmap.hbitmap);
-                defer _ = SelectObject(hdc_mem, old_bitmap);
                 if (self.show_render_overlay or self.hybrid_shadow_debug.enabled) {
                     self.drawRenderPassOverlay(hdc_mem);
                 }
@@ -8560,6 +8596,10 @@ pub const Renderer = struct {
                         0,
                         SRCCOPY,
                     );
+                }
+
+                if (config.WINDOW_VSYNC) {
+                    _ = DwmFlush();
                 }
             }
         }

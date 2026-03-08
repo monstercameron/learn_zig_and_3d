@@ -34,6 +34,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("gdi32"); // For graphics device interface functions
     exe.linkSystemLibrary("kernel32"); // For kernel functions
     exe.linkSystemLibrary("winmm"); // For timer resolution control
+    exe.linkSystemLibrary("dwmapi"); // For compositor-backed frame pacing
     exe.root_module.addImport("zphysics", zphysics_dep.module("root"));
     exe.linkLibrary(zphysics_dep.artifact("joltc"));
 

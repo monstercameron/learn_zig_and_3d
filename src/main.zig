@@ -378,7 +378,7 @@ pub fn main() !void {
         // Check if it's time to render a new frame, based on our target FPS.
 
         if (!renderer.shouldRenderFrame()) {
-            Sleep(1);
+            renderer.waitUntilNextFrame();
             continue;
         }
 
