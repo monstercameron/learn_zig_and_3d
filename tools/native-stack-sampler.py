@@ -387,7 +387,7 @@ def sample_process(pid, duration_s=1.0, interval_s=0.01):
 
 def main():
     if len(sys.argv) < 2:
-        print("usage: native_stack_sampler.py <pid> [duration_seconds]\n   or: native_stack_sampler.py --launch <exe> [warmup_seconds] [duration_seconds]", file=sys.stderr)
+        print("usage: native-stack-sampler.py <pid> [duration_seconds]\n   or: native-stack-sampler.py --launch <exe> [warmup_seconds] [duration_seconds]", file=sys.stderr)
         raise SystemExit(2)
 
     launched = None

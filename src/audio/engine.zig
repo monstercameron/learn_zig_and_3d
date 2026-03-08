@@ -16,7 +16,7 @@ const AudioCommand = union(enum) {
     },
     stop: struct { id: u64 },
     pause: struct { id: u64 },
-    resume: struct { id: u64 },
+    resume_playback: struct { id: u64 },
     set_volume: struct { id: u64, volume: f32 },
     set_pitch: struct { id: u64, pitch: f32 },
     set_speed: struct { id: u64, speed: f32 },
@@ -358,8 +358,8 @@ pub const AudioEngine = struct {
         _ = self.command_queue.enqueue(.{ .pause = .{ .id = handle.id } });
     }
 
-    pub fn resume(self: *AudioEngine, handle: audio_api.PlaybackHandle) void {
-        _ = self.command_queue.enqueue(.{ .resume = .{ .id = handle.id } });
+    pub fn resumePlayback(self: *AudioEngine, handle: audio_api.PlaybackHandle) void {
+        _ = self.command_queue.enqueue(.{ .resume_playback = .{ .id = handle.id } });
     }
 
     pub fn setVolume(self: *AudioEngine, handle: audio_api.PlaybackHandle, volume: f32) void {
@@ -415,7 +415,7 @@ pub const AudioEngine = struct {
                         }
                     }
                 },
-                .resume => |r| {
+                .resume_playback => |r| {
                     for (self.voices) |*voice| {
                         if (voice.playback_handle_id == r.id) {
                             voice.paused = false;

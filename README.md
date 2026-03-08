@@ -1,179 +1,214 @@
-# Zig 3D CPU Rasterizer
+# learn_zig_and_3d
 
-![Vibecoding](vibecoding.jpg)
+A Windows-native 3D renderer written in Zig, built around CPU rasterization, tile-based work distribution, meshlet experiments, runtime SIMD dispatch, and a small rigid-body scene driven by zphysics.
 
-A high-performance, CPU-based 3D rasterizer built from scratch in Zig. This project showcases advanced rendering techniques, including a multi-threaded, tile-based pipeline, real-time lighting, texture mapping, and interactive controls. It serves as a comprehensive example of systems programming in Zig for graphics applications.
+![Renderer screenshot](docs/assets/images/renderer-screenshot.png)
 
-## Key Features
+![Vibecoding board](docs/assets/images/vibecoding-board.jpg)
 
-*   **Advanced Rendering Pipeline**: A complete 3D rendering pipeline, from model loading to final image composition, including a deferred rendering path.
-*   **Multi-threaded Rendering**: Utilizes a custom-built, work-stealing job system to parallelize the rendering workload across multiple CPU cores, significantly boosting performance.
-*   **Tile-Based Architecture**: The screen is divided into a grid of tiles that are rendered independently, improving cache locality. Future iterations plan to transition to a meshlet-based compute approach.
-*   **Render Passes (In Progress)**: The pipeline represents a modern deferred shading architecture featuring multiple full-screen and compute kernels:
-    *   **G-Buffer Pass**: Captures albedo, normals, and depth.
-    *   **Deferred Lighting**: Computes complex lighting based on G-Buffer data.
-    *   **Post-Processing**: Includes kernels for Bloom, Screen Space Ambient Occlusion (SSAO), Depth of Field (DoF), and Tonemapping.
-    *   **Shadow Render Pass (WIP)**: Currently implementing a dedicated shadow mapping pass to generate dynamic shadows based on directional and point light sources.
-*   **Real-time Lighting and Shading**: Implements dynamic light sources that can be manipulated interactively.
-*   **Texture Mapping**: Supports textured models, with correct perspective-aware texture coordinate interpolation.
-*   **Model Loading**: Loads 3D models from the Wavefront `.obj` file format and handles complex mesh structures.
-*   **Interactive Controls**: Full real-time control over the camera and light source position.
-*   **Debug Visualizations**: Includes optional overlays for wireframe rendering, tile boundaries, and depth/normal visualizations to help debug the rendering process.
+## Overview
 
-## The Rendering Pipeline
+This repository is a hands-on graphics playground. It mixes engine work, rendering experiments, profiling tools, and asset-loading code in one place so you can iterate quickly on rendering ideas without hiding the low-level details.
 
-The renderer processes 3D scenes through a sophisticated, multi-stage pipeline designed for performance and parallelism.
+The current app is a Win32 desktop executable that:
 
-1.  **Vertex Transformation**: 3D model vertices are transformed from model space into world space and then into camera space using matrix transformations.
-2.  **Perspective Projection**: The 3D camera-space coordinates are projected into 2D screen-space coordinates, creating the illusion of depth.
-3.  **Backface Culling**: Triangles that are facing away from the camera are culled early in the pipeline to avoid unnecessary processing.
-4.  **Triangle Binning**: Each triangle is assigned to one or more screen-space tiles that it overlaps. This "binning" process creates a list of triangles for each tile to render.
-5.  **Parallel Tile Rendering**: The core of the rendering process. The job system dispatches rendering jobs for each tile to a pool of worker threads. Each thread independently rasterizes, shades, and textures the triangles in its assigned tiles.
-6.  **Rasterization**: For each triangle, the scanline algorithm is used to determine which pixels to fill.
-7.  **Shading and Texturing**: The color of each pixel is calculated based on the lighting conditions and the model's texture.
-8.  **Compositing**: Once all tiles are rendered, they are composited together into the final framebuffer, which is then displayed on the screen.
+- loads a GLB revolver scene, with an OBJ fallback path
+- renders through a CPU-driven pipeline with tiled work scheduling
+- supports post-processing and shadow-system experiments
+- uses runtime CPU feature detection for scalar, SSE2, AVX2, and newer paths where implemented
+- simulates the on-screen model as a physics body through zphysics/Jolt
 
-## Architecture
+## Quick Start
 
-The project is designed with a modular architecture, where each component has a single, well-defined responsibility.
+Requirements:
 
-*   **`main.zig`**: The application's entry point. It initializes the window, renderer, and job system, and runs the main event loop.
-*   **`renderer.zig`**: The central orchestrator of the rendering process. It manages the rendering pipeline, handles user input, and coordinates the other rendering-related modules.
-*   **`job_system.zig`**: A general-purpose, work-stealing job system that enables parallel execution of tasks. It is used to parallelize the tile rendering stage.
-*   **`tile_renderer.zig`**: Contains the logic for tile-based rendering, including the data structures for tiles and tile grids.
-*   **`binning_stage.zig`**: Implements the triangle binning logic, which is a crucial step in the tile-based rendering pipeline.
-*   **`mesh.zig` & `obj_loader.zig`**: Handle the data structures for 3D models and the logic for loading them from `.obj` files.
-*   **`texture.zig` & `bitmap.zig`**: Manage texture and image data, including loading and sampling.
-*   **`math.zig`**: A comprehensive 3D math library with support for vectors, matrices, and transformations.
-*   **`window.zig`**: Abstracts the platform-specific window creation and management logic.
+- Windows
+- Zig 0.15.x
 
-## Running The Program
-
-For a normal optimized run:
+Common commands:
 
 ```powershell
+zig build run
 zig build run -Doptimize=ReleaseFast
+zig build check
+zig build validate
+zig build benchmarks
+zig build hotreload-demo
 ```
 
-To build first and launch the executable manually:
+`zig build validate` covers the renderer, benchmarks, and the hot reload experiment.
+
+For direct binary launches after a build:
 
 ```powershell
-zig build -Doptimize=ReleaseFast
 .\zig-out\bin\zig-windows-app.exe
+```
+
+## Highlights
+
+- CPU-first renderer written from scratch in Zig
+- custom job system for parallel frame work
+- tile-based rendering path with meshlet-oriented experiments
+- runtime SIMD backend selection
+- directional lighting, HDRI support, textures, and post-processing passes
+- profiling support for exact frame-pass timings and stack sampling
+- small experiments folder for focused renderer-side prototypes
+
+## Render Pass Architecture
+
+This is the same pipeline from `src/renderer.zig`, but grouped so the frame flow is easier to scan.
+
+```mermaid
+flowchart LR
+	A[Frame start] --> B[Update camera and frame view]
+	B --> C[mesh_work_update]
+	C --> D{Shadow maps}
+	D -->|on| E[buildShadowMap per light]
+	D -->|off| F{Scene path}
+	E --> F
+
+	F -->|tiled| G[renderTiled<br/>meshlet_tiled + meshlet_shadows]
+	F -->|direct| H[renderDirect<br/>meshlet_direct]
+	G --> I[Post dispatcher]
+	H --> I
+
+	subgraph P[Optional post stack]
+		direction LR
+		P1[skybox]
+		P2[shadow resolve + hybrid shadow]
+		P3[ssao + ssgi + ssr + depth fog]
+		P4[taa + motion blur]
+		P5[god rays + bloom + lens flare + dof]
+		P6[chromatic aberration + film grain vignette + color grade]
+		P1 --> P2 --> P3 --> P4 --> P5 --> P6
+	end
+
+	I --> P1
+	P6 --> Q[Light markers and present]
+```
+
+## Current Controls
+
+These controls reflect the current code, not an older design:
+
+- `W`, `A`, `S`, `D`: move the camera on the horizontal plane
+- `Space`: move the camera up
+- `Ctrl`: move the camera down
+- Arrow keys: rotate camera yaw and pitch
+- Mouse movement: look around
+- `Q` / `E`: adjust field of view
+- `P`: toggle the render overlay
+- `H`: toggle hybrid-shadow debug stepping
+- `N`: advance one hybrid-shadow debug step when debug stepping is enabled
+- `Enter`: trigger the physics-driven jump on the on-screen model
+- `Esc`: quit
+
+## Build And Run
+
+The root build script is the main entry point for the renderer and convenience steps for related subprojects.
+
+Main commands:
+
+```powershell
+zig build run
+zig build -Doptimize=ReleaseFast
+zig build check
+zig build validate
+zig build benchmarks
+zig build run-benchmarks
+zig build hotreload-demo
 ```
 
 Useful build flags:
 
-*   **`-Doptimize=ReleaseFast`**: Best default for real performance testing and general use.
-*   **`-Doptimize=Debug`**: Use when investigating crashes or logic bugs.
-*   **`-Dprofile=true`**: Keeps frame pointers enabled for stack sampling and profiling tools.
-*   **`-Dcpu=...`**: Forces a CPU target. Only use this if the machine you are running on actually supports that ISA level.
+- `-Doptimize=Debug`: easier debugging
+- `-Doptimize=ReleaseFast`: best default for runtime testing
+- `-Dprofile=true`: keeps frame pointers for native sampling tools
+- `-Dcpu=...`: force a target CPU level when you intentionally want a narrower binary target
 
 Examples:
 
 ```powershell
-zig build run -Doptimize=ReleaseFast -Dprofile=true
+zig build -Doptimize=ReleaseFast -Dprofile=true
 zig build -Dcpu=x86_64_v4 -Doptimize=ReleaseFast
 ```
 
-CPU-target note:
+## Profiling
 
-*   The renderer already does runtime ISA detection and chooses between scalar, SSE2, AVX2, and AVX-512-capable code paths where those runtime-dispatched paths exist.
-*   A forced CPU target like **`-Dcpu=x86_64_v4`** raises the minimum CPU requirement of the binary. That is useful for AVX-512-class hardware, but it will fail to run on AVX2-only machines.
-*   If you want one broadly runnable local build, prefer the default build command without a forced `-Dcpu` override.
+The project already includes two useful profiling paths:
+
+- exact per-pass frame timing from the renderer
+- native call-stack sampling through `tools/native-stack-sampler.py`
+
+Quick examples:
+
+```powershell
+$env:ZIG_RENDER_PROFILE_FRAME = '120'
+zig build -Doptimize=ReleaseFast -Dprofile=true
+.\zig-out\bin\zig-windows-app.exe
+```
+
+```powershell
+python tools\native-stack-sampler.py --launch zig-out\bin\zig-windows-app.exe 12 1
+```
 
 Useful runtime environment variables:
 
-```powershell
-$env:ZIG_RENDER_TTL_SECONDS = '3'
-$env:ZIG_RENDER_PROFILE_FRAME = '120'
+- `ZIG_RENDER_PROFILE_FRAME`: dump exact timings for one frame
+- `ZIG_RENDER_TTL_SECONDS`: auto-exit after a short smoke-test run
+
+For the full workflow, see `docs/performance-profiling.md`.
+
+## Project Layout
+
+- `src/`: main renderer, platform code, physics hookup, kernels, and core systems
+- `resources/`: models, textures, HDRI assets, and runtime config
+- `docs/`: architecture, profiling notes, specs, and project planning
+- `benchmarks/`: focused math and rendering microbenchmarks
+- `experiments/`: isolated feature spikes such as hot reload workflows
+- `tools/`: profiling helpers and utility scripts
+
+Repository map:
+
+```text
+.
+|- build.zig              # root build entry point
+|- build.zig.zon          # external dependency manifest
+|- src/                   # engine and renderer code
+|- resources/             # runtime assets and settings
+|- docs/                  # design notes, specs, and profiling guides
+|- benchmarks/            # standalone benchmark suite
+|- experiments/           # isolated prototype projects
+`- tools/                 # scripts used during development and profiling
 ```
 
-*   **`ZIG_RENDER_TTL_SECONDS`**: Auto-exits the app after a short run, useful for smoke tests.
-*   **`ZIG_RENDER_PROFILE_FRAME`**: Emits exact per-pass timings for the selected frame.
+Additional folder guides:
 
-## Rendering Pipeline Diagram
+- `docs/README.md`
+- `benchmarks/README.md`
+- `experiments/README.md`
+- `tools/README.md`
+- `CONTRIBUTING.md`
 
-```mermaid
-flowchart TD
-    subgraph "Main Thread - Frame Setup"
-        direction LR
-        A[Input: Scene Data] --> B(Stage 1: Vertex Transform & Culling);
-        B -- Transformed Vertices --> C(Stage 2: Tile Binning/Meshlet Setup);
-        C -- Geometry Data --> D{Dispatch Render Passes};
-    end
+## Notable Engine Pieces
 
-    subgraph "Worker Threads - Render Passes"
-        direction TB
-        D -.-> SP(Shadow Render Pass WIP)
-        D -.-> GB(G-Buffer Pass)
-        
-        SP -.-> |Shadow Mappings| DL
-        GB -.-> |Albedo, Normal, Depth| DL(Deferred Lighting Pass)
-        
-        DL -.-> PP(Post-Processing Kernels<br>Bloom, SSAO, DoF)
-    end
+- `src/main.zig`: app bootstrap, message loop, physics step, and scene wiring
+- `src/renderer.zig`: camera, frame orchestration, tiled rendering, lighting, and post-processing control
+- `src/job_system.zig`: worker-thread scheduling
+- `src/shadow_system.zig`: shadow acceleration and reuse logic
+- `src/tile_renderer.zig`: tile-local raster and buffers
+- `src/meshlet_builder.zig` and related files: meshlet generation and caching work
 
-    subgraph "Main Thread - Frame Finalization"
-        direction LR
-        I{Wait for Passes to Complete};
-        PP -.-> I;
-        I -- Output Buffers --> J(Tonemapping & Compositing);
-        J --> K[Present to Screen];
-    end
-```
+## Status
 
-## Architecture Diagram
+This is an active learning-and-engineering repository, not a polished engine release. Expect experiments, profiling artifacts, feature spikes, and rapid iteration.
 
-```mermaid
-graph TD
-    subgraph "Entry Point"
-        main["main.zig"];
-    end
+## Development Notes
 
-    subgraph "Core Engine"
-        renderer["renderer.zig"];
-    end
-
-    subgraph "Major Systems"
-        job_system["job_system.zig"];
-        pipeline["binning_stage.zig &<br>tile_renderer.zig"];
-        assets["obj_loader.zig &<br>texture.zig"];
-    end
-
-    subgraph "Low-Level Libraries"
-        math["math.zig"];
-        platform["window.zig &<br>input.zig"];
-        data["mesh.zig &<br>bitmap.zig"];
-    end
-
-    main --> renderer;
-    
-    renderer --> job_system;
-    renderer --> pipeline;
-    renderer --> assets;
-    
-    renderer --> math;
-    renderer --> platform;
-    renderer --> data;
-```
-
-## Controls
-
-*   **Arrow Keys**: Rotate the model.
-*   **WASD Keys**: Orbit the light source around the model.
-*   **Q/E Keys**: Adjust the camera's field of view (FOV).
-
-## Future Goals
-
-While the rasterizer is fully functional and features many advanced rendering techniques, there are ongoing areas of development:
-
-*   **Shadow Render Pass**: Completing the in-progress dynamic shadow pass (shadow mapping) for full integration into the deferred lighting pipeline.
-*   **Meshlet Compute Pipeline**: Transitioning fully to a GPU-style, compute-based meshlet rendering architecture, replacing or supplementing the tile-based rasterizer.
-*   **Advanced Shading Models**: Implement physically based rendering (PBR) shading models for more realistic lighting and material interaction.
-*   **Performance Optimizations**: Further optimize the rendering pipeline using SIMD-accelerated math kernels, and advanced culling techniques (i.e., frustum/occlusion culling on meshlets).
-*   **Cross-Platform Support**: Port the windowing and input handling logic to other OS targets beyond Windows.
+- Core source uses the existing Zig-first layout under `src/`; this repo reorg keeps runtime code paths stable and improves the surrounding structure rather than shuffling engine modules needlessly.
+- Generated outputs, caches, and local profiling artifacts are expected to stay out of git.
+- External dependency resolution currently relies on `build.zig.zon` for `zphysics`.
 
 ## License
 
-This project is open source and available under the MIT License.
+No standalone license file is currently present in the repository root.

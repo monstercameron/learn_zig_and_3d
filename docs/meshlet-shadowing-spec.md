@@ -1,5 +1,16 @@
 # Meshlet-First Packet Shadowing Spec
 
+This file is a design sketch for a future-facing shadow path. It describes the intended packet-oriented meshlet shadowing model and the supporting data structures, not a promise that the entire flow is active in the renderer today.
+
+## Overview
+
+The core idea is to keep shadowing aligned with the meshlet-first direction of the renderer:
+
+- use meshlets as the coarse shadow work unit
+- keep BVH traversal packet-friendly
+- stage tile-local shading work in batches instead of tracing one pixel at a time
+- preserve early-out opportunities when a full packet becomes occluded
+
 ## 1. Data Structures
 
 ```zig
@@ -51,7 +62,7 @@ pub const ShadowTriangle = struct {
 };
 ```
 
-## 2. Frame Graph & Job Flow
+## 2. Frame Graph And Job Flow
 
 1.  **Main Rasterization**: Generate G-Buffer (Depth, Normals, Albedo, etc.) as usual.
 2.  **TLAS Update Job**: Rebuild or refit the Top-Level Acceleration Structure over all visible/shadow-casting instances.
@@ -103,3 +114,8 @@ fn processTileShadows(tile: *Tile, tlas: *TLAS, directional_light: Light) void {
     accumulateLighting(tile, ray_packet.shadow_factors);
 }
 ```
+
+## Notes
+
+- This spec is most useful when working on `src/shadow_system.zig`, meshlet shadow traversal, or packet-oriented lighting experiments.
+- If the live renderer diverges from this document, the code is authoritative and this file should be updated rather than treated as ground truth.

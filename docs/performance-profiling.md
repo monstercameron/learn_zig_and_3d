@@ -1,11 +1,12 @@
 # Performance Profiling
 
-This project has two built-in profiling paths:
+This repository has three useful profiling paths that work together:
 
 1. Exact per-pass timings from the renderer.
-2. Native call-stack sampling from `tools/native_stack_sampler.py`.
+2. Native call-stack sampling from `tools/native-stack-sampler.py`.
+3. Chrome trace capture through `profile.json`.
 
-Use both for performance reviews. The pass timings tell you which render pass is slow. The stack sampler tells you where the CPU is spending time inside that pass.
+Use the pass timings to find the slow stage, the stack sampler to find the hot code inside that stage, and the trace file when you need a broader frame view.
 
 ## 1. Build For Profiling
 
@@ -61,20 +62,20 @@ Clear the variable after use if needed:
 Remove-Item Env:ZIG_RENDER_PROFILE_FRAME
 ```
 
-## 3. Call-Stack Sampling
+## 3. Native Call-Stack Sampling
 
-Use the local sampler in `tools/native_stack_sampler.py`.
+Use the local sampler in `tools/native-stack-sampler.py`.
 
 Sample a running process:
 
 ```powershell
-python tools\native_stack_sampler.py <pid> 1
+python tools\native-stack-sampler.py <pid> 1
 ```
 
 Launch, warm up, sample for one second, then terminate automatically:
 
 ```powershell
-python tools\native_stack_sampler.py --launch zig-out\bin\zig-windows-app.exe 12 1
+python tools\native-stack-sampler.py --launch zig-out\bin\zig-windows-app.exe 12 1
 ```
 
 When launched through the local profiling tools, the renderer also gets a wall-clock TTL through `ZIG_RENDER_TTL_SECONDS` so it closes itself automatically instead of leaving a window open.
@@ -84,7 +85,7 @@ Recommended combined workflow:
 ```powershell
 zig build -Dprofile=true
 $env:ZIG_RENDER_PROFILE_FRAME = '120'
-python tools\native_stack_sampler.py --launch zig-out\bin\zig-windows-app.exe 12 1
+python tools\native-stack-sampler.py --launch zig-out\bin\zig-windows-app.exe 12 1
 ```
 
 That gives you:
@@ -123,8 +124,9 @@ For any serious performance review:
 
 If a change affects image quality, capture a screenshot before and after profiling. Performance-only changes are not enough if they break shadow edges, SSAO, textures, or model loading.
 
-## 7. Chrome Tracing Profiler
-There is a custom Chrome Tracing-compatible, thread-safe profiler built into the engine right now. It generates a `profile.json` that you can drag and drop into `chrome://tracing` or [Perfetto](https://ui.perfetto.dev/).
+## 7. Chrome Trace Capture
+
+The engine also has a built-in Chrome trace-compatible profiler. It writes `profile.json`, which you can open in `chrome://tracing` or [Perfetto](https://ui.perfetto.dev/).
 
 To generate the Chrome Trace, compile and run with the environment variable `ZIG_RENDER_PROFILE_FRAME` set:
 
@@ -133,4 +135,6 @@ $env:ZIG_RENDER_PROFILE_FRAME = '120'
 zig build run -Doptimize=ReleaseFast
 ```
 
-This will run the trace starting on frame 119 and stop on frame 120, logging output to `profile.json` in the workspace root. You can wrap `profiler.zone("YourFunctionName");` around any function or block for fine-grained stack visibility.
+This capture starts just before the requested frame and writes `profile.json` in the workspace root.
+
+Use `profiler.zone("YourFunctionName")` around specific functions or blocks when you need finer-grained trace visibility.

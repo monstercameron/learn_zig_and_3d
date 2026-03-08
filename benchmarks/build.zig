@@ -16,6 +16,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const cpu_features_module = b.createModule(.{
+        .root_source_file = b.path("../src/cpu_features.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const lighting_module = b.createModule(.{
         .root_source_file = b.path("../src/lighting.zig"),
         .target = target,
@@ -28,6 +34,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    lighting_module.addImport("cpu_features.zig", cpu_features_module);
+    lighting_module.addImport("math.zig", math_module);
     mesh_module.addImport("math.zig", math_module);
 
     root_module.addImport("math3d", math_module);

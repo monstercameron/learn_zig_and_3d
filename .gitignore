@@ -1,11 +1,31 @@
 # Zig build artifacts
+.zigcache/
+.zig-cache/
 zig-cache/
 zig-out/
+**/.zigcache/
+**/.zig-cache/
+**/zig-out/
 
 # Build directories
 build/
 dist/
 target/
+
+# Runtime caches and generated outputs
+cache/
+*.meshlets
+profile.json
+
+# Python environments and caches
+.venv/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Benchmark scratch files
+benchmarks/src/*.tmp
 
 # IDE and editor files
 .vscode/
@@ -20,9 +40,3 @@ Thumbs.db
 .directory
 
 # Dependencies
-.zig-cache/*
-zig-out/*
-benchmarks/.zig-cache/*
-experiments/hotreload_demo/.zig-cache/*
-experiments/play_mp3/.zig-cache/*
-*/.zig-cache/*

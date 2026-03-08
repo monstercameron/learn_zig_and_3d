@@ -106,9 +106,9 @@ pub fn pause(handle: PlaybackHandle) void {
     }
 }
 
-pub fn resume(handle: PlaybackHandle) void {
+pub fn resumePlayback(handle: PlaybackHandle) void {
     if (g_audio_engine) |*audio_engine| {
-        audio_engine.resume(handle);
+        audio_engine.resumePlayback(handle);
     }
 }
 

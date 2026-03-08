@@ -1,0 +1,18 @@
+* text=auto
+
+*.zig text eol=lf
+*.zon text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.py text eol=lf
+*.ps1 text eol=crlf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.bmp binary
+*.exr binary
+*.mp3 binary
+*.glb binary
+*.dll binary
+*.exe binary

@@ -41,6 +41,12 @@ pub fn build(b: *std.Build) void {
     // Install the executable so it can be run with 'zig build run'
     b.installArtifact(exe);
 
+    const check_step = b.step("check", "Compile the main renderer without running it");
+    check_step.dependOn(&exe.step);
+
+    const validate_step = b.step("validate", "Build the main app and supported subprojects");
+    validate_step.dependOn(check_step);
+
     // Add a run step
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -52,21 +58,16 @@ pub fn build(b: *std.Build) void {
     const benchmarks_build_cmd = b.addSystemCommand(&[_][]const u8{ "zig", "build" });
     benchmarks_build_cmd.cwd = b.path("benchmarks");
     benchmarks_step.dependOn(&benchmarks_build_cmd.step);
+    validate_step.dependOn(&benchmarks_build_cmd.step);
 
     const run_benchmarks_step = b.step("run-benchmarks", "Run the math benchmarks");
     const benchmarks_run_cmd = b.addSystemCommand(&[_][]const u8{ "zig", "build", "run" });
     benchmarks_run_cmd.cwd = b.path("benchmarks");
     run_benchmarks_step.dependOn(&benchmarks_run_cmd.step);
 
-    // --- MP3 Experiment Runner ---
-    // This step delegates the build to the experiment's own build script.
-    const play_mp3_step = b.step("play-mp3", "Run the MP3 playback experiment");
-
-    const play_mp3_cmd = b.addSystemCommand(&[_][]const u8{
-        "zig",
-        "build",
-        "run",
-    });
-    play_mp3_cmd.cwd = b.path("experiments/play_mp3");
-    play_mp3_step.dependOn(&play_mp3_cmd.step);
+    const hotreload_demo_step = b.step("hotreload-demo", "Build the hot reload experiment");
+    const hotreload_demo_cmd = b.addSystemCommand(&[_][]const u8{ "zig", "build" });
+    hotreload_demo_cmd.cwd = b.path("experiments/hotreload_demo");
+    hotreload_demo_step.dependOn(&hotreload_demo_cmd.step);
+    validate_step.dependOn(&hotreload_demo_cmd.step);
 }
