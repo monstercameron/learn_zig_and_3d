@@ -49,6 +49,8 @@ const MSG = extern struct {
 // Windows message type constants.
 const WM_KEYDOWN = 0x0100;
 const WM_KEYUP = 0x0101;
+const WM_SYSKEYDOWN = 0x0104;
+const WM_SYSKEYUP = 0x0105;
 const WM_CHAR = 0x0102;
 const WM_QUIT = 0x12;
 const WM_MOUSEMOVE = 0x0200;
@@ -75,9 +77,11 @@ extern "user32" fn PeekMessageW(
 extern "user32" fn TranslateMessage(lpMsg: *const MSG) bool;
 
 extern "user32" fn DispatchMessageW(lpMsg: *const MSG) windows.LRESULT;
+extern "user32" fn GetAsyncKeyState(vKey: i32) i16;
 
 // Constant for PeekMessageW: remove the message from the queue after reading.
 const PM_REMOVE = 1;
+const VK_RETURN = 0x0D;
 
 // Windows Sleep function for frame pacing.
 extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
@@ -92,6 +96,7 @@ const mesh_module = @import("mesh.zig");
 const texture = @import("texture.zig");
 const config = @import("app_config.zig");
 const cpu_features = @import("cpu_features.zig");
+const input = @import("input.zig");
 const log = @import("log.zig");
 
 const app_logger = log.get("app.main");
@@ -99,6 +104,11 @@ const preferred_model_path = "resources/models/gun/rovelver1.0.0.glb";
 const fallback_model_path = "resources/models/teapot.obj";
 const gun_bullet_albedo_path = "resources/models/gun/Texture/Cylinder/1_bullet-low_ALBEDO.bmp";
 const gun_body_albedo_path = "resources/models/gun/Texture/body/1_body_low_ALBEDO.004.bmp";
+const gun_jump_velocity: [3]f32 = .{ 0.0, 12.0, 0.0 };
+
+fn isEnterDown() bool {
+    return GetAsyncKeyState(VK_RETURN) < 0;
+}
 
 const SceneAsset = struct {
     mesh: mesh_module.Mesh,
@@ -301,6 +311,7 @@ pub fn main() !void {
     // We use `PeekMessageW` for a non-blocking loop, which allows us to render
     // frames continuously even if there are no new user input events.
     var running = true;
+    var enter_was_down = false;
 
     app_logger.info("starting main event loop...", .{});
 
@@ -331,10 +342,10 @@ pub fn main() !void {
                 }
 
                 // Handle keyboard input directly for maximum responsiveness.
-                if (m.message == WM_KEYDOWN) {
+                if (m.message == WM_KEYDOWN or m.message == WM_SYSKEYDOWN) {
                     const key_code: u32 = @intCast(m.wParam);
                     r.handleKeyInput(key_code, true);
-                } else if (m.message == WM_KEYUP) {
+                } else if (m.message == WM_KEYUP or m.message == WM_SYSKEYUP) {
                     const key_code: u32 = @intCast(m.wParam);
                     r.handleKeyInput(key_code, false);
                 } else if (m.message == WM_CHAR) {
@@ -373,6 +384,13 @@ pub fn main() !void {
             running = false;
             break;
         }
+
+        const enter_is_down = ((renderer.keys_pressed & input.KeyBits.enter) != 0) or isEnterDown();
+        if (enter_is_down and !enter_was_down) {
+            body_interface.activate(gun_body_id);
+            body_interface.setLinearVelocity(gun_body_id, gun_jump_velocity);
+        }
+        enter_was_down = enter_is_down;
 
         // Physics Step
         pw.system.update(1.0 / 60.0, .{ .collision_steps = 1 }) catch {};

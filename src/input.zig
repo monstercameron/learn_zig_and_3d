@@ -34,6 +34,7 @@
 // These are the raw virtual-key codes from the Windows API.
 // We define them here so we don't have magic numbers scattered around the code.
 pub const VirtualKeys = struct {
+    pub const enter: u32 = 0x0D;
     pub const left: u32 = 0x25;
     pub const up: u32 = 0x26;
     pub const right: u32 = 0x27;
@@ -64,6 +65,7 @@ pub const KeyBits = struct {
     pub const e: u32 = 512; // 2^9
     pub const space: u32 = 1024; // 2^10
     pub const ctrl: u32 = 2048; // 2^11
+    pub const enter: u32 = 4096; // 2^12
 };
 
 // A simple struct to link a Windows virtual key code to our internal key bit.
@@ -74,6 +76,7 @@ pub const KeyBinding = struct {
 
 // The master list of all key bindings we are tracking.
 pub const key_bindings = [_]KeyBinding{
+    .{ .virtual_key = VirtualKeys.enter, .bit = KeyBits.enter },
     .{ .virtual_key = VirtualKeys.left, .bit = KeyBits.left },
     .{ .virtual_key = VirtualKeys.right, .bit = KeyBits.right },
     .{ .virtual_key = VirtualKeys.up, .bit = KeyBits.up },
