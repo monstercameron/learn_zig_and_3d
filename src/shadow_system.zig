@@ -267,6 +267,12 @@ pub const ShadowSystem = struct {
     shadow_meshlets: std.ArrayList(ShadowMeshlet),
     shadow_triangles: std.ArrayList(ShadowTriangle),
     shadow_triangle_packets: std.ArrayList(ShadowTrianglePacket),
+    cached_mesh: ?*const mesh.Mesh,
+    cached_blas_root: u32,
+    cached_tlas_fingerprint: u64,
+    cached_instance_count: usize,
+    blas_valid: bool,
+    tlas_valid: bool,
 
     pub fn init(allocator: std.mem.Allocator) ShadowSystem {
         return .{
@@ -276,6 +282,12 @@ pub const ShadowSystem = struct {
             .shadow_meshlets = std.ArrayList(ShadowMeshlet){},
             .shadow_triangles = std.ArrayList(ShadowTriangle){},
             .shadow_triangle_packets = std.ArrayList(ShadowTrianglePacket){},
+            .cached_mesh = null,
+            .cached_blas_root = std.math.maxInt(u32),
+            .cached_tlas_fingerprint = 0,
+            .cached_instance_count = 0,
+            .blas_valid = false,
+            .tlas_valid = false,
         };
     }
 
@@ -288,11 +300,53 @@ pub const ShadowSystem = struct {
     }
 
     pub fn reset(self: *ShadowSystem) void {
+        self.invalidateBLAS();
+    }
+
+    pub fn invalidateTLAS(self: *ShadowSystem) void {
         self.tlas_nodes.clearRetainingCapacity();
-        self.blas_nodes.clearRetainingCapacity();
+        self.cached_tlas_fingerprint = 0;
+        self.cached_instance_count = 0;
+        self.tlas_valid = false;
+    }
+
+    pub fn invalidateBLAS(self: *ShadowSystem) void {
         self.shadow_meshlets.clearRetainingCapacity();
         self.shadow_triangles.clearRetainingCapacity();
         self.shadow_triangle_packets.clearRetainingCapacity();
+        self.blas_nodes.clearRetainingCapacity();
+        self.cached_mesh = null;
+        self.cached_blas_root = std.math.maxInt(u32);
+        self.blas_valid = false;
+        self.invalidateTLAS();
+    }
+
+    pub fn ensureBLAS(self: *ShadowSystem, mesh_ptr: *const mesh.Mesh) !u32 {
+        if (self.blas_valid and self.cached_mesh == mesh_ptr) {
+            return self.cached_blas_root;
+        }
+
+        self.invalidateBLAS();
+        const root = try self.buildBLAS(mesh_ptr);
+        self.cached_mesh = mesh_ptr;
+        self.cached_blas_root = root;
+        self.blas_valid = root != std.math.maxInt(u32);
+        return root;
+    }
+
+    pub fn ensureTLAS(self: *ShadowSystem, instances: []const math.Mat4) !void {
+        std.debug.assert(self.blas_valid);
+
+        const fingerprint = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(instances));
+        if (self.tlas_valid and self.cached_instance_count == instances.len and self.cached_tlas_fingerprint == fingerprint) {
+            return;
+        }
+
+        self.invalidateTLAS();
+        try self.buildTLAS(instances);
+        self.cached_instance_count = instances.len;
+        self.cached_tlas_fingerprint = fingerprint;
+        self.tlas_valid = self.tlas_nodes.items.len != 0;
     }
 
     fn initTrianglePacket() ShadowTrianglePacket {

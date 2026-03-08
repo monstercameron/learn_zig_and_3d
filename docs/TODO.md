@@ -71,27 +71,27 @@ This is a comprehensive list of potential improvements, new features, and refact
 - [ ] **Lighting**:
     - [ ] Add support for multiple light sources.
     - [ ] Implement different light types (e.g., point lights, spot lights).
-    - [ ] Add support for specular highlights.
+    - [x] Add support for specular highlights.
     - [ ] Implement attenuation for point and spot lights.
 - [ ] **Texturing**:
-    - [ ] Implement bilinear texture filtering for smoother textures.
+    - [x] Implement bilinear texture filtering for smoother textures.
     - [ ] Implement trilinear texture filtering.
-    - [ ] Add support for mipmapping to reduce aliasing on distant objects.
+    - [x] Add support for mipmapping to reduce aliasing on distant objects.
     - [ ] Implement anisotropic filtering for improved texture quality on surfaces at an angle.
 - [ ] **Transparency**:
-    - [ ] Add support for alpha blending for transparent objects.
+    - [x] Add support for alpha blending for transparent objects.
     - [ ] Implement a sorting mechanism for transparent objects to render them correctly.
 - [ ] **Camera**:
     - [ ] Create a dedicated camera struct to manage view and projection matrices.
     - [ ] Implement a "look-at" function for the camera.
-    - [ ] Add support for orthographic projection.
+    - [x] Add support for orthographic projection.
 - [ ] **Clipping**:
     - [x] Implement near-plane clipping to correctly handle geometry that is partially behind the camera.
     - [x] Implement frustum culling to discard objects that are entirely outside the camera's view.
 - [ ] **UI & Debugging**:
     - [ ] Add an immediate-mode GUI (e.g., using Dear ImGui) to control rendering options in real-time.
     - [ ] Render the light source as a 3D sphere instead of a 2D circle.
-    - [ ] Add a skybox or skydome for a more interesting background.
+    - [x] Add a skybox or skydome for a more interesting background.
 
 ## Performance Optimizations
 
@@ -102,6 +102,8 @@ This is a comprehensive list of potential improvements, new features, and refact
         - [x] Replace compile-time SIMD-width selection in hot kernels with runtime dispatch where one binary needs to support multiple CPU classes.
     - [x] **`shadow_system.zig`**: Convert `tracePacketAnyHit` to packet-aware BVH traversal instead of peeling one ray at a time from the mask. This is the highest-value AVX2 target because current profiling shows shadow tracing is still the main hotspot.
     - [x] **`shadow_system.zig`**: Rework `meshletOccludesRay` so skip-triangle masking, packet iteration, and early-out logic stay vector-friendly around the already-8-wide triangle kernel instead of falling back to scalar lane handling.
+    - [x] **`shadow_system.zig`**: Cache packed shadow meshlet geometry and BLAS nodes across frames so meshlet-shadow rendering only rebuilds acceleration data when mesh topology or meshlet contents change.
+    - [x] **`shadow_system.zig`**: Split BLAS and TLAS invalidation so static meshes can retain their BLAS while only instance transforms trigger TLAS rebuilds.
     - [x] **`tile_renderer.zig`**: Batch fragment shading spans in `rasterizeTriangleToTile` so texture sampling, normal interpolation, view/light vector setup, and BRDF evaluation can run on 4-8 pixels at a time.
     - [x] **`texture.zig`**: Add an AVX2-friendly batched bilinear sampling path around `sampleBilinearImpl` so four-tap filtering, channel unpacking, and weighted blending can be amortized across multiple UVs.
     - [x] **`lighting.zig`**: Add a batched `computePBR` path for span shading. The scalar function is math-dense, but the real payoff comes from evaluating multiple fragments together rather than only micro-optimizing single calls.
@@ -125,18 +127,21 @@ This is a comprehensive list of potential improvements, new features, and refact
     - [ ] **`tile_renderer.zig`**: Optimize `rasterizeTriangleToTile` to calculate barycentric coordinates for 2x2 or 4x4 pixel blocks simultaneously. This is a standard advanced technique that maps well to SIMD operations.
     - [x] **`lighting.zig`**: Vectorize the `applyIntensity` function to process 4 or 8 pixels at once. The unpack-multiply-repack sequence for RGBA colors is a perfect use case for byte-shuffling and parallel multiplication instructions.
         - [x] Benchmark-only SIMD batch implementation available in `benchmarks/src/lighting_simd.zig` for reference.
-    - [ ] **`renderer.zig`**: Reuse per-frame scratch buffers in the meshlet pipeline (`renderer.zig:1505-1635`). The current code re-allocates `visibility`, `job` arrays, and completion flags every frame; promote them to cached slices on `Renderer` to eliminate allocator churn.
+    - [x] **`renderer.zig`**: Reuse per-frame scratch buffers in the meshlet pipeline (`renderer.zig:1505-1635`). The current code re-allocates `visibility`, `job` arrays, and completion flags every frame; promote them to cached slices on `Renderer` to eliminate allocator churn.
     - [ ] **`tile_renderer.zig`**: Replace per-pixel barycentric recomputation in `rasterizeTriangleToTile` (`tile_renderer.zig:200-270`) with incremental half-space edge functions or block-based evaluation (e.g., 2×2 quads) to cut FLOPs and improve SIMD potential.
     - [x] **`renderer.zig`**: Remove per-frame atomic `resetVertexStates` (`renderer.zig:479-483`) by switching to a versioned/bitset scheme so vertices don’t require a full atomic sweep.
         - `MeshWorkCache.advanceVertexGeneration()` now advances per-frame generation tags and only falls back to a full atomic clear on generation wraparound.
     - [ ] **`renderer.zig`**: Batch `MeshWorkWriter` reservations (`renderer.zig:632-705`) to reduce atomic contention when emitting triangles—reserve chunks per meshlet or per thread.
-    - [ ] **`renderer.zig`**: Cache camera/light basis math (`render3DMeshWithPump`, `renderer.zig:988-1050`) to avoid recomputing sin/cos/matrix multiplies every frame.
-    - [ ] **`renderer.zig`**: Reuse meshlet-task job buffers (`renderer.zig:1685-1765`) instead of allocating `MeshletTaskJob`, `Job`, and completion arrays each frame.
-    - [ ] **`tile_renderer.zig`**: Introduce tile “dirty flags” so untouched tiles skip color/depth clears (`TileBuffer.clear`, `tile_renderer.zig:40-48`).
+    - [x] **`renderer.zig`**: Cache camera/light basis math (`render3DMeshWithPump`, `renderer.zig:988-1050`) to avoid recomputing sin/cos/matrix multiplies every frame.
+    - [x] **`renderer.zig`**: Cache derived frame view state (camera basis vectors, `view_rotation`, projection params, and camera-space light vectors) behind dirty flags so stationary frames skip redundant trig, normalization, and matrix setup.
+    - [x] **`renderer.zig`**: Reuse meshlet-task job buffers (`renderer.zig:1685-1765`) instead of allocating `MeshletTaskJob`, `Job`, and completion arrays each frame.
+    - [x] **`tile_renderer.zig`**: Introduce tile “dirty flags” so untouched tiles skip color/depth clears (`TileBuffer.clear`, `tile_renderer.zig:40-48`).
+    - [x] **`renderer.zig`**: Avoid full-frame `scene_depth` and `scene_camera` clears by tracking active tile spans and clearing only the regions touched by the current frame.
     - [ ] **`binning_stage.zig`**: Replace per-tile `std.ArrayList` allocations with persistent buffers and length resets to eliminate allocator churn during binning.
     - [ ] **`renderer.zig`**: Investigate pushing the back-buffer DIB directly with `SetDIBitsToDevice`/`StretchDIBits` instead of selecting into a compatible DC + `BitBlt` each frame (`drawBitmap`, `renderer.zig:1360-1390`). This removes the extra memory DC hop and cuts a GDI state change per present.
     - [ ] **`experiments/hotreload_demo`**: Build a standalone hot-reload test harness that loads multiple Zig-built shared libraries via `std.DynLib` and calls their exported functions, proving out the shared ABI + hot-swap workflow without touching the main engine.
     - [ ] **`tile_renderer.zig`**: Speed up the `compositeTileToScreen` function by using SIMD instructions to copy larger blocks of pixel data from the tile buffer to the main framebuffer.
+    - [x] **`renderer.zig`**: Fuse TAA history color/depth/surface-tag fetches into a single cached lookup path so reprojected pixels do not repeat screen-to-history bounds and index work three times.
 - [ ] **Job System**:
     - [ ] Implement a truly lock-free work-stealing queue to reduce contention in the job system.
     - [ ] Add job priorities to allow more important tasks to be executed first.
@@ -144,7 +149,7 @@ This is a comprehensive list of potential improvements, new features, and refact
     - [ ] **`obj_loader.zig`**: Implement vertex deduplication. Use a hash map to cache unique `v/vt/vn` combinations and reuse vertex indices. This is critical for reducing memory usage and improving rendering speed.
     - [x] **`renderer.zig`**: Perform backface culling once before binning. Triangles that are back-facing should be culled before they are sent to the binning stage, preventing them from ever being processed by worker threads.
     - [x] **`renderer.zig`**: Reuse per-frame memory allocations. Buffers for `projected` and `transformed_vertices` should be allocated once and reused each frame to avoid allocator overhead.
-    - [ ] **`renderer.zig`**: Cache transformation matrices (view, projection). These matrices should only be recalculated when the camera or settings change, not every single frame.
+    - [x] **`renderer.zig`**: Cache transformation matrices (view, projection). These matrices should only be recalculated when the camera or settings change, not every single frame.
     - [ ] Implement a more efficient rasterization algorithm, such as one based on half-space functions.
     - [ ] Use a more efficient data structure for storing the scene (e.g., a scene graph or an octree).
 
@@ -228,20 +233,20 @@ This is a comprehensive list of potential improvements, new features, and refact
 
 ### Phase 4 – Raster Backend Adaptation
 
-- [ ] **Rework Binning Stage**: Feed the meshlet-emitted primitives into the existing tile binning step; evaluate if a two-pass (meshlet -> tile) pipeline is needed.
-- [ ] **Update Rasterizer Input Path**: Allow `rasterizeTriangleToTile` (and the direct path) to consume primitives that already carry transformed data instead of pulling from global mesh arrays.
-- [ ] **Depth Buffer Integration**: Introduce a depth buffer so overlapping meshlets composit correctly once triangles are no longer globally ordered.
+- [x] **Rework Binning Stage**: Feed the meshlet-emitted primitives into the existing tile binning step; evaluate if a two-pass (meshlet -> tile) pipeline is needed.
+- [x] **Update Rasterizer Input Path**: Allow `rasterizeTriangleToTile` (and the direct path) to consume primitives that already carry transformed data instead of pulling from global mesh arrays.
+- [x] **Depth Buffer Integration**: Introduce a depth buffer so overlapping meshlets composit correctly once triangles are no longer globally ordered.
 - [ ] **Meshlet→Tile Integration Plan**:
     - [ ] Refactor `BinningStage` to operate on slices so a meshlet’s triangle span can be binned independently with thread-local buffers.
-    - [ ] Implement `MeshletBinningJob` using the job system to bin each visible meshlet in parallel and stage per-tile contributions.
-    - [ ] Merge job-local tile contributions into the renderer’s shared tile lists while preserving per-meshlet culling benefits.
-    - [ ] Wire tile render jobs to consume the merged lists and skip untouched tiles based on meshlet activity.
-    - [ ] Extend `MeshWorkCache` to reuse the temporary buffers required by the new binning jobs and merge step.
+    - [x] Implement `MeshletBinningJob` using the job system to bin each visible meshlet in parallel and stage per-tile contributions.
+    - [x] Merge job-local tile contributions into the renderer’s shared tile lists while preserving per-meshlet culling benefits.
+    - [x] Wire tile render jobs to consume the merged lists and skip untouched tiles based on meshlet activity.
+    - [x] Extend `MeshWorkCache` to reuse the temporary buffers required by the new binning jobs and merge step.
     - [ ] Add debug counters/toggles to compare legacy and meshlet-driven binning paths during rollout.
 
 ### Phase 5 – Validation & Tooling
 
 - [ ] **Meshlet Visualization**: Render debugging overlays to highlight active meshlets and their bounds during runtime.
-- [ ] **Performance Telemetry**: Capture per-frame counts (meshlets culled, processed, emitted triangles) to validate expected wins.
-- [ ] **Regression Tests**: Add targeted scenes exercising near-plane clipping, culling edges, and high triangle counts to ensure the new pipeline is stable.
+- [x] **Performance Telemetry**: Capture per-frame counts (meshlets culled, processed, emitted triangles) to validate expected wins.
+- [x] **Regression Tests**: Add targeted scenes exercising near-plane clipping, culling edges, and high triangle counts to ensure the new pipeline is stable.
 - [ ] **Centralize Logging**: Migrate remaining `std.debug.print` call sites to the structured `log.zig` facility so log levels can be configured per namespace.

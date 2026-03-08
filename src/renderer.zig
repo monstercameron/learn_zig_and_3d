@@ -587,6 +587,170 @@ const ProjectionParams = struct {
     jitter_y: f32,
 };
 
+const DerivedFrameViewState = struct {
+    right: math.Vec3,
+    up: math.Vec3,
+    forward: math.Vec3,
+    view_rotation: math.Mat4,
+    light_camera: math.Vec3,
+    light_dir_camera: math.Vec3,
+    center_x: f32,
+    center_y: f32,
+    x_scale: f32,
+    y_scale: f32,
+    cache_projection: ProjectionParams,
+};
+
+const FrameViewCache = struct {
+    valid: bool = false,
+    camera_position: math.Vec3 = math.Vec3.new(0.0, 0.0, 0.0),
+    rotation_angle: f32 = 0.0,
+    rotation_x: f32 = 0.0,
+    camera_fov_deg: f32 = 0.0,
+    bitmap_width: i32 = 0,
+    bitmap_height: i32 = 0,
+    light_dir_world: math.Vec3 = math.Vec3.new(0.0, -1.0, 0.0),
+    light_distance: f32 = 0.0,
+    state: DerivedFrameViewState = undefined,
+
+    fn invalidate(self: *FrameViewCache) void {
+        self.valid = false;
+    }
+
+    fn needsUpdate(
+        self: *const FrameViewCache,
+        camera_position: math.Vec3,
+        rotation_angle: f32,
+        rotation_x: f32,
+        camera_fov_deg: f32,
+        bitmap_width: i32,
+        bitmap_height: i32,
+        light_dir_world: math.Vec3,
+        light_distance: f32,
+    ) bool {
+        const epsilon: f32 = 1e-5;
+        if (!self.valid) return true;
+        if (!approxEqFrameVec3(self.camera_position, camera_position, epsilon)) return true;
+        if (!approxEqFrameF32(self.rotation_angle, rotation_angle, epsilon)) return true;
+        if (!approxEqFrameF32(self.rotation_x, rotation_x, epsilon)) return true;
+        if (!approxEqFrameF32(self.camera_fov_deg, camera_fov_deg, epsilon)) return true;
+        if (self.bitmap_width != bitmap_width or self.bitmap_height != bitmap_height) return true;
+        if (!approxEqFrameVec3(self.light_dir_world, light_dir_world, epsilon)) return true;
+        if (!approxEqFrameF32(self.light_distance, light_distance, epsilon)) return true;
+        return false;
+    }
+
+    fn update(
+        self: *FrameViewCache,
+        camera_position: math.Vec3,
+        rotation_angle: f32,
+        rotation_x: f32,
+        camera_fov_deg: f32,
+        bitmap_width: i32,
+        bitmap_height: i32,
+        light_dir_world: math.Vec3,
+        light_distance: f32,
+    ) DerivedFrameViewState {
+        const yaw = rotation_angle;
+        const pitch = rotation_x;
+        const cos_pitch = @cos(pitch);
+        const sin_pitch = @sin(pitch);
+        const cos_yaw = @cos(yaw);
+        const sin_yaw = @sin(yaw);
+
+        var forward = math.Vec3.new(sin_yaw * cos_pitch, sin_pitch, cos_yaw * cos_pitch);
+        forward = math.Vec3.normalize(forward);
+
+        const world_up = math.Vec3.new(0.0, 1.0, 0.0);
+        var right = math.Vec3.cross(world_up, forward);
+        const right_len = math.Vec3.length(right);
+        if (right_len < 0.0001) {
+            right = math.Vec3.new(1.0, 0.0, 0.0);
+        } else {
+            right = math.Vec3.scale(right, 1.0 / right_len);
+        }
+
+        var up = math.Vec3.cross(forward, right);
+        up = math.Vec3.normalize(up);
+
+        var view_rotation = math.Mat4.identity();
+        view_rotation.data[0] = right.x;
+        view_rotation.data[1] = right.y;
+        view_rotation.data[2] = right.z;
+        view_rotation.data[4] = up.x;
+        view_rotation.data[5] = up.y;
+        view_rotation.data[6] = up.z;
+        view_rotation.data[8] = forward.x;
+        view_rotation.data[9] = forward.y;
+        view_rotation.data[10] = forward.z;
+
+        const light_pos_world = math.Vec3.scale(light_dir_world, light_distance);
+        const light_relative = math.Vec3.sub(light_pos_world, camera_position);
+        const light_camera = math.Vec3.new(
+            math.Vec3.dot(light_relative, right),
+            math.Vec3.dot(light_relative, up),
+            math.Vec3.dot(light_relative, forward),
+        );
+        const light_dir_camera = math.Vec3.normalize(math.Vec3.new(
+            math.Vec3.dot(light_dir_world, right),
+            math.Vec3.dot(light_dir_world, up),
+            math.Vec3.dot(light_dir_world, forward),
+        ));
+
+        const width_f = @as(f32, @floatFromInt(bitmap_width));
+        const height_f = @as(f32, @floatFromInt(bitmap_height));
+        const aspect_ratio = if (height_f > 0.0) width_f / height_f else 1.0;
+        const fov_rad = camera_fov_deg * (std.math.pi / 180.0);
+        const half_fov = fov_rad * 0.5;
+        const tan_half_fov = std.math.tan(half_fov);
+        const y_scale = if (tan_half_fov > 0.0) 1.0 / tan_half_fov else 1.0;
+        const x_scale = y_scale / aspect_ratio;
+        const center_x = width_f * 0.5;
+        const center_y = height_f * 0.5;
+        const cache_projection = ProjectionParams{
+            .center_x = center_x,
+            .center_y = center_y,
+            .x_scale = x_scale,
+            .y_scale = y_scale,
+            .near_plane = NEAR_CLIP,
+            .jitter_x = 0.0,
+            .jitter_y = 0.0,
+        };
+
+        self.camera_position = camera_position;
+        self.rotation_angle = rotation_angle;
+        self.rotation_x = rotation_x;
+        self.camera_fov_deg = camera_fov_deg;
+        self.bitmap_width = bitmap_width;
+        self.bitmap_height = bitmap_height;
+        self.light_dir_world = light_dir_world;
+        self.light_distance = light_distance;
+        self.state = .{
+            .right = right,
+            .up = up,
+            .forward = forward,
+            .view_rotation = view_rotation,
+            .light_camera = light_camera,
+            .light_dir_camera = light_dir_camera,
+            .center_x = center_x,
+            .center_y = center_y,
+            .x_scale = x_scale,
+            .y_scale = y_scale,
+            .cache_projection = cache_projection,
+        };
+        self.valid = true;
+        return self.state;
+    }
+};
+
+fn approxEqFrameF32(a: f32, b: f32, epsilon: f32) bool {
+    return @abs(a - b) <= epsilon;
+}
+
+fn approxEqFrameVec3(a: math.Vec3, b: math.Vec3, epsilon: f32) bool {
+    return approxEqFrameF32(a.x, b.x, epsilon) and approxEqFrameF32(a.y, b.y, epsilon) and approxEqFrameF32(a.z, b.z, epsilon);
+}
+
 const DepthFogConfig = struct {
     near: f32,
     far: f32,
@@ -974,6 +1138,12 @@ const taa_jitter_sequence = [_]math.Vec2{
 
 const invalid_surface_tag: u64 = std.math.maxInt(u64);
 
+const HistoryNearestSample = struct {
+    color: [3]f32,
+    depth: f32,
+    tag: u64,
+};
+
 const ReprojectedHistorySample = struct {
     screen: math.Vec2,
     depth: f32,
@@ -1050,6 +1220,28 @@ fn sampleHistoryColorNearest(history: []const u32, width: usize, height: usize, 
         @floatFromInt((pixel >> 16) & 0xFF),
         @floatFromInt((pixel >> 8) & 0xFF),
         @floatFromInt(pixel & 0xFF),
+    };
+}
+
+fn sampleHistoryNearest(history_pixels: []const u32, history_depth: []const f32, history_surface_tags: []const u64, width: usize, height: usize, screen: math.Vec2) ?HistoryNearestSample {
+    const x = @as(i32, @intFromFloat(@floor(screen.x)));
+    const y = @as(i32, @intFromFloat(@floor(screen.y)));
+    if (x < 0 or y < 0 or x >= @as(i32, @intCast(width)) or y >= @as(i32, @intCast(height))) return null;
+
+    const idx = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
+    const depth = history_depth[idx];
+    if (!std.math.isFinite(depth)) return null;
+
+    const pixel = history_pixels[idx];
+    const tag = history_surface_tags[idx];
+    return .{
+        .color = .{
+            @floatFromInt((pixel >> 16) & 0xFF),
+            @floatFromInt((pixel >> 8) & 0xFF),
+            @floatFromInt(pixel & 0xFF),
+        },
+        .depth = depth,
+        .tag = tag,
     };
 }
 
@@ -1563,17 +1755,24 @@ fn tryApplyTemporalAAMeshletBatch(
         }
 
         const previous_sample = reprojection orelse return false;
-        const previous_depth = sampleHistoryDepthNearest(self.taa_scratch.history_depth, width, height, previous_sample.screen) orelse return false;
+        const history_sample = sampleHistoryNearest(
+            self.taa_scratch.history_pixels,
+            self.taa_scratch.history_depth,
+            self.taa_scratch.history_surface_tags,
+            width,
+            height,
+            previous_sample.screen,
+        ) orelse return false;
+        const previous_depth = history_sample.depth;
         const depth_delta = @abs(previous_depth - previous_sample.depth);
         const depth_factor = 1.0 - std.math.clamp(depth_delta / @max(1e-4, self.temporal_aa_config.depth_threshold), 0.0, 1.0);
         if (depth_factor <= 0.0) return false;
 
-        const previous_tag = sampleHistorySurfaceTagNearest(self.taa_scratch.history_surface_tags, width, height, previous_sample.screen) orelse invalid_surface_tag;
+        const previous_tag = history_sample.tag;
         const current_tag = surfaceTagForHandle(current_surface);
-        if (current_tag == invalid_surface_tag or previous_tag != current_tag) return false;
+        if (current_tag == invalid_surface_tag or previous_tag == invalid_surface_tag or previous_tag != current_tag) return false;
 
-        const previous_color = sampleHistoryColorNearest(self.taa_scratch.history_pixels, width, height, previous_sample.screen) orelse return false;
-        history_colors[lane] = previous_color;
+        history_colors[lane] = history_sample.color;
         history_weights[lane] = std.math.clamp(self.temporal_aa_config.history_weight * (0.6 + 0.15 * depth_factor), 0.0, self.temporal_aa_config.history_weight);
     }
 
@@ -3598,6 +3797,7 @@ pub const Renderer = struct {
     active_tile_flags: ?[]bool,
     active_tile_indices: ?[]usize,
     mesh_work_cache: MeshWorkCache = MeshWorkCache.init(),
+    frame_view_cache: FrameViewCache = .{},
 
     // Rendering options and data
     single_texture_binding: [1]?*const texture.Texture,
@@ -3622,6 +3822,7 @@ pub const Renderer = struct {
     scene_camera: []math.Vec3,
     scene_normal: []math.Vec3,
     scene_surface: []TileRenderer.SurfaceHandle,
+    scene_buffers_initialized: bool = false,
     taa_scratch: TemporalAAScratch,
     taa_previous_view: TemporalAAViewState,
     taa_previous_mesh_vertices: []math.Vec3,
@@ -5772,6 +5973,8 @@ pub const Renderer = struct {
 
     pub fn invalidateMeshWork(self: *Renderer) void {
         self.mesh_work_cache.invalidate();
+        self.frame_view_cache.invalidate();
+        self.sys_shadows.invalidateBLAS();
     }
 
     fn ensureTemporalMeshVertexCapacity(self: *Renderer, vertex_count: usize) !void {
@@ -5940,29 +6143,34 @@ pub const Renderer = struct {
         }
         const light_distance_0 = if (self.lights.items.len > 0) self.lights.items[0].distance else 10.0;
         const light_dir_world = if (self.lights.items.len > 0) self.lights.items[0].direction else math.Vec3.new(0, -1, 0);
-        const light_pos_world = math.Vec3.scale(light_dir_world, light_distance_0);
 
-        const yaw = self.rotation_angle;
-        const pitch = self.rotation_x;
-        const cos_pitch = @cos(pitch);
-        const sin_pitch = @sin(pitch);
-        const cos_yaw = @cos(yaw);
-        const sin_yaw = @sin(yaw);
+        const frame_view = if (self.frame_view_cache.needsUpdate(
+            self.camera_position,
+            self.rotation_angle,
+            self.rotation_x,
+            self.camera_fov_deg,
+            self.bitmap.width,
+            self.bitmap.height,
+            light_dir_world,
+            light_distance_0,
+        ))
+            self.frame_view_cache.update(
+                self.camera_position,
+                self.rotation_angle,
+                self.rotation_x,
+                self.camera_fov_deg,
+                self.bitmap.width,
+                self.bitmap.height,
+                light_dir_world,
+                light_distance_0,
+            )
+        else
+            self.frame_view_cache.state;
 
-        var forward = math.Vec3.new(sin_yaw * cos_pitch, sin_pitch, cos_yaw * cos_pitch);
-        forward = math.Vec3.normalize(forward);
-
+        const right = frame_view.right;
+        const up = frame_view.up;
+        const forward = frame_view.forward;
         const world_up = math.Vec3.new(0.0, 1.0, 0.0);
-        var right = math.Vec3.cross(world_up, forward);
-        const right_len = math.Vec3.length(right);
-        if (right_len < 0.0001) {
-            right = math.Vec3.new(1.0, 0.0, 0.0);
-        } else {
-            right = math.Vec3.scale(right, 1.0 / right_len);
-        }
-
-        var up = math.Vec3.cross(forward, right);
-        up = math.Vec3.normalize(up);
 
         var forward_flat = math.Vec3.new(forward.x, 0.0, forward.z);
         const forward_flat_len = math.Vec3.length(forward_flat);
@@ -5995,50 +6203,37 @@ pub const Renderer = struct {
             self.camera_position = math.Vec3.add(self.camera_position, move_step);
         }
 
-        var view_rotation = math.Mat4.identity();
-        view_rotation.data[0] = right.x;
-        view_rotation.data[1] = right.y;
-        view_rotation.data[2] = right.z;
-        view_rotation.data[4] = up.x;
-        view_rotation.data[5] = up.y;
-        view_rotation.data[6] = up.z;
-        view_rotation.data[8] = forward.x;
-        view_rotation.data[9] = forward.y;
-        view_rotation.data[10] = forward.z;
+        const resolved_frame_view = if (self.frame_view_cache.needsUpdate(
+            self.camera_position,
+            self.rotation_angle,
+            self.rotation_x,
+            self.camera_fov_deg,
+            self.bitmap.width,
+            self.bitmap.height,
+            light_dir_world,
+            light_distance_0,
+        ))
+            self.frame_view_cache.update(
+                self.camera_position,
+                self.rotation_angle,
+                self.rotation_x,
+                self.camera_fov_deg,
+                self.bitmap.width,
+                self.bitmap.height,
+                light_dir_world,
+                light_distance_0,
+            )
+        else
+            self.frame_view_cache.state;
 
-        const light_relative = math.Vec3.sub(light_pos_world, self.camera_position);
-        const light_camera = math.Vec3.new(
-            math.Vec3.dot(light_relative, right),
-            math.Vec3.dot(light_relative, up),
-            math.Vec3.dot(light_relative, forward),
-        );
-
-        const light_dir = math.Vec3.normalize(math.Vec3.new(
-            math.Vec3.dot(light_dir_world, right),
-            math.Vec3.dot(light_dir_world, up),
-            math.Vec3.dot(light_dir_world, forward),
-        ));
-
-        const width_f = @as(f32, @floatFromInt(self.bitmap.width));
-        const height_f = @as(f32, @floatFromInt(self.bitmap.height));
-        const aspect_ratio = if (height_f > 0.0) width_f / height_f else 1.0;
-        const fov_rad = self.camera_fov_deg * (std.math.pi / 180.0);
-        const half_fov = fov_rad * 0.5;
-        const tan_half_fov = std.math.tan(half_fov);
-        const y_scale = if (tan_half_fov > 0.0) 1.0 / tan_half_fov else 1.0;
-        const x_scale = y_scale / aspect_ratio;
-        const center_x = width_f * 0.5;
-        const center_y = height_f * 0.5;
-
-        const cache_projection = ProjectionParams{
-            .center_x = center_x,
-            .center_y = center_y,
-            .x_scale = x_scale,
-            .y_scale = y_scale,
-            .near_plane = NEAR_CLIP,
-            .jitter_x = 0.0,
-            .jitter_y = 0.0,
-        };
+        const view_rotation = resolved_frame_view.view_rotation;
+        const light_camera = resolved_frame_view.light_camera;
+        const light_dir = resolved_frame_view.light_dir_camera;
+        const center_x = resolved_frame_view.center_x;
+        const center_y = resolved_frame_view.center_y;
+        const x_scale = resolved_frame_view.x_scale;
+        const y_scale = resolved_frame_view.y_scale;
+        const cache_projection = resolved_frame_view.cache_projection;
         const taa_jitter = if (config.POST_TAA_ENABLED) taaJitterForFrame(self.total_frames_rendered) else math.Vec2.new(0.0, 0.0);
         const raster_projection = ProjectionParams{
             .center_x = center_x,
@@ -6091,10 +6286,9 @@ pub const Renderer = struct {
         }
 
         if (config.MESHLET_SHADOWS_ENABLED and mesh.meshlets.len > 0) {
-            self.sys_shadows.reset();
-            _ = try self.sys_shadows.buildBLAS(mesh);
+            _ = try self.sys_shadows.ensureBLAS(mesh);
             var instances = [_]math.Mat4{math.Mat4.identity()};
-            try self.sys_shadows.buildTLAS(&instances);
+            try self.sys_shadows.ensureTLAS(&instances);
         }
 
         if (builtin.mode == .Debug and cache.full_vertex_cache_valid and cache.transformed_vertices.len == mesh.vertices.len) {
@@ -7578,17 +7772,24 @@ pub const Renderer = struct {
                 }
 
                 const previous_sample = reprojection orelse continue;
-                const previous_depth = sampleHistoryDepthNearest(self.taa_scratch.history_depth, width, height, previous_sample.screen) orelse continue;
+                const history_sample = sampleHistoryNearest(
+                    self.taa_scratch.history_pixels,
+                    self.taa_scratch.history_depth,
+                    self.taa_scratch.history_surface_tags,
+                    width,
+                    height,
+                    previous_sample.screen,
+                ) orelse continue;
+                const previous_depth = history_sample.depth;
                 const depth_delta = @abs(previous_depth - previous_sample.depth);
                 const depth_factor = 1.0 - std.math.clamp(depth_delta / @max(1e-4, self.temporal_aa_config.depth_threshold), 0.0, 1.0);
                 if (depth_factor <= 0.0) continue;
 
-                const previous_tag = sampleHistorySurfaceTagNearest(self.taa_scratch.history_surface_tags, width, height, previous_sample.screen) orelse invalid_surface_tag;
+                const previous_tag = history_sample.tag;
                 const current_tag = surfaceTagForHandle(current_surface);
-                if (current_tag != invalid_surface_tag and previous_tag == current_tag) {
-                    const previous_color = sampleHistoryColorNearest(self.taa_scratch.history_pixels, width, height, previous_sample.screen) orelse continue;
+                if (current_tag != invalid_surface_tag and previous_tag != invalid_surface_tag and previous_tag == current_tag) {
                     const history_weight = std.math.clamp(self.temporal_aa_config.history_weight * (0.6 + 0.15 * depth_factor), 0.0, self.temporal_aa_config.history_weight);
-                    self.taa_scratch.resolve_pixels[idx] = blendTemporalColor(current_pixel, previous_color, history_weight);
+                    self.taa_scratch.resolve_pixels[idx] = blendTemporalColor(current_pixel, history_sample.color, history_weight);
                     continue;
                 }
 
@@ -9177,9 +9378,19 @@ pub const Renderer = struct {
         const active_flags = self.active_tile_flags.?;
         const active_indices = self.active_tile_indices.?;
         BinningStage.clearTileTriangleLists(tile_lists);
+        if (!self.scene_buffers_initialized) {
+            @memset(self.scene_depth, std.math.inf(f32));
+            @memset(self.scene_camera, math.Vec3.new(0.0, 0.0, 0.0));
+            @memset(self.scene_normal, math.Vec3.new(0.0, 0.0, 0.0));
+            @memset(self.scene_surface, TileRenderer.SurfaceHandle.invalid());
+            self.scene_buffers_initialized = true;
+        } else {
+            for (active_flags, 0..) |was_active, tile_idx| {
+                if (!was_active) continue;
+                self.clearSceneAttachmentsForTile(&grid.tiles[tile_idx]);
+            }
+        }
         @memset(active_flags, false);
-        @memset(self.scene_depth, std.math.inf(f32));
-        @memset(self.scene_camera, math.Vec3.new(0.0, 0.0, 0.0));
 
         const triangles = mesh_work.triangleSlice();
         self.meshlet_telemetry.touched_tiles = 0;
@@ -9321,6 +9532,18 @@ pub const Renderer = struct {
         }
 
         return shadow_pass_elapsed_ns;
+    }
+
+    fn clearSceneAttachmentsForTile(self: *Renderer, tile: *const TileRenderer.Tile) void {
+        var y: i32 = 0;
+        while (y < tile.height) : (y += 1) {
+            const row_start = @as(usize, @intCast((tile.y + y) * self.bitmap.width + tile.x));
+            const row_end = row_start + @as(usize, @intCast(tile.width));
+            @memset(self.scene_depth[row_start..row_end], std.math.inf(f32));
+            @memset(self.scene_camera[row_start..row_end], math.Vec3.new(0.0, 0.0, 0.0));
+            @memset(self.scene_normal[row_start..row_end], math.Vec3.new(0.0, 0.0, 0.0));
+            @memset(self.scene_surface[row_start..row_end], TileRenderer.SurfaceHandle.invalid());
+        }
     }
 
     fn populateTilesFromMeshlets(
