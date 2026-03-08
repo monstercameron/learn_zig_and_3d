@@ -168,14 +168,13 @@ pub fn main() !void {
         configureGunTextures(allocator, &bullet_albedo, &body_albedo, &material_textures);
         renderer.setTextures(material_textures[0..]);
 
-    // Load HDRI background
-    if (texture.loadHdrRaw(allocator, "resources/hdri/envmap.raw")) |env_map| {
-        app_logger.infoSub("assets", "loaded HDRI env map", .{});
-        renderer.setHdriMap(env_map);
-    } else |err| {
-        app_logger.warn("failed to load HDRI: {s}", .{@errorName(err)});
-    }
-
+        // Load HDRI background
+        if (texture.loadHdrRaw(allocator, "resources/hdri/envmap.raw")) |env_map| {
+            app_logger.infoSub("assets", "loaded HDRI env map", .{});
+            renderer.setHdriMap(env_map);
+        } else |err| {
+            app_logger.warn("failed to load HDRI: {s}", .{@errorName(err)});
+        }
     }
 
     scene_asset.mesh.centerToOrigin(); // Center the model at (0,0,0).
@@ -206,7 +205,6 @@ pub fn main() !void {
     defer allocator.free(original_gun_normals);
     @memcpy(original_gun_normals, scene_asset.mesh.normals[0..num_gun_triangles]);
 
-
     try levelAppendGroundPlane(&scene_asset.mesh, allocator);
     try scene_asset.mesh.generateMeshlets(64, 126);
     app_logger.infoSub(
@@ -217,7 +215,6 @@ pub fn main() !void {
 
     renderer.setCameraPosition(math.Vec3.new(0.0, 2.0, -10.0));
     renderer.setCameraOrientation(-0.1, 0.0);
-
 
     // ==== PHYSICS INIT ====
     try zphysics.init(allocator, .{});
@@ -267,12 +264,10 @@ pub fn main() !void {
 
     // ========== EVENT LOOP PHASE ==========
 
-
     // This is the main application loop, similar to `requestAnimationFrame` in JS.
     // We use `PeekMessageW` for a non-blocking loop, which allows us to render
     // frames continuously even if there are no new user input events.
     var running = true;
-
 
     app_logger.info("starting main event loop...", .{});
 
@@ -338,10 +333,9 @@ pub fn main() !void {
             break;
         }
 
-
         // Physics Step
         pw.system.update(1.0 / 60.0, .{ .collision_steps = 1 }) catch {};
-        
+
         // Update Gun Mesh Vertices
         const lock_iface = pw.system.getBodyLockInterfaceNoLock();
         var read_lock: zphysics.BodyLockRead = .{};
@@ -353,16 +347,16 @@ pub fn main() !void {
 
         for (scene_asset.mesh.vertices[0..num_gun_vertices], 0..) |*v, i| {
             const ov = original_gun_vertices[i];
-            v.x = rot[0]*ov.x + rot[3]*ov.y + rot[6]*ov.z + pos[0];
-            v.y = rot[1]*ov.x + rot[4]*ov.y + rot[7]*ov.z + pos[1];
-            v.z = rot[2]*ov.x + rot[5]*ov.y + rot[8]*ov.z + pos[2];
+            v.x = rot[0] * ov.x + rot[3] * ov.y + rot[6] * ov.z + pos[0];
+            v.y = rot[1] * ov.x + rot[4] * ov.y + rot[7] * ov.z + pos[1];
+            v.z = rot[2] * ov.x + rot[5] * ov.y + rot[8] * ov.z + pos[2];
         }
 
         for (scene_asset.mesh.normals[0..num_gun_triangles], 0..) |*n, i| {
             const on = original_gun_normals[i];
-            n.x = rot[0]*on.x + rot[3]*on.y + rot[6]*on.z;
-            n.y = rot[1]*on.x + rot[4]*on.y + rot[7]*on.z;
-            n.z = rot[2]*on.x + rot[5]*on.y + rot[8]*on.z;
+            n.x = rot[0] * on.x + rot[3] * on.y + rot[6] * on.z;
+            n.y = rot[1] * on.x + rot[4] * on.y + rot[7] * on.z;
+            n.z = rot[2] * on.x + rot[5] * on.y + rot[8] * on.z;
         }
 
         scene_asset.mesh.refreshMeshlets();

@@ -61,6 +61,7 @@ pub const ShadowTriangle = struct {
     v0: math.Vec3,
     edge1: math.Vec3,
     edge2: math.Vec3,
+    source_triangle_id: u32,
 };
 
 // Represents a packet of rays for SIMD-style traversal within a screen tile
@@ -71,6 +72,7 @@ pub const RayPacket = struct {
     dirs_x: [64]f32,
     dirs_y: [64]f32,
     dirs_z: [64]f32,
+    skip_triangle_ids: [64]u32,
     active_mask: u64,
     occluded_mask: u64,
 };
@@ -145,6 +147,7 @@ pub const ShadowSystem = struct {
                     .v0 = p0,
                     .edge1 = math.Vec3.sub(p1, p0),
                     .edge2 = math.Vec3.sub(p2, p0),
+                    .source_triangle_id = @intCast(@min(primitive.triangle_index, std.math.maxInt(u32))),
                 });
                 triangle_count += 1;
             }
@@ -272,13 +275,14 @@ pub const ShadowSystem = struct {
         return t > epsilon;
     }
 
-    fn meshletOccludesRay(self: *const ShadowSystem, meshlet_index: u32, origin: math.Vec3, dir: math.Vec3) bool {
+    fn meshletOccludesRay(self: *const ShadowSystem, meshlet_index: u32, origin: math.Vec3, dir: math.Vec3, skip_triangle_id: u32) bool {
         const shadow_meshlet = self.shadow_meshlets.items[meshlet_index];
         const triangle_start = @as(usize, @intCast(shadow_meshlet.triangle_offset));
         const triangle_end = triangle_start + @as(usize, @intCast(shadow_meshlet.triangle_count));
         if (triangle_end > self.shadow_triangles.items.len) return false;
 
         for (self.shadow_triangles.items[triangle_start..triangle_end]) |triangle| {
+            if (triangle.source_triangle_id == skip_triangle_id) continue;
             if (intersectTriangle(origin, dir, triangle)) return true;
         }
 
@@ -294,6 +298,7 @@ pub const ShadowSystem = struct {
 
             const origin = math.Vec3.new(packet.origins_x[ray_idx], packet.origins_y[ray_idx], packet.origins_z[ray_idx]);
             const dir = math.Vec3.new(packet.dirs_x[ray_idx], packet.dirs_y[ray_idx], packet.dirs_z[ray_idx]);
+            const skip_triangle_id = packet.skip_triangle_ids[ray_idx];
             const origin_biased = math.Vec3.add(origin, math.Vec3.scale(dir, 0.01));
             const inv_dir = math.Vec3.new(if (@abs(dir.x) < 1e-6) (if (dir.x < 0) @as(f32, -1e6) else @as(f32, 1e6)) else 1.0 / dir.x, if (@abs(dir.y) < 1e-6) (if (dir.y < 0) @as(f32, -1e6) else @as(f32, 1e6)) else 1.0 / dir.y, if (@abs(dir.z) < 1e-6) (if (dir.z < 0) @as(f32, -1e6) else @as(f32, 1e6)) else 1.0 / dir.z);
 
@@ -315,7 +320,7 @@ pub const ShadowSystem = struct {
 
                             if (intersectAABB(node.aabb, origin_biased, inv_dir)) {
                                 if (node.is_leaf) {
-                                    if (self.meshletOccludesRay(node.left_child_or_meshlet, origin_biased, dir)) {
+                                    if (self.meshletOccludesRay(node.left_child_or_meshlet, origin_biased, dir, skip_triangle_id)) {
                                         packet.occluded_mask |= ray_bit;
                                         break;
                                     }

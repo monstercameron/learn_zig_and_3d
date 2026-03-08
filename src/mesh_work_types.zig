@@ -19,6 +19,7 @@ pub const TrianglePacket = struct {
     intensity: f32,
     flags: TriangleFlags,
     triangle_id: usize,
+    meshlet_id: usize,
 };
 
 pub const MeshletPacket = struct {

@@ -23,6 +23,45 @@ const math = @import("math.zig");
 const texture = @import("texture.zig");
 const lighting = @import("lighting.zig");
 
+pub const invalid_surface_id: u32 = std.math.maxInt(u32);
+
+pub const SurfaceHandle = packed struct {
+    triangle_id: u32,
+    meshlet_id: u32,
+    bary_u: u16,
+    bary_v: u16,
+
+    pub fn invalid() SurfaceHandle {
+        return .{
+            .triangle_id = invalid_surface_id,
+            .meshlet_id = invalid_surface_id,
+            .bary_u = 0,
+            .bary_v = 0,
+        };
+    }
+
+    pub fn init(triangle_id: usize, meshlet_id: usize, bary: math.Vec3) SurfaceHandle {
+        const u = std.math.clamp(bary.x, 0.0, 1.0);
+        const v = std.math.clamp(bary.y, 0.0, 1.0 - u);
+        return .{
+            .triangle_id = @intCast(@min(triangle_id, invalid_surface_id - 1)),
+            .meshlet_id = @intCast(@min(meshlet_id, invalid_surface_id - 1)),
+            .bary_u = @intFromFloat(u * 65535.0 + 0.5),
+            .bary_v = @intFromFloat(v * 65535.0 + 0.5),
+        };
+    }
+
+    pub fn isValid(self: SurfaceHandle) bool {
+        return self.triangle_id != invalid_surface_id and self.meshlet_id != invalid_surface_id;
+    }
+
+    pub fn barycentrics(self: SurfaceHandle) math.Vec3 {
+        const u = @as(f32, @floatFromInt(self.bary_u)) / 65535.0;
+        const v = @as(f32, @floatFromInt(self.bary_v)) / 65535.0;
+        return math.Vec3.new(u, v, @max(0.0, 1.0 - u - v));
+    }
+};
+
 // The width and height of a single tile in pixels.
 // 64x64 is a common choice that balances several factors:
 // - **Cache Locality**: A 64x64 tile with a 32-bit color and 32-bit depth buffer fits well
@@ -38,6 +77,11 @@ pub const ShadingParams = struct {
     uv0: math.Vec2,
     uv1: math.Vec2,
     uv2: math.Vec2,
+    surface_bary0: math.Vec3,
+    surface_bary1: math.Vec3,
+    surface_bary2: math.Vec3,
+    triangle_id: usize,
+    meshlet_id: usize,
     intensity: f32,
     normals: [3]math.Vec3,
     metallic: f32,
@@ -73,6 +117,7 @@ pub const PixelData = struct {
     color: math.Vec4,
     camera: math.Vec3,
     normal: math.Vec3,
+    surface: SurfaceHandle,
 };
 
 pub const TileBuffer = struct {
@@ -87,19 +132,18 @@ pub const TileBuffer = struct {
         const data = try allocator.alloc(PixelData, pixel_count);
         errdefer allocator.free(data);
         const depth = try allocator.alloc(f32, pixel_count);
-        
-        return TileBuffer{ 
-            .data = data, 
-            .depth = depth, 
-            .width = width, 
-            .height = height, 
-            .allocator = allocator 
-        };
+
+        return TileBuffer{ .data = data, .depth = depth, .width = width, .height = height, .allocator = allocator };
     }
 
     /// Clears the tile for a new frame.
     pub fn clear(self: *TileBuffer) void {
-        @memset(self.data, .{ .color = math.Vec4.new(0.0, 0.0, 0.0, 1.0), .camera = math.Vec3.new(0,0,0), .normal = math.Vec3.new(0,0,0) });
+        @memset(self.data, .{
+            .color = math.Vec4.new(0.0, 0.0, 0.0, 1.0),
+            .camera = math.Vec3.new(0, 0, 0),
+            .normal = math.Vec3.new(0, 0, 0),
+            .surface = SurfaceHandle.invalid(),
+        });
         @memset(self.depth, std.math.inf(f32));
     }
 
@@ -151,7 +195,7 @@ pub const TileGrid = struct {
 
 /// Copies the pixels and geometry buffers from a completed tile buffer to the main screen surfaces.
 /// JS Analogy: `main_context.drawImage(tile_canvas, tile.x, tile.y);`
-pub fn compositeTileToScreen(tile: *const Tile, tile_buffer: *const TileBuffer, bitmap: *Bitmap, depth_buffer: ?[]f32, camera_buffer: ?[]math.Vec3, normal_buffer: ?[]math.Vec3) void {
+pub fn compositeTileToScreen(tile: *const Tile, tile_buffer: *const TileBuffer, bitmap: *Bitmap, depth_buffer: ?[]f32, camera_buffer: ?[]math.Vec3, normal_buffer: ?[]math.Vec3, surface_buffer: ?[]SurfaceHandle) void {
     var y: i32 = 0;
     while (y < tile.height) : (y += 1) {
         const tile_row_start = @as(usize, @intCast(y * tile_buffer.width));
@@ -168,13 +212,16 @@ pub fn compositeTileToScreen(tile: *const Tile, tile_buffer: *const TileBuffer, 
             // pack and tonemap to sRGB
             const packed_u32 = lighting.packColorTonemapped(final_color_rgb, a);
             bitmap.pixels[screen_row_start + cx] = packed_u32;
-            
+
             // Re-interleave the structural data out from AoS to SoA Global buffers
             if (camera_buffer) |camera_out| {
                 camera_out[screen_row_start + cx] = tile_buffer.data[tile_row_start + cx].camera;
             }
             if (normal_buffer) |normal_out| {
                 normal_out[screen_row_start + cx] = tile_buffer.data[tile_row_start + cx].normal;
+            }
+            if (surface_buffer) |surface_out| {
+                surface_out[screen_row_start + cx] = tile_buffer.data[tile_row_start + cx].surface;
             }
         }
         if (depth_buffer) |buffer| {
@@ -259,7 +306,7 @@ pub fn rasterizeTriangleToTile(
     // 3. Pre-calculate values for barycentric coordinate calculation.
     const denom = (v1y - v2y) * (v0x - v2x) + (v2x - v1x) * (v0y - v2y);
     if (@abs(denom) < 1e-6) return; // Degenerate triangle.
-    
+
     // Per-triangle LOD selection for memory locality (drastically improves cache hits)
     var lod: f32 = 0.0;
     if (shading.texture) |tex| {
@@ -271,12 +318,12 @@ pub fn rasterizeTriangleToTile(
         const uvy1 = shading.uv1.y * tex_h;
         const uvx2 = shading.uv2.x * tex_w;
         const uvy2 = shading.uv2.y * tex_h;
-        
+
         const uv_denom = (uvy1 - uvy2) * (uvx0 - uvx2) + (uvx2 - uvx1) * (uvy0 - uvy2);
-        
+
         const screen_area = @abs(denom);
         const uv_area = @abs(uv_denom);
-        
+
         if (uv_area > screen_area) {
             const ratio = uv_area / screen_area;
             lod = 0.5 * @log2(ratio);
@@ -345,17 +392,19 @@ pub fn rasterizeTriangleToTile(
                 n0.y * weight0 + n1.y * weight1 + n2.y * weight2,
                 n0.z * weight0 + n1.z * weight1 + n2.z * weight2,
             ).normalize();
+            const surface_bary = math.Vec3.new(
+                shading.surface_bary0.x * weight0 + shading.surface_bary1.x * weight1 + shading.surface_bary2.x * weight2,
+                shading.surface_bary0.y * weight0 + shading.surface_bary1.y * weight1 + shading.surface_bary2.y * weight2,
+                shading.surface_bary0.z * weight0 + shading.surface_bary1.z * weight1 + shading.surface_bary2.z * weight2,
+            );
 
             // hardcoded light for now, or we can use shading.intensity later
             const light_dir = math.Vec3.new(0.5, 0.5, -1.0).normalize();
             const light_color = math.Vec3.new(4.0, 4.0, 4.0);
-            
+
             const view_dir = math.Vec3.scale(camera_pos, -1.0).normalize();
-            
-            const final_color_rgb = lighting.computePBR(
-                base_color_linear, normal, view_dir, light_dir, light_color,
-                shading.metallic, shading.roughness
-            );
+
+            const final_color_rgb = lighting.computePBR(base_color_linear, normal, view_dir, light_dir, light_color, shading.metallic, shading.roughness);
             const final_color = math.Vec4.new(final_color_rgb.x, final_color_rgb.y, final_color_rgb.z, @as(f32, @floatFromInt(a)) / 255.0);
 
             // 9. Write the final color to the tile's local pixel buffer.
@@ -370,19 +419,15 @@ pub fn rasterizeTriangleToTile(
                 tile_buffer.data[idx].camera = camera_pos;
                 tile_buffer.data[idx].color = final_color;
                 tile_buffer.data[idx].normal = normal;
+                tile_buffer.data[idx].surface = SurfaceHandle.init(shading.triangle_id, shading.meshlet_id, surface_bary);
             } else {
                 // Alpha blend with background
                 const dst_c = tile_buffer.data[idx].color;
                 const alpha = final_color.w;
                 const inv_alpha = 1.0 - alpha;
-                tile_buffer.data[idx].color = math.Vec4.new(
-                    final_color.x * alpha + dst_c.x * inv_alpha,
-                    final_color.y * alpha + dst_c.y * inv_alpha,
-                    final_color.z * alpha + dst_c.z * inv_alpha,
-                    1.0
-                );
+                tile_buffer.data[idx].color = math.Vec4.new(final_color.x * alpha + dst_c.x * inv_alpha, final_color.y * alpha + dst_c.y * inv_alpha, final_color.z * alpha + dst_c.z * inv_alpha, 1.0);
             }
-}
+        }
     }
 }
 

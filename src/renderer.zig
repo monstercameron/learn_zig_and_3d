@@ -232,6 +232,8 @@ const TemporalAAScratch = struct {
     history_pixels: []u32,
     resolve_pixels: []u32,
     history_depth: []f32,
+    history_surface_tags: []u64,
+    history_normals: []u32,
     valid: bool,
 };
 
@@ -969,6 +971,14 @@ const taa_jitter_sequence = [_]math.Vec2{
     .{ .x = -0.4375, .y = 0.38888888 },
 };
 
+const invalid_surface_tag: u64 = std.math.maxInt(u64);
+
+const ReprojectedHistorySample = struct {
+    screen: math.Vec2,
+    depth: f32,
+    used_surface_path: bool,
+};
+
 fn taaJitterForFrame(frame_index: u64) math.Vec2 {
     return taa_jitter_sequence[@as(usize, @intCast(frame_index % taa_jitter_sequence.len))];
 }
@@ -1026,6 +1036,18 @@ fn sampleHistoryColor(history: []const u32, width: usize, height: usize, screen:
     };
 }
 
+fn sampleHistoryColorNearest(history: []const u32, width: usize, height: usize, screen: math.Vec2) ?[3]f32 {
+    const x = @as(i32, @intFromFloat(@floor(screen.x)));
+    const y = @as(i32, @intFromFloat(@floor(screen.y)));
+    if (x < 0 or y < 0 or x >= @as(i32, @intCast(width)) or y >= @as(i32, @intCast(height))) return null;
+    const pixel = history[@as(usize, @intCast(y)) * width + @as(usize, @intCast(x))];
+    return .{
+        @floatFromInt((pixel >> 16) & 0xFF),
+        @floatFromInt((pixel >> 8) & 0xFF),
+        @floatFromInt(pixel & 0xFF),
+    };
+}
+
 fn sampleHistoryDepthNearest(history_depth: []const f32, width: usize, height: usize, screen: math.Vec2) ?f32 {
     const x = @as(i32, @intFromFloat(@floor(screen.x)));
     const y = @as(i32, @intFromFloat(@floor(screen.y)));
@@ -1033,6 +1055,134 @@ fn sampleHistoryDepthNearest(history_depth: []const f32, width: usize, height: u
     const sample = history_depth[@as(usize, @intCast(y)) * width + @as(usize, @intCast(x))];
     if (!std.math.isFinite(sample)) return null;
     return sample;
+}
+
+fn sampleHistorySurfaceTagNearest(history_surface_tags: []const u64, width: usize, height: usize, screen: math.Vec2) ?u64 {
+    const x = @as(i32, @intFromFloat(@floor(screen.x)));
+    const y = @as(i32, @intFromFloat(@floor(screen.y)));
+    if (x < 0 or y < 0 or x >= @as(i32, @intCast(width)) or y >= @as(i32, @intCast(height))) return null;
+    const tag = history_surface_tags[@as(usize, @intCast(y)) * width + @as(usize, @intCast(x))];
+    if (tag == invalid_surface_tag) return null;
+    return tag;
+}
+
+fn packHistoryNormal(normal: math.Vec3) u32 {
+    const nx = clampByte(@as(i32, @intFromFloat((std.math.clamp(normal.x, -1.0, 1.0) * 0.5 + 0.5) * 255.0 + 0.5)));
+    const ny = clampByte(@as(i32, @intFromFloat((std.math.clamp(normal.y, -1.0, 1.0) * 0.5 + 0.5) * 255.0 + 0.5)));
+    const nz = clampByte(@as(i32, @intFromFloat((std.math.clamp(normal.z, -1.0, 1.0) * 0.5 + 0.5) * 255.0 + 0.5)));
+    return (@as(u32, nx) << 16) | (@as(u32, ny) << 8) | @as(u32, nz);
+}
+
+fn unpackHistoryNormal(packed_normal: u32) math.Vec3 {
+    const nx = (@as(f32, @floatFromInt((packed_normal >> 16) & 0xFF)) / 255.0) * 2.0 - 1.0;
+    const ny = (@as(f32, @floatFromInt((packed_normal >> 8) & 0xFF)) / 255.0) * 2.0 - 1.0;
+    const nz = (@as(f32, @floatFromInt(packed_normal & 0xFF)) / 255.0) * 2.0 - 1.0;
+    return math.Vec3.normalize(math.Vec3.new(nx, ny, nz));
+}
+
+fn sampleHistoryNormalNearest(history_normals: []const u32, width: usize, height: usize, screen: math.Vec2) ?math.Vec3 {
+    const x = @as(i32, @intFromFloat(@floor(screen.x)));
+    const y = @as(i32, @intFromFloat(@floor(screen.y)));
+    if (x < 0 or y < 0 or x >= @as(i32, @intCast(width)) or y >= @as(i32, @intCast(height))) return null;
+    return unpackHistoryNormal(history_normals[@as(usize, @intCast(y)) * width + @as(usize, @intCast(x))]);
+}
+
+fn surfaceTagForHandle(handle: TileRenderer.SurfaceHandle) u64 {
+    if (!handle.isValid()) return invalid_surface_tag;
+    return (@as(u64, handle.meshlet_id) << 32) | @as(u64, handle.triangle_id);
+}
+
+fn surfaceTagMeshletId(tag: u64) u32 {
+    return @intCast(tag >> 32);
+}
+
+fn clampHistoryToSurfaceNeighborhood(
+    pixels: []const u32,
+    surface_handles: []const TileRenderer.SurfaceHandle,
+    normals: []const math.Vec3,
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    history_color: [3]f32,
+) [3]f32 {
+    const center_idx = y * width + x;
+    const center_surface = surface_handles[center_idx];
+    const center_normal = normals[center_idx];
+
+    var min_rgb = [3]f32{ 255.0, 255.0, 255.0 };
+    var max_rgb = [3]f32{ 0.0, 0.0, 0.0 };
+    var matched_samples: usize = 0;
+
+    const offsets = [_][2]i32{
+        .{ 0, 0 },
+        .{ -1, 0 },
+        .{ 1, 0 },
+        .{ 0, -1 },
+        .{ 0, 1 },
+    };
+
+    for (offsets) |offset| {
+        const sample_x_i = @as(i32, @intCast(x)) + offset[0];
+        const sample_y_i = @as(i32, @intCast(y)) + offset[1];
+        if (sample_x_i < 0 or sample_y_i < 0 or sample_x_i >= @as(i32, @intCast(width)) or sample_y_i >= @as(i32, @intCast(height))) continue;
+
+        const sample_idx = @as(usize, @intCast(sample_y_i)) * width + @as(usize, @intCast(sample_x_i));
+        const sample_surface = surface_handles[sample_idx];
+        const sample_normal = normals[sample_idx];
+
+        const include_sample = if (center_surface.isValid() and sample_surface.isValid())
+            center_surface.meshlet_id == sample_surface.meshlet_id
+        else
+            math.Vec3.dot(center_normal, sample_normal) >= 0.9;
+        if (!include_sample) continue;
+
+        const pixel = pixels[sample_idx];
+        const r = @as(f32, @floatFromInt((pixel >> 16) & 0xFF));
+        const g = @as(f32, @floatFromInt((pixel >> 8) & 0xFF));
+        const b = @as(f32, @floatFromInt(pixel & 0xFF));
+
+        min_rgb[0] = @min(min_rgb[0], r);
+        min_rgb[1] = @min(min_rgb[1], g);
+        min_rgb[2] = @min(min_rgb[2], b);
+        max_rgb[0] = @max(max_rgb[0], r);
+        max_rgb[1] = @max(max_rgb[1], g);
+        max_rgb[2] = @max(max_rgb[2], b);
+        matched_samples += 1;
+    }
+
+    if (matched_samples == 0) return history_color;
+
+    return .{
+        std.math.clamp(history_color[0], min_rgb[0], max_rgb[0]),
+        std.math.clamp(history_color[1], min_rgb[1], max_rgb[1]),
+        std.math.clamp(history_color[2], min_rgb[2], max_rgb[2]),
+    };
+}
+
+fn surfaceHistoryEdgeFactor(surface_handles: []const TileRenderer.SurfaceHandle, width: usize, height: usize, x: usize, y: usize) f32 {
+    const center = surface_handles[y * width + x];
+    if (!center.isValid()) return 0.6;
+
+    var total_neighbors: u32 = 0;
+    var stable_neighbors: u32 = 0;
+    const offsets = [_][2]i32{ .{ -1, 0 }, .{ 1, 0 }, .{ 0, -1 }, .{ 0, 1 } };
+    for (offsets) |offset| {
+        const sample_x = @as(i32, @intCast(x)) + offset[0];
+        const sample_y = @as(i32, @intCast(y)) + offset[1];
+        if (sample_x < 0 or sample_y < 0 or sample_x >= @as(i32, @intCast(width)) or sample_y >= @as(i32, @intCast(height))) continue;
+        total_neighbors += 1;
+        const neighbor = surface_handles[@as(usize, @intCast(sample_y)) * width + @as(usize, @intCast(sample_x))];
+        if (neighbor.isValid() and neighbor.meshlet_id == center.meshlet_id) {
+            stable_neighbors += 1;
+        }
+    }
+
+    if (total_neighbors == 0) return 1.0;
+    if (stable_neighbors >= total_neighbors) return 1.0;
+    if (stable_neighbors + 1 >= total_neighbors) return 0.9;
+    if (stable_neighbors * 2 >= total_neighbors) return 0.75;
+    return 0.5;
 }
 
 fn clampHistoryToNeighborhood(pixels: []const u32, width: usize, height: usize, x: usize, y: usize, history_color: [3]f32) [3]f32 {
@@ -1785,6 +1935,7 @@ const AOJobContext = struct {
 
 const TAAJobContext = struct {
     renderer: *Renderer,
+    mesh: *const Mesh,
     current_view: TemporalAAViewState,
     previous_view: TemporalAAViewState,
     start_row: usize,
@@ -1795,6 +1946,7 @@ const TAAJobContext = struct {
     fn run(ctx_ptr: *anyopaque) void {
         const ctx: *TAAJobContext = @ptrCast(@alignCast(ctx_ptr));
         ctx.renderer.applyTemporalAARows(
+            ctx.mesh,
             ctx.current_view,
             ctx.previous_view,
             ctx.start_row,
@@ -2627,8 +2779,13 @@ pub const Renderer = struct {
     scene_depth: []f32,
     scene_camera: []math.Vec3,
     scene_normal: []math.Vec3,
+    scene_surface: []TileRenderer.SurfaceHandle,
     taa_scratch: TemporalAAScratch,
     taa_previous_view: TemporalAAViewState,
+    taa_previous_mesh_vertices: []math.Vec3,
+    taa_previous_mesh_vertex_count: usize,
+    taa_previous_mesh_triangle_count: usize,
+    taa_previous_mesh_valid: bool,
     hybrid_shadow_coarse_cache: []u8,
     hybrid_shadow_coarse_cache_width: usize,
     hybrid_shadow_coarse_cache_height: usize,
@@ -2787,12 +2944,18 @@ pub const Renderer = struct {
         errdefer allocator.free(scene_camera);
         const scene_normal = try allocator.alloc(math.Vec3, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(scene_normal);
+        const scene_surface = try allocator.alloc(TileRenderer.SurfaceHandle, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        errdefer allocator.free(scene_surface);
         const taa_history_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(taa_history_pixels);
         const taa_resolve_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(taa_resolve_pixels);
         const taa_history_depth = try allocator.alloc(f32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(taa_history_depth);
+        const taa_history_surface_tags = try allocator.alloc(u64, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        errdefer allocator.free(taa_history_surface_tags);
+        const taa_history_normals = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        errdefer allocator.free(taa_history_normals);
         const hybrid_shadow_coarse_downsample = @max(1, config.POST_HYBRID_SHADOW_COARSE_DOWNSAMPLE);
         const hybrid_shadow_coarse_cache_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + hybrid_shadow_coarse_downsample - 1, hybrid_shadow_coarse_downsample))));
         const hybrid_shadow_coarse_cache_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + hybrid_shadow_coarse_downsample - 1, hybrid_shadow_coarse_downsample))));
@@ -2935,10 +3098,13 @@ pub const Renderer = struct {
             .scene_depth = scene_depth,
             .scene_camera = scene_camera,
             .scene_normal = scene_normal,
+            .scene_surface = scene_surface,
             .taa_scratch = .{
                 .history_pixels = taa_history_pixels,
                 .resolve_pixels = taa_resolve_pixels,
                 .history_depth = taa_history_depth,
+                .history_surface_tags = taa_history_surface_tags,
+                .history_normals = taa_history_normals,
                 .valid = false,
             },
             .taa_previous_view = TemporalAAViewState.init(
@@ -2956,6 +3122,10 @@ pub const Renderer = struct {
                     .jitter_y = 0.0,
                 },
             ),
+            .taa_previous_mesh_vertices = &[_]math.Vec3{},
+            .taa_previous_mesh_vertex_count = 0,
+            .taa_previous_mesh_triangle_count = 0,
+            .taa_previous_mesh_valid = false,
             .hybrid_shadow_coarse_cache = hybrid_shadow_coarse_cache,
             .hybrid_shadow_coarse_cache_width = hybrid_shadow_coarse_cache_width,
             .hybrid_shadow_coarse_cache_height = hybrid_shadow_coarse_cache_height,
@@ -3047,9 +3217,13 @@ pub const Renderer = struct {
         self.allocator.free(self.scene_depth);
         self.allocator.free(self.scene_camera);
         self.allocator.free(self.scene_normal);
+        self.allocator.free(self.scene_surface);
         self.allocator.free(self.taa_scratch.history_pixels);
         self.allocator.free(self.taa_scratch.resolve_pixels);
         self.allocator.free(self.taa_scratch.history_depth);
+        self.allocator.free(self.taa_scratch.history_surface_tags);
+        self.allocator.free(self.taa_scratch.history_normals);
+        if (self.taa_previous_mesh_vertices.len != 0) self.allocator.free(self.taa_previous_mesh_vertices);
         self.allocator.free(self.hybrid_shadow_coarse_cache);
         self.allocator.free(self.hybrid_shadow_edge_cache);
         if (self.hybrid_shadow_caster_indices.len != 0) self.allocator.free(self.hybrid_shadow_caster_indices);
@@ -3129,6 +3303,7 @@ pub const Renderer = struct {
             position: math.Vec3,
             uv: math.Vec2,
             normal: math.Vec3,
+            surface_bary: math.Vec3,
         };
 
         fn interpolateClipVertex(a: ClipVertex, b: ClipVertex, near_plane: f32) ClipVertex {
@@ -3141,7 +3316,9 @@ pub const Renderer = struct {
             const uv = math.Vec2.add(a.uv, math.Vec2.scale(uv_delta, t));
             const normal_delta = math.Vec3.sub(b.normal, a.normal);
             const normal = math.Vec3.normalize(math.Vec3.add(a.normal, math.Vec3.scale(normal_delta, t)));
-            return ClipVertex{ .position = position, .uv = uv, .normal = normal };
+            const bary_delta = math.Vec3.sub(b.surface_bary, a.surface_bary);
+            const surface_bary = math.Vec3.add(a.surface_bary, math.Vec3.scale(bary_delta, t));
+            return ClipVertex{ .position = position, .uv = uv, .normal = normal, .surface_bary = surface_bary };
         }
 
         fn textureForIndex(job: *const TileRenderJob, texture_index: u16) ?*const texture.Texture {
@@ -3206,7 +3383,7 @@ pub const Renderer = struct {
             return @abs(cross) < 0.5;
         }
 
-        fn rasterizeFan(job: *TileRenderJob, vertices: []ClipVertex, base_color: u32, texture_index: u16, intensity: f32) void {
+        fn rasterizeFan(job: *TileRenderJob, vertices: []ClipVertex, base_color: u32, texture_index: u16, intensity: f32, triangle_id: usize, meshlet_id: usize) void {
             if (vertices.len < 3) return;
 
             var screen_pts: [max_clipped_vertices]math.Vec2 = undefined;
@@ -3228,6 +3405,11 @@ pub const Renderer = struct {
                 const shading = TileRenderer.ShadingParams{
                     .base_color = base_color,
                     .texture = job.textureForIndex(texture_index),
+                    .surface_bary0 = vertices[0].surface_bary,
+                    .surface_bary1 = vertices[tri_idx].surface_bary,
+                    .surface_bary2 = vertices[tri_idx + 1].surface_bary,
+                    .triangle_id = triangle_id,
+                    .meshlet_id = meshlet_id,
                     .normals = [3]math.Vec3{ vertices[0].normal, vertices[tri_idx].normal, vertices[tri_idx + 1].normal },
                     .metallic = 0.0,
                     .roughness = 1.0,
@@ -3269,16 +3451,16 @@ pub const Renderer = struct {
                 if (!front0 and !front1 and !front2) continue;
 
                 var clip_input = [_]ClipVertex{
-                    ClipVertex{ .position = camera_positions[0], .uv = packet.uv[0], .normal = packet.normals[0] },
-                    ClipVertex{ .position = camera_positions[1], .uv = packet.uv[1], .normal = packet.normals[1] },
-                    ClipVertex{ .position = camera_positions[2], .uv = packet.uv[2], .normal = packet.normals[2] },
+                    ClipVertex{ .position = camera_positions[0], .uv = packet.uv[0], .normal = packet.normals[0], .surface_bary = math.Vec3.new(1.0, 0.0, 0.0) },
+                    ClipVertex{ .position = camera_positions[1], .uv = packet.uv[1], .normal = packet.normals[1], .surface_bary = math.Vec3.new(0.0, 1.0, 0.0) },
+                    ClipVertex{ .position = camera_positions[2], .uv = packet.uv[2], .normal = packet.normals[2], .surface_bary = math.Vec3.new(0.0, 0.0, 1.0) },
                 };
 
                 var clipped: [max_clipped_vertices]ClipVertex = undefined;
                 const clipped_count = clipPolygonToNearPlane(clip_input[0..], near_plane, &clipped);
                 if (clipped_count < 3) continue;
 
-                rasterizeFan(job, clipped[0..clipped_count], packet.base_color, packet.texture_index, packet.intensity);
+                rasterizeFan(job, clipped[0..clipped_count], packet.base_color, packet.texture_index, packet.intensity, packet.triangle_id, packet.meshlet_id);
 
                 if (job.draw_wireframe and !packet.flags.cull_wire) {
                     const p0 = job.projectToScreen(camera_positions[0]);
@@ -3289,7 +3471,10 @@ pub const Renderer = struct {
                     TileRenderer.drawLineToTile(job.tile, job.tile_buffer, p2, p0, wire_color);
                 }
             }
+        }
 
+        fn applyMeshletShadows(ctx: *anyopaque) void {
+            const job: *TileRenderJob = @ptrCast(@alignCast(ctx));
             if (job.sys_shadows) |sys| {
                 const _z_meshletShadowTile = profiler.zone("meshletShadowTile");
                 defer if (_z_meshletShadowTile) |z| z.end();
@@ -3301,6 +3486,7 @@ pub const Renderer = struct {
                     .dirs_x = undefined,
                     .dirs_y = undefined,
                     .dirs_z = undefined,
+                    .skip_triangle_ids = undefined,
                     .active_mask = 0,
                     .occluded_mask = 0,
                 };
@@ -3322,8 +3508,8 @@ pub const Renderer = struct {
                         const idx = pixel_idx + i;
                         const depth = job.tile_buffer.depth[idx];
                         if (depth < std.math.inf(f32) and depth > 0.0) {
-                            const normal = job.tile_buffer.data[idx].normal;
-                            if (math.Vec3.dot(normal, light_dir_camera) <= 0.0) continue;
+                            const normal_camera = job.tile_buffer.data[idx].normal;
+                            if (math.Vec3.dot(normal_camera, light_dir_camera) <= 0.0) continue;
 
                             const cs_pos = job.tile_buffer.data[idx].camera;
                             const xs = math.Vec3.scale(job.cam_right, cs_pos.x);
@@ -3331,14 +3517,27 @@ pub const Renderer = struct {
                             const zs = math.Vec3.scale(job.cam_fwd, cs_pos.z);
                             const ws_relative = math.Vec3.add(xs, math.Vec3.add(ys, zs));
                             const world_pos = math.Vec3.add(job.cam_pos, ws_relative);
+                            const world_normal = math.Vec3.normalize(math.Vec3.add(
+                                math.Vec3.scale(job.cam_right, normal_camera.x),
+                                math.Vec3.add(
+                                    math.Vec3.scale(job.cam_up, normal_camera.y),
+                                    math.Vec3.scale(job.cam_fwd, normal_camera.z),
+                                ),
+                            ));
+                            const origin_bias = math.Vec3.add(
+                                math.Vec3.scale(world_normal, 0.02),
+                                math.Vec3.scale(ray_dir, 0.005),
+                            );
+                            const surface = job.tile_buffer.data[idx].surface;
 
-                            packet.origins_x[i] = world_pos.x;
-                            packet.origins_y[i] = world_pos.y;
-                            packet.origins_z[i] = world_pos.z;
+                            packet.origins_x[i] = world_pos.x + origin_bias.x;
+                            packet.origins_y[i] = world_pos.y + origin_bias.y;
+                            packet.origins_z[i] = world_pos.z + origin_bias.z;
 
                             packet.dirs_x[i] = ray_dir.x;
                             packet.dirs_y[i] = ray_dir.y;
                             packet.dirs_z[i] = ray_dir.z;
+                            packet.skip_triangle_ids[i] = if (surface.isValid()) surface.triangle_id else TileRenderer.invalid_surface_id;
 
                             packet.active_mask |= (@as(u64, 1) << @intCast(i));
                         }
@@ -3472,6 +3671,7 @@ pub const Renderer = struct {
     fn emitPreparedTriangleToWork(
         writer: *MeshWorkWriter,
         tri_idx: usize,
+        meshlet_idx: usize,
         tri: MeshModule.Triangle,
         p0_cam: math.Vec3,
         p1_cam: math.Vec3,
@@ -3535,6 +3735,7 @@ pub const Renderer = struct {
         try writer.writeAtIndex(
             write_index,
             tri_idx,
+            meshlet_idx,
             screen0,
             screen1,
             screen2,
@@ -3557,6 +3758,7 @@ pub const Renderer = struct {
         writer: *MeshWorkWriter,
         mesh: *const Mesh,
         tri_idx: usize,
+        meshlet_idx: usize,
         tri: MeshModule.Triangle,
         states: []std.atomic.Value(u32),
         vertex_generation: u32,
@@ -3592,6 +3794,7 @@ pub const Renderer = struct {
         return emitPreparedTriangleToWork(
             writer,
             tri_idx,
+            meshlet_idx,
             tri,
             p0_cam,
             p1_cam,
@@ -3611,6 +3814,7 @@ pub const Renderer = struct {
         writer: *MeshWorkWriter,
         mesh: *const Mesh,
         tri_idx: usize,
+        meshlet_idx: usize,
         tri: MeshModule.Triangle,
         primitive: MeshModule.MeshletPrimitive,
         local_camera_vertices: []const math.Vec3,
@@ -3641,6 +3845,7 @@ pub const Renderer = struct {
         return emitPreparedTriangleToWork(
             writer,
             tri_idx,
+            meshlet_idx,
             tri,
             p0_cam,
             p1_cam,
@@ -3711,6 +3916,7 @@ pub const Renderer = struct {
     const MeshletRenderJob = struct {
         mesh: *const Mesh,
         meshlet: *const Meshlet,
+        meshlet_index: usize,
         mesh_work: *MeshWork,
         local_projected_vertices: [][2]i32,
         local_camera_vertices: []math.Vec3,
@@ -3766,6 +3972,7 @@ pub const Renderer = struct {
                     &writer,
                     job.mesh,
                     tri_idx,
+                    job.meshlet_index,
                     tri,
                     primitive,
                     job.local_camera_vertices,
@@ -4176,6 +4383,7 @@ pub const Renderer = struct {
             self: *MeshWorkWriter,
             idx: usize,
             tri_idx: usize,
+            meshlet_idx: usize,
             screen0: [2]i32,
             screen1: [2]i32,
             screen2: [2]i32,
@@ -4206,6 +4414,7 @@ pub const Renderer = struct {
                 .intensity = intensity,
                 .flags = flags,
                 .triangle_id = tri_idx,
+                .meshlet_id = meshlet_idx,
             };
         }
     };
@@ -4591,6 +4800,31 @@ pub const Renderer = struct {
         self.mesh_work_cache.invalidate();
     }
 
+    fn ensureTemporalMeshVertexCapacity(self: *Renderer, vertex_count: usize) !void {
+        if (self.taa_previous_mesh_vertices.len == vertex_count) return;
+        if (self.taa_previous_mesh_vertices.len != 0) self.allocator.free(self.taa_previous_mesh_vertices);
+        self.taa_previous_mesh_vertices = if (vertex_count == 0)
+            &[_]math.Vec3{}
+        else
+            try self.allocator.alloc(math.Vec3, vertex_count);
+        self.taa_previous_mesh_vertex_count = 0;
+        self.taa_previous_mesh_triangle_count = 0;
+        self.taa_previous_mesh_valid = false;
+    }
+
+    fn captureTemporalMeshState(self: *Renderer, mesh: *const Mesh) void {
+        if (self.taa_previous_mesh_vertices.len < mesh.vertices.len) {
+            self.taa_previous_mesh_valid = false;
+            return;
+        }
+        if (mesh.vertices.len != 0) {
+            @memcpy(self.taa_previous_mesh_vertices[0..mesh.vertices.len], mesh.vertices);
+        }
+        self.taa_previous_mesh_vertex_count = mesh.vertices.len;
+        self.taa_previous_mesh_triangle_count = mesh.triangles.len;
+        self.taa_previous_mesh_valid = true;
+    }
+
     fn consumeMouseDelta(self: *Renderer) math.Vec2 {
         const delta = self.pending_mouse_delta;
         self.pending_mouse_delta = math.Vec2.new(0.0, 0.0);
@@ -4821,6 +5055,7 @@ pub const Renderer = struct {
 
         var cache = &self.mesh_work_cache;
         try cache.ensureCapacity(self.allocator, mesh.vertices.len);
+        if (config.POST_TAA_ENABLED) try self.ensureTemporalMeshVertexCapacity(mesh.vertices.len);
 
         const needs_update = cache.needsUpdate(
             mesh,
@@ -4880,8 +5115,12 @@ pub const Renderer = struct {
         if (self.use_tiled_rendering and self.tile_grid != null and self.tile_buffers != null) {
             const tri_count = mesh_work.triangleSlice().len;
             pipeline_logger.debugSub("dispatch", "rendering tiled path triangles={} meshlets={}", .{ tri_count, mesh_work.*.meshlet_len });
-            try self.renderTiled(mesh, view_rotation, light_dir, pump, raster_projection, mesh_work);
-            self.recordRenderPassTiming("meshlet_tiled", scene_pass_start);
+            const shadow_pass_elapsed_ns = try self.renderTiled(mesh, view_rotation, light_dir, pump, raster_projection, mesh_work);
+            const scene_pass_elapsed_ns = std.time.nanoTimestamp() - scene_pass_start;
+            self.recordRenderPassDuration("meshlet_tiled", scene_pass_elapsed_ns - @as(i128, @intCast(shadow_pass_elapsed_ns)));
+            if (config.MESHLET_SHADOWS_ENABLED) {
+                self.recordRenderPassDuration("meshlet_shadows", @as(i128, @intCast(shadow_pass_elapsed_ns)));
+            }
         } else {
             const tri_count = mesh_work.triangleSlice().len;
             pipeline_logger.debugSub("dispatch", "rendering direct path triangles={} meshlets={}", .{ tri_count, mesh_work.*.meshlet_len });
@@ -5047,6 +5286,10 @@ pub const Renderer = struct {
         timing.frame_duration_ms = elapsed_ms;
         timing.accumulated_ms += elapsed_ms;
         self.render_pass_count += 1;
+    }
+
+    fn renderPassSortMetric(pass: RenderPassTiming) f32 {
+        return if (pass.has_sample) pass.sampled_ms_per_frame else pass.frame_duration_ms;
     }
 
     fn sampleRenderPassTimings(self: *Renderer, frame_samples: u32) void {
@@ -5978,7 +6221,7 @@ pub const Renderer = struct {
         if (config.POST_SSGI_ENABLED) self.applySSGIPass();
         if (config.POST_SSR_ENABLED) self.applySSRPass(projection);
         if (config.POST_DEPTH_FOG_ENABLED) self.applyDepthFogPass();
-        if (config.POST_TAA_ENABLED) self.applyTemporalAAPass(current_view);
+        if (config.POST_TAA_ENABLED) self.applyTemporalAAPass(mesh, current_view);
         if (config.POST_MOTION_BLUR_ENABLED) self.applyMotionBlurPass(current_view);
         if (config.POST_GOD_RAYS_ENABLED) self.applyGodRaysPass(projection, light_dir_world);
         if (config.POST_BLOOM_ENABLED) self.applyBloomPass();
@@ -6205,6 +6448,7 @@ pub const Renderer = struct {
 
     fn applyTemporalAARows(
         self: *Renderer,
+        mesh: *const Mesh,
         current_view: TemporalAAViewState,
         previous_view: TemporalAAViewState,
         start_row: usize,
@@ -6212,34 +6456,6 @@ pub const Renderer = struct {
         width: usize,
         height: usize,
     ) void {
-        const offset_w = math.Vec3.sub(current_view.camera_position, previous_view.camera_position);
-        const offset_x = math.Vec3.dot(offset_w, previous_view.basis_right);
-        const offset_y = math.Vec3.dot(offset_w, previous_view.basis_up);
-        const offset_z = math.Vec3.dot(offset_w, previous_view.basis_forward);
-
-        const m00 = math.Vec3.dot(current_view.basis_right, previous_view.basis_right);
-        const m01 = math.Vec3.dot(current_view.basis_up, previous_view.basis_right);
-        const m02 = math.Vec3.dot(current_view.basis_forward, previous_view.basis_right);
-
-        const m10 = math.Vec3.dot(current_view.basis_right, previous_view.basis_up);
-        const m11 = math.Vec3.dot(current_view.basis_up, previous_view.basis_up);
-        const m12 = math.Vec3.dot(current_view.basis_forward, previous_view.basis_up);
-
-        const m20 = math.Vec3.dot(current_view.basis_right, previous_view.basis_forward);
-        const m21 = math.Vec3.dot(current_view.basis_up, previous_view.basis_forward);
-        const m22 = math.Vec3.dot(current_view.basis_forward, previous_view.basis_forward);
-
-        const p_near = previous_view.projection.near_plane + NEAR_EPSILON;
-        const jitter_x_diff = current_view.projection.jitter_x - previous_view.projection.jitter_x;
-        const jitter_y_diff = current_view.projection.jitter_y - previous_view.projection.jitter_y;
-
-        const p_cx = previous_view.projection.center_x;
-        const p_cy = previous_view.projection.center_y;
-        const p_jx = previous_view.projection.jitter_x;
-        const p_jy = previous_view.projection.jitter_y;
-        const p_xs = previous_view.projection.x_scale;
-        const p_ys = previous_view.projection.y_scale;
-
         var y = start_row;
         while (y < end_row) : (y += 1) {
             const row_start = y * width;
@@ -6252,33 +6468,111 @@ pub const Renderer = struct {
                 const current_camera = self.scene_camera[idx];
                 if (!validSceneCameraSample(current_camera)) continue;
 
-                const cx = current_camera.x;
-                const cy = current_camera.y;
-                const cz = current_camera.z;
+                const current_surface = self.scene_surface[idx];
+                var reprojection: ?ReprojectedHistorySample = null;
 
-                const prev_z = offset_z + cx * m20 + cy * m21 + cz * m22;
-                if (prev_z <= p_near) continue;
+                if (current_surface.isValid() and self.taa_previous_mesh_valid and current_surface.triangle_id < mesh.triangles.len and self.taa_previous_mesh_triangle_count == mesh.triangles.len) {
+                    const tri = mesh.triangles[current_surface.triangle_id];
+                    if (tri.v0 < self.taa_previous_mesh_vertex_count and tri.v1 < self.taa_previous_mesh_vertex_count and tri.v2 < self.taa_previous_mesh_vertex_count) {
+                        const bary = current_surface.barycentrics();
+                        const prev_v0 = self.taa_previous_mesh_vertices[tri.v0];
+                        const prev_v1 = self.taa_previous_mesh_vertices[tri.v1];
+                        const prev_v2 = self.taa_previous_mesh_vertices[tri.v2];
+                        const previous_world = math.Vec3.new(
+                            prev_v0.x * bary.x + prev_v1.x * bary.y + prev_v2.x * bary.z,
+                            prev_v0.y * bary.x + prev_v1.y * bary.y + prev_v2.y * bary.z,
+                            prev_v0.z * bary.x + prev_v1.z * bary.y + prev_v2.z * bary.z,
+                        );
+                        const previous_relative = math.Vec3.sub(previous_world, previous_view.camera_position);
+                        const previous_camera = math.Vec3.new(
+                            math.Vec3.dot(previous_relative, previous_view.basis_right),
+                            math.Vec3.dot(previous_relative, previous_view.basis_up),
+                            math.Vec3.dot(previous_relative, previous_view.basis_forward),
+                        );
+                        if (previous_camera.z > previous_view.projection.near_plane + NEAR_EPSILON) {
+                            reprojection = .{
+                                .screen = projectCameraPositionFloat(previous_camera, previous_view.projection),
+                                .depth = previous_camera.z,
+                                .used_surface_path = true,
+                            };
+                        }
+                    }
+                }
 
-                const prev_x = offset_x + cx * m00 + cy * m01 + cz * m02;
-                const prev_y = offset_y + cx * m10 + cy * m11 + cz * m12;
+                if (reprojection == null) {
+                    const world_pos = cameraToWorldPosition(
+                        current_view.camera_position,
+                        current_view.basis_right,
+                        current_view.basis_up,
+                        current_view.basis_forward,
+                        current_camera,
+                    );
+                    const previous_relative = math.Vec3.sub(world_pos, previous_view.camera_position);
+                    const previous_camera = math.Vec3.new(
+                        math.Vec3.dot(previous_relative, previous_view.basis_right),
+                        math.Vec3.dot(previous_relative, previous_view.basis_up),
+                        math.Vec3.dot(previous_relative, previous_view.basis_forward),
+                    );
+                    if (previous_camera.z <= previous_view.projection.near_plane + NEAR_EPSILON) continue;
+                    reprojection = .{
+                        .screen = projectCameraPositionFloat(previous_camera, previous_view.projection),
+                        .depth = previous_camera.z,
+                        .used_surface_path = false,
+                    };
+                }
 
-                const inv_z = 1.0 / prev_z;
-                const ndc_x = prev_x * inv_z * p_xs;
-                const ndc_y = prev_y * inv_z * p_ys;
-                const previous_screen_raw_x = ndc_x * p_cx + p_cx + p_jx;
-                const previous_screen_raw_y = -ndc_y * p_cy + p_cy + p_jy;
+                const previous_sample = reprojection orelse continue;
+                const previous_depth = sampleHistoryDepthNearest(self.taa_scratch.history_depth, width, height, previous_sample.screen) orelse continue;
+                const depth_delta = @abs(previous_depth - previous_sample.depth);
+                const depth_factor = 1.0 - std.math.clamp(depth_delta / @max(1e-4, self.temporal_aa_config.depth_threshold), 0.0, 1.0);
+                if (depth_factor <= 0.0) continue;
 
-                const previous_screen = math.Vec2.new(
-                    previous_screen_raw_x + jitter_x_diff,
-                    previous_screen_raw_y + jitter_y_diff,
+                const previous_tag = sampleHistorySurfaceTagNearest(self.taa_scratch.history_surface_tags, width, height, previous_sample.screen) orelse invalid_surface_tag;
+                const current_tag = surfaceTagForHandle(current_surface);
+                if (current_tag != invalid_surface_tag and previous_tag == current_tag) {
+                    const previous_color = sampleHistoryColorNearest(self.taa_scratch.history_pixels, width, height, previous_sample.screen) orelse continue;
+                    const history_weight = std.math.clamp(self.temporal_aa_config.history_weight * (0.6 + 0.15 * depth_factor), 0.0, self.temporal_aa_config.history_weight);
+                    self.taa_scratch.resolve_pixels[idx] = blendTemporalColor(current_pixel, previous_color, history_weight);
+                    continue;
+                }
+
+                const previous_color = if (previous_sample.used_surface_path)
+                    sampleHistoryColorNearest(self.taa_scratch.history_pixels, width, height, previous_sample.screen)
+                else
+                    sampleHistoryColor(self.taa_scratch.history_pixels, width, height, previous_sample.screen);
+                const history_color = previous_color orelse continue;
+                const current_normal = self.scene_normal[idx];
+                const previous_normal = sampleHistoryNormalNearest(self.taa_scratch.history_normals, width, height, previous_sample.screen) orelse math.Vec3.new(0.0, 0.0, 0.0);
+
+                var identity_factor: f32 = if (previous_sample.used_surface_path) 0.35 else 0.2;
+                if (current_tag != invalid_surface_tag and previous_tag != invalid_surface_tag and surfaceTagMeshletId(previous_tag) == current_surface.meshlet_id) {
+                    identity_factor = 0.6;
+                }
+                const normal_alignment = math.Vec3.dot(current_normal, previous_normal);
+                const normal_factor = if (!previous_sample.used_surface_path and previous_tag == invalid_surface_tag)
+                    0.5
+                else if (normal_alignment <= 0.5)
+                    0.0
+                else
+                    std.math.clamp((normal_alignment - 0.5) * 2.0, 0.0, 1.0);
+                if (normal_factor <= 0.0) continue;
+
+                const edge_factor = surfaceHistoryEdgeFactor(self.scene_surface, width, height, x, y);
+                const confidence = identity_factor * depth_factor * normal_factor * edge_factor;
+                if (confidence <= 0.05) continue;
+
+                const clamped_history = clampHistoryToSurfaceNeighborhood(
+                    self.bitmap.pixels,
+                    self.scene_surface,
+                    self.scene_normal,
+                    width,
+                    height,
+                    x,
+                    y,
+                    history_color,
                 );
-
-                const previous_depth = sampleHistoryDepthNearest(self.taa_scratch.history_depth, width, height, previous_screen) orelse continue;
-                if (@abs(previous_depth - prev_z) > self.temporal_aa_config.depth_threshold) continue;
-
-                const previous_color = sampleHistoryColor(self.taa_scratch.history_pixels, width, height, previous_screen) orelse continue;
-                const clamped_history = clampHistoryToNeighborhood(self.bitmap.pixels, width, height, x, y, previous_color);
-                self.taa_scratch.resolve_pixels[idx] = blendTemporalColor(current_pixel, clamped_history, self.temporal_aa_config.history_weight);
+                const history_weight = std.math.clamp(self.temporal_aa_config.history_weight * confidence * 0.9, 0.0, self.temporal_aa_config.history_weight);
+                self.taa_scratch.resolve_pixels[idx] = blendTemporalColor(current_pixel, clamped_history, history_weight);
             }
         }
     }
@@ -6917,7 +7211,7 @@ pub const Renderer = struct {
         }
     }
 
-    fn applyTemporalAAPass(self: *Renderer, current_view: TemporalAAViewState) void {
+    fn applyTemporalAAPass(self: *Renderer, mesh: *const Mesh, current_view: TemporalAAViewState) void {
         const _zone = profiler.zone("applyTemporalAAPass");
         defer if (_zone) |z| z.end();
         if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
@@ -6928,8 +7222,13 @@ pub const Renderer = struct {
         if (!self.taa_scratch.valid) {
             @memcpy(self.taa_scratch.history_pixels, self.bitmap.pixels);
             @memcpy(self.taa_scratch.history_depth, self.scene_depth);
+            for (0..self.bitmap.pixels.len) |idx| {
+                self.taa_scratch.history_surface_tags[idx] = surfaceTagForHandle(self.scene_surface[idx]);
+                self.taa_scratch.history_normals[idx] = packHistoryNormal(self.scene_normal[idx]);
+            }
             self.taa_previous_view = current_view;
             self.taa_scratch.valid = true;
+            self.captureTemporalMeshState(mesh);
             self.recordRenderPassTiming("taa", pass_start);
             return;
         }
@@ -6938,7 +7237,7 @@ pub const Renderer = struct {
         const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
 
         if (stripe_count <= 1 or self.job_system == null) {
-            self.applyTemporalAARows(current_view, self.taa_previous_view, 0, height, width, height);
+            self.applyTemporalAARows(mesh, current_view, self.taa_previous_view, 0, height, width, height);
         } else {
             var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
             var stripe_index: usize = 0;
@@ -6949,6 +7248,7 @@ pub const Renderer = struct {
 
                 self.taa_job_contexts[stripe_index] = .{
                     .renderer = self,
+                    .mesh = mesh,
                     .current_view = current_view,
                     .previous_view = self.taa_previous_view,
                     .start_row = start_row,
@@ -6977,8 +7277,13 @@ pub const Renderer = struct {
         @memcpy(self.bitmap.pixels, self.taa_scratch.resolve_pixels);
         @memcpy(self.taa_scratch.history_pixels, self.bitmap.pixels);
         @memcpy(self.taa_scratch.history_depth, self.scene_depth);
+        for (0..self.bitmap.pixels.len) |idx| {
+            self.taa_scratch.history_surface_tags[idx] = surfaceTagForHandle(self.scene_surface[idx]);
+            self.taa_scratch.history_normals[idx] = packHistoryNormal(self.scene_normal[idx]);
+        }
         self.taa_previous_view = current_view;
         self.taa_scratch.valid = true;
+        self.captureTemporalMeshState(mesh);
         self.recordRenderPassTiming("taa", pass_start);
     }
 
@@ -7375,7 +7680,27 @@ pub const Renderer = struct {
             y += 20;
 
             var line_buffer: [160]u8 = undefined;
-            for (self.render_pass_timings[0..self.render_pass_count]) |pass| {
+            var pass_order: [max_render_passes]usize = undefined;
+            for (0..self.render_pass_count) |idx| {
+                pass_order[idx] = idx;
+            }
+
+            var sort_idx: usize = 1;
+            while (sort_idx < self.render_pass_count) : (sort_idx += 1) {
+                const current_idx = pass_order[sort_idx];
+                const current_metric = renderPassSortMetric(self.render_pass_timings[current_idx]);
+                var insert_idx = sort_idx;
+                while (insert_idx > 0) {
+                    const prev_idx = pass_order[insert_idx - 1];
+                    if (renderPassSortMetric(self.render_pass_timings[prev_idx]) >= current_metric) break;
+                    pass_order[insert_idx] = prev_idx;
+                    insert_idx -= 1;
+                }
+                pass_order[insert_idx] = current_idx;
+            }
+
+            for (pass_order[0..self.render_pass_count]) |pass_idx| {
+                const pass = self.render_pass_timings[pass_idx];
                 const line = if (pass.has_sample)
                     std.fmt.bufPrint(&line_buffer, "{s}: {d:.2} ms/frame", .{ pass.name, pass.sampled_ms_per_frame }) catch continue
                 else
@@ -7505,7 +7830,7 @@ pub const Renderer = struct {
         pump: ?*const fn (*Renderer) bool,
         projection: ProjectionParams,
         mesh_work: *const MeshWork,
-    ) !void {
+    ) !u64 {
         const _z_renderTiled = profiler.zone("renderTiled");
         defer if (_z_renderTiled) |z| z.end();
         _ = light_dir;
@@ -7524,7 +7849,7 @@ pub const Renderer = struct {
 
         if (triangles.len == 0) {
             pipeline_logger.debugSub("tiled", "no triangles; bitmap cleared", .{});
-            return;
+            return 0;
         }
 
         if (self.job_system != null and mesh_work.*.meshlet_len != 0) {
@@ -7572,7 +7897,7 @@ pub const Renderer = struct {
 
         if (active_tile_count == 0) {
             pipeline_logger.debugSub("tiled", "triangles binned to zero active tiles", .{});
-            return;
+            return 0;
         }
 
         if (self.job_system) |job_sys| {
@@ -7608,11 +7933,57 @@ pub const Renderer = struct {
             }
         }
 
+        var shadow_pass_elapsed_ns: u64 = 0;
+        const run_meshlet_shadows = config.MESHLET_SHADOWS_ENABLED and mesh.meshlets.len > 0;
+        if (run_meshlet_shadows) {
+            const shadow_pass_start = std.time.nanoTimestamp();
+
+            if (self.job_system) |job_sys| {
+                var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+                const main_tile_idx = active_indices[0];
+
+                for (active_indices[1..active_tile_count]) |tile_idx| {
+                    jobs[tile_idx] = Job.init(
+                        TileRenderJob.applyMeshletShadows,
+                        @ptrCast(&tile_jobs[tile_idx]),
+                        &parent_job,
+                    );
+
+                    if (!job_sys.submitJobAuto(&jobs[tile_idx])) {
+                        TileRenderJob.applyMeshletShadows(@ptrCast(&tile_jobs[tile_idx]));
+                    }
+                }
+
+                TileRenderJob.applyMeshletShadows(@ptrCast(&tile_jobs[main_tile_idx]));
+                parent_job.complete();
+
+                var interrupted = false;
+                while (!parent_job.isComplete()) {
+                    if (pump) |p| {
+                        if (!p(self)) interrupted = true;
+                    }
+                    std.Thread.yield() catch {};
+                }
+                if (interrupted) return error.RenderInterrupted;
+            } else {
+                for (active_indices[0..active_tile_count]) |tile_idx| {
+                    TileRenderJob.applyMeshletShadows(@ptrCast(&tile_jobs[tile_idx]));
+                }
+            }
+
+            const shadow_elapsed_ns = std.time.nanoTimestamp() - shadow_pass_start;
+            if (shadow_elapsed_ns > 0) {
+                shadow_pass_elapsed_ns = @intCast(shadow_elapsed_ns);
+            }
+        }
+
         // 4. Compositing: Copy the pixels from each completed tile buffer to the main screen bitmap.
         for (active_indices[0..active_tile_count]) |tile_idx| {
             const tile = &grid.tiles[tile_idx];
-            TileRenderer.compositeTileToScreen(tile, &tile_buffers[tile_idx], &self.bitmap, self.scene_depth, self.scene_camera, self.scene_normal);
+            TileRenderer.compositeTileToScreen(tile, &tile_buffers[tile_idx], &self.bitmap, self.scene_depth, self.scene_camera, self.scene_normal, self.scene_surface);
         }
+
+        return shadow_pass_elapsed_ns;
     }
 
     fn populateTilesFromMeshlets(
@@ -7711,6 +8082,7 @@ pub const Renderer = struct {
                 _ = try emitTriangleToWork(
                     &writer,
                     mesh,
+                    tri_idx,
                     tri_idx,
                     tri,
                     vertex_ready,
@@ -7910,6 +8282,7 @@ pub const Renderer = struct {
                 meshlet_jobs[job_idx] = MeshletRenderJob{
                     .mesh = mesh,
                     .meshlet = meshlet_ptr,
+                    .meshlet_index = meshlet_index,
                     .mesh_work = work,
                     .local_projected_vertices = cache_ptr.meshlet_local_projected_scratch[meshlet_vertex_offsets[job_idx] .. meshlet_vertex_offsets[job_idx] + meshlet_ptr.vertex_count],
                     .local_camera_vertices = cache_ptr.meshlet_local_camera_scratch[meshlet_vertex_offsets[job_idx] .. meshlet_vertex_offsets[job_idx] + meshlet_ptr.vertex_count],
@@ -8014,6 +8387,7 @@ pub const Renderer = struct {
                         &writer,
                         mesh,
                         tri_idx,
+                        meshlet_index,
                         tri,
                         primitive,
                         local_camera_vertices,

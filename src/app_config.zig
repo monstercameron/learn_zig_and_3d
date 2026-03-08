@@ -54,11 +54,11 @@ pub var MESHLET_SHADOWS_ENABLED: bool = true;
 
 pub var POST_SHADOW_ENABLED: bool = false;
 /// Square dimension resolution of the shadow depth map target.
-pub var POST_SHADOW_MAP_SIZE: usize = 4096;
+pub var POST_SHADOW_MAP_SIZE: usize = 2048;
 /// Controls the opacity intensity of standard shadows (0-100).
 pub var POST_SHADOW_STRENGTH_PERCENT: i32 = 38;
 /// A depth offset to prevent shadow acne artifacts on lit surfaces.
-pub var POST_SHADOW_DEPTH_BIAS: f32 = 0.07;
+pub var POST_SHADOW_DEPTH_BIAS: f32 = 0.05;
 /// Enables the advanced hybrid ray-traced shadow pass for high fidelity shadows.
 pub var POST_HYBRID_SHADOW_ENABLED: bool = false;
 /// Tile dimension constraint used during hybrid shadow evaluation.
@@ -105,11 +105,11 @@ pub var POST_SSAO_BIAS: f32 = 0.08;
 /// Blurring threshold difference between sampling depths.
 pub var POST_SSAO_BLUR_DEPTH_THRESHOLD: f32 = 0.55;
 /// Enables Temporal Anti-Aliasing (TAA) to smooth out jagged edges across frames.
-pub var POST_TAA_ENABLED: bool = false;
+pub var POST_TAA_ENABLED: bool = true;
 /// Percentage mix of historic frame data blended into current image.
-pub var POST_TAA_HISTORY_PERCENT: i32 = 92;
+pub var POST_TAA_HISTORY_PERCENT: i32 = 82;
 /// A depth threshold allowing TAA to discard historic data to prevent ghosting.
-pub var POST_TAA_DEPTH_THRESHOLD: f32 = 2.0;
+pub var POST_TAA_DEPTH_THRESHOLD: f32 = 0.6;
 /// The near viewing plane at which fog starts appearing.
 pub var POST_DEPTH_FOG_NEAR: f32 = 5.5;
 /// The distant viewing place at which fog fully obscures vision.
