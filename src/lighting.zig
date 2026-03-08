@@ -15,6 +15,7 @@
 //!   simulating indirect light bouncing around the environment.
 
 const std = @import("std");
+const cpu_features = @import("cpu_features.zig");
 const math = @import("math.zig");
 
 /// The minimum amount of light a surface receives, even if it's facing away from the light source.
@@ -60,6 +61,73 @@ pub fn applyIntensity(color: u32, intensity: f32) u32 {
 
     // Re-pack the components into a single 32-bit integer, with full alpha (0xFF).
     return (255 << 24) | (@as(u32, @intFromFloat(r_val)) << 16) | (@as(u32, @intFromFloat(g_val)) << 8) | @as(u32, @intFromFloat(b_val));
+}
+
+fn runtimeIntensityBatchLanes() usize {
+    return switch (cpu_features.detect().preferredVectorBackend()) {
+        .avx512, .avx2 => 8,
+        .sse2, .neon => 4,
+        .scalar => 1,
+    };
+}
+
+fn applyIntensityBatchSimd(comptime lanes: usize, colors: *const [lanes]u32, intensities: *const [lanes]f32) [lanes]u32 {
+    const VecF32 = @Vector(lanes, f32);
+    const VecU32 = @Vector(lanes, u32);
+
+    const ambient: VecF32 = @splat(AMBIENT_LIGHT);
+    const max_intensity: VecF32 = @splat(1.0);
+    const zero: VecF32 = @splat(0.0);
+    const clamp255: VecF32 = @splat(255.0);
+    const mask_ff: VecU32 = @splat(0xFF);
+    const shift8: VecU32 = @splat(8);
+    const shift16: VecU32 = @splat(16);
+    const color_vec: VecU32 = @bitCast(colors.*);
+    const intensity_vec: VecF32 = @bitCast(intensities.*);
+
+    const clamped_intensity = @min(@max(intensity_vec, ambient), max_intensity);
+    const r_int = (color_vec >> shift16) & mask_ff;
+    const g_int = (color_vec >> shift8) & mask_ff;
+    const b_int = color_vec & mask_ff;
+
+    const r = @as(VecF32, @floatFromInt(r_int));
+    const g = @as(VecF32, @floatFromInt(g_int));
+    const b = @as(VecF32, @floatFromInt(b_int));
+
+    const r_scaled = @min(@max(r * clamped_intensity, zero), clamp255);
+    const g_scaled = @min(@max(g * clamped_intensity, zero), clamp255);
+    const b_scaled = @min(@max(b * clamped_intensity, zero), clamp255);
+
+    const r_packed = @as(VecU32, @intFromFloat(r_scaled)) << shift16;
+    const g_packed = @as(VecU32, @intFromFloat(g_scaled)) << shift8;
+    const b_packed = @as(VecU32, @intFromFloat(b_scaled));
+    return @bitCast(@as(VecU32, @splat(0xFF000000)) | r_packed | g_packed | b_packed);
+}
+
+pub fn applyIntensityBatch(colors: []const u32, intensities: []const f32, out: []u32) void {
+    std.debug.assert(colors.len == intensities.len and colors.len == out.len);
+
+    const lanes = runtimeIntensityBatchLanes();
+    var index: usize = 0;
+    while (index + lanes <= colors.len) : (index += lanes) {
+        switch (lanes) {
+            8 => {
+                const result = applyIntensityBatchSimd(8, @ptrCast(colors[index..][0..8]), @ptrCast(intensities[index..][0..8]));
+                const out_ptr: *[8]u32 = @ptrCast(out[index..][0..8]);
+                out_ptr.* = result;
+            },
+            4 => {
+                const result = applyIntensityBatchSimd(4, @ptrCast(colors[index..][0..4]), @ptrCast(intensities[index..][0..4]));
+                const out_ptr: *[4]u32 = @ptrCast(out[index..][0..4]);
+                out_ptr.* = result;
+            },
+            else => out[index] = applyIntensity(colors[index], intensities[index]),
+        }
+    }
+
+    while (index < colors.len) : (index += 1) {
+        out[index] = applyIntensity(colors[index], intensities[index]);
+    }
 }
 
 /// A convenience function to shade the `DEFAULT_BASE_COLOR` with a given brightness.
@@ -197,5 +265,178 @@ pub fn computePBR(
     const direct = math.Vec3.new(combined.x * radiance.x, combined.y * radiance.y, combined.z * radiance.z);
     const ambient = math.Vec3.scale(albedo, 0.2); // Brighten ambient significantly // Ambient term to prevent pure black
     return math.Vec3.add(direct, ambient);
+}
+
+fn runtimePbrBatchLanes() usize {
+    return switch (cpu_features.detect().preferredVectorBackend()) {
+        .avx512, .avx2 => 8,
+        .sse2, .neon => 4,
+        .scalar => 1,
+    };
+}
+
+fn computePBRBatchSimd(
+    comptime lanes: usize,
+    albedos: *const [lanes]math.Vec3,
+    normals: *const [lanes]math.Vec3,
+    view_dirs: *const [lanes]math.Vec3,
+    light_dir: math.Vec3,
+    light_color: math.Vec3,
+    metallic: f32,
+    roughness: f32,
+) [lanes]math.Vec3 {
+    const FloatVec = @Vector(lanes, f32);
+    const eps: FloatVec = @splat(0.000001);
+    const zero: FloatVec = @splat(0.0);
+    const one: FloatVec = @splat(1.0);
+    const pi: FloatVec = @splat(PI);
+    const base_f0: FloatVec = @splat(0.04);
+    const metallic_vec: FloatVec = @splat(metallic);
+    const roughness_vec: FloatVec = @splat(roughness);
+    const light_x: FloatVec = @splat(light_dir.x);
+    const light_y: FloatVec = @splat(light_dir.y);
+    const light_z: FloatVec = @splat(light_dir.z);
+    const light_color_x: FloatVec = @splat(light_color.x);
+    const light_color_y: FloatVec = @splat(light_color.y);
+    const light_color_z: FloatVec = @splat(light_color.z);
+    const ambient_scale: FloatVec = @splat(0.2);
+
+    var albedo_x_arr: [lanes]f32 = undefined;
+    var albedo_y_arr: [lanes]f32 = undefined;
+    var albedo_z_arr: [lanes]f32 = undefined;
+    var normal_x_arr: [lanes]f32 = undefined;
+    var normal_y_arr: [lanes]f32 = undefined;
+    var normal_z_arr: [lanes]f32 = undefined;
+    var view_x_arr: [lanes]f32 = undefined;
+    var view_y_arr: [lanes]f32 = undefined;
+    var view_z_arr: [lanes]f32 = undefined;
+
+    inline for (0..lanes) |lane| {
+        albedo_x_arr[lane] = albedos[lane].x;
+        albedo_y_arr[lane] = albedos[lane].y;
+        albedo_z_arr[lane] = albedos[lane].z;
+        normal_x_arr[lane] = normals[lane].x;
+        normal_y_arr[lane] = normals[lane].y;
+        normal_z_arr[lane] = normals[lane].z;
+        view_x_arr[lane] = view_dirs[lane].x;
+        view_y_arr[lane] = view_dirs[lane].y;
+        view_z_arr[lane] = view_dirs[lane].z;
+    }
+
+    const albedo_x: FloatVec = @bitCast(albedo_x_arr);
+    const albedo_y: FloatVec = @bitCast(albedo_y_arr);
+    const albedo_z: FloatVec = @bitCast(albedo_z_arr);
+    const normal_x: FloatVec = @bitCast(normal_x_arr);
+    const normal_y: FloatVec = @bitCast(normal_y_arr);
+    const normal_z: FloatVec = @bitCast(normal_z_arr);
+    const view_x: FloatVec = @bitCast(view_x_arr);
+    const view_y: FloatVec = @bitCast(view_y_arr);
+    const view_z: FloatVec = @bitCast(view_z_arr);
+
+    const f0_x = base_f0 * (one - metallic_vec) + albedo_x * metallic_vec;
+    const f0_y = base_f0 * (one - metallic_vec) + albedo_y * metallic_vec;
+    const f0_z = base_f0 * (one - metallic_vec) + albedo_z * metallic_vec;
+
+    const halfway_x_raw = view_x + light_x;
+    const halfway_y_raw = view_y + light_y;
+    const halfway_z_raw = view_z + light_z;
+    const halfway_len_sq = halfway_x_raw * halfway_x_raw + halfway_y_raw * halfway_y_raw + halfway_z_raw * halfway_z_raw;
+    const halfway_inv_len = one / @sqrt(@max(halfway_len_sq, eps));
+    const halfway_x = halfway_x_raw * halfway_inv_len;
+    const halfway_y = halfway_y_raw * halfway_inv_len;
+    const halfway_z = halfway_z_raw * halfway_inv_len;
+
+    const roughness_sq = roughness_vec * roughness_vec;
+    const a2 = roughness_sq * roughness_sq;
+    const n_dot_h = @max(normal_x * halfway_x + normal_y * halfway_y + normal_z * halfway_z, zero);
+    const n_dot_h2 = n_dot_h * n_dot_h;
+    const ndf_denom_base = n_dot_h2 * (a2 - one) + one;
+    const ndf = a2 / @max(pi * ndf_denom_base * ndf_denom_base, eps);
+
+    const n_dot_v = @max(normal_x * view_x + normal_y * view_y + normal_z * view_z, zero);
+    const n_dot_l = @max(normal_x * light_x + normal_y * light_y + normal_z * light_z, zero);
+    const geometry_r = roughness_vec + one;
+    const geometry_k = (geometry_r * geometry_r) / @as(FloatVec, @splat(8.0));
+    const ggx_v = n_dot_v / @max(n_dot_v * (one - geometry_k) + geometry_k, eps);
+    const ggx_l = n_dot_l / @max(n_dot_l * (one - geometry_k) + geometry_k, eps);
+    const geometry = ggx_v * ggx_l;
+
+    const cos_theta = @max(halfway_x * view_x + halfway_y * view_y + halfway_z * view_z, zero);
+    const one_minus_cos = @max(zero, one - cos_theta);
+    const one_minus_cos2 = one_minus_cos * one_minus_cos;
+    const one_minus_cos5 = one_minus_cos2 * one_minus_cos2 * one_minus_cos;
+    const fresnel_x = f0_x + (one - f0_x) * one_minus_cos5;
+    const fresnel_y = f0_y + (one - f0_y) * one_minus_cos5;
+    const fresnel_z = f0_z + (one - f0_z) * one_minus_cos5;
+
+    const kd_scale = one - metallic_vec;
+    const kd_x = (one - fresnel_x) * kd_scale;
+    const kd_y = (one - fresnel_y) * kd_scale;
+    const kd_z = (one - fresnel_z) * kd_scale;
+
+    const specular_scale = (ndf * geometry) / @max(@as(FloatVec, @splat(4.0)) * n_dot_v * n_dot_l + @as(FloatVec, @splat(0.0001)), eps);
+    const specular_x = fresnel_x * specular_scale;
+    const specular_y = fresnel_y * specular_scale;
+    const specular_z = fresnel_z * specular_scale;
+
+    const diffuse_scale = one / pi;
+    const diffuse_x = albedo_x * diffuse_scale * kd_x;
+    const diffuse_y = albedo_y * diffuse_scale * kd_y;
+    const diffuse_z = albedo_z * diffuse_scale * kd_z;
+
+    const radiance_x = light_color_x * n_dot_l;
+    const radiance_y = light_color_y * n_dot_l;
+    const radiance_z = light_color_z * n_dot_l;
+
+    const direct_x = (diffuse_x + specular_x) * radiance_x;
+    const direct_y = (diffuse_y + specular_y) * radiance_y;
+    const direct_z = (diffuse_z + specular_z) * radiance_z;
+
+    const out_x_arr: [lanes]f32 = @bitCast(direct_x + albedo_x * ambient_scale);
+    const out_y_arr: [lanes]f32 = @bitCast(direct_y + albedo_y * ambient_scale);
+    const out_z_arr: [lanes]f32 = @bitCast(direct_z + albedo_z * ambient_scale);
+
+    var out: [lanes]math.Vec3 = undefined;
+    inline for (0..lanes) |lane| {
+        out[lane] = math.Vec3.new(out_x_arr[lane], out_y_arr[lane], out_z_arr[lane]);
+    }
+    return out;
+}
+
+pub fn computePBRBatch(
+    albedos: []const math.Vec3,
+    normals: []const math.Vec3,
+    view_dirs: []const math.Vec3,
+    light_dir: math.Vec3,
+    light_color: math.Vec3,
+    metallic: f32,
+    roughness: f32,
+    out: []math.Vec3,
+) void {
+    std.debug.assert(albedos.len == normals.len);
+    std.debug.assert(albedos.len == view_dirs.len);
+    std.debug.assert(albedos.len == out.len);
+
+    const lanes = runtimePbrBatchLanes();
+    var index: usize = 0;
+    while (index + lanes <= albedos.len) : (index += lanes) {
+        switch (lanes) {
+            8 => {
+                const result = computePBRBatchSimd(8, @ptrCast(albedos[index..][0..8]), @ptrCast(normals[index..][0..8]), @ptrCast(view_dirs[index..][0..8]), light_dir, light_color, metallic, roughness);
+                const out_ptr: *[8]math.Vec3 = @ptrCast(out[index..][0..8]);
+                out_ptr.* = result;
+            },
+            4 => {
+                const result = computePBRBatchSimd(4, @ptrCast(albedos[index..][0..4]), @ptrCast(normals[index..][0..4]), @ptrCast(view_dirs[index..][0..4]), light_dir, light_color, metallic, roughness);
+                const out_ptr: *[4]math.Vec3 = @ptrCast(out[index..][0..4]);
+                out_ptr.* = result;
+            },
+            else => out[index] = computePBR(albedos[index], normals[index], view_dirs[index], light_dir, light_color, metallic, roughness),
+        }
+    }
+
+    while (index < albedos.len) : (index += 1) {
+        out[index] = computePBR(albedos[index], normals[index], view_dirs[index], light_dir, light_color, metallic, roughness);
+    }
 }
 

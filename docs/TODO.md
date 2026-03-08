@@ -96,19 +96,39 @@ This is a comprehensive list of potential improvements, new features, and refact
 ## Performance Optimizations
 
 - [ ] **SIMD Vectorization Candidates**:
+    - [x] **AVX2 Dispatch Layer**: Add runtime CPU feature detection and baseline/AVX2/AVX-512 dispatch for a small set of hot kernels so one binary can scale across multiple x86 CPUs without globally targeting the widest ISA.
+        - [x] Add a runtime x86 instruction-set checker (`src/cpu_features.zig`) that detects SSE2, AVX, FMA, AVX2, AVX-512 state, and AMX state at startup.
+        - [x] Route the existing `renderer.zig` packed color/blend batch helpers through runtime-selected scalar/8-lane/16-lane/32-lane paths so TAA resolve, bloom packing, AO/depth fog compositing, skybox packing, god rays, lens flare, chromatic aberration, film grain, and motion blur no longer hard-wire one compile-time lane width.
+        - [x] Replace compile-time SIMD-width selection in hot kernels with runtime dispatch where one binary needs to support multiple CPU classes.
+    - [x] **`shadow_system.zig`**: Convert `tracePacketAnyHit` to packet-aware BVH traversal instead of peeling one ray at a time from the mask. This is the highest-value AVX2 target because current profiling shows shadow tracing is still the main hotspot.
+    - [x] **`shadow_system.zig`**: Rework `meshletOccludesRay` so skip-triangle masking, packet iteration, and early-out logic stay vector-friendly around the already-8-wide triangle kernel instead of falling back to scalar lane handling.
+    - [x] **`tile_renderer.zig`**: Batch fragment shading spans in `rasterizeTriangleToTile` so texture sampling, normal interpolation, view/light vector setup, and BRDF evaluation can run on 4-8 pixels at a time.
+    - [x] **`texture.zig`**: Add an AVX2-friendly batched bilinear sampling path around `sampleBilinearImpl` so four-tap filtering, channel unpacking, and weighted blending can be amortized across multiple UVs.
+    - [x] **`lighting.zig`**: Add a batched `computePBR` path for span shading. The scalar function is math-dense, but the real payoff comes from evaluating multiple fragments together rather than only micro-optimizing single calls.
+    - [x] **`renderer.zig`**: Revisit SSAO generation loops so sample accumulation uses structure-of-arrays batches and vectorized `Vec3` math instead of scalar neighbor walks inside partially batched code.
+    - [ ] **AVX-512 Follow-Up**: Re-evaluate the same hot kernels for 16-lane execution once AVX2 versions exist, especially packet shadow traversal, batched bilinear sampling, deferred lighting, and span-based fragment shading. Only keep AVX-512 paths that outperform AVX2 on real hardware rather than assuming wider is always faster.
+        - [x] Extend the new runtime-dispatched `renderer.zig` batch helper path to include a 32-lane backend so the existing post-process kernels can exercise AVX-512-width execution without changing their call sites again.
+    - [x] **`shadow_system.zig`**: Prototype 16-lane AVX-512 packet traversal for `tracePacketAnyHit` and `meshletOccludesRay` after the packet-oriented control flow is in place.
+    - [x] **`texture.zig`**: Prototype AVX-512 batched filtering around `sampleBilinearImpl` once multiple-UV sampling can be issued together.
+    - [x] **`kernels/deferred_lighting_kernel.zig`**: Evaluate whether the deferred lighting kernel can be executed in CPU-side AVX-512 batches, since its per-pixel math is regular enough to benefit from wider lanes if the execution model is widened.
+        - Current evaluation: the kernel exists, but no live dispatch/use site was found in the renderer path, so AVX-512 work here stays deferred until the kernel is actually wired into frame execution.
+    - [x] **AMX Assessment**: Keep AMX off the active optimization path unless the renderer gains a genuinely tile-matrix workload such as ML denoising, large batched skinning, or convolution-heavy post-processing. Current raster, shading, and traversal code is not a good AMX fit.
     - [ ] **`math.zig`**: Vectorize all core `Vec2`, `Vec3`, `Vec4`, and `Mat4` operations. This is the highest priority for SIMD.
         - `Vec2.add`, `Vec2.sub`, `Vec2.scale`.
         - `Vec3.add`, `Vec3.sub`, `Vec3.scale`, `Vec3.dot`, `Vec3.cross`.
         - `Mat4.multiply`: Classic 4x4 matrix multiplication is highly parallelizable.
         - `Mat4.mulVec4`: Can be optimized using 4-wide dot products.
         - [x] Prototype SIMD implementations in benchmarks (`benchmarks/src/math_copy.zig`, `math_simd.zig`, `math_simd_optimized.zig`) for validation.
+        - [ ] Prioritize `Vec3.dot` and `Vec3.cross` for AVX2-backed batched callers first; the standalone scalar helpers are too small to justify ISA-specific rewrites unless surrounding loops are also restructured.
     - [ ] **`renderer.zig`**: Vectorize the main vertex transformation loop in `render3DMeshWithPump`. This involves processing multiple vertices (e.g., 4 or 8 at a time) through the series of dot products and matrix multiplications.
+        - [x] Batch the meshlet-local visible-vertex transform/project loop in `generateMeshWork` so contiguous meshlet vertex slices can run through runtime-dispatched 4/8/16-lane camera-space and projection math.
     - [ ] **`tile_renderer.zig`**: Optimize `rasterizeTriangleToTile` to calculate barycentric coordinates for 2x2 or 4x4 pixel blocks simultaneously. This is a standard advanced technique that maps well to SIMD operations.
-    - [ ] **`lighting.zig`**: Vectorize the `applyIntensity` function to process 4 or 8 pixels at once. The unpack-multiply-repack sequence for RGBA colors is a perfect use case for byte-shuffling and parallel multiplication instructions.
+    - [x] **`lighting.zig`**: Vectorize the `applyIntensity` function to process 4 or 8 pixels at once. The unpack-multiply-repack sequence for RGBA colors is a perfect use case for byte-shuffling and parallel multiplication instructions.
         - [x] Benchmark-only SIMD batch implementation available in `benchmarks/src/lighting_simd.zig` for reference.
     - [ ] **`renderer.zig`**: Reuse per-frame scratch buffers in the meshlet pipeline (`renderer.zig:1505-1635`). The current code re-allocates `visibility`, `job` arrays, and completion flags every frame; promote them to cached slices on `Renderer` to eliminate allocator churn.
     - [ ] **`tile_renderer.zig`**: Replace per-pixel barycentric recomputation in `rasterizeTriangleToTile` (`tile_renderer.zig:200-270`) with incremental half-space edge functions or block-based evaluation (e.g., 2×2 quads) to cut FLOPs and improve SIMD potential.
-    - [ ] **`renderer.zig`**: Remove per-frame atomic `resetVertexStates` (`renderer.zig:479-483`) by switching to a versioned/bitset scheme so vertices don’t require a full atomic sweep.
+    - [x] **`renderer.zig`**: Remove per-frame atomic `resetVertexStates` (`renderer.zig:479-483`) by switching to a versioned/bitset scheme so vertices don’t require a full atomic sweep.
+        - `MeshWorkCache.advanceVertexGeneration()` now advances per-frame generation tags and only falls back to a full atomic clear on generation wraparound.
     - [ ] **`renderer.zig`**: Batch `MeshWorkWriter` reservations (`renderer.zig:632-705`) to reduce atomic contention when emitting triangles—reserve chunks per meshlet or per thread.
     - [ ] **`renderer.zig`**: Cache camera/light basis math (`render3DMeshWithPump`, `renderer.zig:988-1050`) to avoid recomputing sin/cos/matrix multiplies every frame.
     - [ ] **`renderer.zig`**: Reuse meshlet-task job buffers (`renderer.zig:1685-1765`) instead of allocating `MeshletTaskJob`, `Job`, and completion arrays each frame.

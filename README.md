@@ -47,6 +47,51 @@ The project is designed with a modular architecture, where each component has a 
 *   **`math.zig`**: A comprehensive 3D math library with support for vectors, matrices, and transformations.
 *   **`window.zig`**: Abstracts the platform-specific window creation and management logic.
 
+## Running The Program
+
+For a normal optimized run:
+
+```powershell
+zig build run -Doptimize=ReleaseFast
+```
+
+To build first and launch the executable manually:
+
+```powershell
+zig build -Doptimize=ReleaseFast
+.\zig-out\bin\zig-windows-app.exe
+```
+
+Useful build flags:
+
+*   **`-Doptimize=ReleaseFast`**: Best default for real performance testing and general use.
+*   **`-Doptimize=Debug`**: Use when investigating crashes or logic bugs.
+*   **`-Dprofile=true`**: Keeps frame pointers enabled for stack sampling and profiling tools.
+*   **`-Dcpu=...`**: Forces a CPU target. Only use this if the machine you are running on actually supports that ISA level.
+
+Examples:
+
+```powershell
+zig build run -Doptimize=ReleaseFast -Dprofile=true
+zig build -Dcpu=x86_64_v4 -Doptimize=ReleaseFast
+```
+
+CPU-target note:
+
+*   The renderer already does runtime ISA detection and chooses between scalar, SSE2, AVX2, and AVX-512-capable code paths where those runtime-dispatched paths exist.
+*   A forced CPU target like **`-Dcpu=x86_64_v4`** raises the minimum CPU requirement of the binary. That is useful for AVX-512-class hardware, but it will fail to run on AVX2-only machines.
+*   If you want one broadly runnable local build, prefer the default build command without a forced `-Dcpu` override.
+
+Useful runtime environment variables:
+
+```powershell
+$env:ZIG_RENDER_TTL_SECONDS = '3'
+$env:ZIG_RENDER_PROFILE_FRAME = '120'
+```
+
+*   **`ZIG_RENDER_TTL_SECONDS`**: Auto-exits the app after a short run, useful for smoke tests.
+*   **`ZIG_RENDER_PROFILE_FRAME`**: Emits exact per-pass timings for the selected frame.
+
 ## Rendering Pipeline Diagram
 
 ```mermaid

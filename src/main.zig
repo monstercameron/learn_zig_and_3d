@@ -91,6 +91,7 @@ const gltf_loader = @import("gltf_loader.zig");
 const mesh_module = @import("mesh.zig");
 const texture = @import("texture.zig");
 const config = @import("app_config.zig");
+const cpu_features = @import("cpu_features.zig");
 const log = @import("log.zig");
 
 const app_logger = log.get("app.main");
@@ -129,6 +130,33 @@ pub fn main() !void {
     log.init(allocator);
     defer log.deinit();
     app_logger.infoSub("bootstrap", "log manager initialized", .{});
+    const isa_support = cpu_features.detect();
+    app_logger.infoSub(
+        "cpu",
+        "runtime ISA support neon={} sse2={} avx={} fma={} avx2={} avx512f={} avx512bw={} amx_tile={} amx_int8={} amx_bf16={}",
+        .{
+            isa_support.neon,
+            isa_support.sse2,
+            isa_support.avx,
+            isa_support.fma,
+            isa_support.avx2,
+            isa_support.avx512f,
+            isa_support.avx512bw,
+            isa_support.amx_tile,
+            isa_support.amx_int8,
+            isa_support.amx_bf16,
+        },
+    );
+    app_logger.infoSub(
+        "cpu",
+        "runtime ISA state os_avx={} os_avx512={} os_amx={} preferred_backend={s}",
+        .{
+            isa_support.os_avx_state,
+            isa_support.os_avx512_state,
+            isa_support.os_amx_state,
+            @tagName(isa_support.preferredVectorBackend()),
+        },
+    );
     if (renderer_ttl_ns) |ttl_ns| {
         app_logger.infoSub("bootstrap", "renderer TTL active {d:.3}s", .{@as(f64, @floatFromInt(ttl_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s))});
     }

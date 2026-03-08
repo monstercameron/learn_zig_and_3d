@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const Bitmap = @import("bitmap.zig").Bitmap;
+const cpu_features = @import("cpu_features.zig");
 const scanline = @import("scanline.zig");
 const math = @import("math.zig");
 const texture = @import("texture.zig");
@@ -270,6 +271,146 @@ pub fn drawTileBoundaries(grid: *const TileGrid, bitmap: *Bitmap) void {
 
 // ========== TILE RASTERIZATION ==========
 
+const max_span_batch_lanes = 8;
+
+fn runtimeSpanBatchLanes() usize {
+    return switch (cpu_features.detect().preferredVectorBackend()) {
+        .avx512, .avx2 => 8,
+        .sse2, .neon => 4,
+        .scalar => 1,
+    };
+}
+
+fn interpolateVec2BatchSimd(comptime lanes: usize, a: math.Vec2, b: math.Vec2, c: math.Vec2, weight0: *const [lanes]f32, weight1: *const [lanes]f32, weight2: *const [lanes]f32) [lanes]math.Vec2 {
+    const FloatVec = @Vector(lanes, f32);
+    const w0: FloatVec = @bitCast(weight0.*);
+    const w1: FloatVec = @bitCast(weight1.*);
+    const w2: FloatVec = @bitCast(weight2.*);
+    const out_x: [lanes]f32 = @bitCast(@as(FloatVec, @splat(a.x)) * w0 + @as(FloatVec, @splat(b.x)) * w1 + @as(FloatVec, @splat(c.x)) * w2);
+    const out_y: [lanes]f32 = @bitCast(@as(FloatVec, @splat(a.y)) * w0 + @as(FloatVec, @splat(b.y)) * w1 + @as(FloatVec, @splat(c.y)) * w2);
+
+    var out: [lanes]math.Vec2 = undefined;
+    inline for (0..lanes) |lane| {
+        out[lane] = math.Vec2.new(out_x[lane], out_y[lane]);
+    }
+    return out;
+}
+
+fn interpolateVec2Batch(a: math.Vec2, b: math.Vec2, c: math.Vec2, weight0: []const f32, weight1: []const f32, weight2: []const f32, out: []math.Vec2) void {
+    std.debug.assert(weight0.len == weight1.len and weight0.len == weight2.len and weight0.len == out.len);
+
+    var index: usize = 0;
+    while (index + 8 <= weight0.len) : (index += 8) {
+        const result = interpolateVec2BatchSimd(8, a, b, c, @ptrCast(weight0[index..][0..8]), @ptrCast(weight1[index..][0..8]), @ptrCast(weight2[index..][0..8]));
+        const out_ptr: *[8]math.Vec2 = @ptrCast(out[index..][0..8]);
+        out_ptr.* = result;
+    }
+    while (index + 4 <= weight0.len) : (index += 4) {
+        const result = interpolateVec2BatchSimd(4, a, b, c, @ptrCast(weight0[index..][0..4]), @ptrCast(weight1[index..][0..4]), @ptrCast(weight2[index..][0..4]));
+        const out_ptr: *[4]math.Vec2 = @ptrCast(out[index..][0..4]);
+        out_ptr.* = result;
+    }
+    while (index < weight0.len) : (index += 1) {
+        out[index] = math.Vec2.new(
+            a.x * weight0[index] + b.x * weight1[index] + c.x * weight2[index],
+            a.y * weight0[index] + b.y * weight1[index] + c.y * weight2[index],
+        );
+    }
+}
+
+fn interpolateVec3BatchSimd(comptime lanes: usize, a: math.Vec3, b: math.Vec3, c: math.Vec3, weight0: *const [lanes]f32, weight1: *const [lanes]f32, weight2: *const [lanes]f32) [lanes]math.Vec3 {
+    const FloatVec = @Vector(lanes, f32);
+    const w0: FloatVec = @bitCast(weight0.*);
+    const w1: FloatVec = @bitCast(weight1.*);
+    const w2: FloatVec = @bitCast(weight2.*);
+    const out_x: [lanes]f32 = @bitCast(@as(FloatVec, @splat(a.x)) * w0 + @as(FloatVec, @splat(b.x)) * w1 + @as(FloatVec, @splat(c.x)) * w2);
+    const out_y: [lanes]f32 = @bitCast(@as(FloatVec, @splat(a.y)) * w0 + @as(FloatVec, @splat(b.y)) * w1 + @as(FloatVec, @splat(c.y)) * w2);
+    const out_z: [lanes]f32 = @bitCast(@as(FloatVec, @splat(a.z)) * w0 + @as(FloatVec, @splat(b.z)) * w1 + @as(FloatVec, @splat(c.z)) * w2);
+
+    var out: [lanes]math.Vec3 = undefined;
+    inline for (0..lanes) |lane| {
+        out[lane] = math.Vec3.new(out_x[lane], out_y[lane], out_z[lane]);
+    }
+    return out;
+}
+
+fn interpolateVec3Batch(a: math.Vec3, b: math.Vec3, c: math.Vec3, weight0: []const f32, weight1: []const f32, weight2: []const f32, out: []math.Vec3) void {
+    std.debug.assert(weight0.len == weight1.len and weight0.len == weight2.len and weight0.len == out.len);
+
+    var index: usize = 0;
+    while (index + 8 <= weight0.len) : (index += 8) {
+        const result = interpolateVec3BatchSimd(8, a, b, c, @ptrCast(weight0[index..][0..8]), @ptrCast(weight1[index..][0..8]), @ptrCast(weight2[index..][0..8]));
+        const out_ptr: *[8]math.Vec3 = @ptrCast(out[index..][0..8]);
+        out_ptr.* = result;
+    }
+    while (index + 4 <= weight0.len) : (index += 4) {
+        const result = interpolateVec3BatchSimd(4, a, b, c, @ptrCast(weight0[index..][0..4]), @ptrCast(weight1[index..][0..4]), @ptrCast(weight2[index..][0..4]));
+        const out_ptr: *[4]math.Vec3 = @ptrCast(out[index..][0..4]);
+        out_ptr.* = result;
+    }
+    while (index < weight0.len) : (index += 1) {
+        out[index] = math.Vec3.new(
+            a.x * weight0[index] + b.x * weight1[index] + c.x * weight2[index],
+            a.y * weight0[index] + b.y * weight1[index] + c.y * weight2[index],
+            a.z * weight0[index] + b.z * weight1[index] + c.z * weight2[index],
+        );
+    }
+}
+
+fn normalizeVec3BatchSimd(comptime lanes: usize, values: *const [lanes]math.Vec3) [lanes]math.Vec3 {
+    const FloatVec = @Vector(lanes, f32);
+    const eps: FloatVec = @splat(1e-8);
+    const one: FloatVec = @splat(1.0);
+
+    var x_arr: [lanes]f32 = undefined;
+    var y_arr: [lanes]f32 = undefined;
+    var z_arr: [lanes]f32 = undefined;
+    inline for (0..lanes) |lane| {
+        x_arr[lane] = values[lane].x;
+        y_arr[lane] = values[lane].y;
+        z_arr[lane] = values[lane].z;
+    }
+
+    const x_vec: FloatVec = @bitCast(x_arr);
+    const y_vec: FloatVec = @bitCast(y_arr);
+    const z_vec: FloatVec = @bitCast(z_arr);
+    const len_sq = x_vec * x_vec + y_vec * y_vec + z_vec * z_vec;
+    const inv_len = one / @sqrt(@max(len_sq, eps));
+    const out_x_arr: [lanes]f32 = @bitCast(x_vec * inv_len);
+    const out_y_arr: [lanes]f32 = @bitCast(y_vec * inv_len);
+    const out_z_arr: [lanes]f32 = @bitCast(z_vec * inv_len);
+    const len_sq_arr: [lanes]f32 = @bitCast(len_sq);
+
+    var out: [lanes]math.Vec3 = undefined;
+    inline for (0..lanes) |lane| {
+        if (len_sq_arr[lane] <= 1e-8) {
+            out[lane] = math.Vec3.new(0.0, 0.0, 0.0);
+        } else {
+            out[lane] = math.Vec3.new(out_x_arr[lane], out_y_arr[lane], out_z_arr[lane]);
+        }
+    }
+    return out;
+}
+
+fn normalizeVec3Batch(values: []const math.Vec3, out: []math.Vec3) void {
+    std.debug.assert(values.len == out.len);
+
+    var index: usize = 0;
+    while (index + 8 <= values.len) : (index += 8) {
+        const result = normalizeVec3BatchSimd(8, @ptrCast(values[index..][0..8]));
+        const out_ptr: *[8]math.Vec3 = @ptrCast(out[index..][0..8]);
+        out_ptr.* = result;
+    }
+    while (index + 4 <= values.len) : (index += 4) {
+        const result = normalizeVec3BatchSimd(4, @ptrCast(values[index..][0..4]));
+        const out_ptr: *[4]math.Vec3 = @ptrCast(out[index..][0..4]);
+        out_ptr.* = result;
+    }
+    while (index < values.len) : (index += 1) {
+        out[index] = values[index].normalize();
+    }
+}
+
 /// Rasterizes a single triangle into a specific tile's local buffer.
 /// This is the core "drawing" function for the tiled pipeline.
 pub fn rasterizeTriangleToTile(
@@ -334,98 +475,120 @@ pub fn rasterizeTriangleToTile(
     const inv_depth0 = 1.0 / @max(depths[0], 1e-6);
     const inv_depth1 = 1.0 / @max(depths[1], 1e-6);
     const inv_depth2 = 1.0 / @max(depths[2], 1e-6);
+    const batch_lanes = runtimeSpanBatchLanes();
+    const light_dir = math.Vec3.new(0.5, 0.5, -1.0).normalize();
+    const light_color = math.Vec3.new(4.0, 4.0, 4.0);
 
     // 4. Iterate over every pixel within the triangle's bounding box.
     var y = min_y;
     while (y <= max_y) : (y += 1) {
         const py = @as(f32, @floatFromInt(y)) + 0.5;
         var x = min_x;
-        while (x <= max_x) : (x += 1) {
-            const px = @as(f32, @floatFromInt(x)) + 0.5;
+        while (x <= max_x) {
+            const batch_end = @min(max_x + 1, x + @as(i32, @intCast(batch_lanes)));
+            var batch_weight0: [max_span_batch_lanes]f32 = undefined;
+            var batch_weight1: [max_span_batch_lanes]f32 = undefined;
+            var batch_weight2: [max_span_batch_lanes]f32 = undefined;
+            var batch_indices: [max_span_batch_lanes]usize = undefined;
+            var gather_count: usize = 0;
 
-            // 5. Calculate barycentric coordinates (lambda0, lambda1, lambda2).
-            // These are weights that describe the current pixel's position relative to the
-            // triangle's vertices. If all weights are between 0 and 1, the pixel is inside.
-            const lambda0 = ((v1y - v2y) * (px - v2x) + (v2x - v1x) * (py - v2y)) * inv_denom;
-            const lambda1 = ((v2y - v0y) * (px - v2x) + (v0x - v2x) * (py - v2y)) * inv_denom;
-            const lambda2 = 1.0 - lambda0 - lambda1;
+            while (x < batch_end) : (x += 1) {
+                const px = @as(f32, @floatFromInt(x)) + 0.5;
 
-            // 6. Check if the pixel is inside the triangle.
-            if (lambda0 < 0 or lambda1 < 0 or lambda2 < 0) continue;
+                const lambda0 = ((v1y - v2y) * (px - v2x) + (v2x - v1x) * (py - v2y)) * inv_denom;
+                const lambda1 = ((v2y - v0y) * (px - v2x) + (v0x - v2x) * (py - v2y)) * inv_denom;
+                const lambda2 = 1.0 - lambda0 - lambda1;
+                if (lambda0 < 0 or lambda1 < 0 or lambda2 < 0) continue;
 
-            const persp0 = lambda0 * inv_depth0;
-            const persp1 = lambda1 * inv_depth1;
-            const persp2 = lambda2 * inv_depth2;
-            const persp_sum = persp0 + persp1 + persp2;
-            if (persp_sum <= 1e-6) continue;
-            const inv_persp_sum = 1.0 / persp_sum;
-            const weight0 = persp0 * inv_persp_sum;
-            const weight1 = persp1 * inv_persp_sum;
-            const weight2 = persp2 * inv_persp_sum;
+                const persp0 = lambda0 * inv_depth0;
+                const persp1 = lambda1 * inv_depth1;
+                const persp2 = lambda2 * inv_depth2;
+                const persp_sum = persp0 + persp1 + persp2;
+                if (persp_sum <= 1e-6) continue;
 
-            const camera_pos = math.Vec3.new(
-                camera_positions[0].x * weight0 + camera_positions[1].x * weight1 + camera_positions[2].x * weight2,
-                camera_positions[0].y * weight0 + camera_positions[1].y * weight1 + camera_positions[2].y * weight2,
-                camera_positions[0].z * weight0 + camera_positions[1].z * weight1 + camera_positions[2].z * weight2,
-            );
-            const depth = camera_pos.z;
+                const inv_persp_sum = 1.0 / persp_sum;
+                batch_weight0[gather_count] = persp0 * inv_persp_sum;
+                batch_weight1[gather_count] = persp1 * inv_persp_sum;
+                batch_weight2[gather_count] = persp2 * inv_persp_sum;
+                batch_indices[gather_count] = @as(usize, @intCast(y * tile_buffer.width + x));
+                gather_count += 1;
+            }
 
-            // 7. Interpolate UV coordinates using the barycentric weights.
-            const uv = math.Vec2.new(
-                shading.uv0.x * weight0 + shading.uv1.x * weight1 + shading.uv2.x * weight2,
-                shading.uv0.y * weight0 + shading.uv1.y * weight1 + shading.uv2.y * weight2,
-            );
+            if (gather_count == 0) continue;
 
-            // 8. Sample the texture and apply lighting to get the final pixel color.
-            var base_color_u32 = shading.base_color;
-            if (shading.texture) |tex| base_color_u32 = tex.sampleLod(uv, lod);
-            const a = (base_color_u32 >> 24) & 0xFF;
-            if (a == 0) continue;
+            var batch_camera_pos: [max_span_batch_lanes]math.Vec3 = undefined;
+            var batch_uvs: [max_span_batch_lanes]math.Vec2 = undefined;
+            var batch_normals: [max_span_batch_lanes]math.Vec3 = undefined;
+            var batch_surface_bary: [max_span_batch_lanes]math.Vec3 = undefined;
+            interpolateVec3Batch(camera_positions[0], camera_positions[1], camera_positions[2], batch_weight0[0..gather_count], batch_weight1[0..gather_count], batch_weight2[0..gather_count], batch_camera_pos[0..gather_count]);
+            interpolateVec2Batch(shading.uv0, shading.uv1, shading.uv2, batch_weight0[0..gather_count], batch_weight1[0..gather_count], batch_weight2[0..gather_count], batch_uvs[0..gather_count]);
+            interpolateVec3Batch(shading.normals[0], shading.normals[1], shading.normals[2], batch_weight0[0..gather_count], batch_weight1[0..gather_count], batch_weight2[0..gather_count], batch_normals[0..gather_count]);
+            interpolateVec3Batch(shading.surface_bary0, shading.surface_bary1, shading.surface_bary2, batch_weight0[0..gather_count], batch_weight1[0..gather_count], batch_weight2[0..gather_count], batch_surface_bary[0..gather_count]);
+            normalizeVec3Batch(batch_normals[0..gather_count], batch_normals[0..gather_count]);
 
-            const base_color_linear = lighting.unpackColorLinear(base_color_u32);
-
-            const n0 = shading.normals[0];
-            const n1 = shading.normals[1];
-            const n2 = shading.normals[2];
-            const normal = math.Vec3.new(
-                n0.x * weight0 + n1.x * weight1 + n2.x * weight2,
-                n0.y * weight0 + n1.y * weight1 + n2.y * weight2,
-                n0.z * weight0 + n1.z * weight1 + n2.z * weight2,
-            ).normalize();
-            const surface_bary = math.Vec3.new(
-                shading.surface_bary0.x * weight0 + shading.surface_bary1.x * weight1 + shading.surface_bary2.x * weight2,
-                shading.surface_bary0.y * weight0 + shading.surface_bary1.y * weight1 + shading.surface_bary2.y * weight2,
-                shading.surface_bary0.z * weight0 + shading.surface_bary1.z * weight1 + shading.surface_bary2.z * weight2,
-            );
-
-            // hardcoded light for now, or we can use shading.intensity later
-            const light_dir = math.Vec3.new(0.5, 0.5, -1.0).normalize();
-            const light_color = math.Vec3.new(4.0, 4.0, 4.0);
-
-            const view_dir = math.Vec3.scale(camera_pos, -1.0).normalize();
-
-            const final_color_rgb = lighting.computePBR(base_color_linear, normal, view_dir, light_dir, light_color, shading.metallic, shading.roughness);
-            const final_color = math.Vec4.new(final_color_rgb.x, final_color_rgb.y, final_color_rgb.z, @as(f32, @floatFromInt(a)) / 255.0);
-
-            // 9. Write the final color to the tile's local pixel buffer.
-            const idx = @as(usize, @intCast(y * tile_buffer.width + x));
-            if (idx >= tile_buffer.data.len or idx >= tile_buffer.depth.len) continue;
-
-            if (depth >= tile_buffer.depth[idx]) continue;
-
-            if (a == 255) {
-                // Opaque: Overwrite and update depth
-                tile_buffer.depth[idx] = depth;
-                tile_buffer.data[idx].camera = camera_pos;
-                tile_buffer.data[idx].color = final_color;
-                tile_buffer.data[idx].normal = normal;
-                tile_buffer.data[idx].surface = SurfaceHandle.init(shading.triangle_id, shading.meshlet_id, surface_bary);
+            var batch_base_color_u32: [max_span_batch_lanes]u32 = undefined;
+            if (shading.texture) |tex| {
+                tex.sampleLodBatch(batch_uvs[0..gather_count], lod, batch_base_color_u32[0..gather_count]);
             } else {
-                // Alpha blend with background
-                const dst_c = tile_buffer.data[idx].color;
-                const alpha = final_color.w;
-                const inv_alpha = 1.0 - alpha;
-                tile_buffer.data[idx].color = math.Vec4.new(final_color.x * alpha + dst_c.x * inv_alpha, final_color.y * alpha + dst_c.y * inv_alpha, final_color.z * alpha + dst_c.z * inv_alpha, 1.0);
+                @memset(batch_base_color_u32[0..gather_count], shading.base_color);
+            }
+
+            var active_indices: [max_span_batch_lanes]usize = undefined;
+            var active_camera_pos: [max_span_batch_lanes]math.Vec3 = undefined;
+            var active_normals: [max_span_batch_lanes]math.Vec3 = undefined;
+            var active_surface_bary: [max_span_batch_lanes]math.Vec3 = undefined;
+            var active_view_inputs: [max_span_batch_lanes]math.Vec3 = undefined;
+            var active_albedos: [max_span_batch_lanes]math.Vec3 = undefined;
+            var active_alpha: [max_span_batch_lanes]u32 = undefined;
+            var active_depth: [max_span_batch_lanes]f32 = undefined;
+            var active_count: usize = 0;
+
+            for (0..gather_count) |lane| {
+                const idx = batch_indices[lane];
+                if (idx >= tile_buffer.data.len or idx >= tile_buffer.depth.len) continue;
+
+                const depth = batch_camera_pos[lane].z;
+                if (depth >= tile_buffer.depth[idx]) continue;
+
+                const alpha = (batch_base_color_u32[lane] >> 24) & 0xFF;
+                if (alpha == 0) continue;
+
+                active_indices[active_count] = idx;
+                active_camera_pos[active_count] = batch_camera_pos[lane];
+                active_normals[active_count] = batch_normals[lane];
+                active_surface_bary[active_count] = batch_surface_bary[lane];
+                active_view_inputs[active_count] = math.Vec3.scale(batch_camera_pos[lane], -1.0);
+                active_albedos[active_count] = lighting.unpackColorLinear(batch_base_color_u32[lane]);
+                active_alpha[active_count] = alpha;
+                active_depth[active_count] = depth;
+                active_count += 1;
+            }
+
+            if (active_count == 0) continue;
+
+            var active_view_dirs: [max_span_batch_lanes]math.Vec3 = undefined;
+            var shaded_colors: [max_span_batch_lanes]math.Vec3 = undefined;
+            normalizeVec3Batch(active_view_inputs[0..active_count], active_view_dirs[0..active_count]);
+            lighting.computePBRBatch(active_albedos[0..active_count], active_normals[0..active_count], active_view_dirs[0..active_count], light_dir, light_color, shading.metallic, shading.roughness, shaded_colors[0..active_count]);
+
+            for (0..active_count) |lane| {
+                const alpha = active_alpha[lane];
+                const final_color_rgb = shaded_colors[lane];
+                const final_color = math.Vec4.new(final_color_rgb.x, final_color_rgb.y, final_color_rgb.z, @as(f32, @floatFromInt(alpha)) / 255.0);
+                const idx = active_indices[lane];
+
+                if (alpha == 255) {
+                    tile_buffer.depth[idx] = active_depth[lane];
+                    tile_buffer.data[idx].camera = active_camera_pos[lane];
+                    tile_buffer.data[idx].color = final_color;
+                    tile_buffer.data[idx].normal = active_normals[lane];
+                    tile_buffer.data[idx].surface = SurfaceHandle.init(shading.triangle_id, shading.meshlet_id, active_surface_bary[lane]);
+                } else {
+                    const dst_c = tile_buffer.data[idx].color;
+                    const alpha_f = final_color.w;
+                    const inv_alpha = 1.0 - alpha_f;
+                    tile_buffer.data[idx].color = math.Vec4.new(final_color.x * alpha_f + dst_c.x * inv_alpha, final_color.y * alpha_f + dst_c.y * inv_alpha, final_color.z * alpha_f + dst_c.z * inv_alpha, 1.0);
+                }
             }
         }
     }

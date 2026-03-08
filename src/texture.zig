@@ -24,6 +24,7 @@
 //! like the resulting WebGL texture object, holding the raw pixel data.
 
 const std = @import("std");
+const cpu_features = @import("cpu_features.zig");
 const math = @import("math.zig");
 const config = @import("app_config.zig");
 
@@ -83,6 +84,57 @@ pub const Texture = struct {
             return sampleBilinearImpl(target_pixels, target_w, target_h, uv);
         } else {
             return sampleNearestImpl(target_pixels, target_w, target_h, uv);
+        }
+    }
+
+    pub fn sampleLodBatch(self: *const Texture, uvs: []const math.Vec2, lod: f32, out: []u32) void {
+        std.debug.assert(uvs.len == out.len);
+        if (uvs.len == 0) return;
+
+        var target_pixels = self.pixels;
+        var target_w = self.width;
+        var target_h = self.height;
+
+        const mip_level = @as(usize, @intFromFloat(lod));
+        if (mip_level > 0 and self.mip_levels.items.len > 0) {
+            const level = @min(mip_level - 1, self.mip_levels.items.len - 1);
+            target_pixels = self.mip_levels.items[level];
+            target_w = @max(1, self.width >> @as(u5, @intCast(level + 1)));
+            target_h = @max(1, self.height >> @as(u5, @intCast(level + 1)));
+        }
+
+        if (!config.TEXTURE_FILTERING_BILINEAR) {
+            for (uvs, 0..) |uv, index| {
+                out[index] = sampleNearestImpl(target_pixels, target_w, target_h, uv);
+            }
+            return;
+        }
+
+        const lanes = runtimeTextureBatchLanes();
+        var index: usize = 0;
+        while (index + lanes <= uvs.len) : (index += lanes) {
+            switch (lanes) {
+                16 => {
+                    const result = sampleBilinearBatchImpl(16, target_pixels, target_w, target_h, @ptrCast(uvs[index..][0..16]));
+                    const out_ptr: *[16]u32 = @ptrCast(out[index..][0..16]);
+                    out_ptr.* = result;
+                },
+                8 => {
+                    const result = sampleBilinearBatchImpl(8, target_pixels, target_w, target_h, @ptrCast(uvs[index..][0..8]));
+                    const out_ptr: *[8]u32 = @ptrCast(out[index..][0..8]);
+                    out_ptr.* = result;
+                },
+                4 => {
+                    const result = sampleBilinearBatchImpl(4, target_pixels, target_w, target_h, @ptrCast(uvs[index..][0..4]));
+                    const out_ptr: *[4]u32 = @ptrCast(out[index..][0..4]);
+                    out_ptr.* = result;
+                },
+                else => out[index] = sampleBilinearImpl(target_pixels, target_w, target_h, uvs[index]),
+            }
+        }
+
+        while (index < uvs.len) : (index += 1) {
+            out[index] = sampleBilinearImpl(target_pixels, target_w, target_h, uvs[index]);
         }
     }
 
@@ -151,6 +203,79 @@ pub const Texture = struct {
         return result;
     }
 };
+
+fn runtimeTextureBatchLanes() usize {
+    return switch (cpu_features.detect().preferredVectorBackend()) {
+        .avx512 => 16,
+        .avx2 => 8,
+        .sse2, .neon => 4,
+        .scalar => 1,
+    };
+}
+
+fn sampleBilinearBatchImpl(comptime lanes: usize, pixels: []const u32, w: usize, h: usize, uvs: *const [lanes]math.Vec2) [lanes]u32 {
+    const FloatVec = @Vector(lanes, f32);
+    const U32Vec = @Vector(lanes, u32);
+
+    var u_arr: [lanes]f32 = undefined;
+    var v_arr: [lanes]f32 = undefined;
+    var c00_arr: [lanes]u32 = undefined;
+    var c10_arr: [lanes]u32 = undefined;
+    var c01_arr: [lanes]u32 = undefined;
+    var c11_arr: [lanes]u32 = undefined;
+
+    inline for (0..lanes) |lane| {
+        u_arr[lane] = std.math.clamp(uvs[lane].x, 0.0, 1.0);
+        v_arr[lane] = std.math.clamp(uvs[lane].y, 0.0, 1.0);
+    }
+
+    const w_f: FloatVec = @splat(@as(f32, @floatFromInt(w)) - 1.0);
+    const h_f: FloatVec = @splat(@as(f32, @floatFromInt(h)) - 1.0);
+    const x_coord = @min(@max(@as(FloatVec, @bitCast(u_arr)) * w_f, @as(FloatVec, @splat(0.0))), w_f);
+    const y_coord = @min(@max(@as(FloatVec, @bitCast(v_arr)) * h_f, @as(FloatVec, @splat(0.0))), h_f);
+    const x_floor = @floor(x_coord);
+    const y_floor = @floor(y_coord);
+    const dx = x_coord - x_floor;
+    const dy = y_coord - y_floor;
+    const x_floor_arr: [lanes]f32 = @bitCast(x_floor);
+    const y_floor_arr: [lanes]f32 = @bitCast(y_floor);
+
+    inline for (0..lanes) |lane| {
+        const ux0 = @as(usize, @intFromFloat(x_floor_arr[lane]));
+        const uy0 = @as(usize, @intFromFloat(y_floor_arr[lane]));
+        const ux1 = @min(ux0 + 1, w - 1);
+        const uy1 = @min(uy0 + 1, h - 1);
+        c00_arr[lane] = pixels[uy0 * w + ux0];
+        c10_arr[lane] = pixels[uy0 * w + ux1];
+        c01_arr[lane] = pixels[uy1 * w + ux0];
+        c11_arr[lane] = pixels[uy1 * w + ux1];
+    }
+
+    const frac_x: [lanes]u32 = @bitCast(@as(U32Vec, @intFromFloat(dx * @as(FloatVec, @splat(255.0)))));
+    const frac_y: [lanes]u32 = @bitCast(@as(U32Vec, @intFromFloat(dy * @as(FloatVec, @splat(255.0)))));
+
+    var result: [lanes]u32 = @splat(0);
+    inline for (0..lanes) |lane| {
+        const inv_x = 255 - frac_x[lane];
+        const inv_y = 255 - frac_y[lane];
+        const w00 = inv_x * inv_y;
+        const w10 = frac_x[lane] * inv_y;
+        const w01 = inv_x * frac_y[lane];
+        const w11 = frac_x[lane] * frac_y[lane];
+
+        inline for (.{ 0, 8, 16, 24 }) |shift| {
+            const val00 = (c00_arr[lane] >> shift) & 0xFF;
+            const val10 = (c10_arr[lane] >> shift) & 0xFF;
+            const val01 = (c01_arr[lane] >> shift) & 0xFF;
+            const val11 = (c11_arr[lane] >> shift) & 0xFF;
+            const sum = (val00 * w00 + val10 * w10 + val01 * w01 + val11 * w11);
+            const blended = sum / 65025;
+            result[lane] |= blended << shift;
+        }
+    }
+
+    return result;
+}
 
 /// Loads a texture from a .bmp file. This is a manual parser for the BMP format.
 pub fn loadBmp(allocator: std.mem.Allocator, path: []const u8) !Texture {
