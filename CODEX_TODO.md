@@ -249,3 +249,13 @@ Goal: add explicit SIMD/vectorized code paths in hottest kernels while preservin
 - [x] `bloom_blur_v_kernel.zig` -> `cpu-optimized scalar` (`rolling window blur in bloom_rows backend`)
 - [x] `bloom_composite_kernel.zig` -> `vectorized` (`Float4 SIMD composite math per pixel`)
 - [x] `motion_blur_kernel.zig` -> `cpu-optimized scalar` (`hoisted scales/bounds, incremental t, mul by inverse instead of divide`)
+
+## Phase 11 - Composition Layer Optimization (CPU / Cache / IPC)
+- [x] Add pass metadata for composition phase + output target in pass graph.
+- [x] Add phase-aware execution in pass registry with phase boundary callback support.
+- [x] Build per-frame `CompositionPlan` masks in renderer (`scene`, `geometry_post`, `lighting_scatter`, `final_color`).
+- [x] Execute post passes in explicit phase barriers and record phase timing buckets.
+- [x] Align motion-blur enable scheduling with runtime history availability.
+- [x] Replace full-frame copy-back with buffer swaps for scratch-output passes where safe:
+- [x] `ssgi`, `ssr`, `motion_blur`, `god_rays`, `lens_flare`, `chromatic_aberration`.
+- [x] Validate runtime launch in `ReleaseFast` after composition swap changes.

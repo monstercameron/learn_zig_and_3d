@@ -62,6 +62,7 @@ const shadow_resolve_pass = @import("passes/shadow_resolve_pass.zig");
 const hybrid_shadow_pass = @import("passes/hybrid_shadow_pass.zig");
 const adaptive_shadow_tile_pass = @import("passes/adaptive_shadow_tile_pass.zig");
 const pass_registry = @import("pipeline/pass_registry.zig");
+const pass_graph = @import("pipeline/pass_graph.zig");
 const render_utils = @import("core/utils.zig");
 const shadow_raster_kernel = @import("kernels/shadow_raster_kernel.zig");
 const shadow_sample_kernel = @import("kernels/shadow_sample_kernel.zig");
@@ -1036,6 +1037,27 @@ const HybridShadowDispatchContext = struct {
     light_dir_world: math.Vec3,
 };
 
+const CompositionPlan = struct {
+    enabled_mask: pass_registry.PassMask,
+    uses_scratch_a: bool = false,
+    uses_scratch_b: bool = false,
+    uses_history: bool = false,
+    scratch_pool_a: []u32 = &[_]u32{},
+    scratch_pool_b: []u32 = &[_]u32{},
+    scene_mask: pass_registry.PassMask = 0,
+    geometry_post_mask: pass_registry.PassMask = 0,
+    lighting_scatter_mask: pass_registry.PassMask = 0,
+    final_color_mask: pass_registry.PassMask = 0,
+};
+
+const CompositionScratchBindings = struct {
+    ssgi_scratch_pixels: []u32,
+    ssr_scratch_pixels: []u32,
+    moblur_scratch_pixels: []u32,
+    god_rays_scratch_pixels: []u32,
+    lens_flare_scratch_pixels: []u32,
+};
+
 const PostPassExecutionContext = struct {
     renderer: *Renderer,
     mesh: *const Mesh,
@@ -1047,6 +1069,7 @@ const PostPassExecutionContext = struct {
     projection: ProjectionParams,
     light_dir_world: math.Vec3,
     shadow_elapsed_ns: i128,
+    plan: CompositionPlan,
 };
 
 const AOJobContext = ssao_pass.JobContext(
@@ -4194,8 +4217,7 @@ pub const Renderer = struct {
     }
 
     fn isPostPassEnabled(ctx: PostPassExecutionContext, pass_id: pass_registry.RenderPassId) bool {
-        _ = ctx;
-        return switch (pass_id) {
+        const enabled = switch (pass_id) {
             .skybox => config.POST_SKYBOX_ENABLED,
             .shadow_map => config.POST_SHADOW_ENABLED,
             .shadow_resolve => config.POST_SHADOW_ENABLED,
@@ -4214,9 +4236,80 @@ pub const Renderer = struct {
             .film_grain_vignette => config.POST_FILM_GRAIN_VIGNETTE_ENABLED,
             .color_grade => config.POST_COLOR_CORRECTION_ENABLED,
         };
+        if (!enabled) return false;
+        if (pass_id == .motion_blur and !ctx.renderer.taa_scratch.valid) return false;
+        return true;
+    }
+
+    fn onPostPassPhaseBoundary(ctx: PostPassExecutionContext, phase: pass_registry.PassPhase) void {
+        _ = phase;
+        _ = ctx.plan;
+    }
+
+    fn phaseMaskFor(plan: CompositionPlan, phase: pass_registry.PassPhase) pass_registry.PassMask {
+        return switch (phase) {
+            .scene => plan.scene_mask,
+            .geometry_post => plan.geometry_post_mask,
+            .lighting_scatter => plan.lighting_scatter_mask,
+            .final_color => plan.final_color_mask,
+        };
+    }
+
+    fn phaseTimingName(phase: pass_registry.PassPhase) []const u8 {
+        return switch (phase) {
+            .scene => "phase_scene",
+            .geometry_post => "phase_geometry_post",
+            .lighting_scatter => "phase_lighting_scatter",
+            .final_color => "phase_final_color",
+        };
+    }
+
+    fn snapshotScratchBindings(self: *Renderer) CompositionScratchBindings {
+        return .{
+            .ssgi_scratch_pixels = self.ssgi_scratch_pixels,
+            .ssr_scratch_pixels = self.ssr_scratch_pixels,
+            .moblur_scratch_pixels = self.moblur_scratch_pixels,
+            .god_rays_scratch_pixels = self.god_rays_scratch_pixels,
+            .lens_flare_scratch_pixels = self.lens_flare_scratch_pixels,
+        };
+    }
+
+    fn applyCompositionScratchBindings(self: *Renderer, plan: CompositionPlan) void {
+        _ = self;
+        _ = plan;
+    }
+
+    fn chooseNonFrontScratch(ctx: PostPassExecutionContext) []u32 {
+        const front = ctx.renderer.bitmap.pixels.ptr;
+        if (ctx.plan.scratch_pool_a.len != 0 and front != ctx.plan.scratch_pool_a.ptr) return ctx.plan.scratch_pool_a;
+        if (ctx.plan.scratch_pool_b.len != 0 and front != ctx.plan.scratch_pool_b.ptr) return ctx.plan.scratch_pool_b;
+        return ctx.plan.scratch_pool_a;
+    }
+
+    fn bindScratchForPass(ctx: PostPassExecutionContext, pass_id: pass_registry.RenderPassId) void {
+        const target = chooseNonFrontScratch(ctx);
+        if (target.len == 0) return;
+        switch (pass_id) {
+            .ssgi => ctx.renderer.ssgi_scratch_pixels = target,
+            .ssr => ctx.renderer.ssr_scratch_pixels = target,
+            .motion_blur => ctx.renderer.moblur_scratch_pixels = target,
+            .god_rays => ctx.renderer.god_rays_scratch_pixels = target,
+            .lens_flare => ctx.renderer.lens_flare_scratch_pixels = target,
+            .chromatic_aberration => ctx.renderer.moblur_scratch_pixels = target,
+            else => {},
+        }
+    }
+
+    fn restoreScratchBindings(self: *Renderer, saved: CompositionScratchBindings) void {
+        self.ssgi_scratch_pixels = saved.ssgi_scratch_pixels;
+        self.ssr_scratch_pixels = saved.ssr_scratch_pixels;
+        self.moblur_scratch_pixels = saved.moblur_scratch_pixels;
+        self.god_rays_scratch_pixels = saved.god_rays_scratch_pixels;
+        self.lens_flare_scratch_pixels = saved.lens_flare_scratch_pixels;
     }
 
     fn runPostPassById(ctx: PostPassExecutionContext, pass_id: pass_registry.RenderPassId) void {
+        bindScratchForPass(ctx, pass_id);
         switch (pass_id) {
             .skybox => ctx.renderer.applySkyboxPass(ctx.basis_right, ctx.basis_up, ctx.basis_forward, ctx.projection),
             .shadow_map, .shadow_resolve => {
@@ -4271,6 +4364,41 @@ pub const Renderer = struct {
         light_dir_world: math.Vec3,
         shadow_elapsed_ns: i128,
     ) void {
+        const base_ctx = PostPassExecutionContext{
+            .renderer = self,
+            .mesh = mesh,
+            .camera_position = camera_position,
+            .basis_right = basis_right,
+            .basis_up = basis_up,
+            .basis_forward = basis_forward,
+            .current_view = current_view,
+            .projection = projection,
+            .light_dir_world = light_dir_world,
+            .shadow_elapsed_ns = shadow_elapsed_ns,
+            .plan = .{ .enabled_mask = 0 },
+        };
+        const enabled_mask = pass_registry.buildEnabledMask(base_ctx, isPostPassEnabled);
+        var plan = CompositionPlan{
+            .enabled_mask = enabled_mask,
+            .scratch_pool_a = self.moblur_scratch_pixels,
+            .scratch_pool_b = self.ssr_scratch_pixels,
+        };
+        for (pass_registry.post_passes) |node| {
+            if ((enabled_mask & pass_graph.passBit(node.id)) == 0) continue;
+            switch (node.phase) {
+                .scene => plan.scene_mask |= pass_graph.passBit(node.id),
+                .geometry_post => plan.geometry_post_mask |= pass_graph.passBit(node.id),
+                .lighting_scatter => plan.lighting_scatter_mask |= pass_graph.passBit(node.id),
+                .final_color => plan.final_color_mask |= pass_graph.passBit(node.id),
+            }
+            switch (node.output_target) {
+                .main => {},
+                .scratch_a => plan.uses_scratch_a = true,
+                .scratch_b => plan.uses_scratch_b = true,
+                .history => plan.uses_history = true,
+            }
+        }
+
         const ctx = PostPassExecutionContext{
             .renderer = self,
             .mesh = mesh,
@@ -4282,12 +4410,29 @@ pub const Renderer = struct {
             .projection = projection,
             .light_dir_world = light_dir_world,
             .shadow_elapsed_ns = shadow_elapsed_ns,
+            .plan = plan,
         };
         const iface = pass_registry.PassInterface(PostPassExecutionContext){
             .is_enabled = isPostPassEnabled,
             .run = runPostPassById,
+            .on_phase_boundary = onPostPassPhaseBoundary,
         };
-        pass_registry.executeWithInterface(ctx, iface);
+        const saved_bindings = snapshotScratchBindings(self);
+        defer restoreScratchBindings(self, saved_bindings);
+        applyCompositionScratchBindings(self, plan);
+        const phase_order = [_]pass_registry.PassPhase{
+            .scene,
+            .geometry_post,
+            .lighting_scatter,
+            .final_color,
+        };
+        for (phase_order) |phase| {
+            const phase_mask = phaseMaskFor(plan, phase);
+            if (phase_mask == 0) continue;
+            const phase_start = std.time.nanoTimestamp();
+            pass_registry.executeMaskWithInterface(ctx, phase_mask, iface);
+            self.recordRenderPassDuration(phaseTimingName(phase), std.time.nanoTimestamp() - phase_start);
+        }
     }
 
     fn applySSGIPass(self: *Renderer) void {
@@ -4295,8 +4440,7 @@ pub const Renderer = struct {
         const height: usize = @intCast(self.bitmap.height);
         ssgi_pass.runPipeline(self, height, noopRenderPassJob);
 
-        // Copy back to scene_pixels
-        @memcpy(self.bitmap.pixels, self.ssgi_scratch_pixels);
+        std.mem.swap([]u32, &self.bitmap.pixels, &self.ssgi_scratch_pixels);
         self.recordRenderPassTiming("ssgi", pass_start);
     }
     fn applyAmbientOcclusionPass(self: *Renderer) void {
@@ -4504,7 +4648,7 @@ pub const Renderer = struct {
             noopRenderPassJob,
         );
 
-        @memcpy(self.bitmap.pixels, self.god_rays_scratch_pixels);
+        std.mem.swap([]u32, &self.bitmap.pixels, &self.god_rays_scratch_pixels);
         self.recordRenderPassTiming("god_rays", pass_start);
     }
 
@@ -4523,7 +4667,7 @@ pub const Renderer = struct {
             noopRenderPassJob,
         );
 
-        @memcpy(self.bitmap.pixels, self.lens_flare_scratch_pixels);
+        std.mem.swap([]u32, &self.bitmap.pixels, &self.lens_flare_scratch_pixels);
         self.recordRenderPassTiming("lens_flare", pass_start);
     }
 
@@ -4541,7 +4685,7 @@ pub const Renderer = struct {
             noopRenderPassJob,
         );
 
-        @memcpy(self.bitmap.pixels, self.moblur_scratch_pixels);
+        std.mem.swap([]u32, &self.bitmap.pixels, &self.moblur_scratch_pixels);
         self.recordRenderPassTiming("chromatic_aberration", pass_start);
     }
 
@@ -4574,8 +4718,7 @@ pub const Renderer = struct {
 
         motion_blur_pass.runPipeline(self, current_view, height, width, noopRenderPassJob);
 
-        // Copy scratch back to main pixels
-        @memcpy(self.bitmap.pixels, self.moblur_scratch_pixels);
+        std.mem.swap([]u32, &self.bitmap.pixels, &self.moblur_scratch_pixels);
 
         self.recordRenderPassTiming("motion_blur", pass_start);
     }
@@ -4607,7 +4750,7 @@ pub const Renderer = struct {
         const scene_height: usize = @intCast(self.bitmap.height);
         ssr_pass.runPipeline(self, projection, scene_height, noopRenderPassJob);
 
-        @memcpy(self.bitmap.pixels, self.ssr_scratch_pixels);
+        std.mem.swap([]u32, &self.bitmap.pixels, &self.ssr_scratch_pixels);
         self.recordRenderPassTiming("ssr", pass_start);
     }
 
