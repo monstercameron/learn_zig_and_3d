@@ -1,5 +1,47 @@
 const std = @import("std");
 const math = @import("../../core/math.zig");
+const shadow_raster_rows = @import("shadow_raster_rows.zig");
+
+const max_shadow_meshlet_vertices: usize = 64;
+
+pub fn RasterJobContext(comptime MeshType: type, comptime ShadowMapType: type) type {
+    return struct {
+        mesh: *const MeshType,
+        shadow: *ShadowMapType,
+        start_row: usize,
+        end_row: usize,
+        light_dir_world: math.Vec3,
+
+        pub fn run(ctx_ptr: *anyopaque) void {
+            const ctx: *@This() = @ptrCast(@alignCast(ctx_ptr));
+            shadow_raster_rows.rasterizeShadowMeshRange(
+                ctx.mesh,
+                ctx.shadow,
+                ctx.start_row,
+                ctx.end_row,
+                ctx.light_dir_world,
+                max_shadow_meshlet_vertices,
+            );
+        }
+
+        pub fn runRowsDirect(
+            mesh: *const MeshType,
+            shadow: *ShadowMapType,
+            start_row: usize,
+            end_row: usize,
+            light_dir_world: math.Vec3,
+        ) void {
+            shadow_raster_rows.rasterizeShadowMeshRange(
+                mesh,
+                shadow,
+                start_row,
+                end_row,
+                light_dir_world,
+                max_shadow_meshlet_vertices,
+            );
+        }
+    };
+}
 
 pub fn runBuild(
     self: anytype,
@@ -11,7 +53,6 @@ pub fn runBuild(
     comptime choose_shadow_basis_fn: anytype,
     comptime compute_stripe_count_fn: anytype,
     comptime noop_job_fn: anytype,
-    comptime rasterize_rows_fn: anytype,
 ) i128 {
     if (!post_shadow_enabled or mesh.meshlets.len == 0) {
         target_shadow_map.*.active = false;
@@ -75,7 +116,8 @@ pub fn runBuild(
     const rows_per_job = if (stripe_count <= 1) target_shadow_map.*.height else (target_shadow_map.*.height + stripe_count - 1) / stripe_count;
 
     if (stripe_count <= 1 or self.job_system == null) {
-        rasterize_rows_fn(mesh, target_shadow_map, 0, target_shadow_map.*.height, light_dir_world);
+        const CtxType = @TypeOf(self.shadow_raster_job_contexts[0]);
+        CtxType.runRowsDirect(mesh, target_shadow_map, 0, target_shadow_map.*.height, light_dir_world);
         return std.time.nanoTimestamp() - pass_start;
     }
 

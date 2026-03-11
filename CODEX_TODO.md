@@ -171,3 +171,13 @@ Goal: every standalone renderer feature becomes its own render pass module and i
 - [x] Ensure shadow + lighting remain strictly pass-owned behaviors.
 - [x] Verify no direct heavy pass logic remains embedded in renderer for lighting/shadow.
 - [x] Run and pass `zig build check`, `zig build test`, `zig build validate`.
+
+## Phase 9 - Final Renderer De-Embedding Sweep
+- [x] Remove embedded color-grade kernel path from `renderer.zig`:
+- [x] Migrate or delete `applyBlockbusterGradeRange` and keep color-grade execution pass-owned (`passes/color_grade_pass.zig` + `kernels/color_grade_kernel.zig`).
+- [x] Move bloom LUT builders out of renderer:
+- [x] `buildBloomThresholdCurve` and `buildBloomIntensityLut` should live in bloom pass/module-owned location.
+- [ ] Reduce renderer callback adapters where feasible:
+- [ ] `renderAmbientOcclusionRows`, `blurAmbientOcclusionHorizontalRows`, `blurAmbientOcclusionVerticalRows`, `compositeAmbientOcclusionRows`, `rasterizeShadowMeshRange`, `tryApplyTemporalAAMeshletBatch`.
+- [ ] Keep only required typed bridge shims in renderer where Zig callback typing requires concrete signatures.
+- [x] Validate with `zig build check`, `zig build test`, `zig build validate`.

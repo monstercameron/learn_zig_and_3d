@@ -1,4 +1,5 @@
 const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
+const render_utils = @import("../core/utils.zig");
 
 pub const Stage = enum {
     extract,
@@ -6,6 +7,27 @@ pub const Stage = enum {
     blur_vertical,
     composite,
 };
+
+pub fn buildThresholdCurve(threshold: i32) [256]u8 {
+    var lut: [256]u8 = undefined;
+    for (0..lut.len) |idx| {
+        const luma: i32 = @intCast(idx);
+        if (luma <= threshold) {
+            lut[idx] = 0;
+        } else {
+            lut[idx] = render_utils.clampByte(@divTrunc((luma - threshold) * 255, @max(1, 255 - threshold)));
+        }
+    }
+    return lut;
+}
+
+pub fn buildIntensityLut(intensity_percent: i32) [256]u8 {
+    var lut: [256]u8 = undefined;
+    for (0..lut.len) |idx| {
+        lut[idx] = render_utils.clampByte(@divTrunc(@as(i32, @intCast(idx)) * intensity_percent, 100));
+    }
+    return lut;
+}
 
 pub fn JobContext(comptime BloomScratchType: type) type {
     return struct {

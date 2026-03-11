@@ -58,7 +58,6 @@ const taa_pass = @import("passes/taa_pass.zig");
 const taa_helpers = @import("passes/taa_helpers.zig");
 const taa_meshlet_batch = @import("passes/taa_meshlet_batch.zig");
 const shadow_map_pass = @import("passes/shadow_map_pass.zig");
-const shadow_raster_rows = @import("passes/shadow_raster_rows.zig");
 const shadow_resolve_pass = @import("passes/shadow_resolve_pass.zig");
 const hybrid_shadow_pass = @import("passes/hybrid_shadow_pass.zig");
 const adaptive_shadow_tile_pass = @import("passes/adaptive_shadow_tile_pass.zig");
@@ -68,8 +67,6 @@ const shadow_raster_kernel = @import("kernels/shadow_raster_kernel.zig");
 const shadow_sample_kernel = @import("kernels/shadow_sample_kernel.zig");
 const hybrid_shadow_cache_kernel = @import("kernels/hybrid_shadow_cache_kernel.zig");
 const hybrid_shadow_resolve_kernel = @import("kernels/hybrid_shadow_resolve_kernel.zig");
-const ssao_sample_kernel = @import("kernels/ssao_sample_kernel.zig");
-const ssao_blur_kernel = @import("kernels/ssao_blur_kernel.zig");
 const bloom_blur_h_kernel = @import("kernels/bloom_blur_h_kernel.zig");
 const bloom_blur_v_kernel = @import("kernels/bloom_blur_v_kernel.zig");
 const lighting_pass = @import("passes/lighting_pass.zig");
@@ -579,33 +576,11 @@ const ShadowResolveConfig = struct {
     darkness_percent: i32,
 };
 
-const max_shadow_meshlet_vertices: usize = 64;
 
 const fastScale255 = render_utils.fastScale255;
 
 fn averageBlur5(sum: i32) u8 {
     return @intCast(@divTrunc(sum + 2, 5));
-}
-
-fn buildBloomThresholdCurve(threshold: i32) [256]u8 {
-    var lut: [256]u8 = undefined;
-    for (0..lut.len) |idx| {
-        const luma: i32 = @intCast(idx);
-        if (luma <= threshold) {
-            lut[idx] = 0;
-        } else {
-            lut[idx] = clampByte(@divTrunc((luma - threshold) * 255, @max(1, 255 - threshold)));
-        }
-    }
-    return lut;
-}
-
-fn buildBloomIntensityLut(intensity_percent: i32) [256]u8 {
-    var lut: [256]u8 = undefined;
-    for (0..lut.len) |idx| {
-        lut[idx] = clampByte(@divTrunc(@as(i32, @intCast(idx)) * intensity_percent, 100));
-    }
-    return lut;
 }
 
 fn validSceneCameraSample(camera_pos: math.Vec3) bool {
@@ -927,10 +902,6 @@ fn tryApplyTemporalAAMeshletBatch(
     );
 }
 
-fn rasterizeShadowMeshRange(mesh: *const Mesh, shadow: *ShadowMap, start_row: usize, end_row: usize, light_dir_world: math.Vec3) void {
-    shadow_raster_rows.rasterizeShadowMeshRange(mesh, shadow, start_row, end_row, light_dir_world, max_shadow_meshlet_vertices);
-}
-
 fn renderAmbientOcclusionRows(
     scene_camera: []const math.Vec3,
     scene_width: usize,
@@ -1078,53 +1049,13 @@ const PostPassExecutionContext = struct {
     shadow_elapsed_ns: i128,
 };
 
-const AOJobContext = struct {
-    renderer: *Renderer,
-    stage: ssao_pass.Stage,
-    scene_width: usize,
-    scene_height: usize,
-    start_row: usize,
-    end_row: usize,
-
-    pub fn run(ctx_ptr: *anyopaque) void {
-        const ctx: *AOJobContext = @ptrCast(@alignCast(ctx_ptr));
-        switch (ctx.stage) {
-            .generate => ssao_sample_kernel.runRows(
-                ctx.renderer.scene_camera,
-                ctx.scene_width,
-                ctx.scene_height,
-                &ctx.renderer.ao_scratch,
-                ctx.renderer.ambient_occlusion_config,
-                ctx.start_row,
-                ctx.end_row,
-                renderAmbientOcclusionRows,
-            ),
-            .blur_horizontal => ssao_blur_kernel.runHorizontalRows(
-                &ctx.renderer.ao_scratch,
-                ctx.renderer.ambient_occlusion_config.blur_depth_threshold,
-                ctx.start_row,
-                ctx.end_row,
-                blurAmbientOcclusionHorizontalRows,
-            ),
-            .blur_vertical => ssao_blur_kernel.runVerticalRows(
-                &ctx.renderer.ao_scratch,
-                ctx.renderer.ambient_occlusion_config.blur_depth_threshold,
-                ctx.start_row,
-                ctx.end_row,
-                blurAmbientOcclusionVerticalRows,
-            ),
-            .composite => compositeAmbientOcclusionRows(
-                ctx.renderer.bitmap.pixels,
-                ctx.renderer.scene_camera,
-                ctx.scene_width,
-                ctx.scene_height,
-                &ctx.renderer.ao_scratch,
-                ctx.start_row,
-                ctx.end_row,
-            ),
-        }
-    }
-};
+const AOJobContext = ssao_pass.JobContext(
+    Renderer,
+    renderAmbientOcclusionRows,
+    blurAmbientOcclusionHorizontalRows,
+    blurAmbientOcclusionVerticalRows,
+    compositeAmbientOcclusionRows,
+);
 
 const TAAJobContext = struct {
     renderer: *Renderer,
@@ -1152,18 +1083,7 @@ const TAAJobContext = struct {
 
 const ShadowResolveJobContext = shadow_resolve_pass.JobContext(ShadowResolveConfig, ShadowMap);
 
-const ShadowRasterJobContext = struct {
-    mesh: *const Mesh,
-    shadow: *ShadowMap,
-    start_row: usize,
-    end_row: usize,
-    light_dir_world: math.Vec3,
-
-    pub fn run(ctx_ptr: *anyopaque) void {
-        const ctx: *ShadowRasterJobContext = @ptrCast(@alignCast(ctx_ptr));
-        rasterizeShadowMeshRange(ctx.mesh, ctx.shadow, ctx.start_row, ctx.end_row, ctx.light_dir_world);
-    }
-};
+const ShadowRasterJobContext = shadow_map_pass.RasterJobContext(Mesh, ShadowMap);
 
 const AdaptiveShadowTileJob = struct {
     renderer: *Renderer,
@@ -1193,94 +1113,6 @@ const BloomJobContext = bloom_pass.JobContext(BloomScratch);
 
 fn noopRenderPassJob(ctx: *anyopaque) void {
     _ = ctx;
-}
-
-fn applyBlockbusterGradeRange(pixels: []u32, start_index: usize, end_index: usize, grade: *const ColorGradeProfile) void {
-    var i = start_index;
-    const zero: GradeVec = @splat(0);
-    const max_channel: GradeVec = @splat(255);
-    const three: GradeVec = @splat(3);
-    const sat_r: GradeVec = @splat(110);
-    const sat_g: GradeVec = @splat(104);
-    const sat_b: GradeVec = @splat(96);
-    const hundred: GradeVec = @splat(100);
-
-    while (i + color_grade_simd_lanes <= end_index) : (i += color_grade_simd_lanes) {
-        var alpha: [color_grade_simd_lanes]u32 = undefined;
-        var r_arr: [color_grade_simd_lanes]i16 = undefined;
-        var g_arr: [color_grade_simd_lanes]i16 = undefined;
-        var b_arr: [color_grade_simd_lanes]i16 = undefined;
-        var add_r_arr: [color_grade_simd_lanes]i16 = undefined;
-        var add_g_arr: [color_grade_simd_lanes]i16 = undefined;
-        var add_b_arr: [color_grade_simd_lanes]i16 = undefined;
-
-        inline for (0..color_grade_simd_lanes) |lane| {
-            const pixel = pixels[i + lane];
-            alpha[lane] = pixel & 0xFF000000;
-
-            const r0 = grade.base_curve[@intCast((pixel >> 16) & 0xFF)];
-            const g0 = grade.base_curve[@intCast((pixel >> 8) & 0xFF)];
-            const b0 = grade.base_curve[@intCast(pixel & 0xFF)];
-            const luma_index: usize = @intCast((@as(u32, r0) * 77 + @as(u32, g0) * 150 + @as(u32, b0) * 29) >> 8);
-
-            r_arr[lane] = r0;
-            g_arr[lane] = g0;
-            b_arr[lane] = b0;
-            add_r_arr[lane] = grade.tone_add_r[luma_index];
-            add_g_arr[lane] = grade.tone_add_g[luma_index];
-            add_b_arr[lane] = grade.tone_add_b[luma_index];
-        }
-
-        var r_vec: GradeVec = @bitCast(r_arr);
-        var g_vec: GradeVec = @bitCast(g_arr);
-        var b_vec: GradeVec = @bitCast(b_arr);
-        r_vec += @bitCast(add_r_arr);
-        g_vec += @bitCast(add_g_arr);
-        b_vec += @bitCast(add_b_arr);
-
-        const mean = @divTrunc(r_vec + g_vec + b_vec, three);
-        r_vec = mean + @divTrunc((r_vec - mean) * sat_r, hundred);
-        g_vec = mean + @divTrunc((g_vec - mean) * sat_g, hundred);
-        b_vec = mean + @divTrunc((b_vec - mean) * sat_b, hundred);
-
-        const r_clamped: GradeVec = @min(@max(r_vec, zero), max_channel);
-        const g_clamped: GradeVec = @min(@max(g_vec, zero), max_channel);
-        const b_clamped: GradeVec = @min(@max(b_vec, zero), max_channel);
-        const r_out: [color_grade_simd_lanes]i16 = @bitCast(r_clamped);
-        const g_out: [color_grade_simd_lanes]i16 = @bitCast(g_clamped);
-        const b_out: [color_grade_simd_lanes]i16 = @bitCast(b_clamped);
-
-        inline for (0..color_grade_simd_lanes) |lane| {
-            pixels[i + lane] = alpha[lane] |
-                (@as(u32, @intCast(r_out[lane])) << 16) |
-                (@as(u32, @intCast(g_out[lane])) << 8) |
-                @as(u32, @intCast(b_out[lane]));
-        }
-    }
-
-    while (i < end_index) : (i += 1) {
-        const pixel = pixels[i];
-        const a: u32 = pixel & 0xFF000000;
-
-        const r0: u8 = grade.base_curve[@intCast((pixel >> 16) & 0xFF)];
-        const g0: u8 = grade.base_curve[@intCast((pixel >> 8) & 0xFF)];
-        const b0: u8 = grade.base_curve[@intCast(pixel & 0xFF)];
-
-        const luma_index: usize = @intCast((@as(u32, r0) * 77 + @as(u32, g0) * 150 + @as(u32, b0) * 29) >> 8);
-        var r: i32 = @as(i32, r0) + grade.tone_add_r[luma_index];
-        var g: i32 = @as(i32, g0) + grade.tone_add_g[luma_index];
-        var b: i32 = @as(i32, b0) + grade.tone_add_b[luma_index];
-
-        const mean = @divTrunc(r + g + b, 3);
-        r = mean + @divTrunc((r - mean) * 110, 100);
-        g = mean + @divTrunc((g - mean) * 104, 100);
-        b = mean + @divTrunc((b - mean) * 96, 100);
-
-        pixels[i] = a |
-            (@as(u32, clampByte(r)) << 16) |
-            (@as(u32, clampByte(g)) << 8) |
-            @as(u32, clampByte(b));
-    }
 }
 
 const clampByte = render_utils.clampByte;
@@ -1758,8 +1590,8 @@ pub const Renderer = struct {
                 .pong = bloom_pong,
             },
             .ao_job_contexts = ao_job_contexts,
-            .bloom_threshold_curve = buildBloomThresholdCurve(config.POST_BLOOM_THRESHOLD),
-            .bloom_intensity_lut = buildBloomIntensityLut(config.POST_BLOOM_INTENSITY_PERCENT),
+            .bloom_threshold_curve = bloom_pass.buildThresholdCurve(config.POST_BLOOM_THRESHOLD),
+            .bloom_intensity_lut = bloom_pass.buildIntensityLut(config.POST_BLOOM_INTENSITY_PERCENT),
             .fog_job_contexts = fog_job_contexts,
             .skybox_job_contexts = skybox_job_contexts,
             .shadow_resolve_job_contexts = shadow_resolve_job_contexts,
@@ -4212,7 +4044,6 @@ pub const Renderer = struct {
             chooseShadowBasis,
             computeStripeCount,
             noopRenderPassJob,
-            rasterizeShadowMeshRange,
         );
     }
 

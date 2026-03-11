@@ -1,4 +1,6 @@
 const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
+const ssao_sample_kernel = @import("../kernels/ssao_sample_kernel.zig");
+const ssao_blur_kernel = @import("../kernels/ssao_blur_kernel.zig");
 
 pub const Stage = enum {
     generate,
@@ -6,6 +8,62 @@ pub const Stage = enum {
     blur_vertical,
     composite,
 };
+
+pub fn JobContext(
+    comptime RendererType: type,
+    comptime generate_fn: anytype,
+    comptime blur_h_fn: anytype,
+    comptime blur_v_fn: anytype,
+    comptime composite_fn: anytype,
+) type {
+    return struct {
+        renderer: *RendererType,
+        stage: Stage,
+        scene_width: usize,
+        scene_height: usize,
+        start_row: usize,
+        end_row: usize,
+
+        pub fn run(ctx_ptr: *anyopaque) void {
+            const ctx: *@This() = @ptrCast(@alignCast(ctx_ptr));
+            switch (ctx.stage) {
+                .generate => ssao_sample_kernel.runRows(
+                    ctx.renderer.scene_camera,
+                    ctx.scene_width,
+                    ctx.scene_height,
+                    &ctx.renderer.ao_scratch,
+                    ctx.renderer.ambient_occlusion_config,
+                    ctx.start_row,
+                    ctx.end_row,
+                    generate_fn,
+                ),
+                .blur_horizontal => ssao_blur_kernel.runHorizontalRows(
+                    &ctx.renderer.ao_scratch,
+                    ctx.renderer.ambient_occlusion_config.blur_depth_threshold,
+                    ctx.start_row,
+                    ctx.end_row,
+                    blur_h_fn,
+                ),
+                .blur_vertical => ssao_blur_kernel.runVerticalRows(
+                    &ctx.renderer.ao_scratch,
+                    ctx.renderer.ambient_occlusion_config.blur_depth_threshold,
+                    ctx.start_row,
+                    ctx.end_row,
+                    blur_v_fn,
+                ),
+                .composite => composite_fn(
+                    ctx.renderer.bitmap.pixels,
+                    ctx.renderer.scene_camera,
+                    ctx.scene_width,
+                    ctx.scene_height,
+                    &ctx.renderer.ao_scratch,
+                    ctx.start_row,
+                    ctx.end_row,
+                ),
+            }
+        }
+    };
+}
 
 fn runStageRange(
     self: anytype,
