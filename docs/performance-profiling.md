@@ -80,6 +80,15 @@ python tools\native-stack-sampler.py --launch zig-out\bin\zig-windows-app.exe 12
 
 When launched through the local profiling tools, the renderer also gets a wall-clock TTL through `ZIG_RENDER_TTL_SECONDS` so it closes itself automatically instead of leaving a window open.
 
+You can also enforce frame-count auto-close:
+
+```powershell
+$env:ZIG_RENDER_TTL_FRAMES = '180'
+zig build run -Doptimize=ReleaseFast
+```
+
+If `ZIG_RENDER_PROFILE_FRAME` is set and no TTL is provided, the app now auto-exits at roughly `profile_frame + 30` frames.
+
 Recommended combined workflow:
 
 ```powershell
@@ -138,3 +147,29 @@ zig build run -Doptimize=ReleaseFast
 This capture starts just before the requested frame and writes `profile.json` in the workspace root.
 
 Use `profiler.zone("YourFunctionName")` around specific functions or blocks when you need finer-grained trace visibility.
+
+## 8. Flame Graphs From `profile.json`
+
+You can generate folded stacks (and optionally an SVG flame graph) directly from the trace file:
+
+```powershell
+python tools\trace-to-flamegraph.py --input profile.json --out artifacts\flame\frame120
+```
+
+This writes:
+
+- `artifacts\flame\frame120.folded`
+- `artifacts\flame\frame120.html` (interactive canvas flame graph)
+- `artifacts\flame\frame120.svg` (if `flamegraph.pl` is available)
+
+If `flamegraph.pl` is not on `PATH`, pass it explicitly:
+
+```powershell
+python tools\trace-to-flamegraph.py --input profile.json --out artifacts\flame\frame120 --flamegraph-pl C:\tools\FlameGraph\flamegraph.pl
+```
+
+If you only want folded stacks (for other viewers/tools):
+
+```powershell
+python tools\trace-to-flamegraph.py --input profile.json --out artifacts\flame\frame120 --no-svg
+```

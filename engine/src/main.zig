@@ -135,6 +135,13 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     const renderer_ttl_ns = loadRendererTtlNs(allocator);
+    const renderer_ttl_frames = loadRendererTtlFrames(allocator);
+    const profile_frame_target = loadProfileFrameTarget(allocator);
+    const auto_profile_ttl_frames: ?u64 = if (renderer_ttl_frames == null and profile_frame_target != null)
+        profile_frame_target.? + 30
+    else
+        null;
+    const effective_ttl_frames = renderer_ttl_frames orelse auto_profile_ttl_frames;
     const renderer_start_ns = std.time.nanoTimestamp();
 
     log.init(allocator);
@@ -169,6 +176,9 @@ pub fn main() !void {
     );
     if (renderer_ttl_ns) |ttl_ns| {
         app_logger.infoSub("bootstrap", "renderer TTL active {d:.3}s", .{@as(f64, @floatFromInt(ttl_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s))});
+    }
+    if (effective_ttl_frames) |ttl_frames| {
+        app_logger.infoSub("bootstrap", "renderer TTL active {} frame(s)", .{ttl_frames});
     }
 
     // Create a window.
@@ -377,6 +387,13 @@ pub fn main() !void {
                 break;
             }
         }
+        if (effective_ttl_frames) |ttl_frames| {
+            if (frame_count >= ttl_frames) {
+                app_logger.info("renderer frame TTL expired, exiting", .{});
+                running = false;
+                break;
+            }
+        }
 
         // First, process all pending user input and window events.
         if (!MessagePump.pump(&renderer)) {
@@ -479,6 +496,38 @@ fn loadRendererTtlNs(allocator: std.mem.Allocator) ?i128 {
 
     const ttl_ns_f64 = ttl_seconds * @as(f64, @floatFromInt(std.time.ns_per_s));
     return @as(i128, @intFromFloat(ttl_ns_f64));
+}
+
+fn loadRendererTtlFrames(allocator: std.mem.Allocator) ?u64 {
+    const raw_value = std.process.getEnvVarOwned(allocator, "ZIG_RENDER_TTL_FRAMES") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return null,
+        else => {
+            app_logger.warn("failed to read ZIG_RENDER_TTL_FRAMES: {s}", .{@errorName(err)});
+            return null;
+        },
+    };
+    defer allocator.free(raw_value);
+
+    const trimmed = std.mem.trim(u8, raw_value, " \t\r\n");
+    const ttl_frames = std.fmt.parseUnsigned(u64, trimmed, 10) catch {
+        app_logger.warn("invalid ZIG_RENDER_TTL_FRAMES value: {s}", .{trimmed});
+        return null;
+    };
+    if (ttl_frames == 0) {
+        app_logger.warn("ignoring zero ZIG_RENDER_TTL_FRAMES value", .{});
+        return null;
+    }
+    return ttl_frames;
+}
+
+fn loadProfileFrameTarget(allocator: std.mem.Allocator) ?u64 {
+    const raw_value = std.process.getEnvVarOwned(allocator, "ZIG_RENDER_PROFILE_FRAME") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return null,
+        else => return null,
+    };
+    defer allocator.free(raw_value);
+    const trimmed = std.mem.trim(u8, raw_value, " \t\r\n");
+    return std.fmt.parseUnsigned(u64, trimmed, 10) catch null;
 }
 
 fn loadPrimaryMesh(allocator: std.mem.Allocator) !SceneAsset {
