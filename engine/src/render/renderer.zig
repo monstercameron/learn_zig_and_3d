@@ -30,12 +30,12 @@
 
 const std = @import("std");
 const cpu_features = @import("../core/cpu_features.zig");
-const shadow_system = @import("shadow_system.zig");
+const shadow_system = @import("core/shadow_system.zig");
 const profiler = @import("../core/profiler.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 const math = @import("../core/math.zig");
-const MeshModule = @import("mesh.zig");
+const MeshModule = @import("core/mesh.zig");
 const Mesh = MeshModule.Mesh;
 const Meshlet = MeshModule.Meshlet;
 const config = @import("../core/app_config.zig");
@@ -62,8 +62,8 @@ const shadow_raster_rows = @import("passes/shadow_raster_rows.zig");
 const shadow_resolve_pass = @import("passes/shadow_resolve_pass.zig");
 const hybrid_shadow_pass = @import("passes/hybrid_shadow_pass.zig");
 const adaptive_shadow_tile_pass = @import("passes/adaptive_shadow_tile_pass.zig");
-const pass_registry = @import("pass_registry.zig");
-const render_utils = @import("utils.zig");
+const pass_registry = @import("pipeline/pass_registry.zig");
+const render_utils = @import("core/utils.zig");
 const shadow_raster_kernel = @import("kernels/shadow_raster_kernel.zig");
 const shadow_sample_kernel = @import("kernels/shadow_sample_kernel.zig");
 const hybrid_shadow_cache_kernel = @import("kernels/hybrid_shadow_cache_kernel.zig");
@@ -72,11 +72,11 @@ const ssao_sample_kernel = @import("kernels/ssao_sample_kernel.zig");
 const ssao_blur_kernel = @import("kernels/ssao_blur_kernel.zig");
 const bloom_blur_h_kernel = @import("kernels/bloom_blur_h_kernel.zig");
 const bloom_blur_v_kernel = @import("kernels/bloom_blur_v_kernel.zig");
-const lighting = @import("lighting.zig");
+const lighting_pass = @import("passes/lighting_pass.zig");
 const depth_fog_pass = @import("passes/depth_fog_pass.zig");
-const scanline = @import("scanline.zig");
+const scanline = @import("core/scanline.zig");
 const texture = @import("../assets/texture.zig");
-const WorkTypes = @import("mesh_work_types.zig");
+const WorkTypes = @import("core/mesh_work_types.zig");
 const TrianglePacket = WorkTypes.TrianglePacket;
 const TriangleFlags = WorkTypes.TriangleFlags;
 const MeshletPacket = WorkTypes.MeshletPacket;
@@ -1011,10 +1011,10 @@ extern "dwmapi" fn DwmFlush() callconv(.winapi) windows.HRESULT;
 
 // ========== MODULE IMPORTS ==========
 const Bitmap = @import("../assets/bitmap.zig").Bitmap;
-const TileRenderer = @import("tile_renderer.zig");
+const TileRenderer = @import("core/tile_renderer.zig");
 const TileGrid = TileRenderer.TileGrid;
 const TileBuffer = TileRenderer.TileBuffer;
-const BinningStage = @import("binning_stage.zig");
+const BinningStage = @import("core/binning_stage.zig");
 const job_system_module = @import("../core/job_system.zig");
 const JobSystem = job_system_module.JobSystem;
 const Job = job_system_module.Job;
@@ -2322,7 +2322,7 @@ pub const Renderer = struct {
         if (backface) return null;
 
         const brightness = math.Vec3.dot(normal_cam, light_dir);
-        const intensity = lighting.computeIntensity(brightness);
+        const intensity = lighting_pass.computeIntensity(brightness);
 
         const flags = TriangleFlags{
             .cull_fill = tri.cull_flags.cull_fill,

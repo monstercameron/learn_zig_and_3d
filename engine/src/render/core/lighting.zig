@@ -15,8 +15,8 @@
 //!   simulating indirect light bouncing around the environment.
 
 const std = @import("std");
-const cpu_features = @import("../core/cpu_features.zig");
-const math = @import("../core/math.zig");
+const cpu_features = @import("../../core/cpu_features.zig");
+const math = @import("../../core/math.zig");
 
 /// The minimum amount of light a surface receives, even if it's facing away from the light source.
 /// A value of 0.25 means that surfaces will have at least 25% of their full brightness.
@@ -439,4 +439,3 @@ pub fn computePBRBatch(
         out[index] = computePBR(albedos[index], normals[index], view_dirs[index], light_dir, light_color, metallic, roughness);
     }
 }
-

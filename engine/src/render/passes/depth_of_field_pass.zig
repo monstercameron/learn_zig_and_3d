@@ -1,6 +1,6 @@
 const depth_of_field_kernel = @import("../kernels/depth_of_field_kernel.zig");
 const config = @import("../../core/app_config.zig");
-const pass_dispatch = @import("../pass_dispatch.zig");
+const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 
 pub fn runRows(
     scene_pixels: []const u32,

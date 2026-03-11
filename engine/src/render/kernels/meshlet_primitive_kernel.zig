@@ -1,7 +1,7 @@
 const std = @import("std");
 const compute = @import("compute.zig");
 const math = @import("../../math.zig");
-const lighting = @import("../../lighting.zig");
+const lighting = @import("../../core/lighting.zig");
 const meshlet = @import("meshlet_primitives.zig");
 
 const PrimitiveFlags = meshlet.PrimitiveFlags;

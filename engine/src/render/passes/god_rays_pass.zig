@@ -1,5 +1,5 @@
 const god_rays_kernel = @import("../kernels/god_rays_kernel.zig");
-const pass_dispatch = @import("../pass_dispatch.zig");
+const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 
 pub fn runRows(
     src_pixels: []const u32,

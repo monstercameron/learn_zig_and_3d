@@ -1,4 +1,4 @@
-const pass_dispatch = @import("../pass_dispatch.zig");
+const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 
 pub const Stage = enum {
     extract,

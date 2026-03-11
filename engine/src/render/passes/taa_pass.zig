@@ -1,4 +1,4 @@
-const pass_dispatch = @import("../pass_dispatch.zig");
+const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 const std = @import("std");
 const math = @import("../../core/math.zig");
 const taa_helpers = @import("taa_helpers.zig");

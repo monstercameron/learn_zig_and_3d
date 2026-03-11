@@ -152,3 +152,22 @@ Goal: every standalone renderer feature becomes its own render pass module and i
 - [x] one pass file under `engine/src/render/passes/`
 - [x] one owned kernel file under `engine/src/render/kernels/`
 - [ ] All builds green (`check`, `test`, `validate`) and visual parity validated.
+
+## Phase 7 - Render Layout Hardening (Renderer Top-Level + Core/Pipeline Split)
+- [x] Create `engine/src/render/core/` and move shared render primitives there:
+- [x] `lighting.zig`, `mesh.zig`, `scanline.zig`, `tile_renderer.zig`, `shadow_system.zig`, `binning_stage.zig`, `mesh_work_types.zig`, `utils.zig`, `frame_context.zig`.
+- [x] Create `engine/src/render/core/meshlets/` and move:
+- [x] `meshlet_builder.zig`, `meshlet_cache.zig`.
+- [x] Create `engine/src/render/pipeline/` and move:
+- [x] `pass_dispatch.zig`, `pass_graph.zig`, `pass_registry.zig`.
+- [x] Update all imports across `engine/src`, `app/src`, and tests after moves.
+- [x] Keep `engine/src/render/renderer.zig` as top-level orchestrator.
+- [x] Keep `engine/src/render/passes/` and `engine/src/render/kernels/` as feature execution layers.
+
+## Phase 8 - Lighting As Pass + Shared Core Lighting
+- [x] Introduce `engine/src/render/passes/lighting_pass.zig` as pass-owned lighting execution entrypoint.
+- [x] Keep pass-agnostic BRDF/color/intensity helpers in `engine/src/render/core/lighting.zig`.
+- [x] Rewire renderer/tile paths to invoke lighting through pass module boundaries.
+- [x] Ensure shadow + lighting remain strictly pass-owned behaviors.
+- [x] Verify no direct heavy pass logic remains embedded in renderer for lighting/shadow.
+- [x] Run and pass `zig build check`, `zig build test`, `zig build validate`.

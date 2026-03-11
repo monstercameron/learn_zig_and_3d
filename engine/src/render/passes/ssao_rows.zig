@@ -1,6 +1,6 @@
 const std = @import("std");
 const math = @import("../../core/math.zig");
-const render_utils = @import("../utils.zig");
+const render_utils = @import("../core/utils.zig");
 const taa_helpers = @import("taa_helpers.zig");
 
 const ao_sample_offsets = [_][2]i32{

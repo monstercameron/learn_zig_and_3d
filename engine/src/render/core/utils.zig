@@ -1,6 +1,6 @@
 const std = @import("std");
-const cpu_features = @import("../core/cpu_features.zig");
-const math = @import("../core/math.zig");
+const cpu_features = @import("../../core/cpu_features.zig");
+const math = @import("../../core/math.zig");
 
 pub fn clampByte(value: i32) u8 {
     if (value <= 0) return 0;

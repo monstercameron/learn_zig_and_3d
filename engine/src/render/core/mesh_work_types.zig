@@ -1,4 +1,4 @@
-const math = @import("../core/math.zig");
+const math = @import("../../core/math.zig");
 
 pub const TriangleFlags = packed struct(u8) {
     cull_fill: bool,

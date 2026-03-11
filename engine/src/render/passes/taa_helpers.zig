@@ -1,6 +1,6 @@
 const std = @import("std");
 const math = @import("../../core/math.zig");
-const TileRenderer = @import("../tile_renderer.zig");
+const TileRenderer = @import("../core/tile_renderer.zig");
 
 pub const invalid_surface_tag: u64 = std.math.maxInt(u64);
 

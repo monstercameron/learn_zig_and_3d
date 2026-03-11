@@ -1,6 +1,6 @@
 const std = @import("std");
-const cpu_features = @import("../core/cpu_features.zig");
-const math = @import("../core/math.zig");
+const cpu_features = @import("../../core/cpu_features.zig");
+const math = @import("../../core/math.zig");
 const mesh = @import("mesh.zig");
 
 pub const AABB = struct {

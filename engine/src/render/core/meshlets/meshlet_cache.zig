@@ -5,8 +5,8 @@
 //! wyhash-based suffix to avoid collisions when models share the same filename.
 
 const std = @import("std");
-const math = @import("../core/math.zig");
-const MeshModule = @import("mesh.zig");
+const math = @import("../../../core/math.zig");
+const MeshModule = @import("../mesh.zig");
 const Mesh = MeshModule.Mesh;
 const Meshlet = MeshModule.Meshlet;
 const MeshletPrimitive = MeshModule.MeshletPrimitive;

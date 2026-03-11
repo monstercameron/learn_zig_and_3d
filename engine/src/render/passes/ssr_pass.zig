@@ -1,5 +1,5 @@
 const config = @import("../../core/app_config.zig");
-const pass_dispatch = @import("../pass_dispatch.zig");
+const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 const ssr_kernel = @import("../kernels/ssr_kernel.zig");
 
 pub fn runRows(

@@ -1,6 +1,6 @@
 const math = @import("../../core/math.zig");
 const skybox_kernel = @import("../kernels/skybox_kernel.zig");
-const pass_dispatch = @import("../pass_dispatch.zig");
+const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 
 pub fn JobContext(comptime RendererType: type, comptime ProjectionType: type, comptime HdriMapType: type) type {
     return struct {

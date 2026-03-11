@@ -1,5 +1,5 @@
 const math = @import("../../core/math.zig");
-const render_utils = @import("../utils.zig");
+const render_utils = @import("../core/utils.zig");
 
 fn averageBlur5(sum: i32) u8 {
     return @intCast(@divTrunc(sum + 2, 5));

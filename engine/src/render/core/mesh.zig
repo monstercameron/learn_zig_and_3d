@@ -26,7 +26,7 @@
 //! Our `Mesh` struct holds the same kinds of data: `vertices`, `triangles` (indices), and `normals`.
 
 const std = @import("std");
-const math = @import("../core/math.zig");
+const math = @import("../../core/math.zig");
 const Vec3 = math.Vec3;
 const Vec2 = math.Vec2;
 

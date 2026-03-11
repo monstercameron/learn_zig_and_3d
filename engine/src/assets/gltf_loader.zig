@@ -1,6 +1,6 @@
 const std = @import("std");
 const math = @import("../core/math.zig");
-const MeshModule = @import("../render/mesh.zig");
+const MeshModule = @import("../render/core/mesh.zig");
 
 const Vec2 = math.Vec2;
 const Vec3 = math.Vec3;

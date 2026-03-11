@@ -1,6 +1,6 @@
 const vignette_kernel = @import("../kernels/vignette_kernel.zig");
 const film_grain_kernel = @import("../kernels/film_grain_kernel.zig");
-const pass_dispatch = @import("../pass_dispatch.zig");
+const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 
 pub fn runRows(
     pixels: []u32,

@@ -17,11 +17,11 @@
 //! personal canvas and paint set).
 
 const std = @import("std");
-const Bitmap = @import("../assets/bitmap.zig").Bitmap;
-const cpu_features = @import("../core/cpu_features.zig");
+const Bitmap = @import("../../assets/bitmap.zig").Bitmap;
+const cpu_features = @import("../../core/cpu_features.zig");
 const scanline = @import("scanline.zig");
-const math = @import("../core/math.zig");
-const texture = @import("../assets/texture.zig");
+const math = @import("../../core/math.zig");
+const texture = @import("../../assets/texture.zig");
 const lighting = @import("lighting.zig");
 
 pub const invalid_surface_id: u32 = std.math.maxInt(u32);

@@ -3,7 +3,7 @@ const math = @import("../../core/math.zig");
 const config = @import("../../core/app_config.zig");
 const hybrid_shadow_cache_kernel = @import("../kernels/hybrid_shadow_cache_kernel.zig");
 const hybrid_shadow_candidate_kernel = @import("../kernels/hybrid_shadow_candidate_kernel.zig");
-const render_utils = @import("../utils.zig");
+const render_utils = @import("../core/utils.zig");
 
 const ReceiverBounds = struct {
     valid_min_x: i32,

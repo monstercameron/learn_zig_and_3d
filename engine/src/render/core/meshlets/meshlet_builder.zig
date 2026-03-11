@@ -5,8 +5,8 @@
 //! exceeded, matching the runtime regeneration fallback.
 
 const std = @import("std");
-const log = @import("../core/log.zig");
-const MeshModule = @import("mesh.zig");
+const log = @import("../../../core/log.zig");
+const MeshModule = @import("../mesh.zig");
 const Mesh = MeshModule.Mesh;
 
 const logger = log.get("meshlet.builder");

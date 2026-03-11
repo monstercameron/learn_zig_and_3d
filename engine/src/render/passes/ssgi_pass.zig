@@ -1,5 +1,5 @@
 const ssgi_kernel = @import("../kernels/ssgi_kernel.zig");
-const pass_dispatch = @import("../pass_dispatch.zig");
+const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 
 pub fn runRows(
     pixels: []const u32,

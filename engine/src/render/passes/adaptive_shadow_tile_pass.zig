@@ -2,7 +2,7 @@ const std = @import("std");
 const math = @import("../../core/math.zig");
 const config = @import("../../core/app_config.zig");
 const hybrid_shadow_resolve_kernel = @import("../kernels/hybrid_shadow_resolve_kernel.zig");
-const render_utils = @import("../utils.zig");
+const render_utils = @import("../core/utils.zig");
 
 const near_clip: f32 = 0.01;
 const hybrid_shadow_cache_unknown: u8 = 0xFF;
