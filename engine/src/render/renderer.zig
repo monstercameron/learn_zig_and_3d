@@ -40,7 +40,40 @@ const Mesh = MeshModule.Mesh;
 const Meshlet = MeshModule.Meshlet;
 const config = @import("../core/app_config.zig");
 const input = @import("../platform/input.zig");
+const skybox_pass = @import("passes/skybox_pass.zig");
+const color_grade_pass = @import("passes/color_grade_pass.zig");
+const chromatic_aberration_pass = @import("passes/chromatic_aberration_pass.zig");
+const lens_flare_pass = @import("passes/lens_flare_pass.zig");
+const film_grain_vignette_pass = @import("passes/film_grain_vignette_pass.zig");
+const god_rays_pass = @import("passes/god_rays_pass.zig");
+const depth_of_field_pass = @import("passes/depth_of_field_pass.zig");
+const motion_blur_pass = @import("passes/motion_blur_pass.zig");
+const ssgi_pass = @import("passes/ssgi_pass.zig");
+const ssr_pass = @import("passes/ssr_pass.zig");
+const ssao_pass = @import("passes/ssao_pass.zig");
+const ssao_rows = @import("passes/ssao_rows.zig");
+const bloom_pass = @import("passes/bloom_pass.zig");
+const bloom_rows = @import("passes/bloom_rows.zig");
+const taa_pass = @import("passes/taa_pass.zig");
+const taa_helpers = @import("passes/taa_helpers.zig");
+const taa_meshlet_batch = @import("passes/taa_meshlet_batch.zig");
+const shadow_map_pass = @import("passes/shadow_map_pass.zig");
+const shadow_raster_rows = @import("passes/shadow_raster_rows.zig");
+const shadow_resolve_pass = @import("passes/shadow_resolve_pass.zig");
+const hybrid_shadow_pass = @import("passes/hybrid_shadow_pass.zig");
+const adaptive_shadow_tile_pass = @import("passes/adaptive_shadow_tile_pass.zig");
+const pass_registry = @import("pass_registry.zig");
+const render_utils = @import("utils.zig");
+const shadow_raster_kernel = @import("kernels/shadow_raster_kernel.zig");
+const shadow_sample_kernel = @import("kernels/shadow_sample_kernel.zig");
+const hybrid_shadow_cache_kernel = @import("kernels/hybrid_shadow_cache_kernel.zig");
+const hybrid_shadow_resolve_kernel = @import("kernels/hybrid_shadow_resolve_kernel.zig");
+const ssao_sample_kernel = @import("kernels/ssao_sample_kernel.zig");
+const ssao_blur_kernel = @import("kernels/ssao_blur_kernel.zig");
+const bloom_blur_h_kernel = @import("kernels/bloom_blur_h_kernel.zig");
+const bloom_blur_v_kernel = @import("kernels/bloom_blur_v_kernel.zig");
 const lighting = @import("lighting.zig");
+const depth_fog_pass = @import("passes/depth_fog_pass.zig");
 const scanline = @import("scanline.zig");
 const texture = @import("../assets/texture.zig");
 const WorkTypes = @import("mesh_work_types.zig");
@@ -73,18 +106,6 @@ const HybridShadowCasterBounds = struct {
 const HybridShadowTileRange = struct {
     offset: usize = 0,
     count: usize = 0,
-};
-
-const HybridShadowReceiverBounds = struct {
-    valid_min_x: i32,
-    valid_min_y: i32,
-    valid_max_x: i32,
-    valid_max_y: i32,
-    min_u: f32,
-    max_u: f32,
-    min_v: f32,
-    max_v: f32,
-    min_depth: f32,
 };
 
 const min_rows_per_parallel_job: usize = 16;
@@ -134,7 +155,7 @@ const CameraToLightTransform = struct {
         };
     }
 
-    fn project(self: CameraToLightTransform, camera_pos: math.Vec3) LightSpaceSample {
+    pub fn project(self: CameraToLightTransform, camera_pos: math.Vec3) LightSpaceSample {
         return .{
             .u = self.origin_u + math.Vec3.dot(camera_pos, self.camera_u),
             .v = self.origin_v + math.Vec3.dot(camera_pos, self.camera_v),
@@ -252,8 +273,6 @@ const DepthOfFieldScratch = struct {
     height: usize,
 };
 
-const ssgi_sample_offsets = [_][2]f32{ .{ -0.184342, 0.168873 }, .{ 0.030910, -0.352200 }, .{ 0.263462, 0.343639 }, .{ -0.492357, -0.087091 }, .{ 0.471674, -0.300040 }, .{ -0.158975, 0.591377 }, .{ -0.304861, -0.586992 }, .{ 0.664200, 0.242565 }, .{ -0.693259, 0.286167 }, .{ 0.335080, -0.716046 }, .{ 0.248153, 0.791151 }, .{ -0.749295, -0.434232 }, .{ 0.880364, -0.193545 }, .{ -0.537984, 0.765227 }, .{ -0.124430, -0.960217 }, .{ 0.764649, 0.644447 } };
-
 const SSGIJobContext = struct {
     renderer: *Renderer,
     scene_pixels: []u32,
@@ -262,117 +281,11 @@ const SSGIJobContext = struct {
     start_row: usize,
     end_row: usize,
 
-    fn run(ctx_ptr: *anyopaque) void {
+    pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *SSGIJobContext = @ptrCast(@alignCast(ctx_ptr));
-        const pixels = ctx.scene_pixels;
-        const out_pixels = ctx.scratch_pixels;
-        const camera = ctx.scene_camera;
         const width: usize = @intCast(ctx.renderer.bitmap.width);
         const height: usize = @intCast(ctx.renderer.bitmap.height);
-
-        const max_dist = config.POST_SSGI_RADIUS;
-        const intensity = config.POST_SSGI_INTENSITY;
-        const bounce_decay = config.POST_SSGI_BOUNCE_ATTENUATION;
-
-        var y: usize = ctx.start_row;
-        while (y < ctx.end_row) : (y += 1) {
-            var x: usize = 0;
-            while (x < width) : (x += 1) {
-                const idx = y * width + x;
-                const pos = camera[idx];
-
-                if (!validSceneCameraSample(pos)) {
-                    out_pixels[idx] = pixels[idx];
-                    continue;
-                }
-
-                const normal = estimateSceneNormal(camera, width, height, pos, @intCast(x), @intCast(y), 1);
-
-                const seed = @as(u32, @intCast(x)) *% 73856093 ^ @as(u32, @intCast(y)) *% 19349663;
-                var rand = std.Random.DefaultPrng.init(seed);
-
-                var accum_r: f32 = 0;
-                var accum_g: f32 = 0;
-                var accum_b: f32 = 0;
-                var valid_samples: f32 = 0;
-
-                // Precalculate rotation and scale
-                const rand_angle = rand.random().float(f32) * 2.0 * std.math.pi;
-                const r_cos = @cos(rand_angle);
-                const r_sin = @sin(rand_angle);
-                const sample_max_dist = @as(f32, @floatFromInt(max_dist));
-
-                var s: usize = 0;
-                const num_samples = @as(usize, @intCast(config.POST_SSGI_SAMPLES));
-                while (s < num_samples and s < ssgi_sample_offsets.len) : (s += 1) {
-                    // Get precalculated point and jitter radius slightly
-                    const jitter_r = 0.8 + 0.4 * rand.random().float(f32);
-                    const u = ssgi_sample_offsets[s][0] * jitter_r;
-                    const v = ssgi_sample_offsets[s][1] * jitter_r;
-
-                    // Rotate
-                    const rot_u = u * r_cos - v * r_sin;
-                    const rot_v = u * r_sin + v * r_cos;
-
-                    const dx = @as(i32, @intFromFloat(rot_u * sample_max_dist));
-                    const dy = @as(i32, @intFromFloat(rot_v * sample_max_dist));
-
-                    const nx = @as(i32, @intCast(x)) + dx;
-                    const ny = @as(i32, @intCast(y)) + dy;
-
-                    if (nx < 0 or ny < 0 or nx >= width or ny >= height) continue;
-
-                    const n_idx = @as(usize, @intCast(ny)) * width + @as(usize, @intCast(nx));
-                    const n_pos = camera[n_idx];
-                    if (!validSceneCameraSample(n_pos)) continue;
-
-                    const delta = math.Vec3.sub(n_pos, pos);
-                    const dist_sq = math.Vec3.dot(delta, delta);
-                    if (dist_sq < 0.001) continue;
-
-                    const dist = @sqrt(dist_sq);
-                    const dir = math.Vec3.scale(delta, 1.0 / dist);
-                    const ndot = math.Vec3.dot(normal, dir);
-
-                    // Only points in front of the normal can bounce light
-                    if (ndot > 0.0) {
-                        const neighbor_color = pixels[n_idx];
-                        const r_val = @as(f32, @floatFromInt((neighbor_color >> 16) & 0xFF)) / 255.0;
-                        const g_val = @as(f32, @floatFromInt((neighbor_color >> 8) & 0xFF)) / 255.0;
-                        const b_val = @as(f32, @floatFromInt(neighbor_color & 0xFF)) / 255.0;
-
-                        // Inverse square falloff bounded by max bounce dist
-                        const falloff = 1.0 / (1.0 + dist_sq * bounce_decay);
-                        const weight = ndot * falloff;
-
-                        accum_r += r_val * weight;
-                        accum_g += g_val * weight;
-                        accum_b += b_val * weight;
-                        valid_samples += 1.0;
-                    }
-                }
-
-                const base_color = pixels[idx];
-                if (valid_samples > 0) {
-                    const avg_r = accum_r / valid_samples * intensity;
-                    const avg_g = accum_g / valid_samples * intensity;
-                    const avg_b = accum_b / valid_samples * intensity;
-
-                    const br = @as(f32, @floatFromInt((base_color >> 16) & 0xFF)) / 255.0;
-                    const bg = @as(f32, @floatFromInt((base_color >> 8) & 0xFF)) / 255.0;
-                    const bb = @as(f32, @floatFromInt(base_color & 0xFF)) / 255.0;
-
-                    // Add indirect light to base color (assuming base color is surface albedo approx)
-                    const fr = std.math.clamp(br + br * avg_r, 0.0, 1.0) * 255.0;
-                    const fg = std.math.clamp(bg + bg * avg_g, 0.0, 1.0) * 255.0;
-                    const fb = std.math.clamp(bb + bb * avg_b, 0.0, 1.0) * 255.0;
-
-                    out_pixels[idx] = (0xFF << 24) | (@as(u32, @intFromFloat(fr)) << 16) | (@as(u32, @intFromFloat(fg)) << 8) | @as(u32, @intFromFloat(fb));
-                } else {
-                    out_pixels[idx] = base_color;
-                }
-            }
-        }
+        ssgi_pass.runRows(ctx.scene_pixels, ctx.scratch_pixels, ctx.scene_camera, width, height, ctx.start_row, ctx.end_row);
     }
 };
 
@@ -394,108 +307,24 @@ const SSRJobContext = struct {
     thickness: f32,
     intensity: f32,
 
-    fn run(ctx_ptr: *anyopaque) void {
+    pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *SSRJobContext = @ptrCast(@alignCast(ctx_ptr));
-        const pixels = ctx.scene_pixels;
-        const out_pixels = ctx.scratch_pixels;
-        const camera = ctx.scene_camera;
-        const depth = ctx.scene_depth;
-        const w = ctx.width;
-        const h = ctx.height;
-
-        for (ctx.start_row..ctx.end_row) |y| {
-            for (0..w) |x| {
-                const idx = y * w + x;
-                const p = camera[idx];
-                out_pixels[idx] = pixels[idx];
-
-                if (!validSceneCameraSample(p)) continue;
-                if (depth[idx] > 1000.0) continue;
-
-                const n = estimateSceneNormal(camera, w, h, p, @intCast(x), @intCast(y), 2);
-                if (n.x == 0.0 and n.y == 0.0 and n.z == 0.0) continue;
-
-                const v = math.Vec3.normalize(p);
-                const dot_vn = math.Vec3.dot(v, n);
-                if (dot_vn > 0.0) continue;
-
-                const r = math.Vec3.normalize(math.Vec3.sub(v, math.Vec3.scale(n, 2.0 * dot_vn)));
-
-                var ray_pos = p;
-                var hit = false;
-                var hit_color: u32 = 0;
-
-                const step = math.Vec3.scale(r, ctx.step_size);
-
-                // Edge falloff for SSR blending
-                var edge_blend: f32 = 1.0;
-
-                var s: i32 = 0;
-                while (s < ctx.max_samples) : (s += 1) {
-                    ray_pos = math.Vec3.add(ray_pos, step);
-
-                    if (ray_pos.z < 0.1) break;
-
-                    // Use step count to avoid sqrt
-                    if (@as(f32, @floatFromInt(s + 1)) * ctx.step_size > ctx.max_distance) break;
-
-                    const proj = projectCameraPositionFloat(ray_pos, ctx.projection);
-                    const sx_float = proj.x;
-                    const sy_float = proj.y;
-
-                    if (sx_float < 0 or sx_float >= @as(f32, @floatFromInt(w)) or sy_float < 0 or sy_float >= @as(f32, @floatFromInt(h))) {
-                        break;
-                    }
-
-                    const sx: usize = @intFromFloat(sx_float);
-                    const sy: usize = @intFromFloat(sy_float);
-                    const hit_idx = sy * w + sx;
-
-                    const sampled_depth = depth[hit_idx];
-                    if (!std.math.isFinite(sampled_depth) or sampled_depth > 1000.0) continue;
-
-                    if (ray_pos.z > sampled_depth) {
-                        const depth_diff = ray_pos.z - sampled_depth;
-                        if (depth_diff < ctx.thickness) {
-                            hit = true;
-                            hit_color = pixels[hit_idx];
-
-                            // Fade based on how close to screen edge we are
-                            const edge_x = @min(sx_float, @as(f32, @floatFromInt(w)) - sx_float) / @as(f32, @floatFromInt(w));
-                            const edge_y = @min(sy_float, @as(f32, @floatFromInt(h)) - sy_float) / @as(f32, @floatFromInt(h));
-                            const edge_dist = @min(edge_x, edge_y) * 4.0;
-                            edge_blend = @max(0.0, @min(1.0, edge_dist));
-
-                            // Fade based on reflection vector pointing towards camera
-                            const facing_ratio = @max(0.0, -r.z);
-                            edge_blend *= @max(0.0, @min(1.0, 1.0 - facing_ratio * 0.8));
-                            break;
-                        }
-                    }
-                }
-
-                if (hit and edge_blend > 0.0) {
-                    const base_c = pixels[idx];
-                    const r_r = @as(f32, @floatFromInt((hit_color >> 16) & 0xFF));
-                    const r_g = @as(f32, @floatFromInt((hit_color >> 8) & 0xFF));
-                    const r_b = @as(f32, @floatFromInt(hit_color & 0xFF));
-
-                    const b_r = @as(f32, @floatFromInt((base_c >> 16) & 0xFF));
-                    const b_g = @as(f32, @floatFromInt((base_c >> 8) & 0xFF));
-                    const b_b = @as(f32, @floatFromInt(base_c & 0xFF));
-
-                    // Fresnel approximation
-                    const fresnel = @max(0.0, @min(1.0, std.math.pow(f32, 1.0 + dot_vn, 3.0)));
-                    const reflectivity = ctx.intensity * fresnel * edge_blend;
-
-                    const final_r = @as(u32, @intFromFloat(@max(0.0, @min(255.0, b_r * (1.0 - reflectivity) + r_r * reflectivity))));
-                    const final_g = @as(u32, @intFromFloat(@max(0.0, @min(255.0, b_g * (1.0 - reflectivity) + r_g * reflectivity))));
-                    const final_b = @as(u32, @intFromFloat(@max(0.0, @min(255.0, b_b * (1.0 - reflectivity) + r_b * reflectivity))));
-
-                    out_pixels[idx] = (final_r << 16) | (final_g << 8) | final_b | 0xFF000000;
-                }
-            }
-        }
+        ssr_pass.runRows(
+            ctx.scene_pixels,
+            ctx.scratch_pixels,
+            ctx.scene_camera,
+            ctx.scene_depth,
+            ctx.width,
+            ctx.height,
+            ctx.start_row,
+            ctx.end_row,
+            ctx.projection,
+            ctx.max_samples,
+            ctx.step_size,
+            ctx.max_distance,
+            ctx.thickness,
+            ctx.intensity,
+        );
     }
 };
 
@@ -511,64 +340,20 @@ const DepthOfFieldJobContext = struct {
     focal_range: f32,
     max_blur_radius: i32,
 
-    fn run(ctx_ptr: *anyopaque) void {
+    pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *DepthOfFieldJobContext = @ptrCast(@alignCast(ctx_ptr));
-        const pixels = ctx.scene_pixels;
-        const out_pixels = ctx.scratch_pixels;
-        const depth = ctx.scene_depth;
-        const w = ctx.width;
-        const h = ctx.height;
-        const max_rad = @as(f32, @floatFromInt(ctx.max_blur_radius));
-
-        for (ctx.start_row..ctx.end_row) |y| {
-            for (0..w) |x| {
-                const idx = y * w + x;
-                const d = depth[idx];
-                const dist_from_focal = @abs(d - ctx.focal_distance);
-
-                var blur_amount: f32 = 0.0;
-                if (dist_from_focal > ctx.focal_range) {
-                    blur_amount = @min(1.0, (dist_from_focal - ctx.focal_range) / ctx.focal_range);
-                }
-
-                const blur_radius = blur_amount * max_rad;
-
-                if (blur_radius < 1.0) {
-                    out_pixels[idx] = pixels[idx];
-                } else {
-                    const irad = @as(i32, @intFromFloat(blur_radius));
-                    var r_sum: u32 = 0;
-                    var g_sum: u32 = 0;
-                    var b_sum: u32 = 0;
-                    var count: u32 = 0;
-
-                    const min_y = @max(0, @as(i32, @intCast(y)) - irad);
-                    const max_y = @min(@as(i32, @intCast(h)) - 1, @as(i32, @intCast(y)) + irad);
-                    const min_x = @max(0, @as(i32, @intCast(x)) - irad);
-                    const max_x = @min(@as(i32, @intCast(w)) - 1, @as(i32, @intCast(x)) + irad);
-
-                    const step: i32 = if (irad > 2) 2 else 1;
-
-                    var sy: i32 = min_y;
-                    while (sy <= max_y) : (sy += step) {
-                        var sx: i32 = min_x;
-                        while (sx <= max_x) : (sx += step) {
-                            const sidx = @as(usize, @intCast(sy)) * w + @as(usize, @intCast(sx));
-                            const p = pixels[sidx];
-                            r_sum += (p >> 16) & 0xFF;
-                            g_sum += (p >> 8) & 0xFF;
-                            b_sum += p & 0xFF;
-                            count += 1;
-                        }
-                    }
-
-                    const out_r = r_sum / count;
-                    const out_g = g_sum / count;
-                    const out_b = b_sum / count;
-                    out_pixels[idx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b;
-                }
-            }
-        }
+        depth_of_field_pass.runRows(
+            ctx.scene_pixels,
+            ctx.scratch_pixels,
+            ctx.scene_depth,
+            ctx.width,
+            ctx.height,
+            ctx.start_row,
+            ctx.end_row,
+            ctx.focal_distance,
+            ctx.focal_range,
+            ctx.max_blur_radius,
+        );
     }
 };
 
@@ -795,22 +580,8 @@ const ShadowResolveConfig = struct {
 };
 
 const max_shadow_meshlet_vertices: usize = 64;
-const hybrid_shadow_cache_unknown: u8 = 0xFF;
-const hybrid_shadow_cache_invalid: u8 = 0xFE;
 
-const ShadowSample = struct {
-    valid: bool,
-    coverage: f32,
-
-    fn occluded(self: ShadowSample) bool {
-        return self.coverage >= 0.5;
-    }
-};
-
-fn fastScale255(value: u32, factor: u32) u8 {
-    const scaled = ((value * factor) + 128) * 257;
-    return @intCast(@min(scaled >> 16, 255));
-}
+const fastScale255 = render_utils.fastScale255;
 
 fn averageBlur5(sum: i32) u8 {
     return @intCast(@divTrunc(sum + 2, 5));
@@ -838,53 +609,13 @@ fn buildBloomIntensityLut(intensity_percent: i32) [256]u8 {
 }
 
 fn validSceneCameraSample(camera_pos: math.Vec3) bool {
-    return std.math.isFinite(camera_pos.x) and
-        std.math.isFinite(camera_pos.y) and
-        std.math.isFinite(camera_pos.z) and
-        camera_pos.z > NEAR_CLIP;
+    return render_utils.validSceneCameraSample(camera_pos, NEAR_CLIP);
 }
 
-fn sampleSceneCameraClamped(scene_camera: []const math.Vec3, width: usize, height: usize, x: i32, y: i32) math.Vec3 {
-    const clamped_x: usize = @intCast(@min(@as(i32, @intCast(width - 1)), @max(0, x)));
-    const clamped_y: usize = @intCast(@min(@as(i32, @intCast(height - 1)), @max(0, y)));
-    return scene_camera[clamped_y * width + clamped_x];
-}
+const sampleSceneCameraClamped = render_utils.sampleSceneCameraClamped;
 
 fn estimateSceneNormal(scene_camera: []const math.Vec3, width: usize, height: usize, center: math.Vec3, x: i32, y: i32, step: i32) math.Vec3 {
-    const left = sampleSceneCameraClamped(scene_camera, width, height, x - step, y);
-    const right = sampleSceneCameraClamped(scene_camera, width, height, x + step, y);
-    const up = sampleSceneCameraClamped(scene_camera, width, height, x, y - step);
-    const down = sampleSceneCameraClamped(scene_camera, width, height, x, y + step);
-
-    const tangent_x = if (validSceneCameraSample(left) and validSceneCameraSample(right))
-        math.Vec3.sub(right, left)
-    else if (validSceneCameraSample(right))
-        math.Vec3.sub(right, center)
-    else if (validSceneCameraSample(left))
-        math.Vec3.sub(center, left)
-    else
-        math.Vec3.new(0.0, 0.0, 0.0);
-
-    const tangent_y = if (validSceneCameraSample(up) and validSceneCameraSample(down))
-        math.Vec3.sub(down, up)
-    else if (validSceneCameraSample(down))
-        math.Vec3.sub(down, center)
-    else if (validSceneCameraSample(up))
-        math.Vec3.sub(center, up)
-    else
-        math.Vec3.new(0.0, 0.0, 0.0);
-
-    var normal = math.Vec3.cross(tangent_x, tangent_y);
-    if (math.Vec3.length(normal) <= 1e-4) {
-        normal = math.Vec3.scale(center, -1.0);
-        if (math.Vec3.length(normal) <= 1e-4) return math.Vec3.new(0.0, 0.0, -1.0);
-    }
-
-    normal = math.Vec3.normalize(normal);
-    if (math.Vec3.dot(normal, center) > 0.0) {
-        normal = math.Vec3.scale(normal, -1.0);
-    }
-    return normal;
+    return render_utils.estimateSceneNormal(scene_camera, width, height, center, x, y, step, NEAR_CLIP);
 }
 
 const ao_sample_offsets = [_][2]i32{
@@ -922,74 +653,8 @@ const TemporalAAViewState = struct {
     }
 };
 
-fn chooseShadowBasis(light_dir_world: math.Vec3) struct { right: math.Vec3, up: math.Vec3, forward: math.Vec3 } {
-    const forward = math.Vec3.normalize(math.Vec3.scale(light_dir_world, -1.0));
-    const world_up = if (@abs(forward.y) > 0.98)
-        math.Vec3.new(1.0, 0.0, 0.0)
-    else
-        math.Vec3.new(0.0, 1.0, 0.0);
-    const right = math.Vec3.normalize(math.Vec3.cross(world_up, forward));
-    const up = math.Vec3.normalize(math.Vec3.cross(forward, right));
-    return .{ .right = right, .up = up, .forward = forward };
-}
+const chooseShadowBasis = render_utils.chooseShadowBasis;
 
-fn shadowEdge(a: [2]f32, b: [2]f32, p: [2]f32) f32 {
-    return (p[0] - a[0]) * (b[1] - a[1]) - (p[1] - a[1]) * (b[0] - a[0]);
-}
-
-fn rasterizeShadowTriangleRows(shadow: *ShadowMap, start_row: usize, end_row: usize, p0: math.Vec3, p1: math.Vec3, p2: math.Vec3) void {
-    if (!shadow.active) return;
-    if (start_row >= end_row or end_row > shadow.height) return;
-
-    const scale_x = @as(f32, @floatFromInt(shadow.width - 1)) * shadow.inv_extent_x;
-    const scale_y = @as(f32, @floatFromInt(shadow.height - 1)) * shadow.inv_extent_y;
-
-    const s0 = [2]f32{ (p0.x - shadow.min_x) * scale_x, (shadow.max_y - p0.y) * scale_y };
-    const s1 = [2]f32{ (p1.x - shadow.min_x) * scale_x, (shadow.max_y - p1.y) * scale_y };
-    const s2 = [2]f32{ (p2.x - shadow.min_x) * scale_x, (shadow.max_y - p2.y) * scale_y };
-
-    const area = shadowEdge(s0, s1, s2);
-    if (@abs(area) < 1e-5) return;
-
-    const min_x = std.math.clamp(@as(i32, @intFromFloat(@floor(@min(s0[0], @min(s1[0], s2[0]))))), 0, @as(i32, @intCast(shadow.width - 1)));
-    const max_x = std.math.clamp(@as(i32, @intFromFloat(@ceil(@max(s0[0], @max(s1[0], s2[0]))))), 0, @as(i32, @intCast(shadow.width - 1)));
-    const min_y = std.math.clamp(
-        @as(i32, @intFromFloat(@floor(@min(s0[1], @min(s1[1], s2[1]))))),
-        @as(i32, @intCast(start_row)),
-        @as(i32, @intCast(end_row - 1)),
-    );
-    const max_y = std.math.clamp(
-        @as(i32, @intFromFloat(@ceil(@max(s0[1], @max(s1[1], s2[1]))))),
-        @as(i32, @intCast(start_row)),
-        @as(i32, @intCast(end_row - 1)),
-    );
-    if (min_y > max_y) return;
-
-    var y = min_y;
-    while (y <= max_y) : (y += 1) {
-        var x = min_x;
-        while (x <= max_x) : (x += 1) {
-            const sample = [2]f32{
-                @as(f32, @floatFromInt(x)) + 0.5,
-                @as(f32, @floatFromInt(y)) + 0.5,
-            };
-            const w0 = shadowEdge(s1, s2, sample);
-            const w1 = shadowEdge(s2, s0, sample);
-            const w2 = shadowEdge(s0, s1, sample);
-
-            if ((area > 0.0 and (w0 < 0.0 or w1 < 0.0 or w2 < 0.0)) or
-                (area < 0.0 and (w0 > 0.0 or w1 > 0.0 or w2 > 0.0)))
-            {
-                continue;
-            }
-
-            const inv_area = 1.0 / area;
-            const depth = (w0 * p0.z + w1 * p1.z + w2 * p2.z) * inv_area;
-            const idx = @as(usize, @intCast(y)) * shadow.width + @as(usize, @intCast(x));
-            if (depth < shadow.depth[idx]) shadow.depth[idx] = depth;
-        }
-    }
-}
 
 fn reconstructWorldPosition(
     x: usize,
@@ -1016,55 +681,8 @@ fn reconstructWorldPosition(
     );
 }
 
-fn sampleShadowOcclusion(shadow: *const ShadowMap, world_pos: math.Vec3) f32 {
-    if (!shadow.active) return 0.0;
 
-    const lx = math.Vec3.dot(world_pos, shadow.basis_right);
-    const ly = math.Vec3.dot(world_pos, shadow.basis_up);
-    const lz = math.Vec3.dot(world_pos, shadow.basis_forward);
-    if (lx < shadow.min_x or lx > shadow.max_x or ly < shadow.min_y or ly > shadow.max_y or lz < shadow.min_z or lz > shadow.max_z) return 0.0;
-
-    const tex_x = (lx - shadow.min_x) * shadow.inv_extent_x * @as(f32, @floatFromInt(shadow.width - 1));
-    const tex_y = (shadow.max_y - ly) * shadow.inv_extent_y * @as(f32, @floatFromInt(shadow.height - 1));
-    const center_x = @as(i32, @intFromFloat(@round(tex_x)));
-    const center_y = @as(i32, @intFromFloat(@round(tex_y)));
-
-    const offsets = [_][2]i32{
-        .{ 0, 0 },
-        .{ -1, 0 },
-        .{ 1, 0 },
-        .{ 0, -1 },
-        .{ 0, 1 },
-    };
-
-    var occluded: f32 = 0.0;
-    var weight_sum: f32 = 0.0;
-    for (offsets, 0..) |offset, tap_index| {
-        const sx = std.math.clamp(center_x + offset[0], 0, @as(i32, @intCast(shadow.width - 1)));
-        const sy = std.math.clamp(center_y + offset[1], 0, @as(i32, @intCast(shadow.height - 1)));
-        const sample_idx = @as(usize, @intCast(sy)) * shadow.width + @as(usize, @intCast(sx));
-        const stored_depth = shadow.depth[sample_idx];
-        if (!std.math.isFinite(stored_depth)) continue;
-
-        const weight: f32 = if (tap_index == 0) 0.4 else 0.15;
-        weight_sum += weight;
-        if (lz > stored_depth + shadow.depth_bias + shadow.texel_bias) occluded += weight;
-    }
-
-    if (weight_sum <= 0.0) return 0.0;
-    return occluded / weight_sum;
-}
-
-fn darkenPackedColor(pixel: u32, scale: f32) u32 {
-    const alpha = pixel & 0xFF000000;
-    const r = @as(i32, @intFromFloat(@as(f32, @floatFromInt((pixel >> 16) & 0xFF)) * scale));
-    const g = @as(i32, @intFromFloat(@as(f32, @floatFromInt((pixel >> 8) & 0xFF)) * scale));
-    const b = @as(i32, @intFromFloat(@as(f32, @floatFromInt(pixel & 0xFF)) * scale));
-    return alpha |
-        (@as(u32, clampByte(r)) << 16) |
-        (@as(u32, clampByte(g)) << 8) |
-        @as(u32, clampByte(b));
-}
+const darkenPackedColor = render_utils.darkenPackedColor;
 
 fn darkenPixelSpan(pixels: []u32, start_index: usize, end_index: usize, scale: f32) void {
     if (start_index >= end_index) return;
@@ -1102,28 +720,11 @@ fn darkenPixelSpan(pixels: []u32, start_index: usize, end_index: usize, scale: f
     }
 
     while (i < end_index) : (i += 1) {
-        pixels[i] = darkenPackedColor(pixels[i], scale);
+        pixels[i] = render_utils.darkenPackedColor(pixels[i], scale);
     }
 }
 
-fn cameraToWorldPosition(
-    camera_position: math.Vec3,
-    basis_right: math.Vec3,
-    basis_up: math.Vec3,
-    basis_forward: math.Vec3,
-    camera_pos: math.Vec3,
-) math.Vec3 {
-    return math.Vec3.add(
-        camera_position,
-        math.Vec3.add(
-            math.Vec3.add(
-                math.Vec3.scale(basis_right, camera_pos.x),
-                math.Vec3.scale(basis_up, camera_pos.y),
-            ),
-            math.Vec3.scale(basis_forward, camera_pos.z),
-        ),
-    );
-}
+const cameraToWorldPosition = render_utils.cameraToWorldPosition;
 
 const taa_jitter_sequence = [_]math.Vec2{
     .{ .x = 0.25, .y = -0.16666666 },
@@ -1136,13 +737,7 @@ const taa_jitter_sequence = [_]math.Vec2{
     .{ .x = -0.4375, .y = 0.38888888 },
 };
 
-const invalid_surface_tag: u64 = std.math.maxInt(u64);
-
-const HistoryNearestSample = struct {
-    color: [3]f32,
-    depth: f32,
-    tag: u64,
-};
+const invalid_surface_tag: u64 = taa_helpers.invalid_surface_tag;
 
 const ReprojectedHistorySample = struct {
     screen: math.Vec2,
@@ -1159,372 +754,9 @@ fn taaJitterForFrame(frame_index: u64) math.Vec2 {
 }
 
 fn projectCameraPositionFloat(position: math.Vec3, projection: ProjectionParams) math.Vec2 {
-    const clamped_z = if (position.z < projection.near_plane + NEAR_EPSILON)
-        projection.near_plane + NEAR_EPSILON
-    else
-        position.z;
-    const inv_z = 1.0 / clamped_z;
-    const ndc_x = position.x * inv_z * projection.x_scale;
-    const ndc_y = position.y * inv_z * projection.y_scale;
-    return .{
-        .x = ndc_x * projection.center_x + projection.center_x + projection.jitter_x,
-        .y = -ndc_y * projection.center_y + projection.center_y + projection.jitter_y,
-    };
+    return render_utils.projectCameraPositionFloat(position, projection, NEAR_EPSILON);
 }
 
-fn sampleHistoryColor(history: []const u32, width: usize, height: usize, screen: math.Vec2) ?[3]f32 {
-    const w_f = @as(f32, @floatFromInt(width));
-    const h_f = @as(f32, @floatFromInt(height));
-    if (screen.x < 0.0 or screen.y < 0.0 or screen.x >= w_f or screen.y >= h_f) return null;
-
-    const adj_x = screen.x - 0.5;
-    const adj_y = screen.y - 0.5;
-    const x0_i = @as(i32, @intFromFloat(@floor(adj_x)));
-    const y0_i = @as(i32, @intFromFloat(@floor(adj_y)));
-    const cx0 = @max(0, @min(@as(i32, @intCast(width - 1)), x0_i));
-    const cy0 = @max(0, @min(@as(i32, @intCast(height - 1)), y0_i));
-    const cx1 = @max(0, @min(@as(i32, @intCast(width - 1)), x0_i + 1));
-    const cy1 = @max(0, @min(@as(i32, @intCast(height - 1)), y0_i + 1));
-    const frac_x = std.math.clamp(adj_x - @as(f32, @floatFromInt(x0_i)), 0.0, 1.0);
-    const frac_y = std.math.clamp(adj_y - @as(f32, @floatFromInt(y0_i)), 0.0, 1.0);
-    const x0: usize = @intCast(cx0);
-    const y0: usize = @intCast(cy0);
-    const x1: usize = @intCast(cx1);
-    const y1: usize = @intCast(cy1);
-
-    const c00 = history[y0 * width + x0];
-    const c10 = history[y0 * width + x1];
-    const c01 = history[y1 * width + x0];
-    const c11 = history[y1 * width + x1];
-
-    const top_r = @as(f32, @floatFromInt((c00 >> 16) & 0xFF)) + (@as(f32, @floatFromInt((c10 >> 16) & 0xFF)) - @as(f32, @floatFromInt((c00 >> 16) & 0xFF))) * frac_x;
-    const top_g = @as(f32, @floatFromInt((c00 >> 8) & 0xFF)) + (@as(f32, @floatFromInt((c10 >> 8) & 0xFF)) - @as(f32, @floatFromInt((c00 >> 8) & 0xFF))) * frac_x;
-    const top_b = @as(f32, @floatFromInt(c00 & 0xFF)) + (@as(f32, @floatFromInt(c10 & 0xFF)) - @as(f32, @floatFromInt(c00 & 0xFF))) * frac_x;
-    const bottom_r = @as(f32, @floatFromInt((c01 >> 16) & 0xFF)) + (@as(f32, @floatFromInt((c11 >> 16) & 0xFF)) - @as(f32, @floatFromInt((c01 >> 16) & 0xFF))) * frac_x;
-    const bottom_g = @as(f32, @floatFromInt((c01 >> 8) & 0xFF)) + (@as(f32, @floatFromInt((c11 >> 8) & 0xFF)) - @as(f32, @floatFromInt((c01 >> 8) & 0xFF))) * frac_x;
-    const bottom_b = @as(f32, @floatFromInt(c01 & 0xFF)) + (@as(f32, @floatFromInt(c11 & 0xFF)) - @as(f32, @floatFromInt(c01 & 0xFF))) * frac_x;
-
-    return .{
-        top_r + (bottom_r - top_r) * frac_y,
-        top_g + (bottom_g - top_g) * frac_y,
-        top_b + (bottom_b - top_b) * frac_y,
-    };
-}
-
-fn sampleHistoryColorNearest(history: []const u32, width: usize, height: usize, screen: math.Vec2) ?[3]f32 {
-    const x = @as(i32, @intFromFloat(@floor(screen.x)));
-    const y = @as(i32, @intFromFloat(@floor(screen.y)));
-    if (x < 0 or y < 0 or x >= @as(i32, @intCast(width)) or y >= @as(i32, @intCast(height))) return null;
-    const pixel = history[@as(usize, @intCast(y)) * width + @as(usize, @intCast(x))];
-    return .{
-        @floatFromInt((pixel >> 16) & 0xFF),
-        @floatFromInt((pixel >> 8) & 0xFF),
-        @floatFromInt(pixel & 0xFF),
-    };
-}
-
-fn sampleHistoryNearest(history_pixels: []const u32, history_depth: []const f32, history_surface_tags: []const u64, width: usize, height: usize, screen: math.Vec2) ?HistoryNearestSample {
-    const x = @as(i32, @intFromFloat(@floor(screen.x)));
-    const y = @as(i32, @intFromFloat(@floor(screen.y)));
-    if (x < 0 or y < 0 or x >= @as(i32, @intCast(width)) or y >= @as(i32, @intCast(height))) return null;
-
-    const idx = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
-    const depth = history_depth[idx];
-    if (!std.math.isFinite(depth)) return null;
-
-    const pixel = history_pixels[idx];
-    const tag = history_surface_tags[idx];
-    return .{
-        .color = .{
-            @floatFromInt((pixel >> 16) & 0xFF),
-            @floatFromInt((pixel >> 8) & 0xFF),
-            @floatFromInt(pixel & 0xFF),
-        },
-        .depth = depth,
-        .tag = tag,
-    };
-}
-
-fn sampleHistoryDepthNearest(history_depth: []const f32, width: usize, height: usize, screen: math.Vec2) ?f32 {
-    const x = @as(i32, @intFromFloat(@floor(screen.x)));
-    const y = @as(i32, @intFromFloat(@floor(screen.y)));
-    if (x < 0 or y < 0 or x >= @as(i32, @intCast(width)) or y >= @as(i32, @intCast(height))) return null;
-    const sample = history_depth[@as(usize, @intCast(y)) * width + @as(usize, @intCast(x))];
-    if (!std.math.isFinite(sample)) return null;
-    return sample;
-}
-
-fn sampleHistorySurfaceTagNearest(history_surface_tags: []const u64, width: usize, height: usize, screen: math.Vec2) ?u64 {
-    const x = @as(i32, @intFromFloat(@floor(screen.x)));
-    const y = @as(i32, @intFromFloat(@floor(screen.y)));
-    if (x < 0 or y < 0 or x >= @as(i32, @intCast(width)) or y >= @as(i32, @intCast(height))) return null;
-    const tag = history_surface_tags[@as(usize, @intCast(y)) * width + @as(usize, @intCast(x))];
-    if (tag == invalid_surface_tag) return null;
-    return tag;
-}
-
-fn packHistoryNormal(normal: math.Vec3) u32 {
-    const nx = clampByte(@as(i32, @intFromFloat((std.math.clamp(normal.x, -1.0, 1.0) * 0.5 + 0.5) * 255.0 + 0.5)));
-    const ny = clampByte(@as(i32, @intFromFloat((std.math.clamp(normal.y, -1.0, 1.0) * 0.5 + 0.5) * 255.0 + 0.5)));
-    const nz = clampByte(@as(i32, @intFromFloat((std.math.clamp(normal.z, -1.0, 1.0) * 0.5 + 0.5) * 255.0 + 0.5)));
-    return (@as(u32, nx) << 16) | (@as(u32, ny) << 8) | @as(u32, nz);
-}
-
-fn unpackHistoryNormal(packed_normal: u32) math.Vec3 {
-    const nx = (@as(f32, @floatFromInt((packed_normal >> 16) & 0xFF)) / 255.0) * 2.0 - 1.0;
-    const ny = (@as(f32, @floatFromInt((packed_normal >> 8) & 0xFF)) / 255.0) * 2.0 - 1.0;
-    const nz = (@as(f32, @floatFromInt(packed_normal & 0xFF)) / 255.0) * 2.0 - 1.0;
-    return math.Vec3.normalize(math.Vec3.new(nx, ny, nz));
-}
-
-fn sampleHistoryNormalNearest(history_normals: []const u32, width: usize, height: usize, screen: math.Vec2) ?math.Vec3 {
-    const x = @as(i32, @intFromFloat(@floor(screen.x)));
-    const y = @as(i32, @intFromFloat(@floor(screen.y)));
-    if (x < 0 or y < 0 or x >= @as(i32, @intCast(width)) or y >= @as(i32, @intCast(height))) return null;
-    return unpackHistoryNormal(history_normals[@as(usize, @intCast(y)) * width + @as(usize, @intCast(x))]);
-}
-
-fn surfaceTagForHandle(handle: TileRenderer.SurfaceHandle) u64 {
-    if (!handle.isValid()) return invalid_surface_tag;
-    return (@as(u64, handle.meshlet_id) << 32) | @as(u64, handle.triangle_id);
-}
-
-fn surfaceTagMeshletId(tag: u64) u32 {
-    return @intCast(tag >> 32);
-}
-
-fn clampHistoryToSurfaceNeighborhood(
-    pixels: []const u32,
-    surface_handles: []const TileRenderer.SurfaceHandle,
-    normals: []const math.Vec3,
-    width: usize,
-    height: usize,
-    x: usize,
-    y: usize,
-    history_color: [3]f32,
-) [3]f32 {
-    const center_idx = y * width + x;
-    const center_surface = surface_handles[center_idx];
-    const center_normal = normals[center_idx];
-
-    var min_rgb = [3]f32{ 255.0, 255.0, 255.0 };
-    var max_rgb = [3]f32{ 0.0, 0.0, 0.0 };
-    var matched_samples: usize = 0;
-
-    const offsets = [_][2]i32{
-        .{ 0, 0 },
-        .{ -1, 0 },
-        .{ 1, 0 },
-        .{ 0, -1 },
-        .{ 0, 1 },
-    };
-
-    for (offsets) |offset| {
-        const sample_x_i = @as(i32, @intCast(x)) + offset[0];
-        const sample_y_i = @as(i32, @intCast(y)) + offset[1];
-        if (sample_x_i < 0 or sample_y_i < 0 or sample_x_i >= @as(i32, @intCast(width)) or sample_y_i >= @as(i32, @intCast(height))) continue;
-
-        const sample_idx = @as(usize, @intCast(sample_y_i)) * width + @as(usize, @intCast(sample_x_i));
-        const sample_surface = surface_handles[sample_idx];
-        const sample_normal = normals[sample_idx];
-
-        const include_sample = if (center_surface.isValid() and sample_surface.isValid())
-            center_surface.meshlet_id == sample_surface.meshlet_id
-        else
-            math.Vec3.dot(center_normal, sample_normal) >= 0.9;
-        if (!include_sample) continue;
-
-        const pixel = pixels[sample_idx];
-        const r = @as(f32, @floatFromInt((pixel >> 16) & 0xFF));
-        const g = @as(f32, @floatFromInt((pixel >> 8) & 0xFF));
-        const b = @as(f32, @floatFromInt(pixel & 0xFF));
-
-        min_rgb[0] = @min(min_rgb[0], r);
-        min_rgb[1] = @min(min_rgb[1], g);
-        min_rgb[2] = @min(min_rgb[2], b);
-        max_rgb[0] = @max(max_rgb[0], r);
-        max_rgb[1] = @max(max_rgb[1], g);
-        max_rgb[2] = @max(max_rgb[2], b);
-        matched_samples += 1;
-    }
-
-    if (matched_samples == 0) return history_color;
-
-    return .{
-        std.math.clamp(history_color[0], min_rgb[0], max_rgb[0]),
-        std.math.clamp(history_color[1], min_rgb[1], max_rgb[1]),
-        std.math.clamp(history_color[2], min_rgb[2], max_rgb[2]),
-    };
-}
-
-fn surfaceHistoryEdgeFactor(surface_handles: []const TileRenderer.SurfaceHandle, width: usize, height: usize, x: usize, y: usize) f32 {
-    const center = surface_handles[y * width + x];
-    if (!center.isValid()) return 0.6;
-
-    var total_neighbors: u32 = 0;
-    var stable_neighbors: u32 = 0;
-    const offsets = [_][2]i32{ .{ -1, 0 }, .{ 1, 0 }, .{ 0, -1 }, .{ 0, 1 } };
-    for (offsets) |offset| {
-        const sample_x = @as(i32, @intCast(x)) + offset[0];
-        const sample_y = @as(i32, @intCast(y)) + offset[1];
-        if (sample_x < 0 or sample_y < 0 or sample_x >= @as(i32, @intCast(width)) or sample_y >= @as(i32, @intCast(height))) continue;
-        total_neighbors += 1;
-        const neighbor = surface_handles[@as(usize, @intCast(sample_y)) * width + @as(usize, @intCast(sample_x))];
-        if (neighbor.isValid() and neighbor.meshlet_id == center.meshlet_id) {
-            stable_neighbors += 1;
-        }
-    }
-
-    if (total_neighbors == 0) return 1.0;
-    if (stable_neighbors >= total_neighbors) return 1.0;
-    if (stable_neighbors + 1 >= total_neighbors) return 0.9;
-    if (stable_neighbors * 2 >= total_neighbors) return 0.75;
-    return 0.5;
-}
-
-fn clampHistoryToNeighborhood(pixels: []const u32, width: usize, height: usize, x: usize, y: usize, history_color: [3]f32) [3]f32 {
-    var mu = [3]f32{ 0.0, 0.0, 0.0 };
-    var m2 = [3]f32{ 0.0, 0.0, 0.0 };
-    var count: f32 = 0.0;
-
-    var offset_y: i32 = -1;
-    while (offset_y <= 1) : (offset_y += 1) {
-        const sample_y = @min(@as(i32, @intCast(height - 1)), @max(0, @as(i32, @intCast(y)) + offset_y));
-        var offset_x: i32 = -1;
-        while (offset_x <= 1) : (offset_x += 1) {
-            const sample_x = @min(@as(i32, @intCast(width - 1)), @max(0, @as(i32, @intCast(x)) + offset_x));
-            const pixel = pixels[@as(usize, @intCast(sample_y)) * width + @as(usize, @intCast(sample_x))];
-            const r = @as(f32, @floatFromInt((pixel >> 16) & 0xFF));
-            const g = @as(f32, @floatFromInt((pixel >> 8) & 0xFF));
-            const b = @as(f32, @floatFromInt(pixel & 0xFF));
-
-            mu[0] += r;
-            mu[1] += g;
-            mu[2] += b;
-            m2[0] += r * r;
-            m2[1] += g * g;
-            m2[2] += b * b;
-            count += 1.0;
-        }
-    }
-
-    mu[0] /= count;
-    mu[1] /= count;
-    mu[2] /= count;
-    m2[0] /= count;
-    m2[1] /= count;
-    m2[2] /= count;
-
-    var sigma = [3]f32{ 0.0, 0.0, 0.0 };
-    inline for (0..3) |i| {
-        const variance = @max(0.0, m2[i] - mu[i] * mu[i]);
-        sigma[i] = @sqrt(variance);
-    }
-
-    const gamma: f32 = 1.25; // slightly wider than 1 sigma for less flickering
-    return .{
-        std.math.clamp(history_color[0], @max(0.0, mu[0] - gamma * sigma[0]), @min(255.0, mu[0] + gamma * sigma[0])),
-        std.math.clamp(history_color[1], @max(0.0, mu[1] - gamma * sigma[1]), @min(255.0, mu[1] + gamma * sigma[1])),
-        std.math.clamp(history_color[2], @max(0.0, mu[2] - gamma * sigma[2]), @min(255.0, mu[2] + gamma * sigma[2])),
-    };
-}
-
-fn blendTemporalColor(current_pixel: u32, history_color: [3]f32, history_weight: f32) u32 {
-    const alpha = current_pixel & 0xFF000000;
-    const current_weight = 1.0 - history_weight;
-    const current_r = @as(f32, @floatFromInt((current_pixel >> 16) & 0xFF));
-    const current_g = @as(f32, @floatFromInt((current_pixel >> 8) & 0xFF));
-    const current_b = @as(f32, @floatFromInt(current_pixel & 0xFF));
-    const out_r = @as(i32, @intFromFloat(current_r * current_weight + history_color[0] * history_weight + 0.5));
-    const out_g = @as(i32, @intFromFloat(current_g * current_weight + history_color[1] * history_weight + 0.5));
-    const out_b = @as(i32, @intFromFloat(current_b * current_weight + history_color[2] * history_weight + 0.5));
-    return alpha |
-        (@as(u32, clampByte(out_r)) << 16) |
-        (@as(u32, clampByte(out_g)) << 8) |
-        @as(u32, clampByte(out_b));
-}
-
-fn blendTemporalColorBatchSimd(
-    comptime lanes: usize,
-    current_pixels: *const [lanes]u32,
-    history_colors: *const [lanes][3]f32,
-    history_weights: *const [lanes]f32,
-) [lanes]u32 {
-    const FloatVec = @Vector(lanes, f32);
-    const IntVec = @Vector(lanes, i32);
-
-    var alpha: [lanes]u32 = undefined;
-    var current_r_arr: [lanes]f32 = undefined;
-    var current_g_arr: [lanes]f32 = undefined;
-    var current_b_arr: [lanes]f32 = undefined;
-    var history_r_arr: [lanes]f32 = undefined;
-    var history_g_arr: [lanes]f32 = undefined;
-    var history_b_arr: [lanes]f32 = undefined;
-
-    inline for (0..lanes) |lane| {
-        const pixel = current_pixels[lane];
-        alpha[lane] = pixel & 0xFF000000;
-        current_r_arr[lane] = @floatFromInt((pixel >> 16) & 0xFF);
-        current_g_arr[lane] = @floatFromInt((pixel >> 8) & 0xFF);
-        current_b_arr[lane] = @floatFromInt(pixel & 0xFF);
-        history_r_arr[lane] = history_colors[lane][0];
-        history_g_arr[lane] = history_colors[lane][1];
-        history_b_arr[lane] = history_colors[lane][2];
-    }
-
-    const history_weight_vec: FloatVec = @bitCast(history_weights.*);
-    const current_weight_vec: FloatVec = @as(FloatVec, @splat(1.0)) - history_weight_vec;
-    const half_vec: FloatVec = @as(FloatVec, @splat(0.5));
-
-    const out_r_vec = (@as(FloatVec, @bitCast(current_r_arr)) * current_weight_vec) + (@as(FloatVec, @bitCast(history_r_arr)) * history_weight_vec) + half_vec;
-    const out_g_vec = (@as(FloatVec, @bitCast(current_g_arr)) * current_weight_vec) + (@as(FloatVec, @bitCast(history_g_arr)) * history_weight_vec) + half_vec;
-    const out_b_vec = (@as(FloatVec, @bitCast(current_b_arr)) * current_weight_vec) + (@as(FloatVec, @bitCast(history_b_arr)) * history_weight_vec) + half_vec;
-
-    const out_r: [lanes]i32 = @bitCast(@as(IntVec, @intFromFloat(out_r_vec)));
-    const out_g: [lanes]i32 = @bitCast(@as(IntVec, @intFromFloat(out_g_vec)));
-    const out_b: [lanes]i32 = @bitCast(@as(IntVec, @intFromFloat(out_b_vec)));
-
-    var result: [lanes]u32 = undefined;
-    inline for (0..lanes) |lane| {
-        result[lane] = alpha[lane] |
-            (@as(u32, clampByte(out_r[lane])) << 16) |
-            (@as(u32, clampByte(out_g[lane])) << 8) |
-            @as(u32, clampByte(out_b[lane]));
-    }
-    return result;
-}
-
-fn blendTemporalColorBatch(
-    current_pixels: []const u32,
-    history_colors: []const [3]f32,
-    history_weights: []const f32,
-    output: []u32,
-) void {
-    std.debug.assert(current_pixels.len == history_colors.len);
-    std.debug.assert(current_pixels.len == history_weights.len);
-    std.debug.assert(output.len >= current_pixels.len);
-
-    switch (current_pixels.len) {
-        0 => {},
-        1 => output[0] = blendTemporalColor(current_pixels[0], history_colors[0], history_weights[0]),
-        8 => {
-            const result = blendTemporalColorBatchSimd(8, @ptrCast(current_pixels.ptr), @ptrCast(history_colors.ptr), @ptrCast(history_weights.ptr));
-            const out_ptr: *[8]u32 = @ptrCast(output.ptr);
-            out_ptr.* = result;
-        },
-        16 => {
-            const result = blendTemporalColorBatchSimd(16, @ptrCast(current_pixels.ptr), @ptrCast(history_colors.ptr), @ptrCast(history_weights.ptr));
-            const out_ptr: *[16]u32 = @ptrCast(output.ptr);
-            out_ptr.* = result;
-        },
-        32 => {
-            const result = blendTemporalColorBatchSimd(32, @ptrCast(current_pixels.ptr), @ptrCast(history_colors.ptr), @ptrCast(history_weights.ptr));
-            const out_ptr: *[32]u32 = @ptrCast(output.ptr);
-            out_ptr.* = result;
-        },
-        else => unreachable,
-    }
-}
 
 fn addPackedColorBatchSimd(
     comptime lanes: usize,
@@ -1664,16 +896,6 @@ fn packShiftedColorBatch(
     }
 }
 
-fn pixelLuma(pixel: u32) f32 {
-    const r = @as(f32, @floatFromInt((pixel >> 16) & 0xFF));
-    const g = @as(f32, @floatFromInt((pixel >> 8) & 0xFF));
-    const b = @as(f32, @floatFromInt(pixel & 0xFF));
-    return (r * 0.299) + (g * 0.587) + (b * 0.114);
-}
-
-fn colorLuma(color: [3]f32) f32 {
-    return (color[0] * 0.299) + (color[1] * 0.587) + (color[2] * 0.114);
-}
 
 fn tryApplyTemporalAAMeshletBatch(
     self: *Renderer,
@@ -1686,750 +908,27 @@ fn tryApplyTemporalAAMeshletBatch(
     width: usize,
     height: usize,
 ) bool {
-    const simd_lanes = runtimeColorGradeSimdLanes();
-    if (x + simd_lanes > width) return false;
-
-    var current_pixels: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-    var history_colors: [max_runtime_color_grade_simd_lanes][3]f32 = undefined;
-    var history_weights: [max_runtime_color_grade_simd_lanes]f32 = undefined;
-
-    for (0..simd_lanes) |lane| {
-        const idx = row_start + x + lane;
-        const current_pixel = self.bitmap.pixels[idx];
-        current_pixels[lane] = current_pixel;
-
-        const current_camera = self.scene_camera[idx];
-        if (!validSceneCameraSample(current_camera)) return false;
-
-        const current_surface = self.scene_surface[idx];
-        var reprojection: ?ReprojectedHistorySample = null;
-
-        if (current_surface.isValid() and self.taa_previous_mesh_valid and current_surface.triangle_id < mesh.triangles.len and self.taa_previous_mesh_triangle_count == mesh.triangles.len) {
-            const tri = mesh.triangles[current_surface.triangle_id];
-            if (tri.v0 < self.taa_previous_mesh_vertex_count and tri.v1 < self.taa_previous_mesh_vertex_count and tri.v2 < self.taa_previous_mesh_vertex_count) {
-                const bary = current_surface.barycentrics();
-                const prev_v0 = self.taa_previous_mesh_vertices[tri.v0];
-                const prev_v1 = self.taa_previous_mesh_vertices[tri.v1];
-                const prev_v2 = self.taa_previous_mesh_vertices[tri.v2];
-                const previous_world = math.Vec3.new(
-                    prev_v0.x * bary.x + prev_v1.x * bary.y + prev_v2.x * bary.z,
-                    prev_v0.y * bary.x + prev_v1.y * bary.y + prev_v2.y * bary.z,
-                    prev_v0.z * bary.x + prev_v1.z * bary.y + prev_v2.z * bary.z,
-                );
-                const previous_relative = math.Vec3.sub(previous_world, previous_view.camera_position);
-                const previous_camera = math.Vec3.new(
-                    math.Vec3.dot(previous_relative, previous_view.basis_right),
-                    math.Vec3.dot(previous_relative, previous_view.basis_up),
-                    math.Vec3.dot(previous_relative, previous_view.basis_forward),
-                );
-                if (previous_camera.z > previous_view.projection.near_plane + NEAR_EPSILON) {
-                    reprojection = .{
-                        .screen = projectCameraPositionFloat(previous_camera, previous_view.projection),
-                        .depth = previous_camera.z,
-                        .used_surface_path = true,
-                    };
-                }
-            }
-        }
-
-        if (reprojection == null) {
-            const world_pos = cameraToWorldPosition(
-                current_view.camera_position,
-                current_view.basis_right,
-                current_view.basis_up,
-                current_view.basis_forward,
-                current_camera,
-            );
-            const previous_relative = math.Vec3.sub(world_pos, previous_view.camera_position);
-            const previous_camera = math.Vec3.new(
-                math.Vec3.dot(previous_relative, previous_view.basis_right),
-                math.Vec3.dot(previous_relative, previous_view.basis_up),
-                math.Vec3.dot(previous_relative, previous_view.basis_forward),
-            );
-            if (previous_camera.z <= previous_view.projection.near_plane + NEAR_EPSILON) return false;
-            reprojection = .{
-                .screen = projectCameraPositionFloat(previous_camera, previous_view.projection),
-                .depth = previous_camera.z,
-                .used_surface_path = false,
-            };
-        }
-
-        const previous_sample = reprojection orelse return false;
-        const history_sample = sampleHistoryNearest(
-            self.taa_scratch.history_pixels,
-            self.taa_scratch.history_depth,
-            self.taa_scratch.history_surface_tags,
-            width,
-            height,
-            previous_sample.screen,
-        ) orelse return false;
-        const previous_depth = history_sample.depth;
-        const depth_delta = @abs(previous_depth - previous_sample.depth);
-        const depth_factor = 1.0 - std.math.clamp(depth_delta / @max(1e-4, self.temporal_aa_config.depth_threshold), 0.0, 1.0);
-        if (depth_factor <= 0.0) return false;
-
-        const previous_tag = history_sample.tag;
-        const current_tag = surfaceTagForHandle(current_surface);
-        if (current_tag == invalid_surface_tag or previous_tag == invalid_surface_tag or previous_tag != current_tag) return false;
-
-        history_colors[lane] = history_sample.color;
-        history_weights[lane] = std.math.clamp(self.temporal_aa_config.history_weight * (0.6 + 0.15 * depth_factor), 0.0, self.temporal_aa_config.history_weight);
-    }
-
-    var blended: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-    blendTemporalColorBatch(current_pixels[0..simd_lanes], history_colors[0..simd_lanes], history_weights[0..simd_lanes], blended[0..simd_lanes]);
-    for (0..simd_lanes) |lane| {
-        self.taa_scratch.resolve_pixels[row_start + x + lane] = blended[lane];
-    }
-    _ = y;
-    return true;
-}
-
-fn rayIntersectsSphere(origin: math.Vec3, direction: math.Vec3, center: math.Vec3, radius: f32) bool {
-    const oc = math.Vec3.sub(origin, center);
-    const b = math.Vec3.dot(oc, direction);
-    const c = math.Vec3.dot(oc, oc) - radius * radius;
-    if (c <= 0.0) return true;
-    const discriminant = b * b - c;
-    if (discriminant < 0.0) return false;
-    const t = -b - @sqrt(discriminant);
-    return t > 0.0;
-}
-
-fn rayIntersectsTriangle8(
-    orig_x: @Vector(8, f32),
-    orig_y: @Vector(8, f32),
-    orig_z: @Vector(8, f32),
-    dir_x: @Vector(8, f32),
-    dir_y: @Vector(8, f32),
-    dir_z: @Vector(8, f32),
-    v0x: @Vector(8, f32),
-    v0y: @Vector(8, f32),
-    v0z: @Vector(8, f32),
-    v1x: @Vector(8, f32),
-    v1y: @Vector(8, f32),
-    v1z: @Vector(8, f32),
-    v2x: @Vector(8, f32),
-    v2y: @Vector(8, f32),
-    v2z: @Vector(8, f32),
-    active_mask: @Vector(8, bool),
-) bool {
-    const eps: @Vector(8, f32) = @splat(1e-6);
-    const zeros: @Vector(8, f32) = @splat(0.0);
-    const ones: @Vector(8, f32) = @splat(1.0);
-
-    const edge1_x = v1x - v0x;
-    const edge1_y = v1y - v0y;
-    const edge1_z = v1z - v0z;
-
-    const edge2_x = v2x - v0x;
-    const edge2_y = v2y - v0y;
-    const edge2_z = v2z - v0z;
-
-    const pvec_x = dir_y * edge2_z - dir_z * edge2_y;
-    const pvec_y = dir_z * edge2_x - dir_x * edge2_z;
-    const pvec_z = dir_x * edge2_y - dir_y * edge2_x;
-
-    const det = edge1_x * pvec_x + edge1_y * pvec_y + edge1_z * pvec_z;
-    const valid_det = @abs(det) >= eps;
-
-    const inv_det = ones / det;
-
-    const tvec_x = orig_x - v0x;
-    const tvec_y = orig_y - v0y;
-    const tvec_z = orig_z - v0z;
-
-    const u = (tvec_x * pvec_x + tvec_y * pvec_y + tvec_z * pvec_z) * inv_det;
-    const valid_u_min = u >= zeros;
-    const valid_u_max = u <= ones;
-
-    const qvec_x = tvec_y * edge1_z - tvec_z * edge1_y;
-    const qvec_y = tvec_z * edge1_x - tvec_x * edge1_z;
-    const qvec_z = tvec_x * edge1_y - tvec_y * edge1_x;
-
-    const v = (dir_x * qvec_x + dir_y * qvec_y + dir_z * qvec_z) * inv_det;
-    const valid_v_min = v >= zeros;
-    const valid_v_max = (u + v) <= ones;
-
-    const t = (edge2_x * qvec_x + edge2_y * qvec_y + edge2_z * qvec_z) * inv_det;
-    const valid_t = t > eps;
-
-    var hit = active_mask;
-    hit = @select(bool, hit, valid_det, @as(@Vector(8, bool), @splat(false)));
-    hit = @select(bool, hit, valid_u_min, @as(@Vector(8, bool), @splat(false)));
-    hit = @select(bool, hit, valid_u_max, @as(@Vector(8, bool), @splat(false)));
-    hit = @select(bool, hit, valid_v_min, @as(@Vector(8, bool), @splat(false)));
-    hit = @select(bool, hit, valid_v_max, @as(@Vector(8, bool), @splat(false)));
-    hit = @select(bool, hit, valid_t, @as(@Vector(8, bool), @splat(false)));
-
-    return @reduce(.Or, hit);
-}
-
-fn rayIntersectsTriangle(origin: math.Vec3, direction: math.Vec3, v0: math.Vec3, v1: math.Vec3, v2: math.Vec3) bool {
-    const eps: f32 = 1e-6;
-    const edge1 = math.Vec3.sub(v1, v0);
-    const edge2 = math.Vec3.sub(v2, v0);
-    const pvec = math.Vec3.cross(direction, edge2);
-    const det = math.Vec3.dot(edge1, pvec);
-    if (@abs(det) < eps) return false;
-
-    const inv_det = 1.0 / det;
-    const tvec = math.Vec3.sub(origin, v0);
-    const u = math.Vec3.dot(tvec, pvec) * inv_det;
-    if (u < 0.0 or u > 1.0) return false;
-
-    const qvec = math.Vec3.cross(tvec, edge1);
-    const v = math.Vec3.dot(direction, qvec) * inv_det;
-    if (v < 0.0 or (u + v) > 1.0) return false;
-
-    const t = math.Vec3.dot(edge2, qvec) * inv_det;
-    return t > eps;
+    return taa_meshlet_batch.tryApply(
+        self,
+        mesh,
+        current_view,
+        previous_view,
+        row_start,
+        x,
+        y,
+        width,
+        height,
+        runtimeColorGradeSimdLanes(),
+        max_runtime_color_grade_simd_lanes,
+        validSceneCameraSample,
+        cameraToWorldPosition,
+        projectCameraPositionFloat,
+        NEAR_EPSILON,
+    );
 }
 
 fn rasterizeShadowMeshRange(mesh: *const Mesh, shadow: *ShadowMap, start_row: usize, end_row: usize, light_dir_world: math.Vec3) void {
-    if (!shadow.active) return;
-
-    const basis = shadow.basis_right;
-    const basis_up = shadow.basis_up;
-    const basis_forward = shadow.basis_forward;
-
-    for (mesh.meshlets) |*meshlet| {
-        const meshlet_vertices = mesh.meshletVertexSlice(meshlet);
-        if (meshlet_vertices.len > max_shadow_meshlet_vertices) continue;
-
-        var local_light_vertices: [max_shadow_meshlet_vertices]math.Vec3 = undefined;
-        for (meshlet_vertices, 0..) |global_idx, local_idx| {
-            const world = mesh.vertices[global_idx];
-            local_light_vertices[local_idx] = math.Vec3.new(
-                math.Vec3.dot(world, basis),
-                math.Vec3.dot(world, basis_up),
-                math.Vec3.dot(world, basis_forward),
-            );
-        }
-
-        for (mesh.meshletPrimitiveSlice(meshlet)) |primitive| {
-            const tri_idx = primitive.triangle_index;
-            if (tri_idx >= mesh.normals.len) continue;
-
-            const normal = mesh.normals[tri_idx];
-            if (math.Vec3.dot(normal, light_dir_world) <= 0.0) continue;
-
-            const p0 = local_light_vertices[@as(usize, primitive.local_v0)];
-            const p1 = local_light_vertices[@as(usize, primitive.local_v1)];
-            const p2 = local_light_vertices[@as(usize, primitive.local_v2)];
-            rasterizeShadowTriangleRows(shadow, start_row, end_row, p0, p1, p2);
-        }
-    }
-}
-
-fn extractBloomDownsampleRows(
-    src: []u32,
-    src_width: usize,
-    src_height: usize,
-    bloom: *BloomScratch,
-    threshold_curve: *const [256]u8,
-    start_row: usize,
-    end_row: usize,
-) void {
-    var y = start_row;
-    while (y < end_row) : (y += 1) {
-        const sy0 = @min(src_height - 1, y << 2);
-        const sy1 = @min(src_height - 1, sy0 + 1);
-        const sy2 = @min(src_height - 1, sy0 + 2);
-        const sy3 = @min(src_height - 1, sy0 + 3);
-        const row0 = sy0 * src_width;
-        const row1 = sy1 * src_width;
-        const row2 = sy2 * src_width;
-        const row3 = sy3 * src_width;
-        const dst_row = y * bloom.width;
-        const simd_lanes = runtimeColorGradeSimdLanes();
-        var x: usize = 0;
-        while (x + simd_lanes <= bloom.width) : (x += simd_lanes) {
-            var alpha: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            var r_arr: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            var g_arr: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            var b_arr: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-
-            for (0..simd_lanes) |lane| {
-                const sx = (x + lane) << 2;
-                var r_sum: u32 = 0;
-                var g_sum: u32 = 0;
-                var b_sum: u32 = 0;
-
-                if (sx + 3 < src_width) {
-                    inline for (0..4) |dx| {
-                        const p0 = src[row0 + sx + dx];
-                        const p1 = src[row1 + sx + dx];
-                        const p2 = src[row2 + sx + dx];
-                        const p3 = src[row3 + sx + dx];
-
-                        r_sum += (p0 >> 16) & 0xFF;
-                        g_sum += (p0 >> 8) & 0xFF;
-                        b_sum += p0 & 0xFF;
-
-                        r_sum += (p1 >> 16) & 0xFF;
-                        g_sum += (p1 >> 8) & 0xFF;
-                        b_sum += p1 & 0xFF;
-
-                        r_sum += (p2 >> 16) & 0xFF;
-                        g_sum += (p2 >> 8) & 0xFF;
-                        b_sum += p2 & 0xFF;
-
-                        r_sum += (p3 >> 16) & 0xFF;
-                        g_sum += (p3 >> 8) & 0xFF;
-                        b_sum += p3 & 0xFF;
-                    }
-                } else {
-                    inline for (0..4) |dx| {
-                        const sample_x = @min(src_width - 1, sx + dx);
-                        const p0 = src[row0 + sample_x];
-                        const p1 = src[row1 + sample_x];
-                        const p2 = src[row2 + sample_x];
-                        const p3 = src[row3 + sample_x];
-
-                        r_sum += (p0 >> 16) & 0xFF;
-                        g_sum += (p0 >> 8) & 0xFF;
-                        b_sum += p0 & 0xFF;
-
-                        r_sum += (p1 >> 16) & 0xFF;
-                        g_sum += (p1 >> 8) & 0xFF;
-                        b_sum += p1 & 0xFF;
-
-                        r_sum += (p2 >> 16) & 0xFF;
-                        g_sum += (p2 >> 8) & 0xFF;
-                        b_sum += p2 & 0xFF;
-
-                        r_sum += (p3 >> 16) & 0xFF;
-                        g_sum += (p3 >> 8) & 0xFF;
-                        b_sum += p3 & 0xFF;
-                    }
-                }
-
-                const r = r_sum >> 4;
-                const g = g_sum >> 4;
-                const b = b_sum >> 4;
-                const luma: usize = @intCast((r_sum * 77 + g_sum * 150 + b_sum * 29) >> 12);
-                const factor = threshold_curve[luma];
-                alpha[lane] = 0xFF000000;
-
-                if (factor == 0) {
-                    r_arr[lane] = 0;
-                    g_arr[lane] = 0;
-                    b_arr[lane] = 0;
-                } else {
-                    r_arr[lane] = fastScale255(r, factor);
-                    g_arr[lane] = fastScale255(g, factor);
-                    b_arr[lane] = fastScale255(b, factor);
-                }
-            }
-
-            var packed_pixels: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            packShiftedColorBatch(alpha[0..simd_lanes], r_arr[0..simd_lanes], g_arr[0..simd_lanes], b_arr[0..simd_lanes], packed_pixels[0..simd_lanes]);
-            for (0..simd_lanes) |lane| {
-                bloom.ping[dst_row + x + lane] = packed_pixels[lane];
-            }
-        }
-
-        while (x < bloom.width) : (x += 1) {
-            const sx = x << 2;
-            var r_sum: u32 = 0;
-            var g_sum: u32 = 0;
-            var b_sum: u32 = 0;
-
-            if (sx + 3 < src_width) {
-                inline for (0..4) |dx| {
-                    const p0 = src[row0 + sx + dx];
-                    const p1 = src[row1 + sx + dx];
-                    const p2 = src[row2 + sx + dx];
-                    const p3 = src[row3 + sx + dx];
-
-                    r_sum += (p0 >> 16) & 0xFF;
-                    g_sum += (p0 >> 8) & 0xFF;
-                    b_sum += p0 & 0xFF;
-
-                    r_sum += (p1 >> 16) & 0xFF;
-                    g_sum += (p1 >> 8) & 0xFF;
-                    b_sum += p1 & 0xFF;
-
-                    r_sum += (p2 >> 16) & 0xFF;
-                    g_sum += (p2 >> 8) & 0xFF;
-                    b_sum += p2 & 0xFF;
-
-                    r_sum += (p3 >> 16) & 0xFF;
-                    g_sum += (p3 >> 8) & 0xFF;
-                    b_sum += p3 & 0xFF;
-                }
-            } else {
-                inline for (0..4) |dx| {
-                    const sample_x = @min(src_width - 1, sx + dx);
-                    const p0 = src[row0 + sample_x];
-                    const p1 = src[row1 + sample_x];
-                    const p2 = src[row2 + sample_x];
-                    const p3 = src[row3 + sample_x];
-
-                    r_sum += (p0 >> 16) & 0xFF;
-                    g_sum += (p0 >> 8) & 0xFF;
-                    b_sum += p0 & 0xFF;
-
-                    r_sum += (p1 >> 16) & 0xFF;
-                    g_sum += (p1 >> 8) & 0xFF;
-                    b_sum += p1 & 0xFF;
-
-                    r_sum += (p2 >> 16) & 0xFF;
-                    g_sum += (p2 >> 8) & 0xFF;
-                    b_sum += p2 & 0xFF;
-
-                    r_sum += (p3 >> 16) & 0xFF;
-                    g_sum += (p3 >> 8) & 0xFF;
-                    b_sum += p3 & 0xFF;
-                }
-            }
-
-            const r = r_sum >> 4;
-            const g = g_sum >> 4;
-            const b = b_sum >> 4;
-            const luma: usize = @intCast((r_sum * 77 + g_sum * 150 + b_sum * 29) >> 12);
-            const factor = threshold_curve[luma];
-
-            if (factor == 0) {
-                bloom.ping[dst_row + x] = 0xFF000000;
-                continue;
-            }
-
-            const br = fastScale255(r, factor);
-            const bg = fastScale255(g, factor);
-            const bb = fastScale255(b, factor);
-            bloom.ping[dst_row + x] = 0xFF000000 |
-                (@as(u32, br) << 16) |
-                (@as(u32, bg) << 8) |
-                @as(u32, bb);
-        }
-    }
-}
-
-fn blurBloomHorizontalRows(bloom: *BloomScratch, start_row: usize, end_row: usize) void {
-    const simd_lanes = runtimeColorGradeSimdLanes();
-    var y = start_row;
-    while (y < end_row) : (y += 1) {
-        const row_start = y * bloom.width;
-        const src_row = bloom.ping[row_start .. row_start + bloom.width];
-        const dst_row = bloom.pong[row_start .. row_start + bloom.width];
-        const edge1 = @min(bloom.width - 1, @as(usize, 1));
-        const edge2 = @min(bloom.width - 1, @as(usize, 2));
-        const p0 = src_row[0];
-        const p1 = src_row[edge1];
-        const p2 = src_row[edge2];
-        var r: i32 = @intCast(((p0 >> 16) & 0xFF) * 3 + ((p1 >> 16) & 0xFF) + ((p2 >> 16) & 0xFF));
-        var g: i32 = @intCast(((p0 >> 8) & 0xFF) * 3 + ((p1 >> 8) & 0xFF) + ((p2 >> 8) & 0xFF));
-        var b: i32 = @intCast((p0 & 0xFF) * 3 + (p1 & 0xFF) + (p2 & 0xFF));
-        var x: usize = 0;
-        while (x + simd_lanes <= bloom.width) : (x += simd_lanes) {
-            var alpha: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            var r_arr: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            var g_arr: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            var b_arr: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            var lane_r = r;
-            var lane_g = g;
-            var lane_b = b;
-
-            for (0..simd_lanes) |lane| {
-                alpha[lane] = 0xFF000000;
-                r_arr[lane] = averageBlur5(lane_r);
-                g_arr[lane] = averageBlur5(lane_g);
-                b_arr[lane] = averageBlur5(lane_b);
-
-                const cur_x = x + lane;
-                if (cur_x + 1 < bloom.width) {
-                    const remove_idx = if (cur_x >= 2) cur_x - 2 else 0;
-                    const add_idx = @min(bloom.width - 1, cur_x + 3);
-                    const remove_pixel = src_row[remove_idx];
-                    const add_pixel = src_row[add_idx];
-                    lane_r += @as(i32, @intCast((add_pixel >> 16) & 0xFF)) - @as(i32, @intCast((remove_pixel >> 16) & 0xFF));
-                    lane_g += @as(i32, @intCast((add_pixel >> 8) & 0xFF)) - @as(i32, @intCast((remove_pixel >> 8) & 0xFF));
-                    lane_b += @as(i32, @intCast(add_pixel & 0xFF)) - @as(i32, @intCast(remove_pixel & 0xFF));
-                }
-            }
-
-            var packed_pixels: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            packShiftedColorBatch(alpha[0..simd_lanes], r_arr[0..simd_lanes], g_arr[0..simd_lanes], b_arr[0..simd_lanes], packed_pixels[0..simd_lanes]);
-            for (0..simd_lanes) |lane| {
-                dst_row[x + lane] = packed_pixels[lane];
-            }
-            r = lane_r;
-            g = lane_g;
-            b = lane_b;
-        }
-
-        while (x < bloom.width) : (x += 1) {
-            dst_row[x] = 0xFF000000 |
-                (@as(u32, averageBlur5(r)) << 16) |
-                (@as(u32, averageBlur5(g)) << 8) |
-                @as(u32, averageBlur5(b));
-
-            if (x + 1 >= bloom.width) break;
-            const remove_idx = if (x >= 2) x - 2 else 0;
-            const add_idx = @min(bloom.width - 1, x + 3);
-            const remove_pixel = src_row[remove_idx];
-            const add_pixel = src_row[add_idx];
-            r += @as(i32, @intCast((add_pixel >> 16) & 0xFF)) - @as(i32, @intCast((remove_pixel >> 16) & 0xFF));
-            g += @as(i32, @intCast((add_pixel >> 8) & 0xFF)) - @as(i32, @intCast((remove_pixel >> 8) & 0xFF));
-            b += @as(i32, @intCast(add_pixel & 0xFF)) - @as(i32, @intCast(remove_pixel & 0xFF));
-        }
-    }
-}
-
-fn blurBloomVerticalRows(bloom: *BloomScratch, start_row: usize, end_row: usize) void {
-    const simd_lanes = runtimeColorGradeSimdLanes();
-    var x: usize = 0;
-    while (x < bloom.width) : (x += 1) {
-        var r: i32 = 0;
-        var g: i32 = 0;
-        var b: i32 = 0;
-        var offset: i32 = -2;
-        while (offset <= 2) : (offset += 1) {
-            const sample_y = @min(
-                bloom.height - 1,
-                @as(usize, @intCast(@max(0, @as(i32, @intCast(start_row)) + offset))),
-            );
-            const pixel = bloom.pong[sample_y * bloom.width + x];
-            r += @intCast((pixel >> 16) & 0xFF);
-            g += @intCast((pixel >> 8) & 0xFF);
-            b += @intCast(pixel & 0xFF);
-        }
-
-        var current_y = start_row;
-        while (current_y + simd_lanes <= end_row) : (current_y += simd_lanes) {
-            var alpha: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            var r_arr: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            var g_arr: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            var b_arr: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            var lane_r = r;
-            var lane_g = g;
-            var lane_b = b;
-
-            for (0..simd_lanes) |lane| {
-                alpha[lane] = 0xFF000000;
-                r_arr[lane] = averageBlur5(lane_r);
-                g_arr[lane] = averageBlur5(lane_g);
-                b_arr[lane] = averageBlur5(lane_b);
-
-                const y_pos = current_y + lane;
-                if (y_pos + 1 < end_row) {
-                    const remove_idx = if (y_pos >= 2) y_pos - 2 else 0;
-                    const add_idx = @min(bloom.height - 1, y_pos + 3);
-                    const remove_pixel = bloom.pong[remove_idx * bloom.width + x];
-                    const add_pixel = bloom.pong[add_idx * bloom.width + x];
-                    lane_r += @as(i32, @intCast((add_pixel >> 16) & 0xFF)) - @as(i32, @intCast((remove_pixel >> 16) & 0xFF));
-                    lane_g += @as(i32, @intCast((add_pixel >> 8) & 0xFF)) - @as(i32, @intCast((remove_pixel >> 8) & 0xFF));
-                    lane_b += @as(i32, @intCast(add_pixel & 0xFF)) - @as(i32, @intCast(remove_pixel & 0xFF));
-                }
-            }
-
-            var packed_pixels: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            packShiftedColorBatch(alpha[0..simd_lanes], r_arr[0..simd_lanes], g_arr[0..simd_lanes], b_arr[0..simd_lanes], packed_pixels[0..simd_lanes]);
-            for (0..simd_lanes) |lane| {
-                bloom.ping[(current_y + lane) * bloom.width + x] = packed_pixels[lane];
-            }
-            r = lane_r;
-            g = lane_g;
-            b = lane_b;
-        }
-
-        while (current_y < end_row) : (current_y += 1) {
-            bloom.ping[current_y * bloom.width + x] = 0xFF000000 |
-                (@as(u32, averageBlur5(r)) << 16) |
-                (@as(u32, averageBlur5(g)) << 8) |
-                @as(u32, averageBlur5(b));
-
-            if (current_y + 1 >= end_row) break;
-            const remove_idx = if (current_y >= 2) current_y - 2 else 0;
-            const add_idx = @min(bloom.height - 1, current_y + 3);
-            const remove_pixel = bloom.pong[remove_idx * bloom.width + x];
-            const add_pixel = bloom.pong[add_idx * bloom.width + x];
-            r += @as(i32, @intCast((add_pixel >> 16) & 0xFF)) - @as(i32, @intCast((remove_pixel >> 16) & 0xFF));
-            g += @as(i32, @intCast((add_pixel >> 8) & 0xFF)) - @as(i32, @intCast((remove_pixel >> 8) & 0xFF));
-            b += @as(i32, @intCast(add_pixel & 0xFF)) - @as(i32, @intCast(remove_pixel & 0xFF));
-        }
-    }
-}
-
-fn compositeBloomRows(
-    dst: []u32,
-    dst_width: usize,
-    bloom: *const BloomScratch,
-    intensity_lut: *const [256]u8,
-    start_row: usize,
-    end_row: usize,
-) void {
-    const max_channel: GradeVec = @splat(255);
-    var y = start_row;
-    while (y < end_row) : (y += 1) {
-        const by = @min(bloom.height - 1, y >> 2);
-        const bloom_row = bloom.ping[by * bloom.width ..][0..bloom.width];
-        const row_start = y * dst_width;
-        var x: usize = 0;
-        while (x + color_grade_simd_lanes <= dst_width) : (x += color_grade_simd_lanes) {
-            var alpha: [color_grade_simd_lanes]u32 = undefined;
-            var r_arr: [color_grade_simd_lanes]i16 = undefined;
-            var g_arr: [color_grade_simd_lanes]i16 = undefined;
-            var b_arr: [color_grade_simd_lanes]i16 = undefined;
-            var add_r_arr: [color_grade_simd_lanes]i16 = undefined;
-            var add_g_arr: [color_grade_simd_lanes]i16 = undefined;
-            var add_b_arr: [color_grade_simd_lanes]i16 = undefined;
-
-            inline for (0..color_grade_simd_lanes) |lane| {
-                const dst_idx = row_start + x + lane;
-                const dst_pixel = dst[dst_idx];
-                const bloom_pixel = bloom_row[@min(bloom.width - 1, (x + lane) >> 2)];
-                alpha[lane] = dst_pixel & 0xFF000000;
-                r_arr[lane] = @intCast((dst_pixel >> 16) & 0xFF);
-                g_arr[lane] = @intCast((dst_pixel >> 8) & 0xFF);
-                b_arr[lane] = @intCast(dst_pixel & 0xFF);
-                add_r_arr[lane] = intensity_lut[(bloom_pixel >> 16) & 0xFF];
-                add_g_arr[lane] = intensity_lut[(bloom_pixel >> 8) & 0xFF];
-                add_b_arr[lane] = intensity_lut[bloom_pixel & 0xFF];
-            }
-
-            const r_src: GradeVec = @bitCast(r_arr);
-            const g_src: GradeVec = @bitCast(g_arr);
-            const b_src: GradeVec = @bitCast(b_arr);
-            const add_r_vec: GradeVec = @bitCast(add_r_arr);
-            const add_g_vec: GradeVec = @bitCast(add_g_arr);
-            const add_b_vec: GradeVec = @bitCast(add_b_arr);
-            const r_vec: GradeVec = @as(GradeVec, @min(r_src + add_r_vec, max_channel));
-            const g_vec: GradeVec = @as(GradeVec, @min(g_src + add_g_vec, max_channel));
-            const b_vec: GradeVec = @as(GradeVec, @min(b_src + add_b_vec, max_channel));
-            const r_out: [color_grade_simd_lanes]i16 = @bitCast(r_vec);
-            const g_out: [color_grade_simd_lanes]i16 = @bitCast(g_vec);
-            const b_out: [color_grade_simd_lanes]i16 = @bitCast(b_vec);
-
-            inline for (0..color_grade_simd_lanes) |lane| {
-                dst[row_start + x + lane] = alpha[lane] |
-                    (@as(u32, @intCast(r_out[lane])) << 16) |
-                    (@as(u32, @intCast(g_out[lane])) << 8) |
-                    @as(u32, @intCast(b_out[lane]));
-            }
-        }
-
-        while (x < dst_width) : (x += 1) {
-            const bloom_pixel = bloom_row[@min(bloom.width - 1, x >> 2)];
-            const idx = row_start + x;
-            const dst_pixel = dst[idx];
-            const a = dst_pixel & 0xFF000000;
-            const r = @as(i32, @intCast((dst_pixel >> 16) & 0xFF)) + intensity_lut[(bloom_pixel >> 16) & 0xFF];
-            const g = @as(i32, @intCast((dst_pixel >> 8) & 0xFF)) + intensity_lut[(bloom_pixel >> 8) & 0xFF];
-            const b = @as(i32, @intCast(dst_pixel & 0xFF)) + intensity_lut[bloom_pixel & 0xFF];
-            dst[idx] = a |
-                (@as(u32, clampByte(r)) << 16) |
-                (@as(u32, clampByte(g)) << 8) |
-                @as(u32, clampByte(b));
-        }
-    }
-}
-
-fn accumulateAmbientOcclusionSampleBatchSimd(
-    comptime lanes: usize,
-    centers: *const [lanes]math.Vec3,
-    normals: *const [lanes]math.Vec3,
-    samples: *const [lanes]math.Vec3,
-    sample_valid: *const [lanes]bool,
-    radius_sq: f32,
-    bias: f32,
-    occlusion: *[lanes]f32,
-    sample_count: *[lanes]u32,
-) void {
-    const FloatVec = @Vector(lanes, f32);
-    const radius_sq_vec: FloatVec = @splat(radius_sq);
-    const bias_vec: FloatVec = @splat(bias);
-    const eps: FloatVec = @splat(1e-5);
-    const one: FloatVec = @splat(1.0);
-
-    var center_x_arr: [lanes]f32 = undefined;
-    var center_y_arr: [lanes]f32 = undefined;
-    var center_z_arr: [lanes]f32 = undefined;
-    var normal_x_arr: [lanes]f32 = undefined;
-    var normal_y_arr: [lanes]f32 = undefined;
-    var normal_z_arr: [lanes]f32 = undefined;
-    var sample_x_arr: [lanes]f32 = undefined;
-    var sample_y_arr: [lanes]f32 = undefined;
-    var sample_z_arr: [lanes]f32 = undefined;
-
-    inline for (0..lanes) |lane| {
-        center_x_arr[lane] = centers[lane].x;
-        center_y_arr[lane] = centers[lane].y;
-        center_z_arr[lane] = centers[lane].z;
-        normal_x_arr[lane] = normals[lane].x;
-        normal_y_arr[lane] = normals[lane].y;
-        normal_z_arr[lane] = normals[lane].z;
-        sample_x_arr[lane] = samples[lane].x;
-        sample_y_arr[lane] = samples[lane].y;
-        sample_z_arr[lane] = samples[lane].z;
-    }
-
-    const center_x: FloatVec = @bitCast(center_x_arr);
-    const center_y: FloatVec = @bitCast(center_y_arr);
-    const center_z: FloatVec = @bitCast(center_z_arr);
-    const normal_x: FloatVec = @bitCast(normal_x_arr);
-    const normal_y: FloatVec = @bitCast(normal_y_arr);
-    const normal_z: FloatVec = @bitCast(normal_z_arr);
-    const sample_x: FloatVec = @bitCast(sample_x_arr);
-    const sample_y: FloatVec = @bitCast(sample_y_arr);
-    const sample_z: FloatVec = @bitCast(sample_z_arr);
-
-    const delta_x = sample_x - center_x;
-    const delta_y = sample_y - center_y;
-    const delta_z = sample_z - center_z;
-    const distance_sq = delta_x * delta_x + delta_y * delta_y + delta_z * delta_z;
-    const distance = @sqrt(@max(distance_sq, eps));
-    const inv_distance = one / distance;
-    const ndot = (normal_x * (delta_x * inv_distance) + normal_y * (delta_y * inv_distance) + normal_z * (delta_z * inv_distance)) - bias_vec;
-    const range_weight = one - (distance_sq / radius_sq_vec);
-    const contribution_arr: [lanes]f32 = @bitCast(ndot * range_weight);
-    const distance_sq_arr: [lanes]f32 = @bitCast(distance_sq);
-    const ndot_arr: [lanes]f32 = @bitCast(ndot);
-
-    inline for (0..lanes) |lane| {
-        if (sample_valid[lane] and distance_sq_arr[lane] > 1e-5 and distance_sq_arr[lane] <= radius_sq and ndot_arr[lane] > 0.0) {
-            occlusion[lane] += contribution_arr[lane];
-            sample_count[lane] += 1;
-        }
-    }
-}
-
-fn accumulateAmbientOcclusionSampleBatch(
-    centers: []const math.Vec3,
-    normals: []const math.Vec3,
-    samples: []const math.Vec3,
-    sample_valid: []const bool,
-    radius_sq: f32,
-    bias: f32,
-    occlusion: []f32,
-    sample_count: []u32,
-) void {
-    std.debug.assert(centers.len == normals.len);
-    std.debug.assert(centers.len == samples.len);
-    std.debug.assert(centers.len == sample_valid.len);
-    std.debug.assert(centers.len == occlusion.len);
-    std.debug.assert(centers.len == sample_count.len);
-
-    switch (centers.len) {
-        0 => {},
-        1 => {
-            if (!sample_valid[0]) return;
-            const delta = math.Vec3.sub(samples[0], centers[0]);
-            const distance_sq = math.Vec3.dot(delta, delta);
-            if (distance_sq <= 1e-5 or distance_sq > radius_sq) return;
-            const distance = @sqrt(distance_sq);
-            const ndot = math.Vec3.dot(normals[0], math.Vec3.scale(delta, 1.0 / distance)) - bias;
-            if (ndot <= 0.0) return;
-            occlusion[0] += ndot * (1.0 - (distance_sq / radius_sq));
-            sample_count[0] += 1;
-        },
-        8 => accumulateAmbientOcclusionSampleBatchSimd(8, @ptrCast(centers.ptr), @ptrCast(normals.ptr), @ptrCast(samples.ptr), @ptrCast(sample_valid.ptr), radius_sq, bias, @ptrCast(occlusion.ptr), @ptrCast(sample_count.ptr)),
-        16 => accumulateAmbientOcclusionSampleBatchSimd(16, @ptrCast(centers.ptr), @ptrCast(normals.ptr), @ptrCast(samples.ptr), @ptrCast(sample_valid.ptr), radius_sq, bias, @ptrCast(occlusion.ptr), @ptrCast(sample_count.ptr)),
-        32 => accumulateAmbientOcclusionSampleBatchSimd(32, @ptrCast(centers.ptr), @ptrCast(normals.ptr), @ptrCast(samples.ptr), @ptrCast(sample_valid.ptr), radius_sq, bias, @ptrCast(occlusion.ptr), @ptrCast(sample_count.ptr)),
-        else => unreachable,
-    }
+    shadow_raster_rows.rasterizeShadowMeshRange(mesh, shadow, start_row, end_row, light_dir_world, max_shadow_meshlet_vertices);
 }
 
 fn renderAmbientOcclusionRows(
@@ -2441,322 +940,15 @@ fn renderAmbientOcclusionRows(
     start_row: usize,
     end_row: usize,
 ) void {
-    const radius_sq = config_value.radius * config_value.radius;
-    const half_step: i32 = @intCast(config_value.downsample / 2);
-    const sample_step: i32 = @intCast(@max(@as(usize, 1), config_value.downsample));
-    const simd_lanes = runtimeColorGradeSimdLanes();
-
-    var y = start_row;
-    while (y < end_row) : (y += 1) {
-        const scene_y = @min(scene_height - 1, y * config_value.downsample + @as(usize, @intCast(half_step)));
-        const dst_row = y * ao.width;
-        var x: usize = 0;
-        while (x + simd_lanes <= ao.width) : (x += simd_lanes) {
-            var visibility_arr: [max_runtime_color_grade_simd_lanes]f32 = undefined;
-            var depth_arr: [max_runtime_color_grade_simd_lanes]f32 = undefined;
-            var center_arr: [max_runtime_color_grade_simd_lanes]math.Vec3 = undefined;
-            var normal_arr: [max_runtime_color_grade_simd_lanes]math.Vec3 = undefined;
-            var center_valid_arr: [max_runtime_color_grade_simd_lanes]bool = undefined;
-            var occlusion_arr: [max_runtime_color_grade_simd_lanes]f32 = @splat(0.0);
-            var sample_count_arr: [max_runtime_color_grade_simd_lanes]u32 = @splat(0);
-
-            for (0..simd_lanes) |lane| {
-                const scene_x = @min(scene_width - 1, (x + lane) * config_value.downsample + @as(usize, @intCast(half_step)));
-                const center = scene_camera[scene_y * scene_width + scene_x];
-                center_arr[lane] = center;
-                if (!validSceneCameraSample(center)) {
-                    center_valid_arr[lane] = false;
-                    normal_arr[lane] = math.Vec3.new(0.0, 0.0, -1.0);
-                    visibility_arr[lane] = 1.0;
-                    depth_arr[lane] = std.math.inf(f32);
-                } else {
-                    center_valid_arr[lane] = true;
-                    depth_arr[lane] = center.z;
-                    normal_arr[lane] = estimateSceneNormal(
-                        scene_camera,
-                        scene_width,
-                        scene_height,
-                        center,
-                        @intCast(scene_x),
-                        @intCast(scene_y),
-                        sample_step,
-                    );
-                }
-            }
-
-            for (ao_sample_offsets) |offset| {
-                var sample_arr: [max_runtime_color_grade_simd_lanes]math.Vec3 = undefined;
-                var sample_valid_arr: [max_runtime_color_grade_simd_lanes]bool = undefined;
-
-                for (0..simd_lanes) |lane| {
-                    if (!center_valid_arr[lane]) {
-                        sample_arr[lane] = center_arr[lane];
-                        sample_valid_arr[lane] = false;
-                        continue;
-                    }
-
-                    const scene_x = @min(scene_width - 1, (x + lane) * config_value.downsample + @as(usize, @intCast(half_step)));
-                    const sample = sampleSceneCameraClamped(
-                        scene_camera,
-                        scene_width,
-                        scene_height,
-                        @as(i32, @intCast(scene_x)) + offset[0] * sample_step,
-                        @as(i32, @intCast(scene_y)) + offset[1] * sample_step,
-                    );
-                    sample_arr[lane] = sample;
-                    sample_valid_arr[lane] = validSceneCameraSample(sample);
-                }
-
-                accumulateAmbientOcclusionSampleBatch(
-                    center_arr[0..simd_lanes],
-                    normal_arr[0..simd_lanes],
-                    sample_arr[0..simd_lanes],
-                    sample_valid_arr[0..simd_lanes],
-                    radius_sq,
-                    config_value.bias,
-                    occlusion_arr[0..simd_lanes],
-                    sample_count_arr[0..simd_lanes],
-                );
-            }
-
-            for (0..simd_lanes) |lane| {
-                if (!center_valid_arr[lane] or sample_count_arr[lane] == 0) {
-                    visibility_arr[lane] = 1.0;
-                } else {
-                    const normalized = occlusion_arr[lane] / @as(f32, @floatFromInt(sample_count_arr[lane]));
-                    visibility_arr[lane] = @max(0.0, 1.0 - @min(1.0, normalized * config_value.strength));
-                }
-            }
-
-            const scale_vec: ShadowFloatVec = @as(ShadowFloatVec, @splat(255.0));
-            const bias_vec: ShadowFloatVec = @as(ShadowFloatVec, @splat(0.5));
-            const visibility_vec: ShadowFloatVec = @bitCast(visibility_arr[0..color_grade_simd_lanes].*);
-            const ping_i32: [color_grade_simd_lanes]i32 = @bitCast(@as(ShadowIntVec, @intFromFloat(visibility_vec * scale_vec + bias_vec)));
-            for (0..simd_lanes) |lane| {
-                const dst_idx = dst_row + x + lane;
-                ao.ping[dst_idx] = @intCast(std.math.clamp(ping_i32[lane], 0, 255));
-                ao.depth[dst_idx] = depth_arr[lane];
-            }
-        }
-
-        while (x < ao.width) : (x += 1) {
-            const scene_x = @min(scene_width - 1, x * config_value.downsample + @as(usize, @intCast(half_step)));
-            const dst_idx = dst_row + x;
-            const center = scene_camera[scene_y * scene_width + scene_x];
-            if (!validSceneCameraSample(center)) {
-                ao.ping[dst_idx] = 255;
-                ao.depth[dst_idx] = std.math.inf(f32);
-                continue;
-            }
-
-            ao.depth[dst_idx] = center.z;
-            const normal = estimateSceneNormal(
-                scene_camera,
-                scene_width,
-                scene_height,
-                center,
-                @intCast(scene_x),
-                @intCast(scene_y),
-                sample_step,
-            );
-
-            var occlusion: f32 = 0.0;
-            var sample_count: usize = 0;
-            for (ao_sample_offsets) |offset| {
-                const sample = sampleSceneCameraClamped(
-                    scene_camera,
-                    scene_width,
-                    scene_height,
-                    @as(i32, @intCast(scene_x)) + offset[0] * sample_step,
-                    @as(i32, @intCast(scene_y)) + offset[1] * sample_step,
-                );
-                if (!validSceneCameraSample(sample)) continue;
-
-                const delta = math.Vec3.sub(sample, center);
-                const distance_sq = math.Vec3.dot(delta, delta);
-                if (distance_sq <= 1e-5 or distance_sq > radius_sq) continue;
-
-                const distance = @sqrt(distance_sq);
-                const ndot = math.Vec3.dot(normal, math.Vec3.scale(delta, 1.0 / distance)) - config_value.bias;
-                if (ndot <= 0.0) continue;
-
-                const range_weight = 1.0 - (distance_sq / radius_sq);
-                occlusion += ndot * range_weight;
-                sample_count += 1;
-            }
-
-            if (sample_count == 0) {
-                ao.ping[dst_idx] = 255;
-                continue;
-            }
-
-            const normalized = occlusion / @as(f32, @floatFromInt(sample_count));
-            const visibility = @max(0.0, 1.0 - @min(1.0, normalized * config_value.strength));
-            ao.ping[dst_idx] = @intFromFloat(visibility * 255.0 + 0.5);
-        }
-    }
+    ssao_rows.renderRows(scene_camera, scene_width, scene_height, ao, config_value, start_row, end_row);
 }
 
 fn blurAmbientOcclusionHorizontalRows(ao: *AOScratch, depth_threshold: f32, start_row: usize, end_row: usize) void {
-    const weights = [_]u32{ 1, 2, 3, 2, 1 };
-    var y = start_row;
-    while (y < end_row) : (y += 1) {
-        const row_start = y * ao.width;
-        var x: usize = 0;
-        while (x + color_grade_simd_lanes <= ao.width) : (x += color_grade_simd_lanes) {
-            var out_arr: [color_grade_simd_lanes]u8 = undefined;
-
-            inline for (0..color_grade_simd_lanes) |lane| {
-                const lane_x = x + lane;
-                const idx = row_start + lane_x;
-                const center_depth = ao.depth[idx];
-                if (!std.math.isFinite(center_depth)) {
-                    out_arr[lane] = 255;
-                } else {
-                    var sum: u32 = 0;
-                    var weight_sum: u32 = 0;
-                    var tap: usize = 0;
-                    while (tap < weights.len) : (tap += 1) {
-                        const offset: i32 = @intCast(tap);
-                        const sample_x: usize = @intCast(@min(
-                            @as(i32, @intCast(ao.width - 1)),
-                            @max(0, @as(i32, @intCast(lane_x)) + offset - 2),
-                        ));
-                        const sample_idx = row_start + sample_x;
-                        const sample_depth = ao.depth[sample_idx];
-                        if (!std.math.isFinite(sample_depth) or @abs(sample_depth - center_depth) > depth_threshold) continue;
-                        sum += @as(u32, ao.ping[sample_idx]) * weights[tap];
-                        weight_sum += weights[tap];
-                    }
-
-                    out_arr[lane] = if (weight_sum == 0) ao.ping[idx] else @intCast(@divTrunc(sum + (weight_sum / 2), weight_sum));
-                }
-            }
-
-            inline for (0..color_grade_simd_lanes) |lane| {
-                ao.pong[row_start + x + lane] = out_arr[lane];
-            }
-        }
-
-        while (x < ao.width) : (x += 1) {
-            const idx = row_start + x;
-            const center_depth = ao.depth[idx];
-            if (!std.math.isFinite(center_depth)) {
-                ao.pong[idx] = 255;
-                continue;
-            }
-
-            var sum: u32 = 0;
-            var weight_sum: u32 = 0;
-            var tap: usize = 0;
-            while (tap < weights.len) : (tap += 1) {
-                const offset: i32 = @intCast(tap);
-                const sample_x: usize = @intCast(@min(
-                    @as(i32, @intCast(ao.width - 1)),
-                    @max(0, @as(i32, @intCast(x)) + offset - 2),
-                ));
-                const sample_idx = row_start + sample_x;
-                const sample_depth = ao.depth[sample_idx];
-                if (!std.math.isFinite(sample_depth) or @abs(sample_depth - center_depth) > depth_threshold) continue;
-                sum += @as(u32, ao.ping[sample_idx]) * weights[tap];
-                weight_sum += weights[tap];
-            }
-
-            ao.pong[idx] = if (weight_sum == 0) ao.ping[idx] else @intCast(@divTrunc(sum + (weight_sum / 2), weight_sum));
-        }
-    }
+    ssao_rows.blurHorizontalRows(ao, depth_threshold, start_row, end_row);
 }
 
 fn blurAmbientOcclusionVerticalRows(ao: *AOScratch, depth_threshold: f32, start_row: usize, end_row: usize) void {
-    const weights = [_]u32{ 1, 2, 3, 2, 1 };
-    var y = start_row;
-    while (y < end_row) : (y += 1) {
-        const row_start = y * ao.width;
-        var x: usize = 0;
-        while (x + color_grade_simd_lanes <= ao.width) : (x += color_grade_simd_lanes) {
-            var out_arr: [color_grade_simd_lanes]u8 = undefined;
-
-            inline for (0..color_grade_simd_lanes) |lane| {
-                const idx = row_start + x + lane;
-                const center_depth = ao.depth[idx];
-                if (!std.math.isFinite(center_depth)) {
-                    out_arr[lane] = 255;
-                } else {
-                    var sum: u32 = 0;
-                    var weight_sum: u32 = 0;
-                    var tap: usize = 0;
-                    while (tap < weights.len) : (tap += 1) {
-                        const offset: i32 = @intCast(tap);
-                        const sample_y: usize = @intCast(@min(
-                            @as(i32, @intCast(ao.height - 1)),
-                            @max(0, @as(i32, @intCast(y)) + offset - 2),
-                        ));
-                        const sample_idx = sample_y * ao.width + x + lane;
-                        const sample_depth = ao.depth[sample_idx];
-                        if (!std.math.isFinite(sample_depth) or @abs(sample_depth - center_depth) > depth_threshold) continue;
-                        sum += @as(u32, ao.pong[sample_idx]) * weights[tap];
-                        weight_sum += weights[tap];
-                    }
-
-                    out_arr[lane] = if (weight_sum == 0) ao.pong[idx] else @intCast(@divTrunc(sum + (weight_sum / 2), weight_sum));
-                }
-            }
-
-            inline for (0..color_grade_simd_lanes) |lane| {
-                ao.ping[row_start + x + lane] = out_arr[lane];
-            }
-        }
-
-        while (x < ao.width) : (x += 1) {
-            const idx = row_start + x;
-            const center_depth = ao.depth[idx];
-            if (!std.math.isFinite(center_depth)) {
-                ao.ping[idx] = 255;
-                continue;
-            }
-
-            var sum: u32 = 0;
-            var weight_sum: u32 = 0;
-            var tap: usize = 0;
-            while (tap < weights.len) : (tap += 1) {
-                const offset: i32 = @intCast(tap);
-                const sample_y: usize = @intCast(@min(
-                    @as(i32, @intCast(ao.height - 1)),
-                    @max(0, @as(i32, @intCast(y)) + offset - 2),
-                ));
-                const sample_idx = sample_y * ao.width + x;
-                const sample_depth = ao.depth[sample_idx];
-                if (!std.math.isFinite(sample_depth) or @abs(sample_depth - center_depth) > depth_threshold) continue;
-                sum += @as(u32, ao.pong[sample_idx]) * weights[tap];
-                weight_sum += weights[tap];
-            }
-
-            ao.ping[idx] = if (weight_sum == 0) ao.pong[idx] else @intCast(@divTrunc(sum + (weight_sum / 2), weight_sum));
-        }
-    }
-}
-
-fn sampleAmbientOcclusionVisibility(ao: *const AOScratch, scene_width: usize, scene_height: usize, x: usize, y: usize) f32 {
-    const u = ((@as(f32, @floatFromInt(x)) + 0.5) * @as(f32, @floatFromInt(ao.width))) / @as(f32, @floatFromInt(scene_width)) - 0.5;
-    const v = ((@as(f32, @floatFromInt(y)) + 0.5) * @as(f32, @floatFromInt(ao.height))) / @as(f32, @floatFromInt(scene_height)) - 0.5;
-    const x0_i = @max(0, @as(i32, @intFromFloat(@floor(u))));
-    const y0_i = @max(0, @as(i32, @intFromFloat(@floor(v))));
-    const x1_i = @min(@as(i32, @intCast(ao.width - 1)), x0_i + 1);
-    const y1_i = @min(@as(i32, @intCast(ao.height - 1)), y0_i + 1);
-    const frac_x = @max(0.0, @min(1.0, u - @as(f32, @floatFromInt(x0_i))));
-    const frac_y = @max(0.0, @min(1.0, v - @as(f32, @floatFromInt(y0_i))));
-    const x0: usize = @intCast(x0_i);
-    const y0: usize = @intCast(y0_i);
-    const x1: usize = @intCast(x1_i);
-    const y1: usize = @intCast(y1_i);
-
-    const s00 = @as(f32, @floatFromInt(ao.ping[y0 * ao.width + x0])) / 255.0;
-    const s10 = @as(f32, @floatFromInt(ao.ping[y0 * ao.width + x1])) / 255.0;
-    const s01 = @as(f32, @floatFromInt(ao.ping[y1 * ao.width + x0])) / 255.0;
-    const s11 = @as(f32, @floatFromInt(ao.ping[y1 * ao.width + x1])) / 255.0;
-    const top = s00 + (s10 - s00) * frac_x;
-    const bottom = s01 + (s11 - s01) * frac_x;
-    return top + (bottom - top) * frac_y;
+    ssao_rows.blurVerticalRows(ao, depth_threshold, start_row, end_row);
 }
 
 fn compositeAmbientOcclusionRows(
@@ -2768,55 +960,7 @@ fn compositeAmbientOcclusionRows(
     start_row: usize,
     end_row: usize,
 ) void {
-    const simd_lanes = runtimeColorGradeSimdLanes();
-    var y = start_row;
-    while (y < end_row) : (y += 1) {
-        const row_start = y * dst_width;
-        var x: usize = 0;
-        while (x + simd_lanes <= dst_width) : (x += simd_lanes) {
-            var current_pixels: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            var black_colors: [max_runtime_color_grade_simd_lanes][3]f32 = undefined;
-            var history_weights: [max_runtime_color_grade_simd_lanes]f32 = undefined;
-
-            for (0..simd_lanes) |lane| {
-                const idx = row_start + x + lane;
-                current_pixels[lane] = dst[idx];
-                black_colors[lane] = .{ 0.0, 0.0, 0.0 };
-                history_weights[lane] = 0.0;
-
-                if (validSceneCameraSample(scene_camera[idx])) {
-                    const visibility = sampleAmbientOcclusionVisibility(ao, dst_width, dst_height, x + lane, y);
-                    if (visibility < 0.999) {
-                        history_weights[lane] = 1.0 - visibility;
-                    }
-                }
-            }
-
-            var blended: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            blendTemporalColorBatch(current_pixels[0..simd_lanes], black_colors[0..simd_lanes], history_weights[0..simd_lanes], blended[0..simd_lanes]);
-            for (0..simd_lanes) |lane| {
-                dst[row_start + x + lane] = blended[lane];
-            }
-        }
-
-        while (x < dst_width) : (x += 1) {
-            const idx = row_start + x;
-            if (!validSceneCameraSample(scene_camera[idx])) continue;
-
-            const visibility = sampleAmbientOcclusionVisibility(ao, dst_width, dst_height, x, y);
-            if (visibility >= 0.999) continue;
-
-            const pixel = dst[idx];
-            const alpha = pixel & 0xFF000000;
-            const r = @as(i32, @intFromFloat(@as(f32, @floatFromInt((pixel >> 16) & 0xFF)) * visibility + 0.5));
-            const g = @as(i32, @intFromFloat(@as(f32, @floatFromInt((pixel >> 8) & 0xFF)) * visibility + 0.5));
-            const b = @as(i32, @intFromFloat(@as(f32, @floatFromInt(pixel & 0xFF)) * visibility + 0.5));
-            dst[idx] = alpha |
-                (@as(u32, clampByte(r)) << 16) |
-                (@as(u32, clampByte(g)) << 8) |
-                @as(u32, clampByte(b));
-        }
-    }
+    ssao_rows.compositeRows(dst, scene_camera, dst_width, dst_height, ao, start_row, end_row);
 }
 
 fn colorGradeSimdLanes() comptime_int {
@@ -2834,14 +978,7 @@ fn colorGradeSimdLanes() comptime_int {
 
 const max_runtime_color_grade_simd_lanes = 32;
 
-fn runtimeColorGradeSimdLanes() usize {
-    return switch (cpu_features.detect().preferredVectorBackend()) {
-        .avx512 => 32,
-        .avx2 => 16,
-        .sse2, .neon => 8,
-        .scalar => 1,
-    };
-}
+const runtimeColorGradeSimdLanes = render_utils.runtimeColorGradeSimdLanes;
 
 const color_grade_simd_lanes = colorGradeSimdLanes();
 const GradeVec = @Vector(color_grade_simd_lanes, i16);
@@ -2888,24 +1025,10 @@ const ColorGradeJobContext = struct {
     end_index: usize,
     profile: *const ColorGradeProfile,
 
-    fn run(ctx_ptr: *anyopaque) void {
+    pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *ColorGradeJobContext = @ptrCast(@alignCast(ctx_ptr));
-        applyBlockbusterGradeRange(ctx.pixels, ctx.start_index, ctx.end_index, ctx.profile);
+        color_grade_pass.runRange(ctx.pixels, ctx.start_index, ctx.end_index, ctx.profile);
     }
-};
-
-const BloomPassStage = enum {
-    extract,
-    blur_horizontal,
-    blur_vertical,
-    composite,
-};
-
-const AOPassStage = enum {
-    generate,
-    blur_horizontal,
-    blur_vertical,
-    composite,
 };
 
 const FogJobContext = struct {
@@ -2916,23 +1039,90 @@ const FogJobContext = struct {
     end_row: usize,
     config: DepthFogConfig,
 
-    fn run(ctx_ptr: *anyopaque) void {
+    pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *FogJobContext = @ptrCast(@alignCast(ctx_ptr));
-        applyDepthFogRows(ctx.pixels, ctx.depth, ctx.width, ctx.start_row, ctx.end_row, ctx.config);
+        depth_fog_pass.runRows(ctx.pixels, ctx.depth, ctx.width, ctx.start_row, ctx.end_row, ctx.config);
     }
+};
+
+const ShadowLightDispatchContext = struct {
+    renderer: *Renderer,
+    camera_position: math.Vec3,
+    basis_right: math.Vec3,
+    basis_up: math.Vec3,
+    basis_forward: math.Vec3,
+    projection: ProjectionParams,
+    shadow_elapsed_ns: i128,
+};
+
+const HybridShadowDispatchContext = struct {
+    renderer: *Renderer,
+    mesh: *const Mesh,
+    camera_position: math.Vec3,
+    basis_right: math.Vec3,
+    basis_up: math.Vec3,
+    basis_forward: math.Vec3,
+    light_dir_world: math.Vec3,
+};
+
+const PostPassExecutionContext = struct {
+    renderer: *Renderer,
+    mesh: *const Mesh,
+    camera_position: math.Vec3,
+    basis_right: math.Vec3,
+    basis_up: math.Vec3,
+    basis_forward: math.Vec3,
+    current_view: TemporalAAViewState,
+    projection: ProjectionParams,
+    light_dir_world: math.Vec3,
+    shadow_elapsed_ns: i128,
 };
 
 const AOJobContext = struct {
     renderer: *Renderer,
-    stage: AOPassStage,
+    stage: ssao_pass.Stage,
     scene_width: usize,
     scene_height: usize,
     start_row: usize,
     end_row: usize,
 
-    fn run(ctx_ptr: *anyopaque) void {
+    pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *AOJobContext = @ptrCast(@alignCast(ctx_ptr));
-        ctx.renderer.runAmbientOcclusionStageRange(ctx.stage, ctx.start_row, ctx.end_row, ctx.scene_width, ctx.scene_height);
+        switch (ctx.stage) {
+            .generate => ssao_sample_kernel.runRows(
+                ctx.renderer.scene_camera,
+                ctx.scene_width,
+                ctx.scene_height,
+                &ctx.renderer.ao_scratch,
+                ctx.renderer.ambient_occlusion_config,
+                ctx.start_row,
+                ctx.end_row,
+                renderAmbientOcclusionRows,
+            ),
+            .blur_horizontal => ssao_blur_kernel.runHorizontalRows(
+                &ctx.renderer.ao_scratch,
+                ctx.renderer.ambient_occlusion_config.blur_depth_threshold,
+                ctx.start_row,
+                ctx.end_row,
+                blurAmbientOcclusionHorizontalRows,
+            ),
+            .blur_vertical => ssao_blur_kernel.runVerticalRows(
+                &ctx.renderer.ao_scratch,
+                ctx.renderer.ambient_occlusion_config.blur_depth_threshold,
+                ctx.start_row,
+                ctx.end_row,
+                blurAmbientOcclusionVerticalRows,
+            ),
+            .composite => compositeAmbientOcclusionRows(
+                ctx.renderer.bitmap.pixels,
+                ctx.renderer.scene_camera,
+                ctx.scene_width,
+                ctx.scene_height,
+                &ctx.renderer.ao_scratch,
+                ctx.start_row,
+                ctx.end_row,
+            ),
+        }
     }
 };
 
@@ -2946,7 +1136,7 @@ const TAAJobContext = struct {
     width: usize,
     height: usize,
 
-    fn run(ctx_ptr: *anyopaque) void {
+    pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *TAAJobContext = @ptrCast(@alignCast(ctx_ptr));
         ctx.renderer.applyTemporalAARows(
             ctx.mesh,
@@ -2960,20 +1150,7 @@ const TAAJobContext = struct {
     }
 };
 
-const ShadowResolveJobContext = struct {
-    pixels: []u32,
-    camera_buffer: []const math.Vec3,
-    width: usize,
-    start_row: usize,
-    end_row: usize,
-    config: ShadowResolveConfig,
-    shadow: *const ShadowMap,
-
-    fn run(ctx_ptr: *anyopaque) void {
-        const ctx: *ShadowResolveJobContext = @ptrCast(@alignCast(ctx_ptr));
-        applyShadowRows(ctx.pixels, ctx.camera_buffer, ctx.width, ctx.start_row, ctx.end_row, ctx.config, ctx.shadow);
-    }
-};
+const ShadowResolveJobContext = shadow_resolve_pass.JobContext(ShadowResolveConfig, ShadowMap);
 
 const ShadowRasterJobContext = struct {
     mesh: *const Mesh,
@@ -2982,7 +1159,7 @@ const ShadowRasterJobContext = struct {
     end_row: usize,
     light_dir_world: math.Vec3,
 
-    fn run(ctx_ptr: *anyopaque) void {
+    pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *ShadowRasterJobContext = @ptrCast(@alignCast(ctx_ptr));
         rasterizeShadowMeshRange(ctx.mesh, ctx.shadow, ctx.start_row, ctx.end_row, ctx.light_dir_world);
     }
@@ -3006,640 +1183,16 @@ const AdaptiveShadowTileJob = struct {
     candidate_offset: usize,
     candidate_count: usize,
 
-    fn run(ctx_ptr: *anyopaque) void {
+    pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *AdaptiveShadowTileJob = @ptrCast(@alignCast(ctx_ptr));
-        if (ctx.candidate_count == 0 or ctx.valid_max_x < ctx.valid_min_x or ctx.valid_max_y < ctx.valid_min_y) return;
-        const width = ctx.valid_max_x - ctx.valid_min_x + 1;
-        const height = ctx.valid_max_y - ctx.valid_min_y + 1;
-        if (width <= 0 or height <= 0) return;
-        ctx.processBlock(ctx.valid_min_x, ctx.valid_min_y, width, height, 0);
-    }
-
-    fn processBlock(ctx: *AdaptiveShadowTileJob, x: i32, y: i32, width: i32, height: i32, depth: u32) void {
-        if (width <= 0 or height <= 0) return;
-
-        const classification = ctx.classifyBlock(x, y, width, height);
-        if (!classification.mixed) {
-            if (classification.shadowed) ctx.darkenBlock(x, y, width, height);
-            return;
-        }
-
-        if (width <= config.POST_HYBRID_SHADOW_MIN_BLOCK_SIZE or height <= config.POST_HYBRID_SHADOW_MIN_BLOCK_SIZE or depth >= config.POST_HYBRID_SHADOW_MAX_DEPTH) {
-            ctx.resolveBlockExact(x, y, width, height);
-            return;
-        }
-
-        const half_w = @max(1, @divTrunc(width, 2));
-        const half_h = @max(1, @divTrunc(height, 2));
-        const rem_w = width - half_w;
-        const rem_h = height - half_h;
-        ctx.processBlock(x, y, half_w, half_h, depth + 1);
-        if (rem_w > 0) ctx.processBlock(x + half_w, y, rem_w, half_h, depth + 1);
-        if (rem_h > 0) ctx.processBlock(x, y + half_h, half_w, rem_h, depth + 1);
-        if (rem_w > 0 and rem_h > 0) ctx.processBlock(x + half_w, y + half_h, rem_w, rem_h, depth + 1);
-    }
-
-    const BlockClassification = struct {
-        mixed: bool,
-        shadowed: bool,
-    };
-
-    fn classifyBlock(ctx: *AdaptiveShadowTileJob, x: i32, y: i32, width: i32, height: i32) BlockClassification {
-        const max_x = x + width - 1;
-        const max_y = y + height - 1;
-        const center_x = x + @divTrunc(width - 1, 2);
-        const center_y = y + @divTrunc(height - 1, 2);
-        const sample_points = [_][2]i32{
-            .{ x, y },
-            .{ max_x, y },
-            .{ x, max_y },
-            .{ max_x, max_y },
-            .{ center_x, center_y },
-            .{ x, center_y },
-            .{ max_x, center_y },
-            .{ center_x, y },
-            .{ center_x, max_y },
-        };
-
-        var any_valid = false;
-        var any_occluded = false;
-        var any_lit = false;
-        var any_invalid = false;
-        for (sample_points) |point| {
-            const sample = ctx.sampleShadow(point[0], point[1]);
-            if (!sample.valid) {
-                any_invalid = true;
-                continue;
-            }
-            any_valid = true;
-            if (sample.coverage >= 0.65) any_occluded = true;
-            if (sample.coverage <= 0.15) any_lit = true;
-            if (sample.coverage > 0.15 and sample.coverage < 0.65) {
-                any_occluded = true;
-                any_lit = true;
-            }
-        }
-
-        if (!any_valid) return .{ .mixed = false, .shadowed = false };
-        if (any_invalid) return .{ .mixed = true, .shadowed = false };
-
-        if (any_occluded and any_lit) return .{ .mixed = true, .shadowed = false };
-        if (any_occluded) return .{ .mixed = false, .shadowed = true };
-        return .{ .mixed = false, .shadowed = false };
-    }
-
-    fn evaluateShadowPoint(ctx: *AdaptiveShadowTileJob, screen_x: i32, screen_y: i32) ShadowSample {
-        if (screen_x < 0 or screen_y < 0 or screen_x >= ctx.renderer.bitmap.width or screen_y >= ctx.renderer.bitmap.height) {
-            return .{ .valid = false, .coverage = 0.0 };
-        }
-
-        const scene_idx = @as(usize, @intCast(screen_y * ctx.renderer.bitmap.width + screen_x));
-        if (scene_idx >= ctx.renderer.scene_camera.len) return .{ .valid = false, .coverage = 0.0 };
-
-        const camera_pos = ctx.renderer.scene_camera[scene_idx];
-        if (!std.math.isFinite(camera_pos.z) or camera_pos.z <= NEAR_CLIP) {
-            return .{ .valid = false, .coverage = 0.0 };
-        }
-
-        const light_sample = ctx.camera_to_light.project(camera_pos);
-        return .{ .valid = true, .coverage = if (ctx.isPointShadowed(camera_pos, light_sample)) 1.0 else 0.0 };
-    }
-
-    fn evaluateShadowCellAtScale(ctx: *AdaptiveShadowTileJob, cache_x: usize, cache_y: usize, shadow_scale: i32) ShadowSample {
-        const origin_x = @as(i32, @intCast(cache_x * @as(usize, @intCast(shadow_scale))));
-        const origin_y = @as(i32, @intCast(cache_y * @as(usize, @intCast(shadow_scale))));
-        const max_x = @min(origin_x + shadow_scale - 1, ctx.renderer.bitmap.width - 1);
-        const max_y = @min(origin_y + shadow_scale - 1, ctx.renderer.bitmap.height - 1);
-        const center_x = @min(origin_x + @divTrunc(shadow_scale, 2), ctx.renderer.bitmap.width - 1);
-        const center_y = @min(origin_y + @divTrunc(shadow_scale, 2), ctx.renderer.bitmap.height - 1);
-        const center = ctx.evaluateShadowPoint(center_x, center_y);
-        if (!center.valid or shadow_scale <= 2) return center;
-
-        const corner_a = ctx.evaluateShadowPoint(origin_x, origin_y);
-        const corner_b = ctx.evaluateShadowPoint(max_x, origin_y);
-        const corner_c = ctx.evaluateShadowPoint(origin_x, max_y);
-        const corner_d = ctx.evaluateShadowPoint(max_x, max_y);
-
-        var min_c = center.coverage;
-        var max_c = center.coverage;
-        if (corner_a.valid) {
-            min_c = @min(min_c, corner_a.coverage);
-            max_c = @max(max_c, corner_a.coverage);
-        }
-        if (corner_b.valid) {
-            min_c = @min(min_c, corner_b.coverage);
-            max_c = @max(max_c, corner_b.coverage);
-        }
-        if (corner_c.valid) {
-            min_c = @min(min_c, corner_c.coverage);
-            max_c = @max(max_c, corner_c.coverage);
-        }
-        if (corner_d.valid) {
-            min_c = @min(min_c, corner_d.coverage);
-            max_c = @max(max_c, corner_d.coverage);
-        }
-
-        if (min_c == max_c) {
-            return .{ .valid = true, .coverage = min_c };
-        }
-
-        return .{ .valid = true, .coverage = 0.5 };
-    }
-
-    fn sampleShadowCache(
-        ctx: *AdaptiveShadowTileJob,
-        cache: []u8,
-        cache_width: usize,
-        cache_height: usize,
-        shadow_scale: i32,
-        screen_x: i32,
-        screen_y: i32,
-    ) ShadowSample {
-        if (screen_x < 0 or screen_y < 0 or screen_x >= ctx.renderer.bitmap.width or screen_y >= ctx.renderer.bitmap.height) {
-            return .{ .valid = false, .coverage = 0.0 };
-        }
-
-        const sample_x = @as(f32, @floatFromInt(screen_x)) / @as(f32, @floatFromInt(shadow_scale));
-        const sample_y = @as(f32, @floatFromInt(screen_y)) / @as(f32, @floatFromInt(shadow_scale));
-        const base_x = std.math.clamp(@as(i32, @intFromFloat(@floor(sample_x))), 0, @as(i32, @intCast(cache_width - 1)));
-        const base_y = std.math.clamp(@as(i32, @intFromFloat(@floor(sample_y))), 0, @as(i32, @intCast(cache_height - 1)));
-        const next_x = @min(base_x + 1, @as(i32, @intCast(cache_width - 1)));
-        const next_y = @min(base_y + 1, @as(i32, @intCast(cache_height - 1)));
-        const frac_x = std.math.clamp(sample_x - @as(f32, @floatFromInt(base_x)), 0.0, 1.0);
-        const frac_y = std.math.clamp(sample_y - @as(f32, @floatFromInt(base_y)), 0.0, 1.0);
-
-        const CacheTap = struct { valid: bool, coverage: f32 };
-        var taps: [4]CacheTap = undefined;
-        const coords = [_][2]i32{
-            .{ base_x, base_y },
-            .{ next_x, base_y },
-            .{ base_x, next_y },
-            .{ next_x, next_y },
-        };
-
-        for (coords, 0..) |coord, tap_index| {
-            const cache_idx = @as(usize, @intCast(coord[1])) * cache_width + @as(usize, @intCast(coord[0]));
-            var cached = cache[cache_idx];
-            if (cached == hybrid_shadow_cache_unknown) {
-                const evaluated = ctx.evaluateShadowCellAtScale(@intCast(coord[0]), @intCast(coord[1]), shadow_scale);
-                cached = if (!evaluated.valid)
-                    hybrid_shadow_cache_invalid
-                else
-                    @intCast(std.math.clamp(@as(i32, @intFromFloat(@round(evaluated.coverage * 253.0))), 0, 253));
-                cache[cache_idx] = cached;
-            }
-
-            if (cached == hybrid_shadow_cache_invalid) {
-                taps[tap_index] = .{ .valid = false, .coverage = 0.0 };
-            } else {
-                taps[tap_index] = .{ .valid = true, .coverage = @as(f32, @floatFromInt(cached)) / 253.0 };
-            }
-        }
-
-        const weights = [_]f32{
-            (1.0 - frac_x) * (1.0 - frac_y),
-            frac_x * (1.0 - frac_y),
-            (1.0 - frac_x) * frac_y,
-            frac_x * frac_y,
-        };
-        var weight_sum: f32 = 0.0;
-        var coverage_sum: f32 = 0.0;
-        for (taps, 0..) |tap, tap_index| {
-            if (!tap.valid) continue;
-            weight_sum += weights[tap_index];
-            coverage_sum += tap.coverage * weights[tap_index];
-        }
-
-        if (weight_sum <= 1e-5) return .{ .valid = false, .coverage = 0.0 };
-        return .{ .valid = true, .coverage = coverage_sum / weight_sum };
-    }
-
-    fn sampleShadowCacheNearest(
-        ctx: *AdaptiveShadowTileJob,
-        cache: []u8,
-        cache_width: usize,
-        cache_height: usize,
-        shadow_scale: i32,
-        screen_x: i32,
-        screen_y: i32,
-    ) ShadowSample {
-        if (screen_x < 0 or screen_y < 0 or screen_x >= ctx.renderer.bitmap.width or screen_y >= ctx.renderer.bitmap.height) {
-            return .{ .valid = false, .coverage = 0.0 };
-        }
-
-        const cache_x = std.math.clamp(@as(i32, @intFromFloat(@round(@as(f32, @floatFromInt(screen_x)) / @as(f32, @floatFromInt(shadow_scale))))), 0, @as(i32, @intCast(cache_width - 1)));
-        const cache_y = std.math.clamp(@as(i32, @intFromFloat(@round(@as(f32, @floatFromInt(screen_y)) / @as(f32, @floatFromInt(shadow_scale))))), 0, @as(i32, @intCast(cache_height - 1)));
-        const cache_idx = @as(usize, @intCast(cache_y)) * cache_width + @as(usize, @intCast(cache_x));
-        var cached = cache[cache_idx];
-        if (cached == hybrid_shadow_cache_unknown) {
-            const evaluated = ctx.evaluateShadowCellAtScale(@intCast(cache_x), @intCast(cache_y), shadow_scale);
-            cached = if (!evaluated.valid)
-                hybrid_shadow_cache_invalid
-            else
-                @intCast(std.math.clamp(@as(i32, @intFromFloat(@round(evaluated.coverage * 253.0))), 0, 253));
-            cache[cache_idx] = cached;
-        }
-
-        if (cached == hybrid_shadow_cache_invalid) return .{ .valid = false, .coverage = 0.0 };
-        return .{ .valid = true, .coverage = @as(f32, @floatFromInt(cached)) / 253.0 };
-    }
-
-    fn sampleShadowCoarse(ctx: *AdaptiveShadowTileJob, screen_x: i32, screen_y: i32) ShadowSample {
-        return ctx.sampleShadowCacheNearest(
-            ctx.renderer.hybrid_shadow_coarse_cache,
-            ctx.renderer.hybrid_shadow_coarse_cache_width,
-            ctx.renderer.hybrid_shadow_coarse_cache_height,
-            @max(1, config.POST_HYBRID_SHADOW_COARSE_DOWNSAMPLE),
-            screen_x,
-            screen_y,
-        );
-    }
-
-    fn sampleShadowRefined(ctx: *AdaptiveShadowTileJob, screen_x: i32, screen_y: i32) ShadowSample {
-        const coarse = ctx.sampleShadowCoarse(screen_x, screen_y);
-        if (!coarse.valid) return coarse;
-        if (coarse.coverage <= config.POST_HYBRID_SHADOW_EDGE_MIN_COVERAGE or coarse.coverage >= config.POST_HYBRID_SHADOW_EDGE_MAX_COVERAGE) return coarse;
-
-        // Apply a small 3x3 PCF-style box filter in the edge cache to anti-alias the outline
-        var coverage_sum: f32 = 0.0;
-        var valid_count: f32 = 0.0;
-
-        var dy: i32 = -1;
-        while (dy <= 1) : (dy += 1) {
-            var dx: i32 = -1;
-            while (dx <= 1) : (dx += 1) {
-                const sample = ctx.sampleShadowCacheNearest(
-                    ctx.renderer.hybrid_shadow_edge_cache,
-                    ctx.renderer.hybrid_shadow_edge_cache_width,
-                    ctx.renderer.hybrid_shadow_edge_cache_height,
-                    @max(1, config.POST_HYBRID_SHADOW_EDGE_DOWNSAMPLE),
-                    screen_x + dx,
-                    screen_y + dy,
-                );
-                if (sample.valid) {
-                    coverage_sum += sample.coverage;
-                    valid_count += 1.0;
-                }
-            }
-        }
-
-        if (valid_count == 0.0) return coarse;
-
-        const avg_coverage = coverage_sum / valid_count;
-        const blend = std.math.clamp(config.POST_HYBRID_SHADOW_EDGE_BLEND, 0.0, 1.0);
-
-        return .{
-            .valid = true,
-            .coverage = avg_coverage * (1.0 - blend) + coarse.coverage * blend,
-        };
-    }
-
-    fn sampleShadow(ctx: *AdaptiveShadowTileJob, screen_x: i32, screen_y: i32) ShadowSample {
-        return ctx.sampleShadowCoarse(screen_x, screen_y);
-    }
-
-    fn isPointShadowed(ctx: *AdaptiveShadowTileJob, camera_pos: math.Vec3, light_sample: LightSpaceSample) bool {
-        if (ctx.candidate_count == 0) return false;
-
-        const candidates = ctx.renderer.hybrid_shadow_tile_candidates[ctx.candidate_offset .. ctx.candidate_offset + ctx.candidate_count];
-        var ray_origin: math.Vec3 = undefined;
-        var ray_origin_ready = false;
-        for (candidates) |caster_index| {
-            if (caster_index >= ctx.renderer.hybrid_shadow_caster_count) continue;
-            const caster = ctx.renderer.hybrid_shadow_caster_bounds[caster_index];
-            if (caster.max_depth <= light_sample.depth + config.POST_HYBRID_SHADOW_RAY_BIAS) continue;
-            if (light_sample.u < caster.min_u or light_sample.u > caster.max_u or light_sample.v < caster.min_v or light_sample.v > caster.max_v) continue;
-
-            if (!ray_origin_ready) {
-                const world_pos = cameraToWorldPosition(
-                    ctx.camera_position,
-                    ctx.basis_right,
-                    ctx.basis_up,
-                    ctx.basis_forward,
-                    camera_pos,
-                );
-                ray_origin = math.Vec3.add(world_pos, math.Vec3.scale(ctx.light_dir_world, config.POST_HYBRID_SHADOW_RAY_BIAS));
-                ray_origin_ready = true;
-            }
-
-            const meshlet = &ctx.mesh.meshlets[caster.meshlet_index];
-            if (!rayIntersectsSphere(ray_origin, ctx.light_dir_world, meshlet.bounds_center, meshlet.bounds_radius)) continue;
-            const primitives = ctx.mesh.meshletPrimitiveSlice(meshlet);
-            var prim_i: usize = 0;
-            const dir_x: @Vector(8, f32) = @splat(ctx.light_dir_world.x);
-            const dir_y: @Vector(8, f32) = @splat(ctx.light_dir_world.y);
-            const dir_z: @Vector(8, f32) = @splat(ctx.light_dir_world.z);
-            const orig_x: @Vector(8, f32) = @splat(ray_origin.x);
-            const orig_y: @Vector(8, f32) = @splat(ray_origin.y);
-            const orig_z: @Vector(8, f32) = @splat(ray_origin.z);
-
-            while (prim_i < primitives.len) : (prim_i += 8) {
-                var v0x: @Vector(8, f32) = @splat(0);
-                var v0y: @Vector(8, f32) = @splat(0);
-                var v0z: @Vector(8, f32) = @splat(0);
-                var v1x: @Vector(8, f32) = @splat(0);
-                var v1y: @Vector(8, f32) = @splat(0);
-                var v1z: @Vector(8, f32) = @splat(0);
-                var v2x: @Vector(8, f32) = @splat(0);
-                var v2y: @Vector(8, f32) = @splat(0);
-                var v2z: @Vector(8, f32) = @splat(0);
-                var active_mask: @Vector(8, bool) = @splat(false);
-
-                const count = @min(8, primitives.len - prim_i);
-                for (0..count) |j| {
-                    const tri = ctx.mesh.triangles[primitives[prim_i + j].triangle_index];
-                    const v0 = ctx.mesh.vertices[tri.v0];
-                    const v1 = ctx.mesh.vertices[tri.v1];
-                    const v2 = ctx.mesh.vertices[tri.v2];
-                    v0x[j] = v0.x;
-                    v0y[j] = v0.y;
-                    v0z[j] = v0.z;
-                    v1x[j] = v1.x;
-                    v1y[j] = v1.y;
-                    v1z[j] = v1.z;
-                    v2x[j] = v2.x;
-                    v2y[j] = v2.y;
-                    v2z[j] = v2.z;
-                    active_mask[j] = true;
-                }
-
-                if (rayIntersectsTriangle8(orig_x, orig_y, orig_z, dir_x, dir_y, dir_z, v0x, v0y, v0z, v1x, v1y, v1z, v2x, v2y, v2z, active_mask)) return true;
-            }
-        }
-        return false;
-    }
-
-    fn resolveBlockExact(ctx: *AdaptiveShadowTileJob, x: i32, y: i32, width: i32, height: i32) void {
-        const sample_stride = @max(1, config.POST_HYBRID_SHADOW_EDGE_DOWNSAMPLE);
-        const max_x = x + width;
-        const max_y = y + height;
-
-        var block_y = y;
-        while (block_y < max_y) : (block_y += sample_stride) {
-            if (block_y >= ctx.renderer.bitmap.height) break;
-            const block_h = @min(sample_stride, max_y - block_y);
-            if (block_h <= 0) continue;
-
-            var block_x = x;
-            while (block_x < max_x) : (block_x += sample_stride) {
-                if (block_x >= ctx.renderer.bitmap.width) break;
-                const block_w = @min(sample_stride, max_x - block_x);
-                if (block_w <= 0) continue;
-
-                const sample_x = block_x + @divTrunc(block_w - 1, 2);
-                const sample_y = block_y + @divTrunc(block_h - 1, 2);
-                const sample = ctx.sampleShadowRefined(sample_x, sample_y);
-                if (!sample.valid) continue;
-                const coverage = sample.coverage;
-                if (coverage <= 0.02) continue;
-                if (coverage >= 0.98) {
-                    ctx.darkenBlock(block_x, block_y, block_w, block_h);
-                    continue;
-                }
-
-                const pixel_scale = 1.0 - ((1.0 - ctx.darkness_scale) * coverage);
-                var py = block_y;
-                while (py < block_y + block_h) : (py += 1) {
-                    if (py < 0 or py >= ctx.renderer.bitmap.height) continue;
-                    const row_start = @as(usize, @intCast(py * ctx.renderer.bitmap.width + block_x));
-                    const row_end = @min(
-                        @as(usize, @intCast(py * ctx.renderer.bitmap.width + block_x + block_w)),
-                        ctx.renderer.bitmap.pixels.len,
-                    );
-                    var idx = row_start;
-                    while (idx < row_end) : (idx += 1) {
-                        ctx.renderer.bitmap.pixels[idx] = darkenPackedColor(ctx.renderer.bitmap.pixels[idx], pixel_scale);
-                    }
-                }
-            }
-        }
-    }
-
-    fn darkenBlock(ctx: *AdaptiveShadowTileJob, x: i32, y: i32, width: i32, height: i32) void {
-        var py = y;
-        while (py < y + height) : (py += 1) {
-            if (py < 0 or py >= ctx.renderer.bitmap.height) continue;
-            const row_start = @as(usize, @intCast(py * ctx.renderer.bitmap.width + x));
-            const row_end = @as(usize, @intCast(py * ctx.renderer.bitmap.width + x + width));
-            darkenPixelSpan(ctx.renderer.bitmap.pixels, row_start, row_end, ctx.darkness_scale);
-        }
+        adaptive_shadow_tile_pass.run(ctx);
     }
 };
 
-const BloomJobContext = struct {
-    stage: BloomPassStage,
-    scene_pixels: []u32,
-    scene_width: usize,
-    scene_height: usize,
-    bloom: *BloomScratch,
-    threshold_curve: *const [256]u8,
-    intensity_lut: *const [256]u8,
-    start_row: usize,
-    end_row: usize,
-
-    fn run(ctx_ptr: *anyopaque) void {
-        const ctx: *BloomJobContext = @ptrCast(@alignCast(ctx_ptr));
-        switch (ctx.stage) {
-            .extract => extractBloomDownsampleRows(
-                ctx.scene_pixels,
-                ctx.scene_width,
-                ctx.scene_height,
-                ctx.bloom,
-                ctx.threshold_curve,
-                ctx.start_row,
-                ctx.end_row,
-            ),
-            .blur_horizontal => blurBloomHorizontalRows(ctx.bloom, ctx.start_row, ctx.end_row),
-            .blur_vertical => blurBloomVerticalRows(ctx.bloom, ctx.start_row, ctx.end_row),
-            .composite => compositeBloomRows(
-                ctx.scene_pixels,
-                ctx.scene_width,
-                ctx.bloom,
-                ctx.intensity_lut,
-                ctx.start_row,
-                ctx.end_row,
-            ),
-        }
-    }
-};
+const BloomJobContext = bloom_pass.JobContext(BloomScratch);
 
 fn noopRenderPassJob(ctx: *anyopaque) void {
     _ = ctx;
-}
-
-fn applyDepthFogRows(
-    pixels: []u32,
-    depth_buffer: []const f32,
-    width: usize,
-    start_row: usize,
-    end_row: usize,
-    fog: DepthFogConfig,
-) void {
-    const simd_lanes = runtimeColorGradeSimdLanes();
-    var y = start_row;
-    while (y < end_row) : (y += 1) {
-        const row_start = y * width;
-        const row_end = row_start + width;
-        var idx = row_start;
-        const fog_rgb = [3]f32{
-            @floatFromInt(fog.color_r),
-            @floatFromInt(fog.color_g),
-            @floatFromInt(fog.color_b),
-        };
-        while (idx + simd_lanes <= row_end) : (idx += simd_lanes) {
-            var current_pixels: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            var history_colors: [max_runtime_color_grade_simd_lanes][3]f32 = undefined;
-            var history_weights: [max_runtime_color_grade_simd_lanes]f32 = undefined;
-
-            for (0..simd_lanes) |lane| {
-                const lane_idx = idx + lane;
-                current_pixels[lane] = pixels[lane_idx];
-                history_colors[lane] = fog_rgb;
-                history_weights[lane] = 0.0;
-
-                const depth = depth_buffer[lane_idx];
-                if (std.math.isFinite(depth) and depth > fog.near) {
-                    const normalized = std.math.clamp((depth - fog.near) * fog.inv_range, 0.0, 1.0);
-                    if (normalized > 0.0) {
-                        const factor = normalized * fog.strength;
-                        if (factor > 0.001) {
-                            history_weights[lane] = factor;
-                        }
-                    }
-                }
-            }
-
-            var blended: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-            blendTemporalColorBatch(current_pixels[0..simd_lanes], history_colors[0..simd_lanes], history_weights[0..simd_lanes], blended[0..simd_lanes]);
-            for (0..simd_lanes) |lane| {
-                pixels[idx + lane] = blended[lane];
-            }
-        }
-
-        while (idx < row_end) : (idx += 1) {
-            const depth = depth_buffer[idx];
-            if (!std.math.isFinite(depth) or depth <= fog.near) continue;
-
-            const normalized = std.math.clamp((depth - fog.near) * fog.inv_range, 0.0, 1.0);
-            if (normalized <= 0.0) continue;
-
-            const factor = normalized * fog.strength;
-            if (factor <= 0.001) continue;
-
-            const pixel = pixels[idx];
-            const alpha = pixel & 0xFF000000;
-            const inv = 1.0 - factor;
-
-            const r = @as(i32, @intFromFloat(@as(f32, @floatFromInt((pixel >> 16) & 0xFF)) * inv + @as(f32, @floatFromInt(fog.color_r)) * factor));
-            const g = @as(i32, @intFromFloat(@as(f32, @floatFromInt((pixel >> 8) & 0xFF)) * inv + @as(f32, @floatFromInt(fog.color_g)) * factor));
-            const b = @as(i32, @intFromFloat(@as(f32, @floatFromInt(pixel & 0xFF)) * inv + @as(f32, @floatFromInt(fog.color_b)) * factor));
-
-            pixels[idx] = alpha |
-                (@as(u32, clampByte(r)) << 16) |
-                (@as(u32, clampByte(g)) << 8) |
-                @as(u32, clampByte(b));
-        }
-    }
-}
-
-fn applyShadowRows(
-    pixels: []u32,
-    camera_buffer: []const math.Vec3,
-    width: usize,
-    start_row: usize,
-    end_row: usize,
-    config_value: ShadowResolveConfig,
-    shadow: *const ShadowMap,
-) void {
-    if (!shadow.active) return;
-    const max_channel: ShadowFloatVec = @splat(255.0);
-    const darkness_scale = @as(f32, @floatFromInt(config_value.darkness_percent)) / 100.0;
-
-    var y = start_row;
-    while (y < end_row) : (y += 1) {
-        const row_start = y * width;
-        const row_end = row_start + width;
-        var x: usize = 0;
-        while (x + color_grade_simd_lanes <= width) : (x += color_grade_simd_lanes) {
-            var alpha: [color_grade_simd_lanes]u32 = undefined;
-            var r_arr: [color_grade_simd_lanes]f32 = undefined;
-            var g_arr: [color_grade_simd_lanes]f32 = undefined;
-            var b_arr: [color_grade_simd_lanes]f32 = undefined;
-            var scale_arr: [color_grade_simd_lanes]f32 = undefined;
-
-            inline for (0..color_grade_simd_lanes) |lane| {
-                const idx = row_start + x + lane;
-                const pixel = pixels[idx];
-                alpha[lane] = pixel & 0xFF000000;
-                r_arr[lane] = @floatFromInt((pixel >> 16) & 0xFF);
-                g_arr[lane] = @floatFromInt((pixel >> 8) & 0xFF);
-                b_arr[lane] = @floatFromInt(pixel & 0xFF);
-                scale_arr[lane] = 1.0;
-
-                const camera_pos = camera_buffer[idx];
-                if (std.math.isFinite(camera_pos.z) and camera_pos.z > config_value.near_plane) {
-                    const world_pos = math.Vec3.add(
-                        config_value.camera_position,
-                        math.Vec3.add(
-                            math.Vec3.add(
-                                math.Vec3.scale(config_value.basis_right, camera_pos.x),
-                                math.Vec3.scale(config_value.basis_up, camera_pos.y),
-                            ),
-                            math.Vec3.scale(config_value.basis_forward, camera_pos.z),
-                        ),
-                    );
-                    const occlusion = sampleShadowOcclusion(shadow, world_pos);
-                    if (occlusion > 0.0) scale_arr[lane] = 1.0 - darkness_scale * occlusion;
-                }
-            }
-
-            const scale_vec: ShadowFloatVec = @bitCast(scale_arr);
-            const r_scaled = @min(@as(ShadowFloatVec, @bitCast(r_arr)) * scale_vec, max_channel);
-            const g_scaled = @min(@as(ShadowFloatVec, @bitCast(g_arr)) * scale_vec, max_channel);
-            const b_scaled = @min(@as(ShadowFloatVec, @bitCast(b_arr)) * scale_vec, max_channel);
-            const r_out: [color_grade_simd_lanes]i32 = @bitCast(@as(ShadowIntVec, @intFromFloat(r_scaled)));
-            const g_out: [color_grade_simd_lanes]i32 = @bitCast(@as(ShadowIntVec, @intFromFloat(g_scaled)));
-            const b_out: [color_grade_simd_lanes]i32 = @bitCast(@as(ShadowIntVec, @intFromFloat(b_scaled)));
-
-            inline for (0..color_grade_simd_lanes) |lane| {
-                pixels[row_start + x + lane] = alpha[lane] |
-                    (@as(u32, @intCast(r_out[lane])) << 16) |
-                    (@as(u32, @intCast(g_out[lane])) << 8) |
-                    @as(u32, @intCast(b_out[lane]));
-            }
-        }
-
-        while (row_start + x < row_end) : (x += 1) {
-            const idx = row_start + x;
-            const camera_pos = camera_buffer[idx];
-            if (!std.math.isFinite(camera_pos.z) or camera_pos.z <= config_value.near_plane) continue;
-
-            const world_pos = math.Vec3.add(
-                config_value.camera_position,
-                math.Vec3.add(
-                    math.Vec3.add(
-                        math.Vec3.scale(config_value.basis_right, camera_pos.x),
-                        math.Vec3.scale(config_value.basis_up, camera_pos.y),
-                    ),
-                    math.Vec3.scale(config_value.basis_forward, camera_pos.z),
-                ),
-            );
-            const occlusion = sampleShadowOcclusion(shadow, world_pos);
-            if (occlusion <= 0.0) continue;
-
-            const shadow_scale = 1.0 - darkness_scale * occlusion;
-            const pixel = pixels[idx];
-            const alpha = pixel & 0xFF000000;
-            const r = @as(i32, @intFromFloat(@as(f32, @floatFromInt((pixel >> 16) & 0xFF)) * shadow_scale));
-            const g = @as(i32, @intFromFloat(@as(f32, @floatFromInt((pixel >> 8) & 0xFF)) * shadow_scale));
-            const b = @as(i32, @intFromFloat(@as(f32, @floatFromInt(pixel & 0xFF)) * shadow_scale));
-
-            pixels[idx] = alpha |
-                (@as(u32, clampByte(r)) << 16) |
-                (@as(u32, clampByte(g)) << 8) |
-                @as(u32, clampByte(b));
-        }
-    }
 }
 
 fn applyBlockbusterGradeRange(pixels: []u32, start_index: usize, end_index: usize, grade: *const ColorGradeProfile) void {
@@ -3730,11 +1283,7 @@ fn applyBlockbusterGradeRange(pixels: []u32, start_index: usize, end_index: usiz
     }
 }
 
-fn clampByte(value: i32) u8 {
-    if (value <= 0) return 0;
-    if (value >= 255) return 255;
-    return @intCast(value);
-}
+const clampByte = render_utils.clampByte;
 
 /// The `Renderer` struct holds the entire state of the rendering engine.
 /// It manages the window connection, the pixel buffer, the rendering pipeline, and application state.
@@ -5989,7 +3538,7 @@ pub const Renderer = struct {
         self.taa_previous_mesh_valid = false;
     }
 
-    fn captureTemporalMeshState(self: *Renderer, mesh: *const Mesh) void {
+    pub fn captureTemporalMeshState(self: *Renderer, mesh: *const Mesh) void {
         if (self.taa_previous_mesh_vertices.len < mesh.vertices.len) {
             self.taa_previous_mesh_valid = false;
             return;
@@ -6450,13 +3999,9 @@ pub const Renderer = struct {
         self.render_pass_count = 0;
     }
 
-    fn recordRenderPassTiming(self: *Renderer, name: []const u8, start_ns: i128) void {
+    pub fn recordRenderPassTiming(self: *Renderer, name: []const u8, start_ns: i128) void {
         const elapsed_ns = std.time.nanoTimestamp() - start_ns;
         self.recordRenderPassDuration(name, elapsed_ns);
-    }
-
-    fn nanosecondsToMs(elapsed_ns: i128) f32 {
-        return @as(f32, @floatFromInt(elapsed_ns)) / 1_000_000.0;
     }
 
     fn computeStripeCount(max_jobs: usize, row_count: usize) usize {
@@ -6465,9 +4010,9 @@ pub const Renderer = struct {
         return @min(max_jobs, desired);
     }
 
-    fn recordRenderPassDuration(self: *Renderer, name: []const u8, elapsed_ns: i128) void {
+    pub fn recordRenderPassDuration(self: *Renderer, name: []const u8, elapsed_ns: i128) void {
         if (self.render_pass_count >= self.render_pass_timings.len) return;
-        const elapsed_ms = nanosecondsToMs(elapsed_ns);
+        const elapsed_ms = render_utils.nanosecondsToMs(elapsed_ns);
         var timing = &self.render_pass_timings[self.render_pass_count];
         if (timing.name.len == 0 or !std.mem.eql(u8, timing.name, name)) {
             timing.* = .{
@@ -6657,104 +4202,18 @@ pub const Renderer = struct {
     }
 
     fn buildShadowMap(self: *Renderer, mesh: *const Mesh, light_dir_world: math.Vec3, target_shadow_map: *ShadowMap) i128 {
-        if (!config.POST_SHADOW_ENABLED or mesh.meshlets.len == 0) {
-            target_shadow_map.*.active = false;
-            return 0;
-        }
-
-        const pass_start = std.time.nanoTimestamp();
-        const basis = chooseShadowBasis(light_dir_world);
-        var min_x = std.math.inf(f32);
-        var max_x = -std.math.inf(f32);
-        var min_y = std.math.inf(f32);
-        var max_y = -std.math.inf(f32);
-        var min_z = std.math.inf(f32);
-        var max_z = -std.math.inf(f32);
-
-        for (mesh.vertices) |vertex| {
-            const lx = math.Vec3.dot(vertex, basis.right);
-            const ly = math.Vec3.dot(vertex, basis.up);
-            const lz = math.Vec3.dot(vertex, basis.forward);
-            min_x = @min(min_x, lx);
-            max_x = @max(max_x, lx);
-            min_y = @min(min_y, ly);
-            max_y = @max(max_y, ly);
-            min_z = @min(min_z, lz);
-            max_z = @max(max_z, lz);
-        }
-
-        if (!std.math.isFinite(min_x) or !std.math.isFinite(max_x)) {
-            target_shadow_map.*.active = false;
-            return std.time.nanoTimestamp() - pass_start;
-        }
-
-        const range_x = @max(0.001, max_x - min_x);
-        const range_y = @max(0.001, max_y - min_y);
-        const range_z = @max(0.001, max_z - min_z);
-        const margin = @max(0.25, @max(range_x, @max(range_y, range_z)) * 0.08);
-
-        target_shadow_map.*.basis_right = basis.right;
-        target_shadow_map.*.basis_up = basis.up;
-        target_shadow_map.*.basis_forward = basis.forward;
-        target_shadow_map.*.min_x = min_x - margin;
-        target_shadow_map.*.max_x = max_x + margin;
-        target_shadow_map.*.min_y = min_y - margin;
-        target_shadow_map.*.max_y = max_y + margin;
-        target_shadow_map.*.min_z = min_z - margin;
-        target_shadow_map.*.max_z = max_z + margin;
-        target_shadow_map.*.inv_extent_x = 1.0 / @max(0.001, target_shadow_map.*.max_x - target_shadow_map.*.min_x);
-        target_shadow_map.*.inv_extent_y = 1.0 / @max(0.001, target_shadow_map.*.max_y - target_shadow_map.*.min_y);
-        target_shadow_map.*.depth_bias = config.POST_SHADOW_DEPTH_BIAS;
-        target_shadow_map.*.texel_bias = @max(
-            0.001,
-            @max(
-                (target_shadow_map.*.max_x - target_shadow_map.*.min_x) / @as(f32, @floatFromInt(target_shadow_map.*.width)),
-                (target_shadow_map.*.max_y - target_shadow_map.*.min_y) / @as(f32, @floatFromInt(target_shadow_map.*.height)),
-            ) * 0.35,
+        return shadow_map_pass.runBuild(
+            self,
+            mesh,
+            light_dir_world,
+            target_shadow_map,
+            config.POST_SHADOW_ENABLED,
+            config.POST_SHADOW_DEPTH_BIAS,
+            chooseShadowBasis,
+            computeStripeCount,
+            noopRenderPassJob,
+            rasterizeShadowMeshRange,
         );
-        target_shadow_map.*.active = true;
-        @memset(target_shadow_map.*.depth, std.math.inf(f32));
-
-        const stripe_count = computeStripeCount(self.shadow_raster_job_contexts.len, target_shadow_map.*.height);
-        const rows_per_job = if (stripe_count <= 1) target_shadow_map.*.height else (target_shadow_map.*.height + stripe_count - 1) / stripe_count;
-
-        if (stripe_count <= 1 or self.job_system == null) {
-            rasterizeShadowMeshRange(mesh, target_shadow_map, 0, target_shadow_map.*.height, light_dir_world);
-            return std.time.nanoTimestamp() - pass_start;
-        }
-
-        var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-        var stripe_index: usize = 0;
-        while (stripe_index < stripe_count) : (stripe_index += 1) {
-            const start_row = stripe_index * rows_per_job;
-            if (start_row >= target_shadow_map.*.height) break;
-            const end_row = @min(target_shadow_map.*.height, start_row + rows_per_job);
-
-            self.shadow_raster_job_contexts[stripe_index] = .{
-                .mesh = mesh,
-                .shadow = target_shadow_map,
-                .start_row = start_row,
-                .end_row = end_row,
-                .light_dir_world = light_dir_world,
-            };
-
-            if (stripe_index == 0) continue;
-
-            self.color_grade_jobs[stripe_index] = Job.init(
-                ShadowRasterJobContext.run,
-                @ptrCast(&self.shadow_raster_job_contexts[stripe_index]),
-                &parent_job,
-            );
-            if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
-                ShadowRasterJobContext.run(@ptrCast(&self.shadow_raster_job_contexts[stripe_index]));
-            }
-        }
-
-        ShadowRasterJobContext.run(@ptrCast(&self.shadow_raster_job_contexts[0]));
-        parent_job.complete();
-        parent_job.wait();
-
-        return std.time.nanoTimestamp() - pass_start;
     }
 
     fn applyShadowPass(
@@ -6769,12 +4228,8 @@ pub const Renderer = struct {
         pass_index: usize,
     ) void {
         if (!target_shadow_map.*.active or self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
-
-        const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
         const height: usize = @intCast(self.bitmap.height);
-        const stripe_count = computeStripeCount(self.shadow_resolve_job_contexts.len, height);
-        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
         const resolve_config = ShadowResolveConfig{
             .camera_position = camera_position,
             .basis_right = basis_right,
@@ -6787,294 +4242,16 @@ pub const Renderer = struct {
             .near_plane = projection.near_plane,
             .darkness_percent = config.POST_SHADOW_STRENGTH_PERCENT,
         };
-
-        if (stripe_count <= 1 or self.job_system == null) {
-            applyShadowRows(self.bitmap.pixels, self.scene_camera, width, 0, height, resolve_config, target_shadow_map);
-            self.recordRenderPassDuration(if (pass_index == 0) "shadow_pass_0" else "shadow_pass_1", build_elapsed_ns + (std.time.nanoTimestamp() - pass_start));
-            return;
-        }
-
-        var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-        var stripe_index: usize = 0;
-        while (stripe_index < stripe_count) : (stripe_index += 1) {
-            const start_row = stripe_index * rows_per_job;
-            if (start_row >= height) break;
-            const end_row = @min(height, start_row + rows_per_job);
-
-            self.shadow_resolve_job_contexts[stripe_index] = .{
-                .pixels = self.bitmap.pixels,
-                .camera_buffer = self.scene_camera,
-                .width = width,
-                .start_row = start_row,
-                .end_row = end_row,
-                .config = resolve_config,
-                .shadow = target_shadow_map,
-            };
-
-            if (stripe_index == 0) continue;
-
-            self.color_grade_jobs[stripe_index] = Job.init(
-                ShadowResolveJobContext.run,
-                @ptrCast(&self.shadow_resolve_job_contexts[stripe_index]),
-                &parent_job,
-            );
-            if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
-                ShadowResolveJobContext.run(@ptrCast(&self.shadow_resolve_job_contexts[stripe_index]));
-            }
-        }
-
-        ShadowResolveJobContext.run(@ptrCast(&self.shadow_resolve_job_contexts[0]));
-        parent_job.complete();
-        parent_job.wait();
-        self.recordRenderPassDuration(if (pass_index == 0) "shadow_pass_0" else "shadow_pass_1", build_elapsed_ns + (std.time.nanoTimestamp() - pass_start));
-    }
-
-    fn ensureHybridShadowScratch(self: *Renderer, caster_capacity: usize, tile_candidate_capacity: usize, grid_candidate_capacity: usize) !void {
-        if (caster_capacity > self.hybrid_shadow_caster_indices.len) {
-            self.hybrid_shadow_caster_indices = if (self.hybrid_shadow_caster_indices.len == 0)
-                try self.allocator.alloc(usize, caster_capacity)
-            else
-                try self.allocator.realloc(self.hybrid_shadow_caster_indices, caster_capacity);
-        }
-
-        if (caster_capacity > self.hybrid_shadow_caster_bounds.len) {
-            self.hybrid_shadow_caster_bounds = if (self.hybrid_shadow_caster_bounds.len == 0)
-                try self.allocator.alloc(HybridShadowCasterBounds, caster_capacity)
-            else
-                try self.allocator.realloc(self.hybrid_shadow_caster_bounds, caster_capacity);
-        }
-
-        if (caster_capacity > self.hybrid_shadow_candidate_marks.len) {
-            self.hybrid_shadow_candidate_marks = if (self.hybrid_shadow_candidate_marks.len == 0)
-                try self.allocator.alloc(u32, caster_capacity)
-            else
-                try self.allocator.realloc(self.hybrid_shadow_candidate_marks, caster_capacity);
-            @memset(self.hybrid_shadow_candidate_marks, 0);
-            self.hybrid_shadow_candidate_mark_generation = 0;
-        }
-
-        if (tile_candidate_capacity > self.hybrid_shadow_tile_candidates.len) {
-            self.hybrid_shadow_tile_candidates = if (self.hybrid_shadow_tile_candidates.len == 0)
-                try self.allocator.alloc(usize, tile_candidate_capacity)
-            else
-                try self.allocator.realloc(self.hybrid_shadow_tile_candidates, tile_candidate_capacity);
-        }
-
-        if (grid_candidate_capacity > self.hybrid_shadow_grid_candidates.len) {
-            self.hybrid_shadow_grid_candidates = if (self.hybrid_shadow_grid_candidates.len == 0)
-                try self.allocator.alloc(usize, grid_candidate_capacity)
-            else
-                try self.allocator.realloc(self.hybrid_shadow_grid_candidates, grid_candidate_capacity);
-        }
-    }
-
-    fn nextHybridShadowCandidateMark(self: *Renderer) u32 {
-        if (self.hybrid_shadow_candidate_marks.len == 0) return 0;
-
-        if (self.hybrid_shadow_candidate_mark_generation == std.math.maxInt(u32)) {
-            @memset(self.hybrid_shadow_candidate_marks, 0);
-            self.hybrid_shadow_candidate_mark_generation = 1;
-        } else {
-            self.hybrid_shadow_candidate_mark_generation += 1;
-            if (self.hybrid_shadow_candidate_mark_generation == 0) self.hybrid_shadow_candidate_mark_generation = 1;
-        }
-        return self.hybrid_shadow_candidate_mark_generation;
-    }
-
-    fn collectHybridShadowTileCandidates(
-        self: *Renderer,
-        receiver_bounds: HybridShadowReceiverBounds,
-        candidate_write: *usize,
-    ) HybridShadowStats {
-        var stats = HybridShadowStats{};
-        if (!self.hybrid_shadow_grid.active or self.hybrid_shadow_caster_count == 0) return stats;
-
-        const grid = self.hybrid_shadow_grid;
-        const mark = self.nextHybridShadowCandidateMark();
-        if (mark == 0) return stats;
-
-        const min_cell_x = std.math.clamp(
-            @as(i32, @intFromFloat(@floor((receiver_bounds.min_u - grid.min_u) * grid.inv_cell_u))),
-            0,
-            @as(i32, hybrid_shadow_grid_dim - 1),
+        shadow_map_pass.runPipeline(
+            self,
+            width,
+            height,
+            resolve_config,
+            target_shadow_map,
+            pass_index,
+            build_elapsed_ns,
+            noopRenderPassJob,
         );
-        const max_cell_x = std.math.clamp(
-            @as(i32, @intFromFloat(@floor((receiver_bounds.max_u - grid.min_u) * grid.inv_cell_u))),
-            0,
-            @as(i32, hybrid_shadow_grid_dim - 1),
-        );
-        const min_cell_y = std.math.clamp(
-            @as(i32, @intFromFloat(@floor((receiver_bounds.min_v - grid.min_v) * grid.inv_cell_v))),
-            0,
-            @as(i32, hybrid_shadow_grid_dim - 1),
-        );
-        const max_cell_y = std.math.clamp(
-            @as(i32, @intFromFloat(@floor((receiver_bounds.max_v - grid.min_v) * grid.inv_cell_v))),
-            0,
-            @as(i32, hybrid_shadow_grid_dim - 1),
-        );
-
-        var cell_y = min_cell_y;
-        while (cell_y <= max_cell_y) : (cell_y += 1) {
-            var cell_x = min_cell_x;
-            while (cell_x <= max_cell_x) : (cell_x += 1) {
-                const cell_index = @as(usize, @intCast(cell_y)) * hybrid_shadow_grid_dim + @as(usize, @intCast(cell_x));
-                const cell_range = self.hybrid_shadow_grid_ranges[cell_index];
-                if (cell_range.count == 0) continue;
-
-                const caster_indices = self.hybrid_shadow_grid_candidates[cell_range.offset .. cell_range.offset + cell_range.count];
-                stats.grid_candidate_count += caster_indices.len;
-                for (caster_indices) |caster_index| {
-                    if (caster_index >= self.hybrid_shadow_caster_count) continue;
-                    if (self.hybrid_shadow_candidate_marks[caster_index] == mark) continue;
-                    self.hybrid_shadow_candidate_marks[caster_index] = mark;
-                    stats.unique_candidate_count += 1;
-
-                    const caster = self.hybrid_shadow_caster_bounds[caster_index];
-                    if (caster.max_depth <= receiver_bounds.min_depth + config.POST_HYBRID_SHADOW_RAY_BIAS) continue;
-                    if (caster.max_u < receiver_bounds.min_u or caster.min_u > receiver_bounds.max_u) continue;
-                    if (caster.max_v < receiver_bounds.min_v or caster.min_v > receiver_bounds.max_v) continue;
-
-                    self.hybrid_shadow_tile_candidates[candidate_write.*] = caster_index;
-                    candidate_write.* += 1;
-                    stats.final_candidate_count += 1;
-                }
-            }
-        }
-
-        return stats;
-    }
-
-    fn buildHybridShadowReceiverBounds(
-        self: *Renderer,
-        tile: *const TileRenderer.Tile,
-        camera_to_light: CameraToLightTransform,
-    ) ?HybridShadowReceiverBounds {
-        const tile_min_x = std.math.clamp(tile.x, 0, self.bitmap.width - 1);
-        const tile_min_y = std.math.clamp(tile.y, 0, self.bitmap.height - 1);
-        const tile_max_x = std.math.clamp(tile.x + tile.width - 1, 0, self.bitmap.width - 1);
-        const tile_max_y = std.math.clamp(tile.y + tile.height - 1, 0, self.bitmap.height - 1);
-        const sample_stride = @max(1, config.POST_HYBRID_SHADOW_EDGE_DOWNSAMPLE);
-        var min_u = std.math.inf(f32);
-        var max_u = -std.math.inf(f32);
-        var min_v = std.math.inf(f32);
-        var max_v = -std.math.inf(f32);
-        var min_depth = std.math.inf(f32);
-        var found_valid = false;
-
-        var screen_y = tile_min_y;
-        while (screen_y <= tile_max_y) {
-            const row_base = @as(usize, @intCast(screen_y * self.bitmap.width));
-            var screen_x = tile_min_x;
-            while (screen_x <= tile_max_x) {
-                const idx = row_base + @as(usize, @intCast(screen_x));
-                const camera_pos = self.scene_camera[idx];
-                if (std.math.isFinite(camera_pos.z) and camera_pos.z > NEAR_CLIP) {
-                    const light_sample = camera_to_light.project(camera_pos);
-
-                    found_valid = true;
-                    if (light_sample.u < min_u) min_u = light_sample.u;
-                    if (light_sample.u > max_u) max_u = light_sample.u;
-                    if (light_sample.v < min_v) min_v = light_sample.v;
-                    if (light_sample.v > max_v) max_v = light_sample.v;
-                    if (light_sample.depth < min_depth) min_depth = light_sample.depth;
-                }
-
-                if (screen_x == tile_max_x) break;
-                screen_x = @min(tile_max_x, screen_x + sample_stride);
-            }
-
-            if (screen_y == tile_max_y) break;
-            screen_y = @min(tile_max_y, screen_y + sample_stride);
-        }
-
-        if (!found_valid) return null;
-        return .{
-            .valid_min_x = tile_min_x,
-            .valid_min_y = tile_min_y,
-            .valid_max_x = tile_max_x,
-            .valid_max_y = tile_max_y,
-            .min_u = min_u,
-            .max_u = max_u,
-            .min_v = min_v,
-            .max_v = max_v,
-            .min_depth = min_depth,
-        };
-    }
-
-    fn buildHybridShadowGrid(self: *Renderer, caster_count: usize, light_basis_right: math.Vec3, light_basis_up: math.Vec3) void {
-        if (caster_count == 0) {
-            self.hybrid_shadow_grid.active = false;
-            return;
-        }
-
-        var min_u = std.math.inf(f32);
-        var max_u = -std.math.inf(f32);
-        var min_v = std.math.inf(f32);
-        var max_v = -std.math.inf(f32);
-        for (self.hybrid_shadow_caster_bounds[0..caster_count]) |caster| {
-            if (caster.min_u < min_u) min_u = caster.min_u;
-            if (caster.max_u > max_u) max_u = caster.max_u;
-            if (caster.min_v < min_v) min_v = caster.min_v;
-            if (caster.max_v > max_v) max_v = caster.max_v;
-        }
-
-        const extent_u = @max(1e-3, max_u - min_u);
-        const extent_v = @max(1e-3, max_v - min_v);
-        self.hybrid_shadow_grid = .{
-            .basis_right = light_basis_right,
-            .basis_up = light_basis_up,
-            .min_u = min_u,
-            .max_u = max_u,
-            .min_v = min_v,
-            .max_v = max_v,
-            .inv_cell_u = @as(f32, @floatFromInt(hybrid_shadow_grid_dim)) / extent_u,
-            .inv_cell_v = @as(f32, @floatFromInt(hybrid_shadow_grid_dim)) / extent_v,
-            .active = true,
-        };
-
-        var counts = [_]usize{0} ** hybrid_shadow_grid_cells;
-        for (self.hybrid_shadow_caster_bounds[0..caster_count]) |caster| {
-            const min_cell_x = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.min_u - min_u) * self.hybrid_shadow_grid.inv_cell_u))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
-            const max_cell_x = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.max_u - min_u) * self.hybrid_shadow_grid.inv_cell_u))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
-            const min_cell_y = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.min_v - min_v) * self.hybrid_shadow_grid.inv_cell_v))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
-            const max_cell_y = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.max_v - min_v) * self.hybrid_shadow_grid.inv_cell_v))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
-
-            var cell_y = min_cell_y;
-            while (cell_y <= max_cell_y) : (cell_y += 1) {
-                var cell_x = min_cell_x;
-                while (cell_x <= max_cell_x) : (cell_x += 1) {
-                    const cell_index = @as(usize, @intCast(cell_y)) * hybrid_shadow_grid_dim + @as(usize, @intCast(cell_x));
-                    counts[cell_index] += 1;
-                }
-            }
-        }
-
-        var offset: usize = 0;
-        for (&self.hybrid_shadow_grid_ranges, 0..) |*range, cell_index| {
-            range.offset = offset;
-            range.count = counts[cell_index];
-            offset += counts[cell_index];
-        }
-
-        var write_offsets = [_]usize{0} ** hybrid_shadow_grid_cells;
-        for (self.hybrid_shadow_caster_bounds[0..caster_count], 0..) |caster, caster_index| {
-            const min_cell_x = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.min_u - min_u) * self.hybrid_shadow_grid.inv_cell_u))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
-            const max_cell_x = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.max_u - min_u) * self.hybrid_shadow_grid.inv_cell_u))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
-            const min_cell_y = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.min_v - min_v) * self.hybrid_shadow_grid.inv_cell_v))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
-            const max_cell_y = std.math.clamp(@as(i32, @intFromFloat(@floor((caster.max_v - min_v) * self.hybrid_shadow_grid.inv_cell_v))), 0, @as(i32, hybrid_shadow_grid_dim - 1));
-
-            var cell_y = min_cell_y;
-            while (cell_y <= max_cell_y) : (cell_y += 1) {
-                var cell_x = min_cell_x;
-                while (cell_x <= max_cell_x) : (cell_x += 1) {
-                    const cell_index = @as(usize, @intCast(cell_y)) * hybrid_shadow_grid_dim + @as(usize, @intCast(cell_x));
-                    const write_index = self.hybrid_shadow_grid_ranges[cell_index].offset + write_offsets[cell_index];
-                    self.hybrid_shadow_grid_candidates[write_index] = caster_index;
-                    write_offsets[cell_index] += 1;
-                }
-            }
-        }
     }
 
     fn applyAdaptiveShadowPass(
@@ -7110,274 +4287,31 @@ pub const Renderer = struct {
             light_basis.up,
             normalized_light_dir,
         );
-        var accel_elapsed_ns: i128 = 0;
-        var active_tile_capacity: usize = 0;
-        for (grid.tiles, 0..) |_, tile_index| {
-            if (tile_index < active_flags.len and active_flags[tile_index]) active_tile_capacity += 1;
-        }
-
-        if (active_tile_capacity == 0 or mesh.meshlets.len == 0) return;
-        self.ensureHybridShadowScratch(mesh.meshlets.len, active_tile_capacity * mesh.meshlets.len, mesh.meshlets.len * hybrid_shadow_grid_cells) catch |err| {
-            pipeline_logger.errorSub("hybrid_shadow", "scratch allocation failed: {s}", .{@errorName(err)});
-            return;
-        };
-
-        const accel_needs_rebuild = !self.hybrid_shadow_accel_valid or
-            self.hybrid_shadow_cached_meshlet_count != mesh.meshlets.len or
-            self.hybrid_shadow_cached_meshlet_vertex_count != mesh.meshlet_vertices.len or
-            self.hybrid_shadow_cached_meshlet_primitive_count != mesh.meshlet_primitives.len or
-            math.Vec3.dot(self.hybrid_shadow_cached_light_dir, normalized_light_dir) < shadow_rebuild_dot_threshold;
-
-        if (accel_needs_rebuild) {
-            const accel_start = std.time.nanoTimestamp();
-            var caster_count: usize = 0;
-            for (mesh.meshlets, 0..) |meshlet, meshlet_index| {
-                if (meshlet.primitive_count == 0 or meshlet.bounds_radius <= 0.0) continue;
-                const center_u = math.Vec3.dot(meshlet.bounds_center, light_basis.right);
-                const center_v = math.Vec3.dot(meshlet.bounds_center, light_basis.up);
-                const center_depth = math.Vec3.dot(meshlet.bounds_center, normalized_light_dir);
-
-                self.hybrid_shadow_caster_indices[caster_count] = meshlet_index;
-                self.hybrid_shadow_caster_bounds[caster_count] = .{
-                    .meshlet_index = meshlet_index,
-                    .min_u = center_u - meshlet.bounds_radius,
-                    .max_u = center_u + meshlet.bounds_radius,
-                    .min_v = center_v - meshlet.bounds_radius,
-                    .max_v = center_v + meshlet.bounds_radius,
-                    .max_depth = center_depth + meshlet.bounds_radius,
-                };
-                caster_count += 1;
-            }
-            self.hybrid_shadow_caster_count = caster_count;
-            self.hybrid_shadow_cached_light_dir = normalized_light_dir;
-            self.hybrid_shadow_cached_meshlet_count = mesh.meshlets.len;
-            self.hybrid_shadow_cached_meshlet_vertex_count = mesh.meshlet_vertices.len;
-            self.hybrid_shadow_cached_meshlet_primitive_count = mesh.meshlet_primitives.len;
-            self.hybrid_shadow_accel_valid = caster_count != 0;
-            if (caster_count == 0) return;
-            self.buildHybridShadowGrid(caster_count, light_basis.right, light_basis.up);
-            accel_elapsed_ns = std.time.nanoTimestamp() - accel_start;
-        }
-
-        const caster_count = self.hybrid_shadow_caster_count;
-        if (caster_count == 0) return;
-
-        const candidate_start = std.time.nanoTimestamp();
-        var candidate_write: usize = 0;
-        var shadow_job_count: usize = 0;
-        for (grid.tiles, 0..) |*tile, tile_index| {
-            tile_ranges[tile_index] = .{};
-            if (tile_index >= active_flags.len or !active_flags[tile_index]) continue;
-            self.hybrid_shadow_stats.active_tile_count += 1;
-
-            const receiver_bounds = self.buildHybridShadowReceiverBounds(
-                tile,
-                camera_to_light,
-            ) orelse continue;
-
-            const candidate_offset = candidate_write;
-            const candidate_stats = self.collectHybridShadowTileCandidates(receiver_bounds, &candidate_write);
-            self.hybrid_shadow_stats.grid_candidate_count += candidate_stats.grid_candidate_count;
-            self.hybrid_shadow_stats.unique_candidate_count += candidate_stats.unique_candidate_count;
-            self.hybrid_shadow_stats.final_candidate_count += candidate_stats.final_candidate_count;
-
-            const candidate_count = candidate_write - candidate_offset;
-            if (candidate_count == 0) continue;
-
-            tile_ranges[tile_index] = .{ .offset = candidate_offset, .count = candidate_count };
-            shadow_jobs[tile_index] = .{
-                .renderer = self,
-                .mesh = mesh,
-                .tile = tile,
-                .camera_position = camera_position,
-                .basis_right = basis_right,
-                .basis_up = basis_up,
-                .basis_forward = basis_forward,
-                .light_dir_world = normalized_light_dir,
-                .camera_to_light = camera_to_light,
-                .darkness_scale = darkness_scale,
-                .valid_min_x = receiver_bounds.valid_min_x,
-                .valid_min_y = receiver_bounds.valid_min_y,
-                .valid_max_x = receiver_bounds.valid_max_x,
-                .valid_max_y = receiver_bounds.valid_max_y,
-                .candidate_offset = candidate_offset,
-                .candidate_count = candidate_count,
-            };
-            active_indices[shadow_job_count] = tile_index;
-            shadow_job_count += 1;
-        }
-
-        self.hybrid_shadow_stats.accel_rebuild_ms = nanosecondsToMs(accel_elapsed_ns);
-        self.hybrid_shadow_stats.candidate_ms = nanosecondsToMs(std.time.nanoTimestamp() - candidate_start);
-        self.hybrid_shadow_stats.job_count = shadow_job_count;
-        if (shadow_job_count == 0) return;
-        const cache_clear_start = std.time.nanoTimestamp();
-        @memset(self.hybrid_shadow_coarse_cache, 0xFF);
-        @memset(self.hybrid_shadow_edge_cache, 0xFF);
-        self.hybrid_shadow_stats.cache_clear_ms = nanosecondsToMs(std.time.nanoTimestamp() - cache_clear_start);
-
-        if (self.hybrid_shadow_debug.enabled) {
-            const execute_start = std.time.nanoTimestamp();
-            if (self.hybrid_shadow_debug.completed_jobs > shadow_job_count) {
-                self.hybrid_shadow_debug.completed_jobs = shadow_job_count;
-            }
-            if (self.hybrid_shadow_debug.advance_requested) {
-                self.hybrid_shadow_debug.completed_jobs = @min(shadow_job_count, self.hybrid_shadow_debug.completed_jobs + 1);
-            }
-            self.hybrid_shadow_debug.advance_requested = false;
-
-            for (active_indices[0..self.hybrid_shadow_debug.completed_jobs]) |tile_index| {
-                AdaptiveShadowTileJob.run(@ptrCast(&shadow_jobs[tile_index]));
-            }
-            self.hybrid_shadow_stats.execute_ms = nanosecondsToMs(std.time.nanoTimestamp() - execute_start);
-            self.recordRenderPassTiming("hybrid_shadow_step", pass_start);
-            return;
-        }
-
-        const execute_start = std.time.nanoTimestamp();
-        if (self.job_system) |job_sys| {
-            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-            const main_tile_idx = active_indices[0];
-
-            for (active_indices[1..shadow_job_count]) |tile_index| {
-                jobs[tile_index] = Job.init(
-                    AdaptiveShadowTileJob.run,
-                    @ptrCast(&shadow_jobs[tile_index]),
-                    &parent_job,
-                );
-                if (!job_sys.submitJobAuto(&jobs[tile_index])) {
-                    AdaptiveShadowTileJob.run(@ptrCast(&shadow_jobs[tile_index]));
-                }
-            }
-
-            AdaptiveShadowTileJob.run(@ptrCast(&shadow_jobs[main_tile_idx]));
-            parent_job.complete();
-            parent_job.wait();
-        } else {
-            for (active_indices[0..shadow_job_count]) |tile_index| {
-                AdaptiveShadowTileJob.run(@ptrCast(&shadow_jobs[tile_index]));
-            }
-        }
-
-        self.hybrid_shadow_stats.execute_ms = nanosecondsToMs(std.time.nanoTimestamp() - execute_start);
-        self.recordRenderPassTiming("hybrid_shadow", pass_start);
+        hybrid_shadow_pass.runPipeline(
+            self,
+            mesh,
+            grid,
+            active_flags,
+            active_indices,
+            shadow_jobs,
+            tile_ranges,
+            jobs,
+            camera_position,
+            basis_right,
+            basis_up,
+            basis_forward,
+            normalized_light_dir,
+            light_basis.right,
+            light_basis.up,
+            camera_to_light,
+            darkness_scale,
+            pass_start,
+            shadow_rebuild_dot_threshold,
+            noopRenderPassJob,
+        );
     }
 
-    const SkyboxJobContext = struct {
-        renderer: *Renderer,
-        right: math.Vec3,
-        up: math.Vec3,
-        forward: math.Vec3,
-        projection: ProjectionParams,
-        hdri_map: *const texture.HdrTexture,
-        start_row: usize,
-        end_row: usize,
-    };
-
-    fn runSkyboxJobWrapper(ctx_ptr: *anyopaque) void {
-        const ctx: *SkyboxJobContext = @ptrCast(@alignCast(ctx_ptr));
-        applySkyboxRows(ctx);
-    }
-
-    fn applySkyboxRows(ctx: *SkyboxJobContext) void {
-        const width: usize = @intCast(ctx.renderer.bitmap.width);
-        const center_x = ctx.projection.center_x;
-        const center_y = ctx.projection.center_y;
-
-        var y: usize = ctx.start_row;
-        while (y < ctx.end_row) : (y += 1) {
-            const py_f = @as(f32, @floatFromInt(y));
-            const ndc_y = (center_y - py_f) / center_y;
-            const camera_y = ndc_y / ctx.projection.y_scale;
-
-            const simd_lanes = runtimeColorGradeSimdLanes();
-            var x: usize = 0;
-            while (x + simd_lanes <= width) : (x += simd_lanes) {
-                var alpha: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-                var r_arr: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-                var g_arr: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-                var b_arr: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-
-                for (0..simd_lanes) |lane| {
-                    const idx = y * width + x + lane;
-                    const current_pixel = ctx.renderer.bitmap.pixels[idx];
-                    alpha[lane] = 0xFF000000;
-
-                    if (ctx.renderer.scene_depth[idx] < std.math.inf(f32)) {
-                        r_arr[lane] = (current_pixel >> 16) & 0xFF;
-                        g_arr[lane] = (current_pixel >> 8) & 0xFF;
-                        b_arr[lane] = current_pixel & 0xFF;
-                    } else {
-                        const px_f = @as(f32, @floatFromInt(x + lane));
-                        const ndc_x = (px_f - center_x) / center_x;
-                        const camera_x = ndc_x / ctx.projection.x_scale;
-
-                        const dir_local = math.Vec3.normalize(math.Vec3.new(camera_x, camera_y, 1.0));
-                        const right_term = math.Vec3.scale(ctx.right, dir_local.x);
-                        const up_term = math.Vec3.scale(ctx.up, dir_local.y);
-                        const fwd_term = math.Vec3.scale(ctx.forward, dir_local.z);
-                        const dir_world = math.Vec3.normalize(math.Vec3.add(right_term, math.Vec3.add(up_term, fwd_term)));
-                        const hdr_color = ctx.hdri_map.sampleEquirectangularFast(dir_world);
-
-                        const exposure: f32 = 2.5;
-                        const r_ldr = (hdr_color.x * exposure) / (1.0 + (hdr_color.x * exposure));
-                        const g_ldr = (hdr_color.y * exposure) / (1.0 + (hdr_color.y * exposure));
-                        const b_ldr = (hdr_color.z * exposure) / (1.0 + (hdr_color.z * exposure));
-
-                        const r_gamma = std.math.sqrt(r_ldr);
-                        const g_gamma = std.math.sqrt(g_ldr);
-                        const b_gamma = std.math.sqrt(b_ldr);
-
-                        r_arr[lane] = @as(u32, @intFromFloat(std.math.clamp(r_gamma * 255.0, 0.0, 255.0)));
-                        g_arr[lane] = @as(u32, @intFromFloat(std.math.clamp(g_gamma * 255.0, 0.0, 255.0)));
-                        b_arr[lane] = @as(u32, @intFromFloat(std.math.clamp(b_gamma * 255.0, 0.0, 255.0)));
-                    }
-                }
-
-                var packed_pixels: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-                packShiftedColorBatch(alpha[0..simd_lanes], r_arr[0..simd_lanes], g_arr[0..simd_lanes], b_arr[0..simd_lanes], packed_pixels[0..simd_lanes]);
-                for (0..simd_lanes) |lane| {
-                    ctx.renderer.bitmap.pixels[y * width + x + lane] = packed_pixels[lane];
-                }
-            }
-
-            while (x < width) : (x += 1) {
-                const idx = y * width + x;
-
-                // Only draw skybox where depth is infinite (background)
-                if (ctx.renderer.scene_depth[idx] < std.math.inf(f32)) continue;
-
-                const px_f = @as(f32, @floatFromInt(x));
-                const ndc_x = (px_f - center_x) / center_x;
-                const camera_x = ndc_x / ctx.projection.x_scale;
-
-                const dir_local = math.Vec3.normalize(math.Vec3.new(camera_x, camera_y, 1.0));
-
-                const right_term = math.Vec3.scale(ctx.right, dir_local.x);
-                const up_term = math.Vec3.scale(ctx.up, dir_local.y);
-                const fwd_term = math.Vec3.scale(ctx.forward, dir_local.z);
-                const dir_world = math.Vec3.normalize(math.Vec3.add(right_term, math.Vec3.add(up_term, fwd_term)));
-
-                const hdr_color = ctx.hdri_map.sampleEquirectangularFast(dir_world);
-
-                // Tonemap with exposure and gamma correction
-                const exposure: f32 = 2.5;
-                const r_ldr = (hdr_color.x * exposure) / (1.0 + (hdr_color.x * exposure));
-                const g_ldr = (hdr_color.y * exposure) / (1.0 + (hdr_color.y * exposure));
-                const b_ldr = (hdr_color.z * exposure) / (1.0 + (hdr_color.z * exposure));
-
-                const r_gamma = std.math.sqrt(r_ldr);
-                const g_gamma = std.math.sqrt(g_ldr);
-                const b_gamma = std.math.sqrt(b_ldr);
-
-                const r = @as(u32, @intFromFloat(std.math.clamp(r_gamma * 255.0, 0.0, 255.0)));
-                const g = @as(u32, @intFromFloat(std.math.clamp(g_gamma * 255.0, 0.0, 255.0)));
-                const b = @as(u32, @intFromFloat(std.math.clamp(b_gamma * 255.0, 0.0, 255.0)));
-
-                ctx.renderer.bitmap.pixels[idx] = (0xFF << 24) | (r << 16) | (g << 8) | b;
-            }
-        }
-    }
+    const SkyboxJobContext = skybox_pass.JobContext(Renderer, ProjectionParams, texture.HdrTexture);
 
     fn applySkyboxPass(
         self: *Renderer,
@@ -7389,58 +4323,109 @@ pub const Renderer = struct {
         const hdri_map = self.hdri_map orelse return;
         const pass_start = std.time.nanoTimestamp();
         const height: usize = @intCast(self.bitmap.height);
-
-        const stripe_count = computeStripeCount(self.skybox_job_contexts.len, height);
-        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
-
-        if (stripe_count <= 1 or self.job_system == null) {
-            var ctx = SkyboxJobContext{
-                .renderer = self,
-                .right = basis_right,
-                .up = basis_up,
-                .forward = basis_forward,
-                .projection = projection,
-                .hdri_map = &hdri_map,
-                .start_row = 0,
-                .end_row = height,
-            };
-            applySkyboxRows(&ctx);
-            self.recordRenderPassTiming("skybox", pass_start);
-            return;
-        }
-
-        var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-        var stripe_index: usize = 0;
-        while (stripe_index < stripe_count) : (stripe_index += 1) {
-            const start_row = stripe_index * rows_per_job;
-            if (start_row >= height) break;
-            const end_row = @min(height, start_row + rows_per_job);
-
-            self.skybox_job_contexts[stripe_index] = .{
-                .renderer = self,
-                .right = basis_right,
-                .up = basis_up,
-                .forward = basis_forward,
-                .projection = projection,
-                .hdri_map = &hdri_map,
-                .start_row = start_row,
-                .end_row = end_row,
-            };
-
-            self.color_grade_jobs[stripe_index] = Job.init(
-                runSkyboxJobWrapper,
-                @ptrCast(&self.skybox_job_contexts[stripe_index]),
-                &parent_job,
-            );
-            if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
-                runSkyboxJobWrapper(@ptrCast(&self.skybox_job_contexts[stripe_index]));
-            }
-        }
-
-        runSkyboxJobWrapper(@ptrCast(&self.skybox_job_contexts[0]));
-        parent_job.complete();
-        parent_job.wait();
+        skybox_pass.runPipeline(
+            self,
+            basis_right,
+            basis_up,
+            basis_forward,
+            projection,
+            &hdri_map,
+            height,
+            noopRenderPassJob,
+            skybox_pass.runJobWrapper(SkyboxJobContext),
+        );
         self.recordRenderPassTiming("skybox", pass_start);
+    }
+
+    fn applyShadowLightFromPass(ctx: ShadowLightDispatchContext, pass_index: usize) void {
+        const shadow_map_ptr = &ctx.renderer.lights.items[pass_index].shadow_map;
+        ctx.renderer.applyShadowPass(
+            ctx.camera_position,
+            ctx.basis_right,
+            ctx.basis_up,
+            ctx.basis_forward,
+            ctx.projection,
+            ctx.shadow_elapsed_ns,
+            shadow_map_ptr,
+            pass_index,
+        );
+    }
+
+    fn applyHybridShadowFromPass(ctx: HybridShadowDispatchContext) void {
+        ctx.renderer.applyAdaptiveShadowPass(
+            ctx.mesh,
+            ctx.camera_position,
+            ctx.basis_right,
+            ctx.basis_up,
+            ctx.basis_forward,
+            ctx.light_dir_world,
+        );
+    }
+
+    fn isPostPassEnabled(ctx: PostPassExecutionContext, pass_id: pass_registry.RenderPassId) bool {
+        _ = ctx;
+        return switch (pass_id) {
+            .skybox => config.POST_SKYBOX_ENABLED,
+            .shadow_map => config.POST_SHADOW_ENABLED,
+            .shadow_resolve => config.POST_SHADOW_ENABLED,
+            .hybrid_shadow => config.POST_HYBRID_SHADOW_ENABLED,
+            .ssao => config.POST_SSAO_ENABLED,
+            .ssgi => config.POST_SSGI_ENABLED,
+            .ssr => config.POST_SSR_ENABLED,
+            .depth_fog => config.POST_DEPTH_FOG_ENABLED,
+            .taa => config.POST_TAA_ENABLED,
+            .motion_blur => config.POST_MOTION_BLUR_ENABLED,
+            .god_rays => config.POST_GOD_RAYS_ENABLED,
+            .bloom => config.POST_BLOOM_ENABLED,
+            .lens_flare => config.POST_LENS_FLARE_ENABLED,
+            .dof => config.POST_DOF_ENABLED,
+            .chromatic_aberration => config.POST_CHROMATIC_ABERRATION_ENABLED,
+            .film_grain_vignette => config.POST_FILM_GRAIN_VIGNETTE_ENABLED,
+            .color_grade => config.POST_COLOR_CORRECTION_ENABLED,
+        };
+    }
+
+    fn runPostPassById(ctx: PostPassExecutionContext, pass_id: pass_registry.RenderPassId) void {
+        switch (pass_id) {
+            .skybox => ctx.renderer.applySkyboxPass(ctx.basis_right, ctx.basis_up, ctx.basis_forward, ctx.projection),
+            .shadow_map, .shadow_resolve => {
+                const shadow_ctx = ShadowLightDispatchContext{
+                    .renderer = ctx.renderer,
+                    .camera_position = ctx.camera_position,
+                    .basis_right = ctx.basis_right,
+                    .basis_up = ctx.basis_up,
+                    .basis_forward = ctx.basis_forward,
+                    .projection = ctx.projection,
+                    .shadow_elapsed_ns = ctx.shadow_elapsed_ns,
+                };
+                shadow_map_pass.runPerLight(ctx.renderer.lights.items.len, shadow_ctx, applyShadowLightFromPass);
+            },
+            .hybrid_shadow => {
+                const hybrid_ctx = HybridShadowDispatchContext{
+                    .renderer = ctx.renderer,
+                    .mesh = ctx.mesh,
+                    .camera_position = ctx.camera_position,
+                    .basis_right = ctx.basis_right,
+                    .basis_up = ctx.basis_up,
+                    .basis_forward = ctx.basis_forward,
+                    .light_dir_world = ctx.light_dir_world,
+                };
+                hybrid_shadow_pass.run(hybrid_ctx, applyHybridShadowFromPass);
+            },
+            .ssao => ctx.renderer.applyAmbientOcclusionPass(),
+            .ssgi => ctx.renderer.applySSGIPass(),
+            .ssr => ctx.renderer.applySSRPass(ctx.projection),
+            .depth_fog => ctx.renderer.applyDepthFogPass(),
+            .taa => ctx.renderer.applyTemporalAAPass(ctx.mesh, ctx.current_view),
+            .motion_blur => ctx.renderer.applyMotionBlurPass(ctx.current_view),
+            .god_rays => ctx.renderer.applyGodRaysPass(ctx.projection, ctx.light_dir_world),
+            .bloom => ctx.renderer.applyBloomPass(),
+            .lens_flare => ctx.renderer.applyLensFlarePass(),
+            .dof => ctx.renderer.applyDepthOfFieldPass(),
+            .chromatic_aberration => ctx.renderer.applyChromaticAberrationPass(),
+            .film_grain_vignette => ctx.renderer.applyFilmGrainVignettePass(),
+            .color_grade => ctx.renderer.applyBlockbusterColorGradePass(),
+        }
     }
 
     fn applyPostProcessingPasses(
@@ -7455,79 +4440,25 @@ pub const Renderer = struct {
         light_dir_world: math.Vec3,
         shadow_elapsed_ns: i128,
     ) void {
-        if (config.POST_SKYBOX_ENABLED) self.applySkyboxPass(basis_right, basis_up, basis_forward, projection);
-        if (config.POST_SHADOW_ENABLED) {
-            for (self.lights.items, 0..) |*light, pass_index| {
-                self.applyShadowPass(camera_position, basis_right, basis_up, basis_forward, projection, shadow_elapsed_ns, &light.shadow_map, pass_index);
-            }
-        }
-        if (config.POST_HYBRID_SHADOW_ENABLED) self.applyAdaptiveShadowPass(mesh, camera_position, basis_right, basis_up, basis_forward, light_dir_world);
-        if (config.POST_SSAO_ENABLED) self.applyAmbientOcclusionPass();
-        if (config.POST_SSGI_ENABLED) self.applySSGIPass();
-        if (config.POST_SSR_ENABLED) self.applySSRPass(projection);
-        if (config.POST_DEPTH_FOG_ENABLED) self.applyDepthFogPass();
-        if (config.POST_TAA_ENABLED) self.applyTemporalAAPass(mesh, current_view);
-        if (config.POST_MOTION_BLUR_ENABLED) self.applyMotionBlurPass(current_view);
-        if (config.POST_GOD_RAYS_ENABLED) self.applyGodRaysPass(projection, light_dir_world);
-        if (config.POST_BLOOM_ENABLED) self.applyBloomPass();
-        if (config.POST_LENS_FLARE_ENABLED) self.applyLensFlarePass();
-        if (config.POST_DOF_ENABLED) self.applyDepthOfFieldPass();
-        if (config.POST_CHROMATIC_ABERRATION_ENABLED) self.applyChromaticAberrationPass();
-        if (config.POST_FILM_GRAIN_VIGNETTE_ENABLED) self.applyFilmGrainVignettePass();
-        if (!config.POST_COLOR_CORRECTION_ENABLED) return;
-        self.applyBlockbusterColorGradePass();
+        const ctx = PostPassExecutionContext{
+            .renderer = self,
+            .mesh = mesh,
+            .camera_position = camera_position,
+            .basis_right = basis_right,
+            .basis_up = basis_up,
+            .basis_forward = basis_forward,
+            .current_view = current_view,
+            .projection = projection,
+            .light_dir_world = light_dir_world,
+            .shadow_elapsed_ns = shadow_elapsed_ns,
+        };
+        pass_registry.executePostPasses(ctx, isPostPassEnabled, runPostPassById);
     }
 
     fn applySSGIPass(self: *Renderer) void {
         const pass_start = std.time.nanoTimestamp();
         const height: usize = @intCast(self.bitmap.height);
-
-        const stripe_count = computeStripeCount(self.ssgi_job_contexts.len, height);
-        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
-
-        if (stripe_count <= 1 or self.job_system == null) {
-            var ctx = SSGIJobContext{
-                .renderer = self,
-                .scene_pixels = self.bitmap.pixels,
-                .scratch_pixels = self.ssgi_scratch_pixels,
-                .scene_camera = self.scene_camera,
-                .start_row = 0,
-                .end_row = height,
-            };
-            SSGIJobContext.run(@ptrCast(&ctx));
-        } else {
-            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-            var stripe_index: usize = 0;
-            while (stripe_index < stripe_count) : (stripe_index += 1) {
-                const start_row = stripe_index * rows_per_job;
-                if (start_row >= height) break;
-                const end_row = @min(height, start_row + rows_per_job);
-
-                self.ssgi_job_contexts[stripe_index] = .{
-                    .renderer = self,
-                    .scene_pixels = self.bitmap.pixels,
-                    .scratch_pixels = self.ssgi_scratch_pixels,
-                    .scene_camera = self.scene_camera,
-                    .start_row = start_row,
-                    .end_row = end_row,
-                };
-
-                if (stripe_index == 0) continue;
-
-                self.color_grade_jobs[stripe_index] = Job.init(
-                    SSGIJobContext.run,
-                    @ptrCast(&self.ssgi_job_contexts[stripe_index]),
-                    &parent_job,
-                );
-                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
-                    SSGIJobContext.run(@ptrCast(&self.ssgi_job_contexts[stripe_index]));
-                }
-            }
-
-            SSGIJobContext.run(@ptrCast(&self.ssgi_job_contexts[0]));
-            parent_job.complete();
-            parent_job.wait();
-        }
+        ssgi_pass.runPipeline(self, height, noopRenderPassJob);
 
         // Copy back to scene_pixels
         @memcpy(self.bitmap.pixels, self.ssgi_scratch_pixels);
@@ -7538,109 +4469,17 @@ pub const Renderer = struct {
         const pass_start = std.time.nanoTimestamp();
         const scene_width: usize = @intCast(self.bitmap.width);
         const scene_height: usize = @intCast(self.bitmap.height);
-        const ao = &self.ao_scratch;
-        self.dispatchAmbientOcclusionStage(.generate, ao.height, scene_width, scene_height);
-        self.dispatchAmbientOcclusionStage(.blur_horizontal, ao.height, scene_width, scene_height);
-        self.dispatchAmbientOcclusionStage(.blur_vertical, ao.height, scene_width, scene_height);
-        self.dispatchAmbientOcclusionStage(.composite, scene_height, scene_width, scene_height);
-        self.recordRenderPassTiming("ssao", pass_start);
-    }
-
-    fn dispatchAmbientOcclusionStage(
-        self: *Renderer,
-        stage: AOPassStage,
-        row_count: usize,
-        scene_width: usize,
-        scene_height: usize,
-    ) void {
-        if (row_count == 0) return;
-        const stripe_count = computeStripeCount(self.ao_job_contexts.len, row_count);
-        const rows_per_job = if (stripe_count <= 1) row_count else (row_count + stripe_count - 1) / stripe_count;
-
-        if (stripe_count <= 1 or self.job_system == null) {
-            self.runAmbientOcclusionStageRange(stage, 0, row_count, scene_width, scene_height);
-            return;
-        }
-
-        var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-        var stripe_index: usize = 0;
-        while (stripe_index < stripe_count) : (stripe_index += 1) {
-            const start_row = stripe_index * rows_per_job;
-            if (start_row >= row_count) break;
-            const end_row = @min(row_count, start_row + rows_per_job);
-
-            self.ao_job_contexts[stripe_index] = .{
-                .renderer = self,
-                .stage = stage,
-                .scene_width = scene_width,
-                .scene_height = scene_height,
-                .start_row = start_row,
-                .end_row = end_row,
-            };
-
-            if (stripe_index == 0) continue;
-
-            self.color_grade_jobs[stripe_index] = Job.init(
-                AOJobContext.run,
-                @ptrCast(&self.ao_job_contexts[stripe_index]),
-                &parent_job,
-            );
-            if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
-                self.runAmbientOcclusionStageRange(stage, start_row, end_row, scene_width, scene_height);
-            }
-        }
-
-        self.runAmbientOcclusionStageRange(
-            stage,
-            self.ao_job_contexts[0].start_row,
-            self.ao_job_contexts[0].end_row,
+        ssao_pass.runPipeline(
+            self,
             scene_width,
             scene_height,
+            noopRenderPassJob,
+            renderAmbientOcclusionRows,
+            blurAmbientOcclusionHorizontalRows,
+            blurAmbientOcclusionVerticalRows,
+            compositeAmbientOcclusionRows,
         );
-        parent_job.complete();
-        parent_job.wait();
-    }
-
-    fn runAmbientOcclusionStageRange(
-        self: *Renderer,
-        stage: AOPassStage,
-        start_row: usize,
-        end_row: usize,
-        scene_width: usize,
-        scene_height: usize,
-    ) void {
-        switch (stage) {
-            .generate => renderAmbientOcclusionRows(
-                self.scene_camera,
-                scene_width,
-                scene_height,
-                &self.ao_scratch,
-                self.ambient_occlusion_config,
-                start_row,
-                end_row,
-            ),
-            .blur_horizontal => blurAmbientOcclusionHorizontalRows(
-                &self.ao_scratch,
-                self.ambient_occlusion_config.blur_depth_threshold,
-                start_row,
-                end_row,
-            ),
-            .blur_vertical => blurAmbientOcclusionVerticalRows(
-                &self.ao_scratch,
-                self.ambient_occlusion_config.blur_depth_threshold,
-                start_row,
-                end_row,
-            ),
-            .composite => compositeAmbientOcclusionRows(
-                self.bitmap.pixels,
-                self.scene_camera,
-                scene_width,
-                scene_height,
-                &self.ao_scratch,
-                start_row,
-                end_row,
-            ),
-        }
+        self.recordRenderPassTiming("ssao", pass_start);
     }
 
     fn applyDepthFogPass(self: *Renderer) void {
@@ -7648,50 +4487,11 @@ pub const Renderer = struct {
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
         const height: usize = @intCast(self.bitmap.height);
-        const stripe_count = computeStripeCount(self.fog_job_contexts.len, height);
-        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
-
-        if (stripe_count <= 1 or self.job_system == null) {
-            applyDepthFogRows(self.bitmap.pixels, self.scene_depth, width, 0, height, self.depth_fog_config);
-            self.recordRenderPassTiming("depth_fog", pass_start);
-            return;
-        }
-
-        var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-        var stripe_index: usize = 0;
-        while (stripe_index < stripe_count) : (stripe_index += 1) {
-            const start_row = stripe_index * rows_per_job;
-            if (start_row >= height) break;
-            const end_row = @min(height, start_row + rows_per_job);
-
-            self.fog_job_contexts[stripe_index] = .{
-                .pixels = self.bitmap.pixels,
-                .depth = self.scene_depth,
-                .width = width,
-                .start_row = start_row,
-                .end_row = end_row,
-                .config = self.depth_fog_config,
-            };
-
-            if (stripe_index == 0) continue;
-
-            self.color_grade_jobs[stripe_index] = Job.init(
-                FogJobContext.run,
-                @ptrCast(&self.fog_job_contexts[stripe_index]),
-                &parent_job,
-            );
-            if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
-                FogJobContext.run(@ptrCast(&self.fog_job_contexts[stripe_index]));
-            }
-        }
-
-        FogJobContext.run(@ptrCast(&self.fog_job_contexts[0]));
-        parent_job.complete();
-        parent_job.wait();
+        depth_fog_pass.runPipeline(self, width, height, noopRenderPassJob);
         self.recordRenderPassTiming("depth_fog", pass_start);
     }
 
-    fn applyTemporalAARows(
+    pub fn applyTemporalAARows(
         self: *Renderer,
         mesh: *const Mesh,
         current_view: TemporalAAViewState,
@@ -7701,161 +4501,21 @@ pub const Renderer = struct {
         width: usize,
         height: usize,
     ) void {
-        var y = start_row;
-        while (y < end_row) : (y += 1) {
-            const row_start = y * width;
-            var x: usize = 0;
-            while (x < width) : (x += 1) {
-                if (tryApplyTemporalAAMeshletBatch(self, mesh, current_view, previous_view, row_start, x, y, width, height)) {
-                    x += color_grade_simd_lanes - 1;
-                    continue;
-                }
-
-                const idx = row_start + x;
-                const current_pixel = self.bitmap.pixels[idx];
-                self.taa_scratch.resolve_pixels[idx] = current_pixel;
-
-                const current_camera = self.scene_camera[idx];
-                if (!validSceneCameraSample(current_camera)) continue;
-
-                const current_surface = self.scene_surface[idx];
-                var reprojection: ?ReprojectedHistorySample = null;
-
-                if (current_surface.isValid() and self.taa_previous_mesh_valid and current_surface.triangle_id < mesh.triangles.len and self.taa_previous_mesh_triangle_count == mesh.triangles.len) {
-                    const tri = mesh.triangles[current_surface.triangle_id];
-                    if (tri.v0 < self.taa_previous_mesh_vertex_count and tri.v1 < self.taa_previous_mesh_vertex_count and tri.v2 < self.taa_previous_mesh_vertex_count) {
-                        const bary = current_surface.barycentrics();
-                        const prev_v0 = self.taa_previous_mesh_vertices[tri.v0];
-                        const prev_v1 = self.taa_previous_mesh_vertices[tri.v1];
-                        const prev_v2 = self.taa_previous_mesh_vertices[tri.v2];
-                        const previous_world = math.Vec3.new(
-                            prev_v0.x * bary.x + prev_v1.x * bary.y + prev_v2.x * bary.z,
-                            prev_v0.y * bary.x + prev_v1.y * bary.y + prev_v2.y * bary.z,
-                            prev_v0.z * bary.x + prev_v1.z * bary.y + prev_v2.z * bary.z,
-                        );
-                        const previous_relative = math.Vec3.sub(previous_world, previous_view.camera_position);
-                        const previous_camera = math.Vec3.new(
-                            math.Vec3.dot(previous_relative, previous_view.basis_right),
-                            math.Vec3.dot(previous_relative, previous_view.basis_up),
-                            math.Vec3.dot(previous_relative, previous_view.basis_forward),
-                        );
-                        if (previous_camera.z > previous_view.projection.near_plane + NEAR_EPSILON) {
-                            reprojection = .{
-                                .screen = projectCameraPositionFloat(previous_camera, previous_view.projection),
-                                .depth = previous_camera.z,
-                                .used_surface_path = true,
-                            };
-                        }
-                    }
-                }
-
-                if (reprojection == null) {
-                    const world_pos = cameraToWorldPosition(
-                        current_view.camera_position,
-                        current_view.basis_right,
-                        current_view.basis_up,
-                        current_view.basis_forward,
-                        current_camera,
-                    );
-                    const previous_relative = math.Vec3.sub(world_pos, previous_view.camera_position);
-                    const previous_camera = math.Vec3.new(
-                        math.Vec3.dot(previous_relative, previous_view.basis_right),
-                        math.Vec3.dot(previous_relative, previous_view.basis_up),
-                        math.Vec3.dot(previous_relative, previous_view.basis_forward),
-                    );
-                    if (previous_camera.z <= previous_view.projection.near_plane + NEAR_EPSILON) continue;
-                    reprojection = .{
-                        .screen = projectCameraPositionFloat(previous_camera, previous_view.projection),
-                        .depth = previous_camera.z,
-                        .used_surface_path = false,
-                    };
-                }
-
-                const previous_sample = reprojection orelse continue;
-                const history_sample = sampleHistoryNearest(
-                    self.taa_scratch.history_pixels,
-                    self.taa_scratch.history_depth,
-                    self.taa_scratch.history_surface_tags,
-                    width,
-                    height,
-                    previous_sample.screen,
-                ) orelse continue;
-                const previous_depth = history_sample.depth;
-                const depth_delta = @abs(previous_depth - previous_sample.depth);
-                const depth_factor = 1.0 - std.math.clamp(depth_delta / @max(1e-4, self.temporal_aa_config.depth_threshold), 0.0, 1.0);
-                if (depth_factor <= 0.0) continue;
-
-                const previous_tag = history_sample.tag;
-                const current_tag = surfaceTagForHandle(current_surface);
-                if (current_tag != invalid_surface_tag and previous_tag != invalid_surface_tag and previous_tag == current_tag) {
-                    const history_weight = std.math.clamp(self.temporal_aa_config.history_weight * (0.6 + 0.15 * depth_factor), 0.0, self.temporal_aa_config.history_weight);
-                    self.taa_scratch.resolve_pixels[idx] = blendTemporalColor(current_pixel, history_sample.color, history_weight);
-                    continue;
-                }
-
-                const previous_color = if (previous_sample.used_surface_path)
-                    sampleHistoryColorNearest(self.taa_scratch.history_pixels, width, height, previous_sample.screen)
-                else
-                    sampleHistoryColor(self.taa_scratch.history_pixels, width, height, previous_sample.screen);
-                const history_color = previous_color orelse continue;
-                const current_normal = self.scene_normal[idx];
-                const previous_normal = sampleHistoryNormalNearest(self.taa_scratch.history_normals, width, height, previous_sample.screen) orelse math.Vec3.new(0.0, 0.0, 0.0);
-
-                var identity_factor: f32 = if (previous_sample.used_surface_path) 0.35 else 0.2;
-                const same_meshlet_history = current_tag != invalid_surface_tag and previous_tag != invalid_surface_tag and surfaceTagMeshletId(previous_tag) == current_surface.meshlet_id;
-                if (same_meshlet_history) {
-                    identity_factor = 0.6;
-                }
-                const normal_alignment = math.Vec3.dot(current_normal, previous_normal);
-                const normal_factor = if (!previous_sample.used_surface_path and previous_tag == invalid_surface_tag)
-                    0.5
-                else if (normal_alignment <= 0.5)
-                    0.0
-                else
-                    std.math.clamp((normal_alignment - 0.5) * 2.0, 0.0, 1.0);
-                const edge_factor = surfaceHistoryEdgeFactor(self.scene_surface, width, height, x, y);
-                const confidence = identity_factor * depth_factor * normal_factor * edge_factor;
-                const fallback_history_weight = if (previous_sample.used_surface_path)
-                    self.temporal_aa_config.history_weight * 0.04 * depth_factor * edge_factor
-                else if (previous_tag != invalid_surface_tag or same_meshlet_history)
-                    self.temporal_aa_config.history_weight * 0.025 * depth_factor * edge_factor
-                else
-                    self.temporal_aa_config.history_weight * 0.015 * depth_factor * edge_factor;
-                const clamped_history = if (current_surface.isValid() or previous_tag != invalid_surface_tag)
-                    clampHistoryToSurfaceNeighborhood(
-                        self.bitmap.pixels,
-                        self.scene_surface,
-                        self.scene_normal,
-                        width,
-                        height,
-                        x,
-                        y,
-                        history_color,
-                    )
-                else
-                    clampHistoryToNeighborhood(
-                        self.bitmap.pixels,
-                        width,
-                        height,
-                        x,
-                        y,
-                        history_color,
-                    );
-                const current_luma = pixelLuma(current_pixel);
-                const history_luma = colorLuma(clamped_history);
-                const luma_delta = @abs(history_luma - current_luma) / 255.0;
-                const shadow_darkening = std.math.clamp((history_luma - current_luma - 10.0) / 72.0, 0.0, 1.0);
-                const luminance_factor = 1.0 - (std.math.clamp((luma_delta - 0.06) / 0.24, 0.0, 1.0) * 0.85);
-                const shadow_factor = 1.0 - (shadow_darkening * 0.9);
-                const history_weight = std.math.clamp(
-                    @max(self.temporal_aa_config.history_weight * confidence * 0.9, fallback_history_weight),
-                    0.0,
-                    self.temporal_aa_config.history_weight,
-                ) * luminance_factor * shadow_factor;
-                if (history_weight <= 0.0) continue;
-                self.taa_scratch.resolve_pixels[idx] = blendTemporalColor(current_pixel, clamped_history, history_weight);
-            }
-        }
+        taa_pass.runRows(
+            self,
+            mesh,
+            current_view,
+            previous_view,
+            start_row,
+            end_row,
+            width,
+            height,
+            tryApplyTemporalAAMeshletBatch,
+            validSceneCameraSample,
+            cameraToWorldPosition,
+            projectCameraPositionFloat,
+            NEAR_EPSILON,
+        );
     }
 
     const GodRaysJobContext = struct {
@@ -7868,12 +4528,20 @@ pub const Renderer = struct {
 
         pub fn run(ctx_ptr: *anyopaque) void {
             const ctx: *GodRaysJobContext = @ptrCast(@alignCast(ctx_ptr));
-            ctx.renderer.applyGodRaysRows(
+            god_rays_pass.runRows(
+                ctx.renderer.bitmap.pixels,
+                ctx.renderer.god_rays_scratch_pixels,
                 ctx.start_row,
                 ctx.end_row,
                 ctx.width,
                 ctx.height,
-                ctx.light_screen_pos,
+                ctx.light_screen_pos.x,
+                ctx.light_screen_pos.y,
+                config.POST_GOD_RAYS_SAMPLES,
+                config.POST_GOD_RAYS_DECAY,
+                config.POST_GOD_RAYS_DENSITY,
+                config.POST_GOD_RAYS_WEIGHT,
+                config.POST_GOD_RAYS_EXPOSURE,
             );
         }
     };
@@ -7887,7 +4555,15 @@ pub const Renderer = struct {
 
         pub fn run(ctx_ptr: *anyopaque) void {
             const ctx: *ChromaticAberrationJobContext = @ptrCast(@alignCast(ctx_ptr));
-            ctx.renderer.applyChromaticAberrationRows(ctx.start_row, ctx.end_row, ctx.width, ctx.height);
+            chromatic_aberration_pass.runRows(
+                ctx.renderer.bitmap.pixels,
+                ctx.renderer.moblur_scratch_pixels,
+                ctx.start_row,
+                ctx.end_row,
+                ctx.width,
+                ctx.height,
+                config.POST_CHROMATIC_ABERRATION_STRENGTH,
+            );
         }
     };
 
@@ -7900,7 +4576,16 @@ pub const Renderer = struct {
 
         pub fn run(ctx_ptr: *anyopaque) void {
             const ctx: *FilmGrainVignetteJobContext = @ptrCast(@alignCast(ctx_ptr));
-            ctx.renderer.applyFilmGrainVignetteRows(ctx.start_row, ctx.end_row, ctx.width, ctx.height);
+            film_grain_vignette_pass.runRows(
+                ctx.renderer.bitmap.pixels,
+                ctx.start_row,
+                ctx.end_row,
+                ctx.width,
+                ctx.height,
+                config.POST_FILM_GRAIN_STRENGTH,
+                config.POST_VIGNETTE_STRENGTH,
+                @as(u32, @intCast(ctx.renderer.total_frames_rendered % 1000)),
+            );
         }
     };
 
@@ -7913,7 +4598,16 @@ pub const Renderer = struct {
 
         pub fn run(ctx_ptr: *anyopaque) void {
             const ctx: *LensFlareJobContext = @ptrCast(@alignCast(ctx_ptr));
-            ctx.renderer.applyLensFlareRows(ctx.start_row, ctx.end_row, ctx.width, ctx.height);
+            _ = ctx.height;
+            lens_flare_pass.runRows(
+                ctx.renderer.bitmap.pixels,
+                ctx.renderer.lens_flare_scratch_pixels,
+                ctx.start_row,
+                ctx.end_row,
+                ctx.width,
+                config.POST_LENS_FLARE_THRESHOLD,
+                @as(f32, @floatFromInt(config.POST_LENS_FLARE_INTENSITY_PERCENT)) / 100.0,
+            );
         }
     };
 
@@ -7928,13 +4622,16 @@ pub const Renderer = struct {
 
         pub fn run(ctx_ptr: *anyopaque) void {
             const ctx: *MotionBlurJobContext = @ptrCast(@alignCast(ctx_ptr));
-            ctx.renderer.applyMotionBlurRows(
-                ctx.current_view,
-                ctx.previous_view,
+            motion_blur_pass.runRows(
+                ctx.renderer.bitmap.pixels,
+                ctx.renderer.moblur_scratch_pixels,
+                ctx.renderer.scene_camera,
                 ctx.start_row,
                 ctx.end_row,
                 ctx.width,
                 ctx.height,
+                ctx.current_view,
+                ctx.previous_view,
             );
         }
     };
@@ -7958,170 +4655,22 @@ pub const Renderer = struct {
             const light_proj = projectCameraPositionFloat(math.Vec3.scale(light_pos_view, 1000.0), projection);
             light_screen_pos = math.Vec2.new(light_proj.x, light_proj.y);
         }
-
-        const stripe_count = computeStripeCount(self.god_rays_job_contexts.len, height);
-        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
-
-        if (stripe_count <= 1 or self.job_system == null) {
-            self.applyGodRaysRows(0, height, width, height, light_screen_pos);
-        } else {
-            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-            var stripe_index: usize = 0;
-            while (stripe_index < stripe_count) : (stripe_index += 1) {
-                const start_row = stripe_index * rows_per_job;
-                if (start_row >= height) break;
-                const end_row = @min(height, start_row + rows_per_job);
-
-                self.god_rays_job_contexts[stripe_index] = .{
-                    .renderer = self,
-                    .start_row = start_row,
-                    .end_row = end_row,
-                    .width = width,
-                    .height = height,
-                    .light_screen_pos = light_screen_pos,
-                };
-                if (stripe_index == 0) continue;
-                self.color_grade_jobs[stripe_index] = Job.init(
-                    GodRaysJobContext.run,
-                    @ptrCast(&self.god_rays_job_contexts[stripe_index]),
-                    &parent_job,
-                );
-                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
-                    GodRaysJobContext.run(@ptrCast(&self.god_rays_job_contexts[stripe_index]));
-                }
-            }
-            GodRaysJobContext.run(@ptrCast(&self.god_rays_job_contexts[0]));
-            parent_job.complete();
-            parent_job.wait();
-        }
+        god_rays_pass.runPipeline(
+            self,
+            width,
+            height,
+            light_screen_pos.x,
+            light_screen_pos.y,
+            config.POST_GOD_RAYS_SAMPLES,
+            config.POST_GOD_RAYS_DECAY,
+            config.POST_GOD_RAYS_DENSITY,
+            config.POST_GOD_RAYS_WEIGHT,
+            config.POST_GOD_RAYS_EXPOSURE,
+            noopRenderPassJob,
+        );
 
         @memcpy(self.bitmap.pixels, self.god_rays_scratch_pixels);
         self.recordRenderPassTiming("god_rays", pass_start);
-    }
-
-    fn applyGodRaysRows(self: *Renderer, start_row: usize, end_row: usize, width: usize, height: usize, light_screen_pos: math.Vec2) void {
-        if (light_screen_pos.x == -1000) {
-            const start_idx = start_row * width;
-            const end_idx = end_row * width;
-            @memcpy(self.god_rays_scratch_pixels[start_idx..end_idx], self.bitmap.pixels[start_idx..end_idx]);
-            return;
-        }
-
-        const samples = config.POST_GOD_RAYS_SAMPLES;
-        const decay = config.POST_GOD_RAYS_DECAY;
-        const density = config.POST_GOD_RAYS_DENSITY;
-        const weight = config.POST_GOD_RAYS_WEIGHT;
-        const exposure = config.POST_GOD_RAYS_EXPOSURE;
-
-        const simd_lanes = runtimeColorGradeSimdLanes();
-        var y = start_row;
-        while (y < end_row) : (y += 1) {
-            const row_start = y * width;
-            var x: usize = 0;
-            while (x + simd_lanes <= width) : (x += simd_lanes) {
-                var current_pixels: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-                var add_r_arr: [max_runtime_color_grade_simd_lanes]f32 = undefined;
-                var add_g_arr: [max_runtime_color_grade_simd_lanes]f32 = undefined;
-                var add_b_arr: [max_runtime_color_grade_simd_lanes]f32 = undefined;
-
-                for (0..simd_lanes) |lane| {
-                    const idx = row_start + x + lane;
-                    const original_px = self.bitmap.pixels[idx];
-                    current_pixels[lane] = original_px;
-
-                    const delta_x = (@as(f32, @floatFromInt(x + lane)) - light_screen_pos.x);
-                    const delta_y = (@as(f32, @floatFromInt(y)) - light_screen_pos.y);
-                    const vec_x = delta_x * density / @as(f32, @floatFromInt(samples));
-                    const vec_y = delta_y * density / @as(f32, @floatFromInt(samples));
-
-                    var r_sum: f32 = 0;
-                    var g_sum: f32 = 0;
-                    var b_sum: f32 = 0;
-                    var illumination_decay: f32 = 1.0;
-                    var cur_x = @as(f32, @floatFromInt(x + lane));
-                    var cur_y = @as(f32, @floatFromInt(y));
-
-                    var s: i32 = 0;
-                    while (s < samples) : (s += 1) {
-                        cur_x -= vec_x;
-                        cur_y -= vec_y;
-
-                        const sx = @as(i32, @intFromFloat(cur_x));
-                        const sy = @as(i32, @intFromFloat(cur_y));
-
-                        if (sx >= 0 and sx < @as(i32, @intCast(width)) and sy >= 0 and sy < @as(i32, @intCast(height))) {
-                            const s_idx = @as(usize, @intCast(sy)) * width + @as(usize, @intCast(sx));
-                            const px = self.bitmap.pixels[s_idx];
-                            r_sum += @as(f32, @floatFromInt((px >> 16) & 0xFF)) * illumination_decay * weight;
-                            g_sum += @as(f32, @floatFromInt((px >> 8) & 0xFF)) * illumination_decay * weight;
-                            b_sum += @as(f32, @floatFromInt(px & 0xFF)) * illumination_decay * weight;
-                        }
-
-                        illumination_decay *= decay;
-                    }
-
-                    add_r_arr[lane] = r_sum * exposure;
-                    add_g_arr[lane] = g_sum * exposure;
-                    add_b_arr[lane] = b_sum * exposure;
-                }
-
-                var blended: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-                addPackedColorBatch(current_pixels[0..simd_lanes], add_r_arr[0..simd_lanes], add_g_arr[0..simd_lanes], add_b_arr[0..simd_lanes], blended[0..simd_lanes]);
-                for (0..simd_lanes) |lane| {
-                    self.god_rays_scratch_pixels[row_start + x + lane] = blended[lane];
-                }
-            }
-
-            while (x < width) : (x += 1) {
-                const idx = row_start + x;
-                const original_px = self.bitmap.pixels[idx];
-
-                // Calculate vector from pixel to light on screen
-                const delta_x = (@as(f32, @floatFromInt(x)) - light_screen_pos.x);
-                const delta_y = (@as(f32, @floatFromInt(y)) - light_screen_pos.y);
-                const vec_x = delta_x * density / @as(f32, @floatFromInt(samples));
-                const vec_y = delta_y * density / @as(f32, @floatFromInt(samples));
-
-                var r_sum: f32 = 0;
-                var g_sum: f32 = 0;
-                var b_sum: f32 = 0;
-                var illumination_decay: f32 = 1.0;
-
-                var cur_x = @as(f32, @floatFromInt(x));
-                var cur_y = @as(f32, @floatFromInt(y));
-
-                var s: i32 = 0;
-                while (s < samples) : (s += 1) {
-                    cur_x -= vec_x;
-                    cur_y -= vec_y;
-
-                    const sx = @as(i32, @intFromFloat(cur_x));
-                    const sy = @as(i32, @intFromFloat(cur_y));
-
-                    if (sx >= 0 and sx < @as(i32, @intCast(width)) and sy >= 0 and sy < @as(i32, @intCast(height))) {
-                        const s_idx = @as(usize, @intCast(sy)) * width + @as(usize, @intCast(sx));
-                        const px = self.bitmap.pixels[s_idx];
-
-                        // Treat bright pixels as scattering objects (poor man's occlusion/sun proxy)
-                        r_sum += @as(f32, @floatFromInt((px >> 16) & 0xFF)) * illumination_decay * weight;
-                        g_sum += @as(f32, @floatFromInt((px >> 8) & 0xFF)) * illumination_decay * weight;
-                        b_sum += @as(f32, @floatFromInt(px & 0xFF)) * illumination_decay * weight;
-                    }
-
-                    illumination_decay *= decay;
-                }
-
-                const orig_r = @as(f32, @floatFromInt((original_px >> 16) & 0xFF));
-                const orig_g = @as(f32, @floatFromInt((original_px >> 8) & 0xFF));
-                const orig_b = @as(f32, @floatFromInt(original_px & 0xFF));
-
-                const final_r = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(orig_r + r_sum * exposure))))));
-                const final_g = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(orig_g + g_sum * exposure))))));
-                const final_b = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(orig_b + b_sum * exposure))))));
-
-                self.god_rays_scratch_pixels[idx] = 0xFF000000 | (final_r << 16) | (final_g << 8) | final_b;
-            }
-        }
     }
 
     // --- Lens Flare ---
@@ -8130,154 +4679,17 @@ pub const Renderer = struct {
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
         const height: usize = @intCast(self.bitmap.height);
-
-        const stripe_count = computeStripeCount(self.lens_flare_job_contexts.len, height);
-        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
-
-        if (stripe_count <= 1 or self.job_system == null) {
-            self.applyLensFlareRows(0, height, width, height);
-        } else {
-            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-            var stripe_index: usize = 0;
-            while (stripe_index < stripe_count) : (stripe_index += 1) {
-                const start_row = stripe_index * rows_per_job;
-                if (start_row >= height) break;
-                const end_row = @min(height, start_row + rows_per_job);
-
-                self.lens_flare_job_contexts[stripe_index] = .{
-                    .renderer = self,
-                    .start_row = start_row,
-                    .end_row = end_row,
-                    .width = width,
-                    .height = height,
-                };
-                if (stripe_index == 0) continue;
-                self.color_grade_jobs[stripe_index] = Job.init(
-                    LensFlareJobContext.run,
-                    @ptrCast(&self.lens_flare_job_contexts[stripe_index]),
-                    &parent_job,
-                );
-                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
-                    LensFlareJobContext.run(@ptrCast(&self.lens_flare_job_contexts[stripe_index]));
-                }
-            }
-            LensFlareJobContext.run(@ptrCast(&self.lens_flare_job_contexts[0]));
-            parent_job.complete();
-            parent_job.wait();
-        }
+        lens_flare_pass.runPipeline(
+            self,
+            width,
+            height,
+            config.POST_LENS_FLARE_THRESHOLD,
+            @as(f32, @floatFromInt(config.POST_LENS_FLARE_INTENSITY_PERCENT)) / 100.0,
+            noopRenderPassJob,
+        );
 
         @memcpy(self.bitmap.pixels, self.lens_flare_scratch_pixels);
         self.recordRenderPassTiming("lens_flare", pass_start);
-    }
-
-    fn applyLensFlareRows(self: *Renderer, start_row: usize, end_row: usize, width: usize, _height: usize) void {
-        _ = _height;
-        const threshold = config.POST_LENS_FLARE_THRESHOLD;
-        const intensity = @as(f32, @floatFromInt(config.POST_LENS_FLARE_INTENSITY_PERCENT)) / 100.0;
-
-        const simd_lanes = runtimeColorGradeSimdLanes();
-        var y = start_row;
-        while (y < end_row) : (y += 1) {
-            const row_start = y * width;
-            var x: usize = 0;
-            while (x + simd_lanes <= width) : (x += simd_lanes) {
-                var current_pixels: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-                var add_r_arr: [max_runtime_color_grade_simd_lanes]f32 = undefined;
-                var add_g_arr: [max_runtime_color_grade_simd_lanes]f32 = undefined;
-                var add_b_arr: [max_runtime_color_grade_simd_lanes]f32 = undefined;
-
-                for (0..simd_lanes) |lane| {
-                    const idx = row_start + x + lane;
-                    current_pixels[lane] = self.bitmap.pixels[idx];
-                    add_r_arr[lane] = 0.0;
-                    add_g_arr[lane] = 0.0;
-                    add_b_arr[lane] = 0.0;
-
-                    const signed_x = @as(i32, @intCast(x + lane));
-                    const min_sx = @max(0, signed_x - 60);
-                    const max_sx = @min(@as(i32, @intCast(width)) - 1, signed_x + 60);
-
-                    var s_x: i32 = min_sx;
-                    if (@rem((s_x - (signed_x - 60)), @as(i32, 4)) != 0) {
-                        s_x += @as(i32, 4) - @rem((s_x - (signed_x - 60)), @as(i32, 4));
-                    }
-                    while (s_x <= max_sx) : (s_x += 4) {
-                        const s_idx = y * width + @as(usize, @intCast(s_x));
-                        const px = self.bitmap.pixels[s_idx];
-                        const pr = @as(i32, @intCast((px >> 16) & 0xFF));
-                        const pg = @as(i32, @intCast((px >> 8) & 0xFF));
-                        const pb = @as(i32, @intCast(px & 0xFF));
-
-                        const lumen = @divTrunc(pr * 299 + pg * 587 + pb * 114, 1000);
-                        if (lumen > threshold) {
-                            const dist = @abs(s_x - signed_x);
-                            const falloff = 1.0 - (@as(f32, @floatFromInt(dist)) * 0.0166666);
-                            const base_w = falloff * 0.1 * intensity;
-                            const factor_r = base_w * (if (pr > pb) @as(f32, 1.2) else 0.5);
-
-                            add_r_arr[lane] += @as(f32, @floatFromInt(pr)) * factor_r;
-                            add_g_arr[lane] += @as(f32, @floatFromInt(pg)) * base_w * 0.8;
-                            add_b_arr[lane] += @as(f32, @floatFromInt(pb)) * base_w * 1.5;
-                        }
-                    }
-                }
-
-                var blended: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-                addPackedColorBatch(current_pixels[0..simd_lanes], add_r_arr[0..simd_lanes], add_g_arr[0..simd_lanes], add_b_arr[0..simd_lanes], blended[0..simd_lanes]);
-                for (0..simd_lanes) |lane| {
-                    self.lens_flare_scratch_pixels[row_start + x + lane] = blended[lane];
-                }
-            }
-
-            while (x < width) : (x += 1) {
-                const idx = row_start + x;
-                const current_px = self.bitmap.pixels[idx];
-
-                var r_sum: f32 = 0;
-                var g_sum: f32 = 0;
-                var b_sum: f32 = 0;
-
-                // Simple horizontal anamorphic streak sample
-                const signed_x = @as(i32, @intCast(x));
-                const min_sx = @max(0, signed_x - 60);
-                const max_sx = @min(@as(i32, @intCast(width)) - 1, signed_x + 60);
-
-                var s_x: i32 = min_sx;
-                // Align step so it still hops the same points roughly
-                if (@rem((s_x - (signed_x - 60)), @as(i32, 4)) != 0) {
-                    s_x += @as(i32, 4) - @rem((s_x - (signed_x - 60)), @as(i32, 4));
-                }
-                while (s_x <= max_sx) : (s_x += 4) {
-                    const s_idx = y * width + @as(usize, @intCast(s_x));
-                    const px = self.bitmap.pixels[s_idx];
-                    const pr = @as(i32, @intCast((px >> 16) & 0xFF));
-                    const pg = @as(i32, @intCast((px >> 8) & 0xFF));
-                    const pb = @as(i32, @intCast(px & 0xFF));
-
-                    const lumen = @divTrunc(pr * 299 + pg * 587 + pb * 114, 1000);
-                    if (lumen > threshold) {
-                        const dist = @abs(s_x - signed_x);
-                        const falloff = 1.0 - (@as(f32, @floatFromInt(dist)) * 0.0166666); // /60
-                        const base_w = falloff * 0.1 * intensity;
-                        const factor_r = base_w * (if (pr > pb) @as(f32, 1.2) else 0.5);
-
-                        r_sum += @as(f32, @floatFromInt(pr)) * factor_r;
-                        g_sum += @as(f32, @floatFromInt(pg)) * base_w * 0.8;
-                        b_sum += @as(f32, @floatFromInt(pb)) * base_w * 1.5;
-                    }
-                }
-
-                const orig_r = @as(f32, @floatFromInt((current_px >> 16) & 0xFF));
-                const orig_g = @as(f32, @floatFromInt((current_px >> 8) & 0xFF));
-                const orig_b = @as(f32, @floatFromInt(current_px & 0xFF));
-
-                const final_r = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(orig_r + r_sum))))));
-                const final_g = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(orig_g + g_sum))))));
-                const final_b = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(orig_b + b_sum))))));
-
-                self.lens_flare_scratch_pixels[idx] = 0xFF000000 | (final_r << 16) | (final_g << 8) | final_b;
-            }
-        }
     }
 
     // --- Chromatic Aberration ---
@@ -8286,116 +4698,16 @@ pub const Renderer = struct {
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
         const height: usize = @intCast(self.bitmap.height);
-
-        // We can do this in-place or need a scratch buffer. It's safe to use the moblur_scratch_pixels temporary!
-        const stripe_count = computeStripeCount(self.chromatic_aberration_job_contexts.len, height);
-        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
-
-        if (stripe_count <= 1 or self.job_system == null) {
-            self.applyChromaticAberrationRows(0, height, width, height);
-        } else {
-            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-            var stripe_index: usize = 0;
-            while (stripe_index < stripe_count) : (stripe_index += 1) {
-                const start_row = stripe_index * rows_per_job;
-                if (start_row >= height) break;
-                const end_row = @min(height, start_row + rows_per_job);
-
-                self.chromatic_aberration_job_contexts[stripe_index] = .{
-                    .renderer = self,
-                    .start_row = start_row,
-                    .end_row = end_row,
-                    .width = width,
-                    .height = height,
-                };
-                if (stripe_index == 0) continue;
-                self.color_grade_jobs[stripe_index] = Job.init(
-                    ChromaticAberrationJobContext.run,
-                    @ptrCast(&self.chromatic_aberration_job_contexts[stripe_index]),
-                    &parent_job,
-                );
-                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
-                    ChromaticAberrationJobContext.run(@ptrCast(&self.chromatic_aberration_job_contexts[stripe_index]));
-                }
-            }
-            ChromaticAberrationJobContext.run(@ptrCast(&self.chromatic_aberration_job_contexts[0]));
-            parent_job.complete();
-            parent_job.wait();
-        }
+        chromatic_aberration_pass.runPipeline(
+            self,
+            width,
+            height,
+            config.POST_CHROMATIC_ABERRATION_STRENGTH,
+            noopRenderPassJob,
+        );
 
         @memcpy(self.bitmap.pixels, self.moblur_scratch_pixels);
         self.recordRenderPassTiming("chromatic_aberration", pass_start);
-    }
-
-    fn applyChromaticAberrationRows(self: *Renderer, start_row: usize, end_row: usize, width: usize, height: usize) void {
-        const strong = config.POST_CHROMATIC_ABERRATION_STRENGTH;
-        const cx = @as(f32, @floatFromInt(width)) * 0.5;
-        const cy = @as(f32, @floatFromInt(height)) * 0.5;
-
-        const simd_lanes = runtimeColorGradeSimdLanes();
-        var y = start_row;
-        while (y < end_row) : (y += 1) {
-            const row_start = y * width;
-            var x: usize = 0;
-            while (x + simd_lanes <= width) : (x += simd_lanes) {
-                var alpha: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-                var r_arr: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-                var g_arr: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-                var b_arr: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-
-                for (0..simd_lanes) |lane| {
-                    const idx = row_start + x + lane;
-                    const dx = (@as(f32, @floatFromInt(x + lane)) - cx) / cx;
-                    const dy = (@as(f32, @floatFromInt(y)) - cy) / cy;
-                    const dist = dx * dx + dy * dy;
-                    const shift = dist * strong;
-                    const r_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(x + lane)) + shift));
-                    const b_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(x + lane)) - shift));
-                    const safe_r_x = @max(0, @min(@as(i32, @intCast(width)) - 1, r_x));
-                    const safe_b_x = @max(0, @min(@as(i32, @intCast(width)) - 1, b_x));
-                    const px_r = self.bitmap.pixels[y * width + @as(usize, @intCast(safe_r_x))];
-                    const px_g = self.bitmap.pixels[idx];
-                    const px_b = self.bitmap.pixels[y * width + @as(usize, @intCast(safe_b_x))];
-                    alpha[lane] = 0xFF000000;
-                    r_arr[lane] = (px_r >> 16) & 0xFF;
-                    g_arr[lane] = (px_g >> 8) & 0xFF;
-                    b_arr[lane] = px_b & 0xFF;
-                }
-
-                var packed_pixels: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-                packShiftedColorBatch(alpha[0..simd_lanes], r_arr[0..simd_lanes], g_arr[0..simd_lanes], b_arr[0..simd_lanes], packed_pixels[0..simd_lanes]);
-                for (0..simd_lanes) |lane| {
-                    self.moblur_scratch_pixels[row_start + x + lane] = packed_pixels[lane];
-                }
-            }
-
-            while (x < width) : (x += 1) {
-                const idx = row_start + x;
-
-                // Vector from center
-                const dx = (@as(f32, @floatFromInt(x)) - cx) / cx;
-                const dy = (@as(f32, @floatFromInt(y)) - cy) / cy;
-                const dist = dx * dx + dy * dy; // squared dist to push mostly to edges
-
-                const shift = dist * strong;
-
-                const r_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(x)) + shift));
-                const b_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(x)) - shift));
-
-                const safe_r_x = @max(0, @min(@as(i32, @intCast(width)) - 1, r_x));
-                const safe_b_x = @max(0, @min(@as(i32, @intCast(width)) - 1, b_x));
-
-                const px_r = self.bitmap.pixels[y * width + @as(usize, @intCast(safe_r_x))];
-                const px_g = self.bitmap.pixels[idx];
-                const px_b = self.bitmap.pixels[y * width + @as(usize, @intCast(safe_b_x))];
-
-                const final_r = (px_r >> 16) & 0xFF;
-                const final_g = (px_g >> 8) & 0xFF;
-                const final_b = px_b & 0xFF;
-
-                self.moblur_scratch_pixels[idx] = 0xFF000000 | (final_r << 16) | (final_g << 8) | final_b;
-            }
-        }
     }
 
     // --- Film Grain & Vignette ---
@@ -8404,123 +4716,16 @@ pub const Renderer = struct {
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
         const height: usize = @intCast(self.bitmap.height);
-
-        const stripe_count = computeStripeCount(self.film_grain_job_contexts.len, height);
-        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
-
-        if (stripe_count <= 1 or self.job_system == null) {
-            self.applyFilmGrainVignetteRows(0, height, width, height);
-        } else {
-            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-            var stripe_index: usize = 0;
-            while (stripe_index < stripe_count) : (stripe_index += 1) {
-                const start_row = stripe_index * rows_per_job;
-                if (start_row >= height) break;
-                const end_row = @min(height, start_row + rows_per_job);
-
-                self.film_grain_job_contexts[stripe_index] = .{
-                    .renderer = self,
-                    .start_row = start_row,
-                    .end_row = end_row,
-                    .width = width,
-                    .height = height,
-                };
-                if (stripe_index == 0) continue;
-                self.color_grade_jobs[stripe_index] = Job.init(
-                    FilmGrainVignetteJobContext.run,
-                    @ptrCast(&self.film_grain_job_contexts[stripe_index]),
-                    &parent_job,
-                );
-                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
-                    FilmGrainVignetteJobContext.run(@ptrCast(&self.film_grain_job_contexts[stripe_index]));
-                }
-            }
-            FilmGrainVignetteJobContext.run(@ptrCast(&self.film_grain_job_contexts[0]));
-            parent_job.complete();
-            parent_job.wait();
-        }
+        film_grain_vignette_pass.runPipeline(
+            self,
+            width,
+            height,
+            config.POST_FILM_GRAIN_STRENGTH,
+            config.POST_VIGNETTE_STRENGTH,
+            @as(u32, @intCast(self.total_frames_rendered % 1000)),
+            noopRenderPassJob,
+        );
         self.recordRenderPassTiming("film_grain_vignette", pass_start);
-    }
-
-    fn applyFilmGrainVignetteRows(self: *Renderer, start_row: usize, end_row: usize, width: usize, height: usize) void {
-        const grain_str = config.POST_FILM_GRAIN_STRENGTH;
-        const vig_str = config.POST_VIGNETTE_STRENGTH;
-        const cx = @as(f32, @floatFromInt(width)) * 0.5;
-        const cy = @as(f32, @floatFromInt(height)) * 0.5;
-
-        // pseudo-random seed based on frame so it moves
-        const seed = @as(u32, @intCast(self.total_frames_rendered % 1000));
-
-        var y = start_row;
-        while (y < end_row) : (y += 1) {
-            const row_start = y * width;
-            var x: usize = 0;
-            const simd_lanes = runtimeColorGradeSimdLanes();
-            while (x + simd_lanes <= width) : (x += simd_lanes) {
-                var current_pixels: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-                var black_colors: [max_runtime_color_grade_simd_lanes][3]f32 = undefined;
-                var history_weights: [max_runtime_color_grade_simd_lanes]f32 = undefined;
-
-                for (0..simd_lanes) |lane| {
-                    current_pixels[lane] = self.bitmap.pixels[row_start + x + lane];
-                    black_colors[lane] = .{ 0.0, 0.0, 0.0 };
-
-                    const dx = (@as(f32, @floatFromInt(x + lane)) - cx) / cx;
-                    const dy = (@as(f32, @floatFromInt(y)) - cy) / cy;
-                    const dist = @sqrt(dx * dx + dy * dy);
-                    const vig_factor = 1.0 - @max(0, @min(1.0, dist * vig_str));
-
-                    var hash = (@as(u32, @intCast(x + lane)) *% 73856093) ^ (@as(u32, @intCast(y)) *% 19349663) ^ (seed *% 83492791);
-                    hash = (hash ^ (hash >> 16)) *% 2654435769;
-                    hash = hash ^ (hash >> 16);
-
-                    const noise = (@as(f32, @floatFromInt(hash & 0xFF)) / 255.0) - 0.5;
-                    const grain_factor = 1.0 + (noise * grain_str);
-                    const final_factor = std.math.clamp(vig_factor * grain_factor, 0.0, 1.0);
-                    history_weights[lane] = 1.0 - final_factor;
-                }
-
-                var blended: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-                blendTemporalColorBatch(current_pixels[0..simd_lanes], black_colors[0..simd_lanes], history_weights[0..simd_lanes], blended[0..simd_lanes]);
-                for (0..simd_lanes) |lane| {
-                    self.bitmap.pixels[row_start + x + lane] = blended[lane];
-                }
-            }
-
-            while (x < width) : (x += 1) {
-                const idx = row_start + x;
-                const px = self.bitmap.pixels[idx];
-
-                var r = @as(f32, @floatFromInt((px >> 16) & 0xFF));
-                var g = @as(f32, @floatFromInt((px >> 8) & 0xFF));
-                var b = @as(f32, @floatFromInt(px & 0xFF));
-
-                // --- Vignette ---
-                const dx = (@as(f32, @floatFromInt(x)) - cx) / cx;
-                const dy = (@as(f32, @floatFromInt(y)) - cy) / cy;
-                const dist = @sqrt(dx * dx + dy * dy);
-                const vig_factor = 1.0 - @max(0, @min(1.0, dist * vig_str));
-
-                r *= vig_factor;
-                g *= vig_factor;
-                b *= vig_factor;
-
-                // --- Film Grain ---
-                // Cheap hash for pseudo-random noise
-                var hash = (@as(u32, @intCast(x)) *% 73856093) ^ (@as(u32, @intCast(y)) *% 19349663) ^ (seed *% 83492791);
-                hash = (hash ^ (hash >> 16)) *% 2654435769;
-                hash = hash ^ (hash >> 16);
-
-                const noise = (@as(f32, @floatFromInt(hash & 0xFF)) / 255.0) - 0.5; // -0.5 to 0.5
-                const grain_factor = 1.0 + (noise * grain_str);
-
-                const final_r = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(r * grain_factor))))));
-                const final_g = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(g * grain_factor))))));
-                const final_b = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(b * grain_factor))))));
-
-                self.bitmap.pixels[idx] = 0xFF000000 | (final_r << 16) | (final_g << 8) | final_b;
-            }
-        }
     }
 
     fn applyMotionBlurPass(self: *Renderer, current_view: TemporalAAViewState) void {
@@ -8532,215 +4737,12 @@ pub const Renderer = struct {
         // If TAA isn't populated, we can't reliably do motion blur
         if (!self.taa_scratch.valid) return;
 
-        const stripe_count = computeStripeCount(self.moblur_job_contexts.len, height);
-        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
-
-        if (stripe_count <= 1 or self.job_system == null) {
-            self.applyMotionBlurRows(current_view, self.taa_previous_view, 0, height, width, height);
-        } else {
-            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-            var stripe_index: usize = 0;
-            while (stripe_index < stripe_count) : (stripe_index += 1) {
-                const start_row = stripe_index * rows_per_job;
-                if (start_row >= height) break;
-                const end_row = @min(height, start_row + rows_per_job);
-
-                self.moblur_job_contexts[stripe_index] = .{
-                    .renderer = self,
-                    .current_view = current_view,
-                    .previous_view = self.taa_previous_view,
-                    .start_row = start_row,
-                    .end_row = end_row,
-                    .width = width,
-                    .height = height,
-                };
-                if (stripe_index == 0) continue;
-
-                self.color_grade_jobs[stripe_index] = Job.init(
-                    MotionBlurJobContext.run,
-                    @ptrCast(&self.moblur_job_contexts[stripe_index]),
-                    &parent_job,
-                );
-                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
-                    MotionBlurJobContext.run(@ptrCast(&self.moblur_job_contexts[stripe_index]));
-                }
-            }
-            MotionBlurJobContext.run(@ptrCast(&self.moblur_job_contexts[0]));
-            parent_job.complete();
-            parent_job.wait();
-        }
+        motion_blur_pass.runPipeline(self, current_view, height, width, noopRenderPassJob);
 
         // Copy scratch back to main pixels
         @memcpy(self.bitmap.pixels, self.moblur_scratch_pixels);
 
         self.recordRenderPassTiming("motion_blur", pass_start);
-    }
-
-    fn applyMotionBlurRows(
-        self: *Renderer,
-        current_view: TemporalAAViewState,
-        previous_view: TemporalAAViewState,
-        start_row: usize,
-        end_row: usize,
-        width: usize,
-        height: usize,
-    ) void {
-        const samples = config.POST_MOTION_BLUR_SAMPLES;
-        const intensity = config.POST_MOTION_BLUR_INTENSITY;
-        const inv_samples_plus_one = 1.0 / (@as(f32, @floatFromInt(samples)) + 1.0);
-
-        var y = start_row;
-        while (y < end_row) : (y += 1) {
-            const row_start = y * width;
-            var x: usize = 0;
-            while (x + color_grade_simd_lanes <= width) : (x += color_grade_simd_lanes) {
-                var current_pixels: [color_grade_simd_lanes]u32 = undefined;
-                var add_r_arr: [color_grade_simd_lanes]f32 = undefined;
-                var add_g_arr: [color_grade_simd_lanes]f32 = undefined;
-                var add_b_arr: [color_grade_simd_lanes]f32 = undefined;
-
-                inline for (0..color_grade_simd_lanes) |lane| {
-                    const idx = row_start + x + lane;
-                    const current_pixel = self.bitmap.pixels[idx];
-                    current_pixels[lane] = current_pixel;
-                    self.moblur_scratch_pixels[idx] = current_pixel;
-                    add_r_arr[lane] = 0.0;
-                    add_g_arr[lane] = 0.0;
-                    add_b_arr[lane] = 0.0;
-
-                    const current_camera = self.scene_camera[idx];
-                    if (validSceneCameraSample(current_camera)) {
-                        const world_pos = cameraToWorldPosition(
-                            current_view.camera_position,
-                            current_view.basis_right,
-                            current_view.basis_up,
-                            current_view.basis_forward,
-                            current_camera,
-                        );
-
-                        const previous_relative = math.Vec3.sub(world_pos, previous_view.camera_position);
-                        const previous_camera = math.Vec3.new(
-                            math.Vec3.dot(previous_relative, previous_view.basis_right),
-                            math.Vec3.dot(previous_relative, previous_view.basis_up),
-                            math.Vec3.dot(previous_relative, previous_view.basis_forward),
-                        );
-                        if (previous_camera.z > previous_view.projection.near_plane + NEAR_EPSILON) {
-                            const previous_screen_raw = projectCameraPositionFloat(previous_camera, previous_view.projection);
-                            const vec_x = previous_screen_raw.x - @as(f32, @floatFromInt(x + lane));
-                            const vec_y = previous_screen_raw.y - @as(f32, @floatFromInt(y));
-
-                            const vel_mag_sq = vec_x * vec_x + vec_y * vec_y;
-                            if (vel_mag_sq >= 0.25) {
-                                var r_sum: f32 = @as(f32, @floatFromInt((current_pixel >> 16) & 0xFF));
-                                var g_sum: f32 = @as(f32, @floatFromInt((current_pixel >> 8) & 0xFF));
-                                var b_sum: f32 = @as(f32, @floatFromInt(current_pixel & 0xFF));
-
-                                var s: i32 = 1;
-                                while (s <= samples) : (s += 1) {
-                                    const t = @as(f32, @floatFromInt(s)) / @as(f32, @floatFromInt(samples + 1));
-
-                                    const p_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(x + lane)) + vec_x * t * intensity));
-                                    const p_y = @as(i32, @intFromFloat(@as(f32, @floatFromInt(y)) + vec_y * t * intensity));
-
-                                    if (p_x >= 0 and p_x < @as(i32, @intCast(width)) and p_y >= 0 and p_y < @as(i32, @intCast(height))) {
-                                        const s_idx = @as(usize, @intCast(p_y)) * width + @as(usize, @intCast(p_x));
-                                        const sample_px = self.bitmap.pixels[s_idx];
-                                        r_sum += @as(f32, @floatFromInt((sample_px >> 16) & 0xFF));
-                                        g_sum += @as(f32, @floatFromInt((sample_px >> 8) & 0xFF));
-                                        b_sum += @as(f32, @floatFromInt(sample_px & 0xFF));
-                                    } else {
-                                        r_sum += @as(f32, @floatFromInt((current_pixel >> 16) & 0xFF));
-                                        g_sum += @as(f32, @floatFromInt((current_pixel >> 8) & 0xFF));
-                                        b_sum += @as(f32, @floatFromInt(current_pixel & 0xFF));
-                                    }
-                                }
-
-                                const current_r = @as(f32, @floatFromInt((current_pixel >> 16) & 0xFF));
-                                const current_g = @as(f32, @floatFromInt((current_pixel >> 8) & 0xFF));
-                                const current_b = @as(f32, @floatFromInt(current_pixel & 0xFF));
-                                add_r_arr[lane] = (r_sum * inv_samples_plus_one) - current_r;
-                                add_g_arr[lane] = (g_sum * inv_samples_plus_one) - current_g;
-                                add_b_arr[lane] = (b_sum * inv_samples_plus_one) - current_b;
-                            }
-                        }
-                    }
-                }
-
-                const simd_lanes = runtimeColorGradeSimdLanes();
-                var blurred: [max_runtime_color_grade_simd_lanes]u32 = undefined;
-                addPackedColorBatch(current_pixels[0..simd_lanes], add_r_arr[0..simd_lanes], add_g_arr[0..simd_lanes], add_b_arr[0..simd_lanes], blurred[0..simd_lanes]);
-                for (0..simd_lanes) |lane| {
-                    self.moblur_scratch_pixels[row_start + x + lane] = blurred[lane];
-                }
-            }
-
-            while (x < width) : (x += 1) {
-                const idx = row_start + x;
-                const current_pixel = self.bitmap.pixels[idx];
-                self.moblur_scratch_pixels[idx] = current_pixel;
-
-                const current_camera = self.scene_camera[idx];
-                if (!validSceneCameraSample(current_camera)) continue;
-
-                // Recover world position
-                const world_pos = cameraToWorldPosition(
-                    current_view.camera_position,
-                    current_view.basis_right,
-                    current_view.basis_up,
-                    current_view.basis_forward,
-                    current_camera,
-                );
-
-                // Project back into previous frame
-                const previous_relative = math.Vec3.sub(world_pos, previous_view.camera_position);
-                const previous_camera = math.Vec3.new(
-                    math.Vec3.dot(previous_relative, previous_view.basis_right),
-                    math.Vec3.dot(previous_relative, previous_view.basis_up),
-                    math.Vec3.dot(previous_relative, previous_view.basis_forward),
-                );
-                if (previous_camera.z <= previous_view.projection.near_plane + NEAR_EPSILON) continue;
-
-                const previous_screen_raw = projectCameraPositionFloat(previous_camera, previous_view.projection);
-                // Note: Not stripping jitter here so velocity matches the exact TAA camera shift if wanted.
-                // The actual velocity vector in screen pixels:
-                const vec_x = previous_screen_raw.x - @as(f32, @floatFromInt(x));
-                const vec_y = previous_screen_raw.y - @as(f32, @floatFromInt(y));
-
-                const vel_mag_sq = vec_x * vec_x + vec_y * vec_y;
-                if (vel_mag_sq < 0.25) continue; // Skip sub-pixel blur
-
-                var r_sum: f32 = @as(f32, @floatFromInt((current_pixel >> 16) & 0xFF));
-                var g_sum: f32 = @as(f32, @floatFromInt((current_pixel >> 8) & 0xFF));
-                var b_sum: f32 = @as(f32, @floatFromInt(current_pixel & 0xFF));
-
-                var s: i32 = 1;
-                while (s <= samples) : (s += 1) {
-                    const t = @as(f32, @floatFromInt(s)) / @as(f32, @floatFromInt(samples + 1));
-
-                    const p_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(x)) + vec_x * t * intensity));
-                    const p_y = @as(i32, @intFromFloat(@as(f32, @floatFromInt(y)) + vec_y * t * intensity));
-
-                    if (p_x >= 0 and p_x < @as(i32, @intCast(width)) and p_y >= 0 and p_y < @as(i32, @intCast(height))) {
-                        const s_idx = @as(usize, @intCast(p_y)) * width + @as(usize, @intCast(p_x));
-                        const sample_px = self.bitmap.pixels[s_idx];
-                        r_sum += @as(f32, @floatFromInt((sample_px >> 16) & 0xFF));
-                        g_sum += @as(f32, @floatFromInt((sample_px >> 8) & 0xFF));
-                        b_sum += @as(f32, @floatFromInt(sample_px & 0xFF));
-                    } else {
-                        // edge of screen, duplicate own pixel
-                        r_sum += @as(f32, @floatFromInt((current_pixel >> 16) & 0xFF));
-                        g_sum += @as(f32, @floatFromInt((current_pixel >> 8) & 0xFF));
-                        b_sum += @as(f32, @floatFromInt(current_pixel & 0xFF));
-                    }
-                }
-
-                const final_r = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(r_sum * inv_samples_plus_one))))));
-                const final_g = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(g_sum * inv_samples_plus_one))))));
-                const final_b = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(b_sum * inv_samples_plus_one))))));
-
-                self.moblur_scratch_pixels[idx] = 0xFF000000 | (final_r << 16) | (final_g << 8) | final_b;
-            }
-        }
     }
 
     fn applyTemporalAAPass(self: *Renderer, mesh: *const Mesh, current_view: TemporalAAViewState) void {
@@ -8750,72 +4752,16 @@ pub const Renderer = struct {
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
         const height: usize = @intCast(self.bitmap.height);
-
-        if (!self.taa_scratch.valid) {
-            @memcpy(self.taa_scratch.history_pixels, self.bitmap.pixels);
-            @memcpy(self.taa_scratch.history_depth, self.scene_depth);
-            for (0..self.bitmap.pixels.len) |idx| {
-                self.taa_scratch.history_surface_tags[idx] = surfaceTagForHandle(self.scene_surface[idx]);
-                self.taa_scratch.history_normals[idx] = packHistoryNormal(self.scene_normal[idx]);
-            }
-            self.taa_previous_view = current_view;
-            self.taa_scratch.valid = true;
-            self.captureTemporalMeshState(mesh);
-            self.recordRenderPassTiming("taa", pass_start);
-            return;
-        }
-
-        const stripe_count = computeStripeCount(self.taa_job_contexts.len, height);
-        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
-
-        if (stripe_count <= 1 or self.job_system == null) {
-            self.applyTemporalAARows(mesh, current_view, self.taa_previous_view, 0, height, width, height);
-        } else {
-            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-            var stripe_index: usize = 0;
-            while (stripe_index < stripe_count) : (stripe_index += 1) {
-                const start_row = stripe_index * rows_per_job;
-                if (start_row >= height) break;
-                const end_row = @min(height, start_row + rows_per_job);
-
-                self.taa_job_contexts[stripe_index] = .{
-                    .renderer = self,
-                    .mesh = mesh,
-                    .current_view = current_view,
-                    .previous_view = self.taa_previous_view,
-                    .start_row = start_row,
-                    .end_row = end_row,
-                    .width = width,
-                    .height = height,
-                };
-
-                if (stripe_index == 0) continue;
-
-                self.color_grade_jobs[stripe_index] = Job.init(
-                    TAAJobContext.run,
-                    @ptrCast(&self.taa_job_contexts[stripe_index]),
-                    &parent_job,
-                );
-                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
-                    TAAJobContext.run(@ptrCast(&self.taa_job_contexts[stripe_index]));
-                }
-            }
-
-            TAAJobContext.run(@ptrCast(&self.taa_job_contexts[0]));
-            parent_job.complete();
-            parent_job.wait();
-        }
-
-        @memcpy(self.bitmap.pixels, self.taa_scratch.resolve_pixels);
-        @memcpy(self.taa_scratch.history_pixels, self.bitmap.pixels);
-        @memcpy(self.taa_scratch.history_depth, self.scene_depth);
-        for (0..self.bitmap.pixels.len) |idx| {
-            self.taa_scratch.history_surface_tags[idx] = surfaceTagForHandle(self.scene_surface[idx]);
-            self.taa_scratch.history_normals[idx] = packHistoryNormal(self.scene_normal[idx]);
-        }
-        self.taa_previous_view = current_view;
-        self.taa_scratch.valid = true;
-        self.captureTemporalMeshState(mesh);
+        taa_pass.runPipeline(
+            self,
+            mesh,
+            current_view,
+            width,
+            height,
+            noopRenderPassJob,
+            taa_helpers.surfaceTagForHandle,
+            taa_helpers.packHistoryNormal,
+        );
         self.recordRenderPassTiming("taa", pass_start);
     }
 
@@ -8823,72 +4769,8 @@ pub const Renderer = struct {
         if (self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
 
-        const scene_width: usize = @intCast(self.bitmap.width);
         const scene_height: usize = @intCast(self.bitmap.height);
-
-        const stripe_count = computeStripeCount(self.ssr_job_contexts.len, scene_height);
-        const rows_per_job = if (stripe_count <= 1) scene_height else (scene_height + stripe_count - 1) / stripe_count;
-
-        if (stripe_count <= 1 or self.job_system == null) {
-            self.ssr_job_contexts[0] = .{
-                .renderer = self,
-                .scene_pixels = self.bitmap.pixels,
-                .scratch_pixels = self.ssr_scratch_pixels,
-                .scene_camera = self.scene_camera,
-                .scene_normal = self.scene_normal,
-                .scene_depth = self.scene_depth,
-                .width = scene_width,
-                .height = scene_height,
-                .start_row = 0,
-                .end_row = scene_height,
-                .projection = projection,
-                .max_samples = config.POST_SSR_MAX_SAMPLES,
-                .step_size = config.POST_SSR_STEP,
-                .max_distance = config.POST_SSR_MAX_DISTANCE,
-                .thickness = config.POST_SSR_THICKNESS,
-                .intensity = config.POST_SSR_INTENSITY,
-            };
-            SSRJobContext.run(&self.ssr_job_contexts[0]);
-        } else {
-            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-            var stripe_index: usize = 0;
-            while (stripe_index < stripe_count) : (stripe_index += 1) {
-                const start_row = stripe_index * rows_per_job;
-                if (start_row >= scene_height) break;
-                const end_row = @min(scene_height, start_row + rows_per_job);
-
-                self.ssr_job_contexts[stripe_index] = .{
-                    .renderer = self,
-                    .scene_pixels = self.bitmap.pixels,
-                    .scratch_pixels = self.ssr_scratch_pixels,
-                    .scene_camera = self.scene_camera,
-                    .scene_normal = self.scene_normal,
-                    .scene_depth = self.scene_depth,
-                    .width = scene_width,
-                    .height = scene_height,
-                    .start_row = start_row,
-                    .end_row = end_row,
-                    .projection = projection,
-                    .max_samples = config.POST_SSR_MAX_SAMPLES,
-                    .step_size = config.POST_SSR_STEP,
-                    .max_distance = config.POST_SSR_MAX_DISTANCE,
-                    .thickness = config.POST_SSR_THICKNESS,
-                    .intensity = config.POST_SSR_INTENSITY,
-                };
-
-                self.color_grade_jobs[stripe_index] = Job.init(
-                    SSRJobContext.run,
-                    @ptrCast(&self.ssr_job_contexts[stripe_index]),
-                    &parent_job,
-                );
-
-                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
-                    SSRJobContext.run(@ptrCast(&self.ssr_job_contexts[stripe_index]));
-                }
-            }
-            parent_job.complete();
-            parent_job.wait();
-        }
+        ssr_pass.runPipeline(self, projection, scene_height, noopRenderPassJob);
 
         @memcpy(self.bitmap.pixels, self.ssr_scratch_pixels);
         self.recordRenderPassTiming("ssr", pass_start);
@@ -8900,95 +4782,7 @@ pub const Renderer = struct {
 
         const scene_width: usize = @intCast(self.bitmap.width);
         const scene_height: usize = @intCast(self.bitmap.height);
-
-        const center_x = scene_width / 2;
-        const center_y = scene_height / 2;
-        var center_depth = self.scene_depth[center_y * scene_width + center_x];
-
-        // Safety guard for extreme depths
-        if (center_depth > 1000.0) center_depth = 1000.0;
-
-        // Check a 3x3 region in center to ensure targeting isn't noisy
-        var min_depth: f32 = 1000.0;
-        const box_size: i32 = 4;
-
-        var cy: i32 = -box_size;
-        while (cy <= box_size) : (cy += 1) {
-            var cx: i32 = -box_size;
-            while (cx <= box_size) : (cx += 1) {
-                const py = @as(usize, @intCast(@max(0, @min(@as(i32, @intCast(scene_height)) - 1, @as(i32, @intCast(center_y)) + cy))));
-                const px = @as(usize, @intCast(@max(0, @min(@as(i32, @intCast(scene_width)) - 1, @as(i32, @intCast(center_x)) + cx))));
-                const d = self.scene_depth[py * scene_width + px];
-                if (d < min_depth) {
-                    min_depth = d;
-                }
-            }
-        }
-
-        if (min_depth > 1000.0) min_depth = 1000.0;
-
-        self.dof_target_focal_distance = min_depth;
-
-        // Smooth lerp (Eye Accommodation)
-        self.dof_focal_distance = self.dof_focal_distance + (self.dof_target_focal_distance - self.dof_focal_distance) * 0.1;
-
-        const auto_focal_distance = self.dof_focal_distance;
-
-        const stripe_count = computeStripeCount(self.dof_job_contexts.len, scene_height);
-        const rows_per_job = if (stripe_count <= 1) scene_height else (scene_height + stripe_count - 1) / stripe_count;
-
-        if (stripe_count <= 1 or self.job_system == null) {
-            self.dof_job_contexts[0] = .{
-                .scene_pixels = self.bitmap.pixels,
-                .scratch_pixels = self.dof_scratch.pixels,
-                .scene_depth = self.scene_depth,
-                .width = scene_width,
-                .height = scene_height,
-                .start_row = 0,
-                .end_row = scene_height,
-                .focal_distance = auto_focal_distance,
-                .focal_range = config.POST_DOF_FOCAL_RANGE,
-                .max_blur_radius = config.POST_DOF_BLUR_RADIUS,
-            };
-            DepthOfFieldJobContext.run(&self.dof_job_contexts[0]);
-        } else {
-            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-            var stripe_index: usize = 0;
-            while (stripe_index < stripe_count) : (stripe_index += 1) {
-                const start_row = stripe_index * rows_per_job;
-                if (start_row >= scene_height) break;
-                const end_row = @min(scene_height, start_row + rows_per_job);
-
-                self.dof_job_contexts[stripe_index] = .{
-                    .scene_pixels = self.bitmap.pixels,
-                    .scratch_pixels = self.dof_scratch.pixels,
-                    .scene_depth = self.scene_depth,
-                    .width = scene_width,
-                    .height = scene_height,
-                    .start_row = start_row,
-                    .end_row = end_row,
-                    .focal_distance = auto_focal_distance,
-                    .focal_range = config.POST_DOF_FOCAL_RANGE,
-                    .max_blur_radius = config.POST_DOF_BLUR_RADIUS,
-                };
-
-                self.color_grade_jobs[stripe_index] = Job.init(
-                    DepthOfFieldJobContext.run,
-                    @ptrCast(&self.dof_job_contexts[stripe_index]),
-                    &parent_job,
-                );
-
-                if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
-                    DepthOfFieldJobContext.run(@ptrCast(&self.dof_job_contexts[stripe_index]));
-                }
-            }
-            DepthOfFieldJobContext.run(@ptrCast(&self.dof_job_contexts[0]));
-            parent_job.complete();
-            parent_job.wait();
-        }
-
-        // Copy back to main framebuffer
-        @memcpy(self.bitmap.pixels, self.dof_scratch.pixels);
+        depth_of_field_pass.runPipeline(self, scene_width, scene_height, noopRenderPassJob);
 
         self.recordRenderPassTiming("dof", pass_start);
     }
@@ -8996,107 +4790,21 @@ pub const Renderer = struct {
     fn applyBloomPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0) return;
         const pass_start = std.time.nanoTimestamp();
-        const bloom = &self.bloom_scratch;
         const scene_width: usize = @intCast(self.bitmap.width);
         const scene_height: usize = @intCast(self.bitmap.height);
-        self.dispatchBloomStage(.extract, bloom.height, scene_width, scene_height, config.POST_BLOOM_THRESHOLD, 0);
-        self.dispatchBloomStage(.blur_horizontal, bloom.height, scene_width, scene_height, 0, 0);
-        self.dispatchBloomStage(.blur_vertical, bloom.height, scene_width, scene_height, 0, 0);
-        self.dispatchBloomStage(.composite, scene_height, scene_width, scene_height, 0, config.POST_BLOOM_INTENSITY_PERCENT);
+        bloom_pass.runPipeline(
+            self,
+            scene_width,
+            scene_height,
+            config.POST_BLOOM_THRESHOLD,
+            config.POST_BLOOM_INTENSITY_PERCENT,
+            noopRenderPassJob,
+            bloom_rows.extractDownsampleRows,
+            bloom_rows.blurHorizontalRows,
+            bloom_rows.blurVerticalRows,
+            bloom_rows.compositeRows,
+        );
         self.recordRenderPassTiming("bloom", pass_start);
-    }
-
-    fn dispatchBloomStage(
-        self: *Renderer,
-        stage: BloomPassStage,
-        row_count: usize,
-        scene_width: usize,
-        scene_height: usize,
-        threshold: i32,
-        intensity_percent: i32,
-    ) void {
-        if (row_count == 0) return;
-        const stripe_count = computeStripeCount(self.bloom_job_contexts.len, row_count);
-        const rows_per_job = if (stripe_count <= 1) row_count else (row_count + stripe_count - 1) / stripe_count;
-
-        if (stripe_count <= 1 or self.job_system == null) {
-            self.runBloomStageRange(stage, 0, row_count, scene_width, scene_height, threshold, intensity_percent);
-            return;
-        }
-
-        var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-        var stripe_index: usize = 0;
-        while (stripe_index < stripe_count) : (stripe_index += 1) {
-            const start_row = stripe_index * rows_per_job;
-            if (start_row >= row_count) break;
-            const end_row = @min(row_count, start_row + rows_per_job);
-
-            self.bloom_job_contexts[stripe_index] = .{
-                .stage = stage,
-                .scene_pixels = self.bitmap.pixels,
-                .scene_width = scene_width,
-                .scene_height = scene_height,
-                .bloom = &self.bloom_scratch,
-                .threshold_curve = &self.bloom_threshold_curve,
-                .intensity_lut = &self.bloom_intensity_lut,
-                .start_row = start_row,
-                .end_row = end_row,
-            };
-
-            if (stripe_index == 0) continue;
-
-            self.color_grade_jobs[stripe_index] = Job.init(
-                BloomJobContext.run,
-                @ptrCast(&self.bloom_job_contexts[stripe_index]),
-                &parent_job,
-            );
-            if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
-                BloomJobContext.run(@ptrCast(&self.bloom_job_contexts[stripe_index]));
-            }
-        }
-
-        BloomJobContext.run(@ptrCast(&self.bloom_job_contexts[0]));
-        parent_job.complete();
-        parent_job.wait();
-    }
-
-    fn runBloomStageRange(
-        self: *Renderer,
-        stage: BloomPassStage,
-        start_row: usize,
-        end_row: usize,
-        scene_width: usize,
-        scene_height: usize,
-        threshold: i32,
-        intensity_percent: i32,
-    ) void {
-        switch (stage) {
-            .extract => {
-                _ = threshold;
-                extractBloomDownsampleRows(
-                    self.bitmap.pixels,
-                    scene_width,
-                    scene_height,
-                    &self.bloom_scratch,
-                    &self.bloom_threshold_curve,
-                    start_row,
-                    end_row,
-                );
-            },
-            .blur_horizontal => blurBloomHorizontalRows(&self.bloom_scratch, start_row, end_row),
-            .blur_vertical => blurBloomVerticalRows(&self.bloom_scratch, start_row, end_row),
-            .composite => {
-                _ = intensity_percent;
-                compositeBloomRows(
-                    self.bitmap.pixels,
-                    scene_width,
-                    &self.bloom_scratch,
-                    &self.bloom_intensity_lut,
-                    start_row,
-                    end_row,
-                );
-            },
-        }
     }
 
     fn applyBlockbusterColorGradePass(self: *Renderer) void {
@@ -9104,57 +4812,7 @@ pub const Renderer = struct {
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
         const height: usize = @intCast(self.bitmap.height);
-        const stripe_count = computeStripeCount(self.color_grade_job_contexts.len, height);
-        const rows_per_job = if (stripe_count <= 1) height else (height + stripe_count - 1) / stripe_count;
-
-        if (stripe_count <= 1 or self.job_system == null) {
-            applyBlockbusterGradeRange(self.bitmap.pixels, 0, self.bitmap.pixels.len, &self.color_grade_profile);
-            self.recordRenderPassTiming(config.POST_COLOR_PROFILE_NAME, pass_start);
-            return;
-        }
-
-        var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-
-        var stripe_index: usize = 0;
-        while (stripe_index < stripe_count) : (stripe_index += 1) {
-            const start_row = stripe_index * rows_per_job;
-            if (start_row >= height) break;
-            const end_row = @min(height, start_row + rows_per_job);
-
-            self.color_grade_job_contexts[stripe_index] = .{
-                .pixels = self.bitmap.pixels,
-                .start_index = start_row * width,
-                .end_index = end_row * width,
-                .profile = &self.color_grade_profile,
-            };
-
-            if (stripe_index == 0) continue;
-
-            self.color_grade_jobs[stripe_index] = Job.init(
-                ColorGradeJobContext.run,
-                @ptrCast(&self.color_grade_job_contexts[stripe_index]),
-                &parent_job,
-            );
-
-            if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
-                applyBlockbusterGradeRange(
-                    self.bitmap.pixels,
-                    self.color_grade_job_contexts[stripe_index].start_index,
-                    self.color_grade_job_contexts[stripe_index].end_index,
-                    &self.color_grade_profile,
-                );
-            }
-        }
-
-        applyBlockbusterGradeRange(
-            self.bitmap.pixels,
-            self.color_grade_job_contexts[0].start_index,
-            self.color_grade_job_contexts[0].end_index,
-            &self.color_grade_profile,
-        );
-
-        parent_job.complete();
-        parent_job.wait();
+        color_grade_pass.runPipeline(self, width, height, noopRenderPassJob);
 
         self.recordRenderPassTiming(config.POST_COLOR_PROFILE_NAME, pass_start);
     }

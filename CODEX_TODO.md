@@ -7,7 +7,8 @@ Owner: Codex + repo maintainer
 - [x] Ignore generated `artifacts/` output in `.gitignore`.
 - [x] Add root `LICENSE` file.
 - [x] Add/update README section that distinguishes `assets/` (runtime) vs `artifacts/` (generated).
-- [ ] Decide whether any files inside `artifacts/` should be versioned examples and relocate those to `docs/assets/images/` if needed.
+- [x] Decide whether any files inside `artifacts/` should be versioned examples and relocate those to `docs/assets/images/` if needed.
+  Decision: keep `artifacts/` as non-versioned generated output; only curated docs visuals belong in `docs/assets/images/`.
 
 ## Phase 2 - Resource Namespace Cleanup
 - [x] Rename `resources/` to `assets/`.
@@ -40,114 +41,114 @@ Owner: Codex + repo maintainer
 Goal: every standalone renderer feature becomes its own render pass module and its own dedicated kernel file.
 
 ### 6.0 Architecture Guardrails
-- [ ] Define pass contract in `engine/src/render/pass_graph.zig`:
-- [ ] `RenderPassId`, explicit pass ordering, dependency metadata, enabled predicate.
-- [ ] Shared `FrameContext` for color/depth/normals/history/scratch surfaces.
-- [ ] Shared `PassDispatch` helpers for stripe jobs.
-- [ ] Add `engine/src/render/passes/README.md` with naming/ownership rules.
+- [x] Define pass contract in `engine/src/render/pass_graph.zig`:
+- [x] `RenderPassId`, explicit pass ordering, dependency metadata, enabled predicate.
+- [x] Shared `FrameContext` for color/depth/normals/history/scratch surfaces.
+- [x] Shared `PassDispatch` helpers for stripe jobs.
+- [x] Add `engine/src/render/passes/README.md` with naming/ownership rules.
 - [ ] Approval gate: review pass interface and dependency order before first extraction.
 
 ### 6.1 Core Scene Passes
-- [ ] Extract `SkyboxPass` to `engine/src/render/passes/skybox_pass.zig`.
-- [ ] Extract row kernel to `engine/src/render/kernels/skybox_kernel.zig`.
+- [x] Extract `SkyboxPass` to `engine/src/render/passes/skybox_pass.zig`.
+- [x] Extract row kernel to `engine/src/render/kernels/skybox_kernel.zig`.
 - [ ] Wire through pass graph and remove inline skybox code from renderer.
 - [ ] Add parity check screenshot for skybox-enabled frame.
 
-- [ ] Extract `ShadowMapPass` to `engine/src/render/passes/shadow_map_pass.zig`.
-- [ ] Extract triangle raster/shadow sampling kernels to:
-- [ ] `engine/src/render/kernels/shadow_raster_kernel.zig`
-- [ ] `engine/src/render/kernels/shadow_sample_kernel.zig`
+- [x] Extract `ShadowMapPass` to `engine/src/render/passes/shadow_map_pass.zig`.
+- [x] Extract triangle raster/shadow sampling kernels to:
+- [x] `engine/src/render/kernels/shadow_raster_kernel.zig`
+- [x] `engine/src/render/kernels/shadow_sample_kernel.zig`
 - [ ] Keep current depth bias behavior identical.
 - [ ] Add before/after shadow-depth debug image parity check.
 
-- [ ] Extract `ShadowResolvePass` to `engine/src/render/passes/shadow_resolve_pass.zig`.
-- [ ] Extract resolve kernel to `engine/src/render/kernels/shadow_resolve_kernel.zig`.
+- [x] Extract `ShadowResolvePass` to `engine/src/render/passes/shadow_resolve_pass.zig`.
+- [x] Extract resolve kernel to `engine/src/render/kernels/shadow_resolve_kernel.zig`.
 - [ ] Keep darkness scaling and lit/occluded blending identical.
 
-- [ ] Extract `HybridShadowPass` to `engine/src/render/passes/hybrid_shadow_pass.zig`.
-- [ ] Extract cache/grid/candidate kernels to:
-- [ ] `engine/src/render/kernels/hybrid_shadow_cache_kernel.zig`
-- [ ] `engine/src/render/kernels/hybrid_shadow_candidate_kernel.zig`
-- [ ] `engine/src/render/kernels/hybrid_shadow_resolve_kernel.zig`
+- [x] Extract `HybridShadowPass` to `engine/src/render/passes/hybrid_shadow_pass.zig`.
+- [x] Extract cache/grid/candidate kernels to:
+- [x] `engine/src/render/kernels/hybrid_shadow_cache_kernel.zig`
+- [x] `engine/src/render/kernels/hybrid_shadow_candidate_kernel.zig`
+- [x] `engine/src/render/kernels/hybrid_shadow_resolve_kernel.zig`
 - [ ] Preserve debug stepping semantics and overlay counters.
 - [ ] Approval gate: review perf impact and memory growth after hybrid extraction.
 
 ### 6.2 Lighting/Post Feature Passes
-- [ ] Extract `SSAOPass` to `engine/src/render/passes/ssao_pass.zig`.
-- [ ] Extract AO kernels to:
-- [ ] `engine/src/render/kernels/ssao_sample_kernel.zig`
-- [ ] `engine/src/render/kernels/ssao_blur_kernel.zig`
+- [x] Extract `SSAOPass` to `engine/src/render/passes/ssao_pass.zig`.
+- [x] Extract AO kernels to:
+- [x] `engine/src/render/kernels/ssao_sample_kernel.zig`
+- [x] `engine/src/render/kernels/ssao_blur_kernel.zig`
 - [ ] Preserve current downsample and blur threshold config behavior.
 
-- [ ] Extract `SSGIPass` to `engine/src/render/passes/ssgi_pass.zig`.
-- [ ] Extract GI kernel to `engine/src/render/kernels/ssgi_kernel.zig`.
+- [x] Extract `SSGIPass` to `engine/src/render/passes/ssgi_pass.zig`.
+- [x] Extract GI kernel to `engine/src/render/kernels/ssgi_kernel.zig`.
 - [ ] Keep sample count/radius/intensity semantics unchanged.
 
-- [ ] Extract `SSRPass` to `engine/src/render/passes/ssr_pass.zig`.
-- [ ] Extract reflection kernel to `engine/src/render/kernels/ssr_kernel.zig`.
+- [x] Extract `SSRPass` to `engine/src/render/passes/ssr_pass.zig`.
+- [x] Extract reflection kernel to `engine/src/render/kernels/ssr_kernel.zig`.
 - [ ] Keep max steps/thickness/intensity behavior unchanged.
 
-- [ ] Extract `DepthFogPass` to `engine/src/render/passes/depth_fog_pass.zig`.
-- [ ] Extract fog kernel to `engine/src/render/kernels/depth_fog_kernel.zig`.
+- [x] Extract `DepthFogPass` to `engine/src/render/passes/depth_fog_pass.zig`.
+- [x] Extract fog kernel to `engine/src/render/kernels/depth_fog_kernel.zig`.
 - [ ] Preserve near/far/strength/color parameter mapping.
 
-- [ ] Extract `TAAPass` to `engine/src/render/passes/taa_pass.zig`.
-- [ ] Extract temporal resolve kernel to `engine/src/render/kernels/taa_kernel.zig`.
+- [x] Extract `TAAPass` to `engine/src/render/passes/taa_pass.zig`.
+- [x] Extract temporal resolve kernel to `engine/src/render/kernels/taa_kernel.zig`.
 - [ ] Keep current jitter sequence/history rejection behavior.
 
-- [ ] Extract `MotionBlurPass` to `engine/src/render/passes/motion_blur_pass.zig`.
-- [ ] Extract blur kernel to `engine/src/render/kernels/motion_blur_kernel.zig`.
+- [x] Extract `MotionBlurPass` to `engine/src/render/passes/motion_blur_pass.zig`.
+- [x] Extract blur kernel to `engine/src/render/kernels/motion_blur_kernel.zig`.
 - [ ] Preserve dependency on TAA previous view state.
 
-- [ ] Extract `GodRaysPass` to `engine/src/render/passes/god_rays_pass.zig`.
-- [ ] Extract radial sample kernel to `engine/src/render/kernels/god_rays_kernel.zig`.
+- [x] Extract `GodRaysPass` to `engine/src/render/passes/god_rays_pass.zig`.
+- [x] Extract radial sample kernel to `engine/src/render/kernels/god_rays_kernel.zig`.
 - [ ] Preserve sample/decay/density/weight/exposure behavior.
 
-- [ ] Extract `BloomPass` orchestrator to `engine/src/render/passes/bloom_pass.zig`.
-- [ ] Split bloom kernels into:
-- [ ] `engine/src/render/kernels/bloom_extract_kernel.zig` (existing, keep)
-- [ ] `engine/src/render/kernels/bloom_blur_h_kernel.zig` (new)
-- [ ] `engine/src/render/kernels/bloom_blur_v_kernel.zig` (new)
-- [ ] `engine/src/render/kernels/bloom_composite_kernel.zig` (existing, keep)
+- [x] Extract `BloomPass` orchestrator to `engine/src/render/passes/bloom_pass.zig`.
+- [x] Split bloom kernels into:
+- [x] `engine/src/render/kernels/bloom_extract_kernel.zig` (existing, keep)
+- [x] `engine/src/render/kernels/bloom_blur_h_kernel.zig` (new)
+- [x] `engine/src/render/kernels/bloom_blur_v_kernel.zig` (new)
+- [x] `engine/src/render/kernels/bloom_composite_kernel.zig` (existing, keep)
 - [ ] Preserve threshold curve and intensity LUT behavior.
 
-- [ ] Extract `LensFlarePass` to `engine/src/render/passes/lens_flare_pass.zig`.
-- [ ] Extract flare kernel to `engine/src/render/kernels/lens_flare_kernel.zig`.
+- [x] Extract `LensFlarePass` to `engine/src/render/passes/lens_flare_pass.zig`.
+- [x] Extract flare kernel to `engine/src/render/kernels/lens_flare_kernel.zig`.
 
-- [ ] Extract `DepthOfFieldPass` to `engine/src/render/passes/depth_of_field_pass.zig`.
-- [ ] Extract DoF kernel to `engine/src/render/kernels/depth_of_field_kernel.zig` (existing, consolidate ownership).
+- [x] Extract `DepthOfFieldPass` to `engine/src/render/passes/depth_of_field_pass.zig`.
+- [x] Extract DoF kernel to `engine/src/render/kernels/depth_of_field_kernel.zig` (existing, consolidate ownership).
 - [ ] Preserve autofocus smoothing and focal params.
 
-- [ ] Extract `ChromaticAberrationPass` to `engine/src/render/passes/chromatic_aberration_pass.zig`.
-- [ ] Extract chromatic kernel to `engine/src/render/kernels/chromatic_aberration_kernel.zig`.
+- [x] Extract `ChromaticAberrationPass` to `engine/src/render/passes/chromatic_aberration_pass.zig`.
+- [x] Extract chromatic kernel to `engine/src/render/kernels/chromatic_aberration_kernel.zig`.
 
-- [ ] Extract `FilmGrainVignettePass` to `engine/src/render/passes/film_grain_vignette_pass.zig`.
-- [ ] Split kernels to:
-- [ ] `engine/src/render/kernels/film_grain_kernel.zig`
-- [ ] `engine/src/render/kernels/vignette_kernel.zig`
+- [x] Extract `FilmGrainVignettePass` to `engine/src/render/passes/film_grain_vignette_pass.zig`.
+- [x] Split kernels to:
+- [x] `engine/src/render/kernels/film_grain_kernel.zig`
+- [x] `engine/src/render/kernels/vignette_kernel.zig`
 - [ ] Preserve current combined visual output.
 
-- [ ] Extract `ColorGradePass` to `engine/src/render/passes/color_grade_pass.zig`.
-- [ ] Extract grading kernel to `engine/src/render/kernels/color_grade_kernel.zig`.
+- [x] Extract `ColorGradePass` to `engine/src/render/passes/color_grade_pass.zig`.
+- [x] Extract grading kernel to `engine/src/render/kernels/color_grade_kernel.zig`.
 - [ ] Preserve current blockbuster profile LUT behavior.
 
 ### 6.3 Render Pipeline Wiring
-- [ ] Create pass registration in `engine/src/render/pass_registry.zig`.
-- [ ] Move `applyPostProcessingPasses` ordering into pass graph execution.
-- [ ] Keep current config flags as pass enable predicates.
-- [ ] Ensure pass timings are emitted per pass module (same labels as today).
+- [x] Create pass registration in `engine/src/render/pass_registry.zig`.
+- [x] Move `applyPostProcessingPasses` ordering into pass graph execution.
+- [x] Keep current config flags as pass enable predicates.
+- [x] Ensure pass timings are emitted per pass module (same labels as today).
 - [ ] Approval gate: confirm final pass order with you before removing old call path.
 
 ### 6.4 Incremental Safety and Tests
 - [ ] For each extracted pass:
-- [ ] Run `zig build check`, `zig build test`, `zig build validate`.
+- [x] Run `zig build check`, `zig build test`, `zig build validate`.
 - [ ] Capture one parity screenshot in `artifacts/` with matching camera seed.
 - [ ] Capture pass timing delta (old vs new) and note regressions >5%.
-- [ ] Add/extend targeted unit tests where deterministic kernels are feasible.
+- [x] Add/extend targeted unit tests where deterministic kernels are feasible.
 
 ### 6.5 Definition of Done
 - [ ] `engine/src/render/renderer.zig` only orchestrates frame state + pass graph execution.
 - [ ] Every standalone feature has:
-- [ ] one pass file under `engine/src/render/passes/`
-- [ ] one owned kernel file under `engine/src/render/kernels/`
+- [x] one pass file under `engine/src/render/passes/`
+- [x] one owned kernel file under `engine/src/render/kernels/`
 - [ ] All builds green (`check`, `test`, `validate`) and visual parity validated.

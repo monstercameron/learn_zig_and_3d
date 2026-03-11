@@ -57,12 +57,29 @@ pub fn build(b: *std.Build) void {
     const validate_step = b.step("validate", "Build the main app and supported subprojects");
     validate_step.dependOn(check_step);
 
+    const test_module = b.createModule(.{
+        .root_source_file = b.path("tests/unit/smoke_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_module.addImport("taa_kernel", b.createModule(.{
+        .root_source_file = b.path("engine/src/render/kernels/taa_kernel.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    test_module.addImport("hybrid_shadow_candidate_kernel", b.createModule(.{
+        .root_source_file = b.path("engine/src/render/kernels/hybrid_shadow_candidate_kernel.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    test_module.addImport("hybrid_shadow_resolve_kernel", b.createModule(.{
+        .root_source_file = b.path("engine/src/render/kernels/hybrid_shadow_resolve_kernel.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+
     const unit_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/unit/smoke_test.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = test_module,
     });
     const test_step = b.step("test", "Run unit tests");
     const run_unit_tests = b.addRunArtifact(unit_tests);
