@@ -29,12 +29,13 @@ pub const BloomCompositeKernel = struct {
         const scene_color = loadRGBA(scene_tex, x, y);
         const bloom_color = loadRGBA(bloom_tex, x, y);
 
-        // Composite the bloom effect onto the original scene
-        const final_r = scene_color[0] * pc.scene_intensity + bloom_color[0] * pc.bloom_intensity;
-        const final_g = scene_color[1] * pc.scene_intensity + bloom_color[1] * pc.bloom_intensity;
-        const final_b = scene_color[2] * pc.scene_intensity + bloom_color[2] * pc.bloom_intensity;
-        const final_a = scene_color[3]; // Alpha usually comes from the scene
-
-        storeRGBA(dst, x, y, .{ final_r, final_g, final_b, final_a });
+        const Float4 = @Vector(4, f32);
+        const scene_v: Float4 = scene_color;
+        const bloom_v: Float4 = bloom_color;
+        const scene_scale: Float4 = .{ pc.scene_intensity, pc.scene_intensity, pc.scene_intensity, 0.0 };
+        const bloom_scale: Float4 = .{ pc.bloom_intensity, pc.bloom_intensity, pc.bloom_intensity, 0.0 };
+        var out_v = scene_v * scene_scale + bloom_v * bloom_scale;
+        out_v[3] = scene_v[3];
+        storeRGBA(dst, x, y, out_v);
     }
 };

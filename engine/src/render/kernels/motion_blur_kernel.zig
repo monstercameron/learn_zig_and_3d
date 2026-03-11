@@ -1,4 +1,3 @@
-const std = @import("std");
 const compute = @import("compute.zig");
 const ComputeContext = compute.ComputeContext;
 const loadRGBA = compute.loadRGBA;
@@ -31,26 +30,33 @@ pub const MotionBlurKernel = struct {
         const velocity = loadRGBA(velocity_tex, x, y); // xy components are motion vector
 
         var final_color = current_color;
+        const image_w = @as(f32, @floatFromInt(ctx.image_size.x));
+        const image_h = @as(f32, @floatFromInt(ctx.image_size.y));
+        const inv_count = 1.0 / (@as(f32, @floatFromInt(pc.sample_count)) + 1.0);
+        const step_x = velocity[0] * pc.intensity * image_w;
+        const step_y = velocity[1] * pc.intensity * image_h;
+        const max_x = @as(i32, @intCast(ctx.image_size.x));
+        const max_y = @as(i32, @intCast(ctx.image_size.y));
 
         // Sample along the motion vector
         var i: u32 = 1;
+        var t = inv_count;
         while (i <= pc.sample_count) : (i += 1) {
-            const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(pc.sample_count + 1));
-            const sample_x = @as(i32, @intCast(x)) - @as(i32, @intFromFloat(velocity[0] * pc.intensity * t * @as(f32, @floatFromInt(ctx.image_size.x))));
-            const sample_y = @as(i32, @intCast(y)) - @as(i32, @intFromFloat(velocity[1] * pc.intensity * t * @as(f32, @floatFromInt(ctx.image_size.y))));
+            const sample_x = @as(i32, @intCast(x)) - @as(i32, @intFromFloat(step_x * t));
+            const sample_y = @as(i32, @intCast(y)) - @as(i32, @intFromFloat(step_y * t));
 
-            if (sample_x >= 0 and sample_x < @as(i32, @intCast(ctx.image_size.x)) and
-                sample_y >= 0 and sample_y < @as(i32, @intCast(ctx.image_size.y))) {
+            if (sample_x >= 0 and sample_x < max_x and sample_y >= 0 and sample_y < max_y) {
                 const sampled_color = loadRGBA(color_tex, @as(u32, @intCast(sample_x)), @as(u32, @intCast(sample_y)));
                 final_color[0] += sampled_color[0];
                 final_color[1] += sampled_color[1];
                 final_color[2] += sampled_color[2];
             }
+            t += inv_count;
         }
 
-        final_color[0] /= (@as(f32, @floatFromInt(pc.sample_count)) + 1.0);
-        final_color[1] /= (@as(f32, @floatFromInt(pc.sample_count)) + 1.0);
-        final_color[2] /= (@as(f32, @floatFromInt(pc.sample_count)) + 1.0);
+        final_color[0] *= inv_count;
+        final_color[1] *= inv_count;
+        final_color[2] *= inv_count;
 
         storeRGBA(dst, x, y, final_color);
     }

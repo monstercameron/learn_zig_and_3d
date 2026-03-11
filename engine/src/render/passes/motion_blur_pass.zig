@@ -96,14 +96,16 @@ pub fn runRows(
             const vel_mag_sq = vec_x * vec_x + vec_y * vec_y;
             if (vel_mag_sq < 0.25) continue;
 
-            var r_sum: f32 = @as(f32, @floatFromInt((current_pixel >> 16) & 0xFF));
-            var g_sum: f32 = @as(f32, @floatFromInt((current_pixel >> 8) & 0xFF));
-            var b_sum: f32 = @as(f32, @floatFromInt(current_pixel & 0xFF));
+            const current_r = @as(f32, @floatFromInt((current_pixel >> 16) & 0xFF));
+            const current_g = @as(f32, @floatFromInt((current_pixel >> 8) & 0xFF));
+            const current_b = @as(f32, @floatFromInt(current_pixel & 0xFF));
+            var r_sum: f32 = current_r;
+            var g_sum: f32 = current_g;
+            var b_sum: f32 = current_b;
 
             var s: i32 = 1;
+            var t = inv_samples_plus_one;
             while (s <= samples) : (s += 1) {
-                const t = @as(f32, @floatFromInt(s)) / @as(f32, @floatFromInt(samples + 1));
-
                 const p_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(x)) + vec_x * t * intensity));
                 const p_y = @as(i32, @intFromFloat(@as(f32, @floatFromInt(y)) + vec_y * t * intensity));
 
@@ -114,10 +116,11 @@ pub fn runRows(
                     g_sum += @as(f32, @floatFromInt((sample_px >> 8) & 0xFF));
                     b_sum += @as(f32, @floatFromInt(sample_px & 0xFF));
                 } else {
-                    r_sum += @as(f32, @floatFromInt((current_pixel >> 16) & 0xFF));
-                    g_sum += @as(f32, @floatFromInt((current_pixel >> 8) & 0xFF));
-                    b_sum += @as(f32, @floatFromInt(current_pixel & 0xFF));
+                    r_sum += current_r;
+                    g_sum += current_g;
+                    b_sum += current_b;
                 }
+                t += inv_samples_plus_one;
             }
 
             const final_r = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(r_sum * inv_samples_plus_one))))));

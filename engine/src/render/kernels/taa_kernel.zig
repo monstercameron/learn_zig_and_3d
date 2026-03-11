@@ -8,17 +8,35 @@ pub fn resolvePixel(current_pixel: u32, history_pixel: u32, params: TemporalReso
     const w = std.math.clamp(params.history_weight, 0.0, 1.0);
     const cw = 1.0 - w;
 
-    const cr = @as(f32, @floatFromInt((current_pixel >> 16) & 0xFF));
-    const cg = @as(f32, @floatFromInt((current_pixel >> 8) & 0xFF));
-    const cb = @as(f32, @floatFromInt(current_pixel & 0xFF));
-
-    const hr = @as(f32, @floatFromInt((history_pixel >> 16) & 0xFF));
-    const hg = @as(f32, @floatFromInt((history_pixel >> 8) & 0xFF));
-    const hb = @as(f32, @floatFromInt(history_pixel & 0xFF));
-
-    const out_r = @as(u32, @intFromFloat(std.math.clamp(cr * cw + hr * w, 0.0, 255.0)));
-    const out_g = @as(u32, @intFromFloat(std.math.clamp(cg * cw + hg * w, 0.0, 255.0)));
-    const out_b = @as(u32, @intFromFloat(std.math.clamp(cb * cw + hb * w, 0.0, 255.0)));
+    const Float3 = @Vector(3, f32);
+    const cur: Float3 = .{
+        @floatFromInt((current_pixel >> 16) & 0xFF),
+        @floatFromInt((current_pixel >> 8) & 0xFF),
+        @floatFromInt(current_pixel & 0xFF),
+    };
+    const hist: Float3 = .{
+        @floatFromInt((history_pixel >> 16) & 0xFF),
+        @floatFromInt((history_pixel >> 8) & 0xFF),
+        @floatFromInt(history_pixel & 0xFF),
+    };
+    const mixed = cur * @as(Float3, @splat(cw)) + hist * @as(Float3, @splat(w));
+    const clamped = @max(@as(Float3, @splat(0.0)), @min(@as(Float3, @splat(255.0)), mixed));
+    const out_r: u32 = @intFromFloat(clamped[0]);
+    const out_g: u32 = @intFromFloat(clamped[1]);
+    const out_b: u32 = @intFromFloat(clamped[2]);
 
     return 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b;
+}
+
+pub fn resolvePixelBatch(current_pixels: []const u32, history_pixels: []const u32, params: TemporalResolveParams, out_pixels: []u32) void {
+    const len = @min(current_pixels.len, @min(history_pixels.len, out_pixels.len));
+    var i: usize = 0;
+    while (i + 8 <= len) : (i += 8) {
+        inline for (0..8) |lane| {
+            out_pixels[i + lane] = resolvePixel(current_pixels[i + lane], history_pixels[i + lane], params);
+        }
+    }
+    while (i < len) : (i += 1) {
+        out_pixels[i] = resolvePixel(current_pixels[i], history_pixels[i], params);
+    }
 }

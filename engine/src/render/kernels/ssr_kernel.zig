@@ -82,13 +82,16 @@ pub fn runRows(
     thickness: f32,
     intensity: f32,
 ) void {
+    const width_f = @as(f32, @floatFromInt(width));
+    const height_f = @as(f32, @floatFromInt(height));
+    const far_depth_cutoff: f32 = 1000.0;
     for (start_row..end_row) |y| {
         for (0..width) |x| {
             const idx = y * width + x;
             const p = scene_camera[idx];
             scratch_pixels[idx] = scene_pixels[idx];
             if (!validSceneCameraSample(p)) continue;
-            if (scene_depth[idx] > 1000.0) continue;
+            if (scene_depth[idx] > far_depth_cutoff) continue;
 
             const n = estimateSceneNormal(scene_camera, width, height, p, @intCast(x), @intCast(y), 2);
             if (n.x == 0.0 and n.y == 0.0 and n.z == 0.0) continue;
@@ -102,29 +105,31 @@ pub fn runRows(
             var hit_color: u32 = 0;
             const step = math.Vec3.scale(r, step_size);
             var edge_blend: f32 = 1.0;
+            var marched_distance: f32 = 0.0;
 
             var s: i32 = 0;
             while (s < max_samples) : (s += 1) {
                 ray_pos = math.Vec3.add(ray_pos, step);
+                marched_distance += step_size;
                 if (ray_pos.z < 0.1) break;
-                if (@as(f32, @floatFromInt(s + 1)) * step_size > max_distance) break;
+                if (marched_distance > max_distance) break;
                 const proj = projectCameraPositionFloat(ray_pos, projection);
                 const sx_float = proj.x;
                 const sy_float = proj.y;
-                if (sx_float < 0 or sx_float >= @as(f32, @floatFromInt(width)) or sy_float < 0 or sy_float >= @as(f32, @floatFromInt(height))) break;
+                if (sx_float < 0 or sx_float >= width_f or sy_float < 0 or sy_float >= height_f) break;
 
                 const sx: usize = @intFromFloat(sx_float);
                 const sy: usize = @intFromFloat(sy_float);
                 const hit_idx = sy * width + sx;
                 const sampled_depth = scene_depth[hit_idx];
-                if (!std.math.isFinite(sampled_depth) or sampled_depth > 1000.0) continue;
+                if (!std.math.isFinite(sampled_depth) or sampled_depth > far_depth_cutoff) continue;
                 if (ray_pos.z > sampled_depth) {
                     const depth_diff = ray_pos.z - sampled_depth;
                     if (depth_diff < thickness) {
                         hit = true;
                         hit_color = scene_pixels[hit_idx];
-                        const edge_x = @min(sx_float, @as(f32, @floatFromInt(width)) - sx_float) / @as(f32, @floatFromInt(width));
-                        const edge_y = @min(sy_float, @as(f32, @floatFromInt(height)) - sy_float) / @as(f32, @floatFromInt(height));
+                        const edge_x = @min(sx_float, width_f - sx_float) / width_f;
+                        const edge_y = @min(sy_float, height_f - sy_float) / height_f;
                         const edge_dist = @min(edge_x, edge_y) * 4.0;
                         edge_blend = @max(0.0, @min(1.0, edge_dist));
                         const facing_ratio = @max(0.0, -r.z);

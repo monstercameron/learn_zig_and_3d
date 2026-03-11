@@ -1,6 +1,15 @@
-const vignette_kernel = @import("../kernels/vignette_kernel.zig");
 const film_grain_kernel = @import("../kernels/film_grain_kernel.zig");
 const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
+const cpu_features = @import("../../core/cpu_features.zig");
+
+fn runtimeLanes() usize {
+    return switch (cpu_features.detect().preferredVectorBackend()) {
+        .avx512 => 32,
+        .avx2 => 16,
+        .sse2, .neon => 8,
+        .scalar => 1,
+    };
+}
 
 pub fn runRows(
     pixels: []u32,
@@ -12,17 +21,90 @@ pub fn runRows(
     vig_str: f32,
     seed: u32,
 ) void {
+    const lanes = runtimeLanes();
+    const cx = @as(f32, @floatFromInt(width)) * 0.5;
+    const cy = @as(f32, @floatFromInt(height)) * 0.5;
     var y = start_row;
     while (y < end_row) : (y += 1) {
         const row_start = y * width;
+        const dy = (@as(f32, @floatFromInt(y)) - cy) / cy;
         var x: usize = 0;
+        while (lanes > 1 and x + lanes <= width) : (x += lanes) {
+            switch (lanes) {
+                8 => applyBlock(8, pixels, row_start, x, y, grain_str, vig_str, seed, cx, dy),
+                16 => applyBlock(16, pixels, row_start, x, y, grain_str, vig_str, seed, cx, dy),
+                32 => applyBlock(32, pixels, row_start, x, y, grain_str, vig_str, seed, cx, dy),
+                else => break,
+            }
+        }
         while (x < width) : (x += 1) {
             const idx = row_start + x;
-            const v = vignette_kernel.vignetteFactor(x, y, width, height, vig_str);
-            const p1 = vignette_kernel.applyToPixel(pixels[idx], v);
+            const dx = (@as(f32, @floatFromInt(x)) - cx) / cx;
+            const dist = @sqrt(dx * dx + dy * dy);
+            const v = 1.0 - @max(0.0, @min(1.0, dist * vig_str));
             const g = film_grain_kernel.grainFactor(x, y, seed, grain_str);
-            pixels[idx] = film_grain_kernel.applyToPixel(p1, g);
+            const factor = v * g;
+            const pixel = pixels[idx];
+            const r = @as(f32, @floatFromInt((pixel >> 16) & 0xFF));
+            const g_ch = @as(f32, @floatFromInt((pixel >> 8) & 0xFF));
+            const b = @as(f32, @floatFromInt(pixel & 0xFF));
+            const rr = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(r * factor))))));
+            const gg = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(g_ch * factor))))));
+            const bb = @as(u32, @intCast(@max(0, @min(255, @as(i32, @intFromFloat(b * factor))))));
+            pixels[idx] = 0xFF000000 | (rr << 16) | (gg << 8) | bb;
         }
+    }
+}
+
+fn applyBlock(
+    comptime lanes: usize,
+    pixels: []u32,
+    row_start: usize,
+    x_start: usize,
+    y: usize,
+    grain_str: f32,
+    vig_str: f32,
+    seed: u32,
+    cx: f32,
+    dy: f32,
+) void {
+    var factors: [lanes]f32 = undefined;
+    var r_arr: [lanes]f32 = undefined;
+    var g_arr: [lanes]f32 = undefined;
+    var b_arr: [lanes]f32 = undefined;
+
+    var lane: usize = 0;
+    while (lane < lanes) : (lane += 1) {
+        const x = x_start + lane;
+        const idx = row_start + x;
+        const dx = (@as(f32, @floatFromInt(x)) - cx) / cx;
+        const dist = @sqrt(dx * dx + dy * dy);
+        const v = 1.0 - @max(0.0, @min(1.0, dist * vig_str));
+        const g = film_grain_kernel.grainFactor(x, y, seed, grain_str);
+        factors[lane] = v * g;
+
+        const pixel = pixels[idx];
+        r_arr[lane] = @floatFromInt((pixel >> 16) & 0xFF);
+        g_arr[lane] = @floatFromInt((pixel >> 8) & 0xFF);
+        b_arr[lane] = @floatFromInt(pixel & 0xFF);
+    }
+
+    const FloatVec = @Vector(lanes, f32);
+    const IntVec = @Vector(lanes, i32);
+    const minv: FloatVec = @splat(0.0);
+    const maxv: FloatVec = @splat(255.0);
+    const factor_vec: FloatVec = @as(FloatVec, @bitCast(factors));
+    const r_scaled: [lanes]i32 = @bitCast(@as(IntVec, @intFromFloat(@max(minv, @min(maxv, @as(FloatVec, @bitCast(r_arr)) * factor_vec)))));
+    const g_scaled: [lanes]i32 = @bitCast(@as(IntVec, @intFromFloat(@max(minv, @min(maxv, @as(FloatVec, @bitCast(g_arr)) * factor_vec)))));
+    const b_scaled: [lanes]i32 = @bitCast(@as(IntVec, @intFromFloat(@max(minv, @min(maxv, @as(FloatVec, @bitCast(b_arr)) * factor_vec)))));
+
+    var write_lane: usize = 0;
+    while (write_lane < lanes) : (write_lane += 1) {
+        const idx = row_start + x_start + write_lane;
+        const rr: u32 = @intCast(@max(0, @min(255, r_scaled[write_lane])));
+        const gg: u32 = @intCast(@max(0, @min(255, g_scaled[write_lane])));
+        const bb: u32 = @intCast(@max(0, @min(255, b_scaled[write_lane])));
+        pixels[idx] = 0xFF000000 | (rr << 16) | (gg << 8) | bb;
     }
 }
 

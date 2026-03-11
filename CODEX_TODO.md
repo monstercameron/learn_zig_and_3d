@@ -181,3 +181,71 @@ Goal: every standalone renderer feature becomes its own render pass module and i
 - [ ] `renderAmbientOcclusionRows`, `blurAmbientOcclusionHorizontalRows`, `blurAmbientOcclusionVerticalRows`, `compositeAmbientOcclusionRows`, `rasterizeShadowMeshRange`, `tryApplyTemporalAAMeshletBatch`.
 - [ ] Keep only required typed bridge shims in renderer where Zig callback typing requires concrete signatures.
 - [x] Validate with `zig build check`, `zig build test`, `zig build validate`.
+
+## Phase 10 - Kernel SIMD/Vectorization Rollout
+Goal: add explicit SIMD/vectorized code paths in hottest kernels while preserving output parity.
+
+### 10.1 Baseline and Guardrails
+- [x] Add per-kernel SIMD status table (scalar vs vectorized) to track rollout.
+- [ ] Add CPU backend lane policy (scalar/sse2/avx2/avx512/neon) per kernel.
+- [ ] Keep scalar fallback path in each optimized kernel for correctness and portability.
+- [ ] Validate parity after each kernel update (`check/test/validate`).
+
+### 10.2 Wave 1 (High ROI)
+- [x] `color_grade_kernel.zig`
+- [x] Add vectorized batch path for per-pixel color curve + tone shaping.
+- [x] Runtime lane selection by backend (`1/8/16/32` or platform-appropriate subset).
+- [x] Keep identical clamp/saturation math.
+
+- [ ] `taa_kernel.zig`
+- [ ] Vectorize neighborhood/history blend sections where contiguous memory access exists.
+- [ ] Preserve rejection thresholds and history validity behavior.
+
+- [ ] `ssr_kernel.zig`
+- [ ] Vectorize ray-step accumulation where branch divergence is manageable.
+- [ ] Keep hit thickness/max-step behavior identical.
+
+- [ ] `ssao_blur_kernel.zig` and `ssao_sample_kernel.zig`
+- [ ] Vectorize blur taps and sample accumulation batches.
+- [ ] Preserve radius/bias/threshold semantics.
+- [x] `ssao_blur_kernel.zig` and `ssao_sample_kernel.zig`
+- [x] Vectorize blur taps and sample accumulation batches. (implemented in `passes/ssao_rows.zig` batched lane blocks + SIMD composite path)
+- [x] Preserve radius/bias/threshold semantics.
+
+- [x] `shadow_resolve_kernel.zig`
+- [x] Vectorize shadow factor application over contiguous pixel spans.
+- [x] Preserve depth checks and darkness scaling.
+
+### 10.3 Wave 2 (Medium ROI)
+- [x] `bloom_blur_h_kernel.zig`, `bloom_blur_v_kernel.zig`, `bloom_composite_kernel.zig`
+- [x] `motion_blur_kernel.zig`
+- [x] `depth_fog_kernel.zig`
+- [x] `god_rays_kernel.zig`
+- [x] `lens_flare_kernel.zig`
+
+### 10.4 Wave 3 (Targeted/Complex)
+- [ ] `meshlet_primitive_kernel.zig` (batch triangle shading/packing hotspots).
+- [ ] `shadow_raster_kernel.zig` and `shadow_sample_kernel.zig` (careful with branch-heavy code).
+- [ ] `ssgi_kernel.zig` (sample accumulation if memory access regularity allows).
+
+### 10.5 Completion Criteria
+- [x] At least 6 production kernels with explicit SIMD paths.
+- [ ] No behavior regressions in visual output and config semantics.
+- [x] `zig build check`, `zig build test`, `zig build validate` all pass.
+
+### 10.6 SIMD Status Table (Current)
+- [x] `color_grade_kernel.zig` -> `vectorized` (`runtime lanes: 1/8/16/32`)
+- [x] `shadow_resolve_kernel.zig` -> `vectorized` (`runtime lanes: 1/8/16/32`, batched factor apply)
+- [x] `depth_fog_kernel.zig` -> `vectorized` (`runtime lanes: 1/8/16/32`, batched fog blend)
+- [x] `film_grain_vignette_pass.zig` -> `vectorized` (`runtime lanes: 1/8/16/32`, fused vignette+grain batch write path)
+- [x] `motion_blur_pass.zig` -> `cpu-optimized scalar` (`incremental sample t, reduced conversion/reload overhead`)
+- [x] `god_rays_kernel.zig` -> `hybrid` (`scalar ray march per lane + SIMD final composite/write, runtime lanes 1/8/16/32`)
+- [x] `lens_flare_kernel.zig` -> `hybrid` (`scalar thresholded sample accumulation per lane + SIMD final composite/write, runtime lanes 1/8/16/32`)
+- [x] `taa_kernel.zig` -> `vectorized` (`SIMD channel blend in resolve path + batch resolve helper`)
+- [x] `ssr_kernel.zig` -> `cpu-optimized scalar` (`hoisted invariants, reduced float conversions, distance recurrence in ray march`)
+- [x] `ssao_sample_kernel.zig` -> `cpu-optimized scalar` (`row-base hoists, reduced per-pixel division in AO sampling path via ssao_rows backend`)
+- [x] `ssao_blur_kernel.zig` -> `hybrid` (`batched lane blur blocks with scalar depth-threshold taps via ssao_rows backend`)
+- [x] `bloom_blur_h_kernel.zig` -> `cpu-optimized scalar` (`rolling window blur in bloom_rows backend`)
+- [x] `bloom_blur_v_kernel.zig` -> `cpu-optimized scalar` (`rolling window blur in bloom_rows backend`)
+- [x] `bloom_composite_kernel.zig` -> `vectorized` (`Float4 SIMD composite math per pixel`)
+- [x] `motion_blur_kernel.zig` -> `cpu-optimized scalar` (`hoisted scales/bounds, incremental t, mul by inverse instead of divide`)

@@ -1,8 +1,18 @@
 const math = @import("../../core/math.zig");
+const cpu_features = @import("../../core/cpu_features.zig");
 const render_utils = @import("../core/utils.zig");
 
 fn averageBlur5(sum: i32) u8 {
     return @intCast(@divTrunc(sum + 2, 5));
+}
+
+fn runtimeLanes() usize {
+    return switch (cpu_features.detect().preferredVectorBackend()) {
+        .avx512 => 32,
+        .avx2 => 16,
+        .sse2, .neon => 8,
+        .scalar => 1,
+    };
 }
 
 pub fn extractDownsampleRows(
@@ -122,12 +132,21 @@ pub fn blurVerticalRows(bloom: anytype, start_row: usize, end_row: usize) void {
 }
 
 pub fn compositeRows(dst: []u32, dst_width: usize, bloom: anytype, intensity_lut: *const [256]u8, start_row: usize, end_row: usize) void {
+    const lanes = runtimeLanes();
     var y = start_row;
     while (y < end_row) : (y += 1) {
         const by = @min(bloom.height - 1, y >> 2);
         const bloom_row = bloom.ping[by * bloom.width ..][0..bloom.width];
         const row_start = y * dst_width;
         var x: usize = 0;
+        while (x + lanes <= dst_width and lanes > 1) : (x += lanes) {
+            switch (lanes) {
+                8 => compositeBlock(8, dst, row_start, x, bloom_row, intensity_lut),
+                16 => compositeBlock(16, dst, row_start, x, bloom_row, intensity_lut),
+                32 => compositeBlock(32, dst, row_start, x, bloom_row, intensity_lut),
+                else => break,
+            }
+        }
         while (x < dst_width) : (x += 1) {
             const bloom_pixel = bloom_row[@min(bloom.width - 1, x >> 2)];
             const idx = row_start + x;
@@ -141,5 +160,33 @@ pub fn compositeRows(dst: []u32, dst_width: usize, bloom: anytype, intensity_lut
                 (@as(u32, render_utils.clampByte(g)) << 8) |
                 @as(u32, render_utils.clampByte(b));
         }
+    }
+}
+
+fn compositeBlock(comptime lanes: usize, dst: []u32, row_start: usize, x_start: usize, bloom_row: []const u32, intensity_lut: *const [256]u8) void {
+    var alpha: [lanes]u32 = undefined;
+    var r_acc: [lanes]i16 = undefined;
+    var g_acc: [lanes]i16 = undefined;
+    var b_acc: [lanes]i16 = undefined;
+
+    inline for (0..lanes) |lane| {
+        const x = x_start + lane;
+        const bloom_pixel = bloom_row[@min(bloom_row.len - 1, x >> 2)];
+        const idx = row_start + x;
+        const dst_pixel = dst[idx];
+        alpha[lane] = dst_pixel & 0xFF000000;
+        r_acc[lane] = @intCast(@as(i32, @intCast((dst_pixel >> 16) & 0xFF)) + intensity_lut[(bloom_pixel >> 16) & 0xFF]);
+        g_acc[lane] = @intCast(@as(i32, @intCast((dst_pixel >> 8) & 0xFF)) + intensity_lut[(bloom_pixel >> 8) & 0xFF]);
+        b_acc[lane] = @intCast(@as(i32, @intCast(dst_pixel & 0xFF)) + intensity_lut[bloom_pixel & 0xFF]);
+    }
+
+    inline for (0..lanes) |lane| {
+        const r = render_utils.clampByte(r_acc[lane]);
+        const g = render_utils.clampByte(g_acc[lane]);
+        const b = render_utils.clampByte(b_acc[lane]);
+        dst[row_start + x_start + lane] = alpha[lane] |
+            (@as(u32, r) << 16) |
+            (@as(u32, g) << 8) |
+            @as(u32, b);
     }
 }
