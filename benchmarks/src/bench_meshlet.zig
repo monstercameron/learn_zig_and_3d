@@ -1,6 +1,6 @@
 const std = @import("std");
 const math = @import("math3d");
-const MeshModule = @import("mesh3d");
+const MeshModule = @import("mesh3d.zig");
 const Mesh = MeshModule.Mesh;
 const Meshlet = MeshModule.Meshlet;
 

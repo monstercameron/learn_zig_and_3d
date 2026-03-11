@@ -1,5 +1,5 @@
 const std = @import("std");
-const math = @import("../src/math.zig");
+const math = @import("math3d");
 
 pub const Quat = struct {
     x: f32,

@@ -19,14 +19,24 @@ pub fn build(b: *std.Build) void {
     });
 
     // Create an executable with the specified name and root source file
+    const app_module = b.createModule(.{
+        .root_source_file = b.path("app/src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .omit_frame_pointer = if (profile) false else null,
+    });
+    const engine_main_module = b.createModule(.{
+        .root_source_file = b.path("engine/src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .omit_frame_pointer = if (profile) false else null,
+    });
+    app_module.addImport("engine_main", engine_main_module);
+    engine_main_module.addImport("zphysics", zphysics_dep.module("root"));
+
     const exe = b.addExecutable(.{
         .name = "zig-windows-app",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .omit_frame_pointer = if (profile) false else null,
-        }),
+        .root_module = app_module,
     });
 
     // Link against Windows system libraries for GUI and graphics
@@ -46,6 +56,18 @@ pub fn build(b: *std.Build) void {
 
     const validate_step = b.step("validate", "Build the main app and supported subprojects");
     validate_step.dependOn(check_step);
+
+    const unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/unit/smoke_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const test_step = b.step("test", "Run unit tests");
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    test_step.dependOn(&run_unit_tests.step);
+    validate_step.dependOn(&run_unit_tests.step);
 
     // Add a run step
     const run_cmd = b.addRunArtifact(exe);

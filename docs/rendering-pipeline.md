@@ -68,7 +68,7 @@ Depending on configuration, that can include:
 - hybrid or meshlet-shadow preparation
 - shadow-system acceleration reuse and update logic
 
-The exact combination is controlled by `resources/configs/default.settings.json` and the runtime flags loaded from it.
+The exact combination is controlled by `assets/configs/default.settings.json` and the runtime flags loaded from it.
 
 ### 4. Main Raster Path
 

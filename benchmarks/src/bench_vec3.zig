@@ -1,5 +1,5 @@
 const std = @import("std");
-const math = @import("../../src/math.zig");
+const math = @import("math3d");
 
 pub fn benchmarkVec3Add(iterations: u64) u64 {
     var v1 = math.Vec3.new(1.0, 2.0, 3.0);

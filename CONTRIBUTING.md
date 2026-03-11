@@ -31,7 +31,7 @@ zig build -Doptimize=ReleaseFast -Dprofile=true
 ## Repo Areas
 
 - `src/`: engine and renderer implementation
-- `resources/`: runtime assets and configuration
+- `assets/`: runtime assets and configuration
 - `docs/`: design notes, specs, profiling, and roadmap material
 - `benchmarks/`: focused performance experiments
 - `experiments/`: isolated prototypes that should not silently change main-app behavior

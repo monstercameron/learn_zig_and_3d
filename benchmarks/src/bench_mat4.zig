@@ -1,5 +1,5 @@
 const std = @import("std");
-const math = @import("../../src/math.zig");
+const math = @import("math3d");
 
 pub fn benchmarkMat4Multiply(iterations: u64) u64 {
     var m1 = math.Mat4.identity();

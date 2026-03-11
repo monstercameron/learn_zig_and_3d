@@ -1,7 +1,7 @@
 const std = @import("std");
 const bench_cache = @import("bench_cache.zig");
 const bench_meshlet = @import("bench_meshlet.zig");
-const lighting = @import("lighting");
+const lighting = @import("lighting.zig");
 const lighting_simd = @import("lighting_simd.zig");
 const render_job_bench = @import("render_job_bench.zig");
 

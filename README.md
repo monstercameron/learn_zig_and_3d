@@ -56,7 +56,7 @@ For direct binary launches after a build:
 
 ## Render Pass Architecture
 
-This is the same pipeline from `src/renderer.zig`, but grouped so the frame flow is easier to scan.
+This is the same pipeline from `engine/src/renderer.zig`, but grouped so the frame flow is easier to scan.
 
 ```mermaid
 flowchart LR
@@ -161,8 +161,9 @@ For the full workflow, see `docs/performance-profiling.md`.
 
 ## Project Layout
 
-- `src/`: main renderer, platform code, physics hookup, kernels, and core systems
-- `resources/`: models, textures, HDRI assets, and runtime config
+- `app/src/`: executable entrypoint
+- `engine/src/`: main renderer, platform code, physics hookup, kernels, and core systems
+- `assets/`: models, textures, HDRI assets, and runtime config
 - `docs/`: architecture, profiling notes, specs, and project planning
 - `benchmarks/`: focused math and rendering microbenchmarks
 - `experiments/`: isolated feature spikes such as hot reload workflows
@@ -174,8 +175,9 @@ Repository map:
 .
 |- build.zig              # root build entry point
 |- build.zig.zon          # external dependency manifest
-|- src/                   # engine and renderer code
-|- resources/             # runtime assets and settings
+|- app/src/               # executable entrypoint
+|- engine/src/            # engine and renderer code
+|- assets/                # runtime assets and settings
 |- docs/                  # design notes, specs, and profiling guides
 |- benchmarks/            # standalone benchmark suite
 |- experiments/           # isolated prototype projects
@@ -192,12 +194,13 @@ Additional folder guides:
 
 ## Notable Engine Pieces
 
-- `src/main.zig`: app bootstrap, message loop, physics step, and scene wiring
-- `src/renderer.zig`: camera, frame orchestration, tiled rendering, lighting, and post-processing control
-- `src/job_system.zig`: worker-thread scheduling
-- `src/shadow_system.zig`: shadow acceleration and reuse logic
-- `src/tile_renderer.zig`: tile-local raster and buffers
-- `src/meshlet_builder.zig` and related files: meshlet generation and caching work
+- `app/src/main.zig`: executable entrypoint forwarding to engine runtime
+- `engine/src/main.zig`: app bootstrap, message loop, physics step, and scene wiring
+- `engine/src/renderer.zig`: camera, frame orchestration, tiled rendering, lighting, and post-processing control
+- `engine/src/job_system.zig`: worker-thread scheduling
+- `engine/src/shadow_system.zig`: shadow acceleration and reuse logic
+- `engine/src/tile_renderer.zig`: tile-local raster and buffers
+- `engine/src/meshlet_builder.zig` and related files: meshlet generation and caching work
 
 ## Status
 
@@ -205,10 +208,11 @@ This is an active learning-and-engineering repository, not a polished engine rel
 
 ## Development Notes
 
-- Core source uses the existing Zig-first layout under `src/`; this repo reorg keeps runtime code paths stable and improves the surrounding structure rather than shuffling engine modules needlessly.
+- Core source now uses an `app/` + `engine/` split so runtime entrypoints and reusable systems evolve independently.
 - Generated outputs, caches, and local profiling artifacts are expected to stay out of git.
+- `assets/` is runtime content and `artifacts/` is local generated output (ignored by default).
 - External dependency resolution currently relies on `build.zig.zon` for `zphysics`.
 
 ## License
 
-No standalone license file is currently present in the repository root.
+This repository is licensed under MIT. See `LICENSE`.

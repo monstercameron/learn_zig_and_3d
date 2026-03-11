@@ -11,36 +11,12 @@ pub fn build(b: *std.Build) void {
     });
 
     const math_module = b.createModule(.{
-        .root_source_file = b.path("../src/math.zig"),
+        .root_source_file = b.path("../engine/src/core/math.zig"),
         .target = target,
         .optimize = optimize,
     });
-
-    const cpu_features_module = b.createModule(.{
-        .root_source_file = b.path("../src/cpu_features.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const lighting_module = b.createModule(.{
-        .root_source_file = b.path("../src/lighting.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const mesh_module = b.createModule(.{
-        .root_source_file = b.path("../src/mesh.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    lighting_module.addImport("cpu_features.zig", cpu_features_module);
-    lighting_module.addImport("math.zig", math_module);
-    mesh_module.addImport("math.zig", math_module);
 
     root_module.addImport("math3d", math_module);
-    root_module.addImport("mesh3d", mesh_module);
-    root_module.addImport("lighting", lighting_module);
 
     const exe = b.addExecutable(.{
         .name = "math_benchmarks",

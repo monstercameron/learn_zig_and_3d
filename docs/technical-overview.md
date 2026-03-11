@@ -17,14 +17,14 @@ The current runtime is built around these ideas:
 
 The current app startup path in `src/main.zig` is straightforward:
 
-- load `resources/configs/default.settings.json`
+- load `assets/configs/default.settings.json`
 - create the Win32 window and renderer backbuffer
 - detect CPU features and choose the preferred SIMD backend
-- try to load the GLB revolver scene from `resources/models/gun/rovelver1.0.0.glb`
-- fall back to `resources/models/teapot.obj` if the GLB path fails
+- try to load the GLB revolver scene from `assets/models/gun/rovelver1.0.0.glb`
+- fall back to `assets/models/teapot.obj` if the GLB path fails
 - optionally load HDRI data for the skybox path
 
-The repository also contains scene-level JSON such as `resources/levels/default.level.json`, but that is not the primary startup path today.
+The repository also contains scene-level JSON such as `assets/levels/default.level.json`, but that is not the primary startup path today.
 
 ## Core Systems
 
@@ -55,7 +55,7 @@ The detailed pass order lives in `rendering-pipeline.md`.
 
 ## Configuration And Assets
 
-The main runtime configuration file is `resources/configs/default.settings.json`.
+The main runtime configuration file is `assets/configs/default.settings.json`.
 
 It currently controls:
 
@@ -66,12 +66,12 @@ It currently controls:
 - post-processing toggles and tuning values
 - shadow, hybrid shadow, SSAO, TAA, bloom, fog, and color-grade options
 
-Most assets live under `resources/`:
+Most assets live under `assets/`:
 
-- `resources/models/`: GLB, OBJ, and related textures
-- `resources/hdri/`: environment data
-- `resources/configs/`: runtime settings
-- `resources/levels/`: scene description experiments and supporting data
+- `assets/models/`: GLB, OBJ, and related textures
+- `assets/hdri/`: environment data
+- `assets/configs/`: runtime settings
+- `assets/levels/`: scene description experiments and supporting data
 
 ## Current Constraints
 
