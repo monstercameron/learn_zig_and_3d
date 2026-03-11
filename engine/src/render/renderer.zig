@@ -1194,8 +1194,10 @@ pub const Renderer = struct {
     tile_buffers: ?[]TileBuffer, // A buffer for each tile to be rendered into in parallel.
     job_system: ?*JobSystem, // The multi-threaded job system.
     tile_jobs_buffer: ?[]TileRenderJob,
+    shadow_chunk_jobs_buffer: ?[]TileRenderJob,
     shadow_tile_jobs_buffer: ?[]AdaptiveShadowTileJob,
     job_buffer: ?[]Job,
+    shadow_job_buffer: ?[]Job,
     job_completion_buffer: ?[]bool,
     tile_triangle_lists: ?[]BinningStage.TileTriangleList,
     active_tile_flags: ?[]bool,
@@ -1316,12 +1318,17 @@ pub const Renderer = struct {
         const tile_count = tile_grid.tiles.len;
         const tile_jobs_buffer = try allocator.alloc(TileRenderJob, tile_count);
         errdefer allocator.free(tile_jobs_buffer);
+        const shadow_chunk_job_capacity = tile_count * 4;
+        const shadow_chunk_jobs_buffer = try allocator.alloc(TileRenderJob, shadow_chunk_job_capacity);
+        errdefer allocator.free(shadow_chunk_jobs_buffer);
         const shadow_tile_jobs_buffer = try allocator.alloc(AdaptiveShadowTileJob, tile_count);
         errdefer allocator.free(shadow_tile_jobs_buffer);
         const hybrid_shadow_tile_ranges = try allocator.alloc(HybridShadowTileRange, tile_count);
         errdefer allocator.free(hybrid_shadow_tile_ranges);
         const job_buffer = try allocator.alloc(Job, tile_count);
         errdefer allocator.free(job_buffer);
+        const shadow_job_buffer = try allocator.alloc(Job, shadow_chunk_job_capacity);
+        errdefer allocator.free(shadow_job_buffer);
         const job_completion_buffer = try allocator.alloc(bool, tile_count);
         errdefer allocator.free(job_completion_buffer);
         @memset(job_completion_buffer, false);
@@ -1510,8 +1517,10 @@ pub const Renderer = struct {
             .use_tiled_rendering = true,
             .job_system = job_system,
             .tile_jobs_buffer = tile_jobs_buffer,
+            .shadow_chunk_jobs_buffer = shadow_chunk_jobs_buffer,
             .shadow_tile_jobs_buffer = shadow_tile_jobs_buffer,
             .job_buffer = job_buffer,
+            .shadow_job_buffer = shadow_job_buffer,
             .job_completion_buffer = job_completion_buffer,
             .tile_triangle_lists = tile_triangle_lists,
             .active_tile_flags = active_tile_flags,
@@ -1658,7 +1667,9 @@ pub const Renderer = struct {
         self.sys_shadows.deinit();
         if (self.job_system) |js| js.deinit();
         if (self.job_buffer) |jobs| self.allocator.free(jobs);
+        if (self.shadow_job_buffer) |jobs| self.allocator.free(jobs);
         if (self.tile_jobs_buffer) |tile_jobs| self.allocator.free(tile_jobs);
+        if (self.shadow_chunk_jobs_buffer) |jobs| self.allocator.free(jobs);
         if (self.shadow_tile_jobs_buffer) |shadow_jobs| self.allocator.free(shadow_jobs);
         if (self.job_completion_buffer) |completion| self.allocator.free(completion);
         if (self.tile_triangle_lists) |lists| BinningStage.freeTileTriangleLists(lists, self.allocator);
@@ -1750,6 +1761,8 @@ pub const Renderer = struct {
         cam_right: math.Vec3,
         cam_up: math.Vec3,
         cam_fwd: math.Vec3,
+        shadow_start_idx: usize = 0,
+        shadow_end_idx: usize = 0,
 
         const max_clipped_vertices: usize = 5;
         const wire_color: u32 = 0xFFFFFFFF;
@@ -1934,6 +1947,9 @@ pub const Renderer = struct {
                 const _z_meshletShadowTile = profiler.zone("meshletShadowTile");
                 defer if (_z_meshletShadowTile) |z| z.end();
                 const total_pixels = @as(usize, @intCast(job.tile.width)) * @as(usize, @intCast(job.tile.height));
+                const shadow_start = @min(job.shadow_start_idx, total_pixels);
+                const shadow_end = if (job.shadow_end_idx == 0) total_pixels else @min(job.shadow_end_idx, total_pixels);
+                if (shadow_start >= shadow_end) return;
                 var packet = shadow_system.RayPacket{
                     .origins_x = undefined,
                     .origins_y = undefined,
@@ -1959,15 +1975,21 @@ pub const Renderer = struct {
                     math.Vec3.dot(ray_dir, job.cam_up),
                     math.Vec3.dot(ray_dir, job.cam_fwd),
                 ));
+                const cam_right = job.cam_right;
+                const cam_up = job.cam_up;
+                const cam_fwd = job.cam_fwd;
+                const cam_pos = job.cam_pos;
+                const nx_bias = 0.02;
+                const ray_bias = 0.005;
 
-                var pixel_idx: usize = 0;
-                while (pixel_idx < total_pixels) {
+                var pixel_idx: usize = shadow_start;
+                while (pixel_idx < shadow_end) {
                     packet.active_mask = 0;
                     packet.occluded_mask = 0;
                     packet.shared_dir = ray_dir;
                     packet.shared_inv_dir = ray_inv_dir;
 
-                    const batch_size = @min(64, total_pixels - pixel_idx);
+                    const batch_size = @min(@as(usize, 64), shadow_end - pixel_idx);
                     for (0..batch_size) |i| {
                         const idx = pixel_idx + i;
                         const depth = job.tile_buffer.depth[idx];
@@ -1976,27 +1998,23 @@ pub const Renderer = struct {
                             if (math.Vec3.dot(normal_camera, light_dir_camera) <= 0.0) continue;
 
                             const cs_pos = job.tile_buffer.data[idx].camera;
-                            const xs = math.Vec3.scale(job.cam_right, cs_pos.x);
-                            const ys = math.Vec3.scale(job.cam_up, cs_pos.y);
-                            const zs = math.Vec3.scale(job.cam_fwd, cs_pos.z);
-                            const ws_relative = math.Vec3.add(xs, math.Vec3.add(ys, zs));
-                            const world_pos = math.Vec3.add(job.cam_pos, ws_relative);
-                            const world_normal = math.Vec3.normalize(math.Vec3.add(
-                                math.Vec3.scale(job.cam_right, normal_camera.x),
-                                math.Vec3.add(
-                                    math.Vec3.scale(job.cam_up, normal_camera.y),
-                                    math.Vec3.scale(job.cam_fwd, normal_camera.z),
-                                ),
-                            ));
-                            const origin_bias = math.Vec3.add(
-                                math.Vec3.scale(world_normal, 0.02),
-                                math.Vec3.scale(ray_dir, 0.005),
-                            );
+                            const world_pos_x = cam_pos.x + cam_right.x * cs_pos.x + cam_up.x * cs_pos.y + cam_fwd.x * cs_pos.z;
+                            const world_pos_y = cam_pos.y + cam_right.y * cs_pos.x + cam_up.y * cs_pos.y + cam_fwd.y * cs_pos.z;
+                            const world_pos_z = cam_pos.z + cam_right.z * cs_pos.x + cam_up.z * cs_pos.y + cam_fwd.z * cs_pos.z;
+                            const wn_x = cam_right.x * normal_camera.x + cam_up.x * normal_camera.y + cam_fwd.x * normal_camera.z;
+                            const wn_y = cam_right.y * normal_camera.x + cam_up.y * normal_camera.y + cam_fwd.y * normal_camera.z;
+                            const wn_z = cam_right.z * normal_camera.x + cam_up.z * normal_camera.y + cam_fwd.z * normal_camera.z;
+                            const wn_len_sq = wn_x * wn_x + wn_y * wn_y + wn_z * wn_z;
+                            if (wn_len_sq <= 1e-8) continue;
+                            const wn_inv_len = 1.0 / @sqrt(wn_len_sq);
+                            const bias_x = wn_x * wn_inv_len * nx_bias + ray_dir.x * ray_bias;
+                            const bias_y = wn_y * wn_inv_len * nx_bias + ray_dir.y * ray_bias;
+                            const bias_z = wn_z * wn_inv_len * nx_bias + ray_dir.z * ray_bias;
                             const surface = job.tile_buffer.data[idx].surface;
 
-                            packet.origins_x[i] = world_pos.x + origin_bias.x;
-                            packet.origins_y[i] = world_pos.y + origin_bias.y;
-                            packet.origins_z[i] = world_pos.z + origin_bias.z;
+                            packet.origins_x[i] = world_pos_x + bias_x;
+                            packet.origins_y[i] = world_pos_y + bias_y;
+                            packet.origins_z[i] = world_pos_z + bias_z;
 
                             packet.dirs_x[i] = ray_dir.x;
                             packet.dirs_y[i] = ray_dir.y;
@@ -5076,7 +5094,26 @@ pub const Renderer = struct {
                 .cam_right = math.Vec3.new(transform.data[0], transform.data[1], transform.data[2]),
                 .cam_up = math.Vec3.new(transform.data[4], transform.data[5], transform.data[6]),
                 .cam_fwd = math.Vec3.new(transform.data[8], transform.data[9], transform.data[10]),
+                .shadow_start_idx = 0,
+                .shadow_end_idx = 0,
             };
+        }
+
+        // CPU load-balancing: heavy tiles first improves job queue saturation.
+        if (active_tile_count > 1) {
+            var i: usize = 1;
+            while (i < active_tile_count) : (i += 1) {
+                const key = active_indices[i];
+                const key_cost = tile_lists[key].count();
+                var j = i;
+                while (j > 0) {
+                    const prev = active_indices[j - 1];
+                    if (tile_lists[prev].count() >= key_cost) break;
+                    active_indices[j] = prev;
+                    j -= 1;
+                }
+                active_indices[j] = key;
+            }
         }
 
         if (active_tile_count == 0) {
@@ -5121,24 +5158,60 @@ pub const Renderer = struct {
         const run_meshlet_shadows = config.MESHLET_SHADOWS_ENABLED and mesh.meshlets.len > 0;
         if (run_meshlet_shadows) {
             const shadow_pass_start = std.time.nanoTimestamp();
+            const shadow_chunk_jobs = self.shadow_chunk_jobs_buffer.?;
+            const shadow_jobs = self.shadow_job_buffer.?;
+            const shadow_chunk_pixels: usize = 2048;
+            const shadow_min_chunk_pixels: usize = 1024;
+            const shadow_split_tri_threshold: usize = 96;
+            const worker_count: usize = if (self.job_system) |js| @intCast(js.worker_count) else 1;
+            var shadow_job_count: usize = 0;
+
+            for (active_indices[0..active_tile_count]) |tile_idx| {
+                const base_job = tile_jobs[tile_idx];
+                const total_pixels = @as(usize, @intCast(base_job.tile.width)) * @as(usize, @intCast(base_job.tile.height));
+                const tri_cost = tile_lists[tile_idx].count();
+                const should_split = worker_count > 2 and total_pixels >= shadow_chunk_pixels and tri_cost >= shadow_split_tri_threshold;
+                const desired_chunks: usize = if (should_split)
+                    @max(@as(usize, 1), @min(@as(usize, 4), @min(worker_count, total_pixels / shadow_min_chunk_pixels)))
+                else
+                    1;
+                const adaptive_chunk_pixels: usize = @max(shadow_min_chunk_pixels, @divTrunc(total_pixels + desired_chunks - 1, desired_chunks));
+
+                var start: usize = 0;
+                while (start < total_pixels and shadow_job_count < shadow_chunk_jobs.len) {
+                    const end = @min(total_pixels, start + (if (should_split) adaptive_chunk_pixels else total_pixels));
+                    var chunk_job = base_job;
+                    chunk_job.shadow_start_idx = start;
+                    chunk_job.shadow_end_idx = end;
+                    shadow_chunk_jobs[shadow_job_count] = chunk_job;
+                    shadow_job_count += 1;
+                    start = end;
+                }
+            }
+
+            if (shadow_job_count == 0) {
+                const shadow_elapsed_ns = std.time.nanoTimestamp() - shadow_pass_start;
+                if (shadow_elapsed_ns > 0) shadow_pass_elapsed_ns = @intCast(shadow_elapsed_ns);
+                return shadow_pass_elapsed_ns;
+            }
 
             if (self.job_system) |job_sys| {
                 var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-                const main_tile_idx = active_indices[0];
-
-                for (active_indices[1..active_tile_count]) |tile_idx| {
-                    jobs[tile_idx] = Job.init(
+                const main_job_idx: usize = 0;
+                var submit_idx: usize = 1;
+                while (submit_idx < shadow_job_count) : (submit_idx += 1) {
+                    shadow_jobs[submit_idx] = Job.init(
                         TileRenderJob.applyMeshletShadows,
-                        @ptrCast(&tile_jobs[tile_idx]),
+                        @ptrCast(&shadow_chunk_jobs[submit_idx]),
                         &parent_job,
                     );
 
-                    if (!job_sys.submitJobAuto(&jobs[tile_idx])) {
-                        TileRenderJob.applyMeshletShadows(@ptrCast(&tile_jobs[tile_idx]));
+                    if (!job_sys.submitJobAuto(&shadow_jobs[submit_idx])) {
+                        TileRenderJob.applyMeshletShadows(@ptrCast(&shadow_chunk_jobs[submit_idx]));
                     }
                 }
 
-                TileRenderJob.applyMeshletShadows(@ptrCast(&tile_jobs[main_tile_idx]));
+                TileRenderJob.applyMeshletShadows(@ptrCast(&shadow_chunk_jobs[main_job_idx]));
                 parent_job.complete();
 
                 var interrupted = false;
@@ -5150,8 +5223,8 @@ pub const Renderer = struct {
                 }
                 if (interrupted) return error.RenderInterrupted;
             } else {
-                for (active_indices[0..active_tile_count]) |tile_idx| {
-                    TileRenderJob.applyMeshletShadows(@ptrCast(&tile_jobs[tile_idx]));
+                for (shadow_chunk_jobs[0..shadow_job_count]) |*chunk_job| {
+                    TileRenderJob.applyMeshletShadows(@ptrCast(chunk_job));
                 }
             }
 
