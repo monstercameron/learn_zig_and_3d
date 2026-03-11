@@ -1,0 +1,25 @@
+{
+  "key": "cornell",
+  "assets": [
+    {
+      "type": "camera",
+      "cameraName": "main_showcase",
+      "cameraPosition": [0.0, 2.0, -6.5],
+      "cameraOrientation": [0.0, 0.0]
+    },
+    {
+      "type": "runtime",
+      "runtimeName": "static"
+    },
+    {
+      "type": "model",
+      "modelType": "obj",
+      "modelPath": "assets/models/cornell_box.obj",
+      "applyCornellPalette": true,
+      "position": [0.0, 0.0, 0.0],
+      "rotationDeg": [0.0, 0.0, 0.0],
+      "scale": [1.0, 1.0, 1.0],
+      "textures": []
+    }
+  ]
+}

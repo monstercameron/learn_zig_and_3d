@@ -1,0 +1,32 @@
+{
+  "key": "gun_physics",
+  "assets": [
+    {
+      "type": "camera",
+      "cameraName": "main_gameplay",
+      "cameraPosition": [0.0, 2.0, -10.0],
+      "cameraOrientation": [-0.1, 0.0]
+    },
+    {
+      "type": "runtime",
+      "runtimeName": "gun_physics"
+    },
+    {
+      "type": "hdri",
+      "path": "assets/hdri/envmap.raw"
+    },
+    {
+      "type": "model",
+      "modelType": "gltf",
+      "modelPath": "assets/models/gun/rovelver1.0.0.glb",
+      "fallbackModelPath": "assets/models/teapot.obj",
+      "position": [0.0, 0.0, 0.0],
+      "rotationDeg": [0.0, 0.0, 0.0],
+      "scale": [1.0, 1.0, 1.0],
+      "textures": [
+        { "slot": 0, "path": "assets/models/gun/Texture/Cylinder/1_bullet-low_ALBEDO.bmp" },
+        { "slot": 1, "path": "assets/models/gun/Texture/body/1_body_low_ALBEDO.004.bmp" }
+      ]
+    }
+  ]
+}

@@ -32,7 +32,6 @@ const profiler = @import("core/profiler.zig");
 const windows = std.os.windows;
 const math = @import("core/math.zig");
 const zphysics = @import("zphysics");
-const physics_utils = @import("physics/physics_utils.zig");
 
 // Windows message structure.
 // JS Analogy: This is the raw event object from the operating system. A browser
@@ -90,30 +89,119 @@ extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
 // JS Analogy: `const Window = require('./window.js');`
 const Window = @import("platform/window.zig").Window;
 const Renderer = @import("render/renderer.zig").Renderer;
-const obj_loader = @import("assets/obj_loader.zig");
 const gltf_loader = @import("assets/gltf_loader.zig");
-const mesh_module = @import("render/core/mesh.zig");
+const obj_loader = @import("assets/obj_loader.zig");
 const texture = @import("assets/texture.zig");
+const mesh_module = @import("render/core/mesh.zig");
 const config = @import("core/app_config.zig");
 const cpu_features = @import("core/cpu_features.zig");
+const physics_utils = @import("physics/physics_utils.zig");
 const input = @import("platform/input.zig");
 const log = @import("core/log.zig");
 
 const app_logger = log.get("app.main");
-const preferred_model_path = "assets/models/gun/rovelver1.0.0.glb";
-const fallback_model_path = "assets/models/teapot.obj";
-const gun_bullet_albedo_path = "assets/models/gun/Texture/Cylinder/1_bullet-low_ALBEDO.bmp";
-const gun_body_albedo_path = "assets/models/gun/Texture/body/1_body_low_ALBEDO.004.bmp";
+const scenes_index_path = "assets/configs/scenes/index.json";
 const gun_jump_velocity: [3]f32 = .{ 0.0, 12.0, 0.0 };
+
+const SceneRuntime = enum {
+    static,
+    gun_physics,
+};
+
+const SceneModelType = enum {
+    gltf,
+    obj,
+};
+
+const SceneAssetConfigEntry = struct {
+    type: []const u8,
+    modelType: []const u8 = "",
+    modelPath: []const u8 = "",
+    fallbackModelPath: ?[]const u8 = null,
+    applyCornellPalette: bool = false,
+    position: [3]f32 = .{ 0.0, 0.0, 0.0 },
+    rotationDeg: [3]f32 = .{ 0.0, 0.0, 0.0 },
+    scale: [3]f32 = .{ 1.0, 1.0, 1.0 },
+    textures: []SceneTextureSlotEntry = &[_]SceneTextureSlotEntry{},
+    path: ?[]const u8 = null,
+    runtimeName: ?[]const u8 = null,
+    cameraPosition: ?[3]f32 = null,
+    cameraOrientation: ?[2]f32 = null,
+    cameraName: ?[]const u8 = null,
+};
+
+const SceneTextureSlotEntry = struct {
+    slot: u32,
+    path: []const u8,
+};
+
+const SceneFile = struct {
+    key: []const u8,
+    assets: []SceneAssetConfigEntry,
+};
+
+const SceneIndexEntry = struct {
+    key: []const u8,
+    file: []const u8,
+};
+
+const SceneIndexFile = struct {
+    defaultScene: []const u8,
+    loadingScene: ?[]const u8 = null,
+    loadingFrames: ?u32 = null,
+    scenes: []SceneIndexEntry,
+};
+
+const SceneAssetDefinition = struct {
+    model_type: SceneModelType,
+    model_path: []const u8,
+    fallback_model_path: ?[]const u8,
+    apply_cornell_palette: bool,
+    position: math.Vec3,
+    rotation_deg: math.Vec3,
+    scale: math.Vec3,
+    texture_slots: []SceneTextureSlotDefinition,
+};
+
+const SceneTextureSlotDefinition = struct {
+    slot: usize,
+    path: []const u8,
+};
+
+const SceneDefinition = struct {
+    key: []const u8,
+    assets: []SceneAssetDefinition,
+    texture_slots: []SceneTextureSlotDefinition,
+    runtime: SceneRuntime,
+    hdri_path: ?[]const u8,
+    camera_position: math.Vec3,
+    camera_orientation_pitch: f32,
+    camera_orientation_yaw: f32,
+};
+
+const SceneAsset = struct {
+    mesh: mesh_module.Mesh,
+};
+
+const GunRuntime = struct {
+    pw: *physics_utils.PhysicsWorld,
+    gun_body_id: zphysics.BodyId,
+    num_gun_vertices: usize,
+    num_gun_triangles: usize,
+    original_gun_vertices: []math.Vec3,
+    original_gun_normals: []math.Vec3,
+    enter_was_down: bool = false,
+
+    fn deinit(self: *GunRuntime, allocator: std.mem.Allocator) void {
+        allocator.free(self.original_gun_vertices);
+        allocator.free(self.original_gun_normals);
+        self.pw.deinit(allocator);
+    }
+};
 
 fn isEnterDown() bool {
     return GetAsyncKeyState(VK_RETURN) < 0;
 }
-
-const SceneAsset = struct {
-    mesh: mesh_module.Mesh,
-    uses_gun_materials: bool,
-};
 
 /// # Application Entry Point
 /// This `main` function is where the program execution begins.
@@ -208,126 +296,7 @@ pub fn main() !void {
     defer renderer.deinit(); // Guarantees the renderer is cleaned up on exit.
     app_logger.infoSub("bootstrap", "renderer initialized backbuffer={d}x{d}", .{ renderer.bitmap.width, renderer.bitmap.height });
 
-    var bullet_albedo: ?texture.Texture = null;
-    defer if (bullet_albedo) |*tex| tex.deinit();
-    var body_albedo: ?texture.Texture = null;
-    defer if (body_albedo) |*tex| tex.deinit();
-    var material_textures = [_]?*const texture.Texture{ null, null, null };
-
-    // Load the preferred scene model, falling back to the teapot if the GLB path fails.
-    var scene_asset = try loadPrimaryMesh(allocator);
-    defer scene_asset.mesh.deinit(); // Guarantees the mesh memory is freed on exit.
-    if (scene_asset.uses_gun_materials) {
-        configureGunTextures(allocator, &bullet_albedo, &body_albedo, &material_textures);
-        renderer.setTextures(material_textures[0..]);
-
-        // Load HDRI background
-        if (texture.loadHdrRaw(allocator, "assets/hdri/envmap.raw")) |env_map| {
-            app_logger.infoSub("assets", "loaded HDRI env map", .{});
-            renderer.setHdriMap(env_map);
-        } else |err| {
-            app_logger.warn("failed to load HDRI: {s}", .{@errorName(err)});
-        }
-    }
-
-    scene_asset.mesh.centerToOrigin(); // Center the model at (0,0,0).
-
-    // Calculate exact bounds
-    var gun_min_b = scene_asset.mesh.vertices[0];
-    var gun_max_b = scene_asset.mesh.vertices[0];
-    for (scene_asset.mesh.vertices[1..scene_asset.mesh.vertices.len]) |v| {
-        gun_min_b.x = @min(gun_min_b.x, v.x);
-        gun_min_b.y = @min(gun_min_b.y, v.y);
-        gun_min_b.z = @min(gun_min_b.z, v.z);
-        gun_max_b.x = @max(gun_max_b.x, v.x);
-        gun_max_b.y = @max(gun_max_b.y, v.y);
-        gun_max_b.z = @max(gun_max_b.z, v.z);
-    }
-    const gun_hx = (gun_max_b.x - gun_min_b.x) * 0.5;
-    const gun_hy = (gun_max_b.y - gun_min_b.y) * 0.5;
-    const gun_hz = (gun_max_b.z - gun_min_b.z) * 0.5;
-
-    const num_gun_vertices = scene_asset.mesh.vertices.len;
-    const num_gun_triangles = scene_asset.mesh.triangles.len;
-
-    const original_gun_vertices = try allocator.alloc(math.Vec3, num_gun_vertices);
-    defer allocator.free(original_gun_vertices);
-    @memcpy(original_gun_vertices, scene_asset.mesh.vertices[0..num_gun_vertices]);
-
-    const original_gun_normals = try allocator.alloc(math.Vec3, num_gun_triangles);
-    defer allocator.free(original_gun_normals);
-    @memcpy(original_gun_normals, scene_asset.mesh.normals[0..num_gun_triangles]);
-
-    try levelAppendGroundPlane(&scene_asset.mesh, allocator);
-    try scene_asset.mesh.generateMeshlets(64, 126);
-    app_logger.infoSub(
-        "assets",
-        "loaded scene mesh vertices={} triangles={} meshlets={}",
-        .{ scene_asset.mesh.vertices.len, scene_asset.mesh.triangles.len, scene_asset.mesh.meshlets.len },
-    );
-
-    renderer.setCameraPosition(math.Vec3.new(0.0, 2.0, -10.0));
-    renderer.setCameraOrientation(-0.1, 0.0);
-
-    // ==== PHYSICS INIT ====
-    try zphysics.init(allocator, .{});
-    app_logger.info("zphysics.init done", .{});
-    defer zphysics.deinit();
-    var pw = try physics_utils.PhysicsWorld.init(allocator);
-    app_logger.info("PhysicsWorld.init done", .{});
-    defer pw.deinit(allocator);
-
-    const body_interface = pw.system.getBodyInterfaceMut();
-
-    // floor
-    const floor_shape_settings = try zphysics.BoxShapeSettings.create(.{ 100.0, 1.0, 100.0 });
-    defer floor_shape_settings.asShapeSettings().release();
-    const floor_shape = try floor_shape_settings.asShapeSettings().createShape();
-    defer floor_shape.release();
-
-    const floor_body_settings = zphysics.BodyCreationSettings{
-        .shape = floor_shape,
-        .position = .{ 0.0, -2.0, 0.0, 0.0 },
-        .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
-        .motion_type = .static,
-        .object_layer = physics_utils.object_layers.non_moving,
-    };
-    const floor_body_id = try body_interface.createAndAddBody(floor_body_settings, .activate);
-    _ = floor_body_id;
-
-    // gun
-    const gun_shape_settings = try zphysics.BoxShapeSettings.create(.{ gun_hx, gun_hy, gun_hz });
-    defer gun_shape_settings.asShapeSettings().release();
-    const gun_shape = try gun_shape_settings.asShapeSettings().createShape();
-    defer gun_shape.release();
-
-    var gun_body_settings = zphysics.BodyCreationSettings{
-        .shape = gun_shape,
-        .position = .{ 0.0, 5.0, 0.0, 0.0 },
-        .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
-        .motion_type = .dynamic,
-        .object_layer = physics_utils.object_layers.moving,
-    };
-    // Add angular velocity and initial bounce
-    gun_body_settings.angular_velocity = .{ 2.0, 1.0, 3.0, 0.0 };
-    gun_body_settings.restitution = 0.5;
-
-    const gun_body_id = try body_interface.createAndAddBody(gun_body_settings, .activate);
-    app_logger.info("gun body created!", .{});
-
-    // ========== EVENT LOOP PHASE ==========
-
-    // This is the main application loop, similar to `requestAnimationFrame` in JS.
-    // We use `PeekMessageW` for a non-blocking loop, which allows us to render
-    // frames continuously even if there are no new user input events.
     var running = true;
-    var enter_was_down = false;
-
-    app_logger.info("starting main event loop...", .{});
-
-    // The MessagePump is a helper for processing all pending OS events.
-    // JS Analogy: This is like the internal logic a browser runs between frames
-    // to handle all queued user inputs.
     const MessagePump = struct {
         fn decodeMouseCoords(lParam: windows.LPARAM) windows.POINT {
             const raw: usize = @bitCast(lParam);
@@ -343,15 +312,11 @@ pub fn main() !void {
 
         fn pump(r: *Renderer) bool {
             var m: MSG = undefined;
-            // Process all pending messages in the queue without blocking.
             while (PeekMessageW(&m, null, 0, 0, PM_REMOVE) != 0) {
-                // If we get a quit message, signal the main loop to exit.
                 if (m.message == WM_QUIT) {
                     app_logger.info("received WM_QUIT message, exiting", .{});
-                    return false; // Signal to exit.
+                    return false;
                 }
-
-                // Handle keyboard input directly for maximum responsiveness.
                 if (m.message == WM_KEYDOWN or m.message == WM_SYSKEYDOWN) {
                     const key_code: u32 = @intCast(m.wParam);
                     r.handleKeyInput(key_code, true);
@@ -365,16 +330,108 @@ pub fn main() !void {
                     const coords = decodeMouseCoords(m.lParam);
                     r.handleMouseMove(coords.x, coords.y);
                 }
-
-                // These two functions are part of the standard Windows message handling.
-                // `TranslateMessage` converts key presses into character messages.
-                // `DispatchMessageW` sends the message to our main window handler (`WindowProc`).
                 _ = TranslateMessage(&m);
                 _ = DispatchMessageW(&m);
             }
-            return true; // Continue running.
+            return true;
         }
     };
+
+    const scene_index_bytes = try std.fs.cwd().readFileAlloc(allocator, scenes_index_path, 1024 * 1024);
+    defer allocator.free(scene_index_bytes);
+    const parsed_scene_index = try std.json.parseFromSlice(SceneIndexFile, allocator, scene_index_bytes, .{ .ignore_unknown_fields = true });
+    defer parsed_scene_index.deinit();
+
+    const selected_scene_key = try resolveLaunchSceneKey(allocator, parsed_scene_index.value);
+    const selected_scene_file_path = try resolveSceneFilePath(parsed_scene_index.value, selected_scene_key);
+    const scene_file_bytes = try std.fs.cwd().readFileAlloc(allocator, selected_scene_file_path, 1024 * 1024);
+    defer allocator.free(scene_file_bytes);
+    const parsed_scene_file = try std.json.parseFromSlice(SceneFile, allocator, scene_file_bytes, .{ .ignore_unknown_fields = true });
+    defer parsed_scene_file.deinit();
+
+    const scene_def = try buildSceneDefinition(allocator, parsed_scene_file.value);
+    defer allocator.free(scene_def.assets);
+    defer allocator.free(scene_def.texture_slots);
+    app_logger.infoSub("bootstrap", "launch scene: {s}", .{scene_def.key});
+
+    if (parsed_scene_index.value.loadingScene) |loading_key| {
+        const loading_file_path = resolveSceneFilePath(parsed_scene_index.value, loading_key) catch null;
+        if (loading_file_path) |path| {
+            const loading_bytes = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+            defer allocator.free(loading_bytes);
+            const parsed_loading = try std.json.parseFromSlice(SceneFile, allocator, loading_bytes, .{ .ignore_unknown_fields = true });
+            defer parsed_loading.deinit();
+            const loading_scene = try buildSceneDefinition(allocator, parsed_loading.value);
+            defer allocator.free(loading_scene.assets);
+            defer allocator.free(loading_scene.texture_slots);
+
+            var loading_asset = try loadPrimaryMesh(allocator, loading_scene);
+            defer loading_asset.mesh.deinit();
+            try loading_asset.mesh.generateMeshlets(64, 126);
+            renderer.setCameraPosition(loading_scene.camera_position);
+            renderer.setCameraOrientation(loading_scene.camera_orientation_pitch, loading_scene.camera_orientation_yaw);
+
+            const loading_frames = parsed_scene_index.value.loadingFrames orelse 45;
+            var lf: u32 = 0;
+            while (lf < loading_frames and running) : (lf += 1) {
+                if (!MessagePump.pump(&renderer)) {
+                    running = false;
+                    break;
+                }
+                if (!renderer.shouldRenderFrame()) {
+                    renderer.waitUntilNextFrame();
+                    continue;
+                }
+                renderer.render3DMeshWithPump(&loading_asset.mesh, MessagePump.pump) catch {};
+                Sleep(0);
+            }
+        }
+    }
+
+    var scene_textures = [_]?texture.Texture{ null, null, null };
+    defer for (&scene_textures) |*tex| {
+        if (tex.*) |*loaded| loaded.deinit();
+    };
+    var material_textures = [_]?*const texture.Texture{ null, null, null };
+
+    try zphysics.init(allocator, .{});
+    defer zphysics.deinit();
+
+    var scene_asset = try loadPrimaryMesh(allocator, scene_def);
+    defer scene_asset.mesh.deinit(); // Guarantees the mesh memory is freed on exit.
+    var gun_runtime: ?GunRuntime = null;
+    if (scene_def.texture_slots.len > 0) {
+        try loadSceneTextures(allocator, scene_def.assets, &scene_textures, &material_textures);
+        renderer.setTextures(material_textures[0..]);
+    }
+    if (scene_def.hdri_path) |hdri_path| {
+        if (texture.loadHdrRaw(allocator, hdri_path)) |env_map| {
+            app_logger.infoSub("assets", "loaded HDRI env map", .{});
+            renderer.setHdriMap(env_map);
+        } else |err| {
+            app_logger.warn("failed to load HDRI {s}: {s}", .{ hdri_path, @errorName(err) });
+        }
+    }
+    if (scene_def.runtime == .gun_physics) {
+        gun_runtime = try setupGunRuntime(allocator, &scene_asset.mesh);
+    }
+    defer if (gun_runtime) |*runtime| runtime.deinit(allocator);
+
+    try scene_asset.mesh.generateMeshlets(64, 126);
+    app_logger.infoSub(
+        "assets",
+        "loaded scene mesh vertices={} triangles={} meshlets={}",
+        .{ scene_asset.mesh.vertices.len, scene_asset.mesh.triangles.len, scene_asset.mesh.meshlets.len },
+    );
+
+    renderer.setCameraPosition(scene_def.camera_position);
+    renderer.setCameraOrientation(scene_def.camera_orientation_pitch, scene_def.camera_orientation_yaw);
+
+    if (!running) return;
+
+    app_logger.info("starting main event loop...", .{});
+
+    // ========== EVENT LOOP PHASE ==========
 
     var frame_count: u32 = 0;
     // The main event loop.
@@ -402,41 +459,40 @@ pub fn main() !void {
             break;
         }
 
-        const enter_is_down = ((renderer.keys_pressed & input.KeyBits.enter) != 0) or isEnterDown();
-        if (enter_is_down and !enter_was_down) {
-            body_interface.activate(gun_body_id);
-            body_interface.setLinearVelocity(gun_body_id, gun_jump_velocity);
+        if (gun_runtime) |*runtime| {
+            const enter_is_down = ((renderer.keys_pressed & input.KeyBits.enter) != 0) or isEnterDown();
+            if (enter_is_down and !runtime.enter_was_down) {
+                const body_interface = runtime.pw.system.getBodyInterfaceMut();
+                body_interface.activate(runtime.gun_body_id);
+                body_interface.setLinearVelocity(runtime.gun_body_id, gun_jump_velocity);
+            }
+            runtime.enter_was_down = enter_is_down;
+
+            runtime.pw.system.update(1.0 / 60.0, .{ .collision_steps = 1 }) catch {};
+
+            const lock_iface = runtime.pw.system.getBodyLockInterfaceNoLock();
+            var read_lock: zphysics.BodyLockRead = .{};
+            read_lock.lock(lock_iface, runtime.gun_body_id);
+            const body = read_lock.body.?;
+            const xform = body.getWorldTransform();
+            const rot = xform.rotation;
+            const pos = xform.position;
+
+            for (scene_asset.mesh.vertices[0..runtime.num_gun_vertices], 0..) |*v, i| {
+                const ov = runtime.original_gun_vertices[i];
+                v.x = rot[0] * ov.x + rot[3] * ov.y + rot[6] * ov.z + pos[0];
+                v.y = rot[1] * ov.x + rot[4] * ov.y + rot[7] * ov.z + pos[1];
+                v.z = rot[2] * ov.x + rot[5] * ov.y + rot[8] * ov.z + pos[2];
+            }
+            for (scene_asset.mesh.normals[0..runtime.num_gun_triangles], 0..) |*n, i| {
+                const on = runtime.original_gun_normals[i];
+                n.x = rot[0] * on.x + rot[3] * on.y + rot[6] * on.z;
+                n.y = rot[1] * on.x + rot[4] * on.y + rot[7] * on.z;
+                n.z = rot[2] * on.x + rot[5] * on.y + rot[8] * on.z;
+            }
+            scene_asset.mesh.refreshMeshlets();
+            renderer.invalidateMeshWork();
         }
-        enter_was_down = enter_is_down;
-
-        // Physics Step
-        pw.system.update(1.0 / 60.0, .{ .collision_steps = 1 }) catch {};
-
-        // Update Gun Mesh Vertices
-        const lock_iface = pw.system.getBodyLockInterfaceNoLock();
-        var read_lock: zphysics.BodyLockRead = .{};
-        read_lock.lock(lock_iface, gun_body_id);
-        const body = read_lock.body.?;
-        const xform = body.getWorldTransform();
-        const rot = xform.rotation;
-        const pos = xform.position;
-
-        for (scene_asset.mesh.vertices[0..num_gun_vertices], 0..) |*v, i| {
-            const ov = original_gun_vertices[i];
-            v.x = rot[0] * ov.x + rot[3] * ov.y + rot[6] * ov.z + pos[0];
-            v.y = rot[1] * ov.x + rot[4] * ov.y + rot[7] * ov.z + pos[1];
-            v.z = rot[2] * ov.x + rot[5] * ov.y + rot[8] * ov.z + pos[2];
-        }
-
-        for (scene_asset.mesh.normals[0..num_gun_triangles], 0..) |*n, i| {
-            const on = original_gun_normals[i];
-            n.x = rot[0] * on.x + rot[3] * on.y + rot[6] * on.z;
-            n.y = rot[1] * on.x + rot[4] * on.y + rot[7] * on.z;
-            n.z = rot[2] * on.x + rot[5] * on.y + rot[8] * on.z;
-        }
-
-        scene_asset.mesh.refreshMeshlets();
-        renderer.invalidateMeshWork();
 
         // Check if it's time to render a new frame, based on our target FPS.
 
@@ -530,66 +586,378 @@ fn loadProfileFrameTarget(allocator: std.mem.Allocator) ?u64 {
     return std.fmt.parseUnsigned(u64, trimmed, 10) catch null;
 }
 
-fn loadPrimaryMesh(allocator: std.mem.Allocator) !SceneAsset {
-    if (gltf_loader.load(allocator, preferred_model_path)) |mesh| {
-        app_logger.infoSub("assets", "loaded gltf scene from {s}", .{preferred_model_path});
-        return .{
-            .mesh = mesh,
-            .uses_gun_materials = true,
+fn resolveLaunchSceneKey(allocator: std.mem.Allocator, scene_index: SceneIndexFile) ![]const u8 {
+    var requested_scene: ?[]const u8 = null;
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.startsWith(u8, arg, "--scene=")) {
+            requested_scene = arg["--scene=".len..];
+            break;
+        } else if (std.mem.eql(u8, arg, "--scene") and i + 1 < args.len) {
+            requested_scene = args[i + 1];
+            i += 1;
+            break;
+        }
+    }
+
+    if (requested_scene == null) {
+        const env_scene = std.process.getEnvVarOwned(allocator, "ZIG_SCENE") catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => null,
+            else => null,
         };
+        if (env_scene) |env| {
+            defer allocator.free(env);
+            requested_scene = std.mem.trim(u8, env, " \t\r\n");
+        }
+    }
+
+    const chosen_key = requested_scene orelse scene_index.defaultScene;
+    for (scene_index.scenes) |entry| {
+        if (std.ascii.eqlIgnoreCase(chosen_key, entry.key)) return entry.key;
+    }
+
+    for (scene_index.scenes) |entry| {
+        if (std.ascii.eqlIgnoreCase(scene_index.defaultScene, entry.key)) return entry.key;
+    }
+    return error.SceneNotFound;
+}
+
+fn resolveSceneFilePath(scene_index: SceneIndexFile, key: []const u8) ![]const u8 {
+    for (scene_index.scenes) |entry| {
+        if (std.ascii.eqlIgnoreCase(key, entry.key)) return entry.file;
+    }
+    return error.SceneFilePathNotFound;
+}
+
+fn buildSceneDefinition(allocator: std.mem.Allocator, scene_file: SceneFile) !SceneDefinition {
+    var runtime: SceneRuntime = .static;
+    var hdri_path: ?[]const u8 = null;
+    var camera_position = math.Vec3.new(0.0, 2.0, -6.5);
+    var camera_orientation_pitch: f32 = 0.0;
+    var camera_orientation_yaw: f32 = 0.0;
+
+    var model_count: usize = 0;
+    var texture_count: usize = 0;
+    for (scene_file.assets) |asset| {
+        if (std.ascii.eqlIgnoreCase(asset.type, "model")) {
+            model_count += 1;
+            texture_count += asset.textures.len;
+        } else if (std.ascii.eqlIgnoreCase(asset.type, "runtime")) {
+            if (asset.runtimeName) |runtime_name| {
+                if (std.ascii.eqlIgnoreCase(runtime_name, "gun_physics")) runtime = .gun_physics;
+            }
+        } else if (std.ascii.eqlIgnoreCase(asset.type, "hdri")) {
+            hdri_path = asset.path;
+        } else if (std.ascii.eqlIgnoreCase(asset.type, "camera")) {
+            if (asset.cameraPosition) |pos| {
+                camera_position = math.Vec3.new(pos[0], pos[1], pos[2]);
+            }
+            if (asset.cameraOrientation) |angles| {
+                camera_orientation_pitch = angles[0];
+                camera_orientation_yaw = angles[1];
+            }
+        }
+    }
+
+    const assets = try allocator.alloc(SceneAssetDefinition, model_count);
+    const texture_slots = try allocator.alloc(SceneTextureSlotDefinition, texture_count);
+    var model_index: usize = 0;
+    var texture_index: usize = 0;
+    for (scene_file.assets) |asset| {
+        if (!std.ascii.eqlIgnoreCase(asset.type, "model")) continue;
+
+        const model_type = if (std.ascii.eqlIgnoreCase(asset.modelType, "gltf"))
+            SceneModelType.gltf
+        else if (std.ascii.eqlIgnoreCase(asset.modelType, "obj"))
+            SceneModelType.obj
+        else
+            return error.InvalidSceneModelType;
+
+        const start = texture_index;
+        for (asset.textures) |slot| {
+            texture_slots[texture_index] = .{
+                .slot = @intCast(slot.slot),
+                .path = slot.path,
+            };
+            texture_index += 1;
+        }
+
+        assets[model_index] = .{
+            .model_type = model_type,
+            .model_path = asset.modelPath,
+            .fallback_model_path = asset.fallbackModelPath,
+            .apply_cornell_palette = asset.applyCornellPalette,
+            .position = math.Vec3.new(asset.position[0], asset.position[1], asset.position[2]),
+            .rotation_deg = math.Vec3.new(asset.rotationDeg[0], asset.rotationDeg[1], asset.rotationDeg[2]),
+            .scale = math.Vec3.new(asset.scale[0], asset.scale[1], asset.scale[2]),
+            .texture_slots = texture_slots[start..texture_index],
+        };
+        model_index += 1;
+    }
+
+    return .{
+        .key = scene_file.key,
+        .assets = assets,
+        .texture_slots = texture_slots,
+        .runtime = runtime,
+        .hdri_path = hdri_path,
+        .camera_position = camera_position,
+        .camera_orientation_pitch = camera_orientation_pitch,
+        .camera_orientation_yaw = camera_orientation_yaw,
+    };
+}
+
+fn loadPrimaryMesh(allocator: std.mem.Allocator, scene_def: SceneDefinition) !SceneAsset {
+    if (scene_def.assets.len == 0) return error.SceneHasNoAssets;
+
+    var merged_mesh: ?mesh_module.Mesh = null;
+    for (scene_def.assets) |asset| {
+        var loaded_mesh: mesh_module.Mesh = switch (asset.model_type) {
+            .gltf => try loadGltfMeshAsset(allocator, asset),
+            .obj => try loadObjMeshAsset(allocator, asset),
+        };
+        applyAssetTransform(&loaded_mesh, asset);
+        if (merged_mesh == null) {
+            merged_mesh = loaded_mesh;
+        } else {
+            var existing = merged_mesh.?;
+            try appendMesh(allocator, &existing, &loaded_mesh);
+            loaded_mesh.deinit();
+            merged_mesh = existing;
+        }
+    }
+
+    return .{ .mesh = merged_mesh.? };
+}
+
+fn loadGltfMeshAsset(allocator: std.mem.Allocator, asset: SceneAssetDefinition) !mesh_module.Mesh {
+    if (gltf_loader.load(allocator, asset.model_path)) |mesh| {
+        app_logger.infoSub("assets", "loaded gltf asset from {s}", .{asset.model_path});
+        return mesh;
     } else |err| {
-        app_logger.warn("preferred model load failed for {s}: {s}; falling back to {s}", .{
-            preferred_model_path,
+        app_logger.warn("scene gltf load failed for {s}: {s}", .{
+            asset.model_path,
             @errorName(err),
-            fallback_model_path,
         });
     }
-
-    const fallback_mesh = try obj_loader.load(allocator, fallback_model_path);
-    app_logger.infoSub("assets", "loaded fallback obj from {s}", .{fallback_model_path});
-    return .{
-        .mesh = fallback_mesh,
-        .uses_gun_materials = false,
-    };
+    if (asset.fallback_model_path) |fallback_path| {
+        const fallback_mesh = try obj_loader.load(allocator, fallback_path);
+        app_logger.infoSub("assets", "loaded fallback obj from {s}", .{fallback_path});
+        return fallback_mesh;
+    }
+    return error.SceneModelLoadFailed;
 }
 
-fn configureGunTextures(
+fn loadObjMeshAsset(allocator: std.mem.Allocator, asset: SceneAssetDefinition) !mesh_module.Mesh {
+    var mesh = try obj_loader.load(allocator, asset.model_path);
+    if (asset.apply_cornell_palette) applyCornellColors(&mesh);
+    app_logger.infoSub("assets", "loaded obj asset from {s}", .{asset.model_path});
+    return mesh;
+}
+
+fn appendMesh(allocator: std.mem.Allocator, target: *mesh_module.Mesh, source: *const mesh_module.Mesh) !void {
+    const old_vertex_count = target.vertices.len;
+    const old_triangle_count = target.triangles.len;
+    const new_vertex_count = old_vertex_count + source.vertices.len;
+    const new_triangle_count = old_triangle_count + source.triangles.len;
+
+    const new_vertices = try allocator.alloc(math.Vec3, new_vertex_count);
+    errdefer allocator.free(new_vertices);
+    const new_tex_coords = try allocator.alloc(math.Vec2, new_vertex_count);
+    errdefer allocator.free(new_tex_coords);
+    const new_triangles = try allocator.alloc(mesh_module.Triangle, new_triangle_count);
+    errdefer allocator.free(new_triangles);
+    const new_normals = try allocator.alloc(math.Vec3, new_triangle_count);
+    errdefer allocator.free(new_normals);
+
+    std.mem.copyForwards(math.Vec3, new_vertices[0..old_vertex_count], target.vertices);
+    std.mem.copyForwards(math.Vec2, new_tex_coords[0..old_vertex_count], target.tex_coords);
+    std.mem.copyForwards(mesh_module.Triangle, new_triangles[0..old_triangle_count], target.triangles);
+    std.mem.copyForwards(math.Vec3, new_normals[0..old_triangle_count], target.normals);
+
+    std.mem.copyForwards(math.Vec3, new_vertices[old_vertex_count..], source.vertices);
+    std.mem.copyForwards(math.Vec2, new_tex_coords[old_vertex_count..], source.tex_coords);
+    for (source.triangles, 0..) |tri, i| {
+        var shifted = tri;
+        shifted.v0 += old_vertex_count;
+        shifted.v1 += old_vertex_count;
+        shifted.v2 += old_vertex_count;
+        new_triangles[old_triangle_count + i] = shifted;
+    }
+    std.mem.copyForwards(math.Vec3, new_normals[old_triangle_count..], source.normals);
+
+    allocator.free(target.vertices);
+    allocator.free(target.tex_coords);
+    allocator.free(target.triangles);
+    allocator.free(target.normals);
+    target.vertices = new_vertices;
+    target.tex_coords = new_tex_coords;
+    target.triangles = new_triangles;
+    target.normals = new_normals;
+    target.clearMeshlets();
+}
+
+fn loadSceneTextures(
     allocator: std.mem.Allocator,
-    bullet_albedo: *?texture.Texture,
-    body_albedo: *?texture.Texture,
+    assets: []const SceneAssetDefinition,
+    loaded_slots: *[3]?texture.Texture,
     material_textures: *[3]?*const texture.Texture,
-) void {
-    bullet_albedo.* = texture.loadBmp(allocator, gun_bullet_albedo_path) catch |err| blk: {
-        app_logger.warn("failed to load gun bullet texture {s}: {s}", .{ gun_bullet_albedo_path, @errorName(err) });
-        break :blk null;
-    };
-    if (bullet_albedo.*) |*tex| {
-        material_textures[0] = tex;
-        app_logger.infoSub("assets", "loaded gun bullet albedo {s}", .{gun_bullet_albedo_path});
-    }
-
-    body_albedo.* = texture.loadBmp(allocator, gun_body_albedo_path) catch |err| blk: {
-        app_logger.warn("failed to load gun body texture {s}: {s}", .{ gun_body_albedo_path, @errorName(err) });
-        break :blk null;
-    };
-    if (body_albedo.*) |*tex| {
-        material_textures[1] = tex;
-        app_logger.infoSub("assets", "loaded gun body albedo {s}", .{gun_body_albedo_path});
+) !void {
+    for (assets) |asset| {
+        for (asset.texture_slots) |slot| {
+            if (slot.slot >= loaded_slots.len) {
+                app_logger.warn("texture slot {} out of range for {s}", .{ slot.slot, slot.path });
+                continue;
+            }
+            loaded_slots[slot.slot] = texture.loadBmp(allocator, slot.path) catch |err| blk: {
+                app_logger.warn("failed to load texture slot {} {s}: {s}", .{ slot.slot, slot.path, @errorName(err) });
+                break :blk null;
+            };
+            if (loaded_slots[slot.slot]) |*tex| material_textures[slot.slot] = tex;
+        }
     }
 }
 
-fn levelLiftMeshToGround(mesh: *mesh_module.Mesh) void {
-    if (mesh.vertices.len == 0) return;
-    var min_y = mesh.vertices[0].y;
-    for (mesh.vertices[1..]) |v| {
-        if (v.y < min_y) min_y = v.y;
-    }
-    const offset = -min_y;
-    if (offset == 0.0) return;
+fn applyAssetTransform(mesh: *mesh_module.Mesh, asset: SceneAssetDefinition) void {
     for (mesh.vertices) |*v| {
-        v.y += offset;
+        v.* = transformPoint(v.*, asset.position, asset.rotation_deg, asset.scale);
     }
-    mesh.clearMeshlets();
+    for (mesh.normals) |*n| {
+        n.* = rotateVector(n.*, asset.rotation_deg).normalize();
+    }
+}
+
+fn transformPoint(v: math.Vec3, position: math.Vec3, rotation_deg: math.Vec3, scale: math.Vec3) math.Vec3 {
+    const scaled = math.Vec3.new(v.x * scale.x, v.y * scale.y, v.z * scale.z);
+    const rotated = rotateVector(scaled, rotation_deg);
+    return math.Vec3.add(rotated, position);
+}
+
+fn rotateVector(v: math.Vec3, rotation_deg: math.Vec3) math.Vec3 {
+    const rad_scale = std.math.pi / 180.0;
+    const rx = rotation_deg.x * rad_scale;
+    const ry = rotation_deg.y * rad_scale;
+    const rz = rotation_deg.z * rad_scale;
+
+    const sx = @sin(rx);
+    const cx = @cos(rx);
+    const sy = @sin(ry);
+    const cy = @cos(ry);
+    const sz = @sin(rz);
+    const cz = @cos(rz);
+
+    const x1 = v.x;
+    const y1 = v.y * cx - v.z * sx;
+    const z1 = v.y * sx + v.z * cx;
+
+    const x2 = x1 * cy + z1 * sy;
+    const y2 = y1;
+    const z2 = -x1 * sy + z1 * cy;
+
+    return math.Vec3.new(
+        x2 * cz - y2 * sz,
+        x2 * sz + y2 * cz,
+        z2,
+    );
+}
+
+fn setupGunRuntime(allocator: std.mem.Allocator, mesh: *mesh_module.Mesh) !GunRuntime {
+    mesh.centerToOrigin();
+
+    var gun_min_b = mesh.vertices[0];
+    var gun_max_b = mesh.vertices[0];
+    for (mesh.vertices[1..]) |v| {
+        gun_min_b.x = @min(gun_min_b.x, v.x);
+        gun_min_b.y = @min(gun_min_b.y, v.y);
+        gun_min_b.z = @min(gun_min_b.z, v.z);
+        gun_max_b.x = @max(gun_max_b.x, v.x);
+        gun_max_b.y = @max(gun_max_b.y, v.y);
+        gun_max_b.z = @max(gun_max_b.z, v.z);
+    }
+
+    const num_gun_vertices = mesh.vertices.len;
+    const num_gun_triangles = mesh.triangles.len;
+    const original_gun_vertices = try allocator.alloc(math.Vec3, num_gun_vertices);
+    const original_gun_normals = try allocator.alloc(math.Vec3, num_gun_triangles);
+    @memcpy(original_gun_vertices, mesh.vertices[0..num_gun_vertices]);
+    @memcpy(original_gun_normals, mesh.normals[0..num_gun_triangles]);
+
+    try levelAppendGroundPlane(mesh, allocator);
+
+    var pw = try physics_utils.PhysicsWorld.init(allocator);
+    const body_interface = pw.system.getBodyInterfaceMut();
+
+    const floor_shape_settings = try zphysics.BoxShapeSettings.create(.{ 100.0, 1.0, 100.0 });
+    defer floor_shape_settings.asShapeSettings().release();
+    const floor_shape = try floor_shape_settings.asShapeSettings().createShape();
+    defer floor_shape.release();
+    const floor_body_settings = zphysics.BodyCreationSettings{
+        .shape = floor_shape,
+        .position = .{ 0.0, -2.0, 0.0, 0.0 },
+        .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
+        .motion_type = .static,
+        .object_layer = physics_utils.object_layers.non_moving,
+    };
+    _ = try body_interface.createAndAddBody(floor_body_settings, .activate);
+
+    const gun_hx = (gun_max_b.x - gun_min_b.x) * 0.5;
+    const gun_hy = (gun_max_b.y - gun_min_b.y) * 0.5;
+    const gun_hz = (gun_max_b.z - gun_min_b.z) * 0.5;
+    const gun_shape_settings = try zphysics.BoxShapeSettings.create(.{ gun_hx, gun_hy, gun_hz });
+    defer gun_shape_settings.asShapeSettings().release();
+    const gun_shape = try gun_shape_settings.asShapeSettings().createShape();
+    defer gun_shape.release();
+
+    var gun_body_settings = zphysics.BodyCreationSettings{
+        .shape = gun_shape,
+        .position = .{ 0.0, 5.0, 0.0, 0.0 },
+        .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
+        .motion_type = .dynamic,
+        .object_layer = physics_utils.object_layers.moving,
+    };
+    gun_body_settings.angular_velocity = .{ 2.0, 1.0, 3.0, 0.0 };
+    gun_body_settings.restitution = 0.5;
+    const gun_body_id = try body_interface.createAndAddBody(gun_body_settings, .activate);
+
+    return .{
+        .pw = pw,
+        .gun_body_id = gun_body_id,
+        .num_gun_vertices = num_gun_vertices,
+        .num_gun_triangles = num_gun_triangles,
+        .original_gun_vertices = original_gun_vertices,
+        .original_gun_normals = original_gun_normals,
+    };
+}
+
+fn applyCornellColors(mesh: *mesh_module.Mesh) void {
+    const white: u32 = 0xFFE6E6E6;
+    const red: u32 = 0xFF3A3ACB;
+    const green: u32 = 0xFF59D66F;
+
+    for (mesh.triangles, 0..) |*tri, i| {
+        tri.base_color = if (i < 2)
+            white // back
+        else if (i < 4)
+            red // left
+        else if (i < 6)
+            green // right
+        else if (i < 12)
+            white // floor, ceiling, light
+        else
+            white; // inner boxes
+    }
+
+    // Cornell room is viewed from the inside; flip room and light panel normals so
+    // backface rejection keeps interior surfaces visible.
+    const flip_count: usize = @min(mesh.normals.len, 12);
+    for (mesh.normals[0..flip_count]) |*n| {
+        n.x = -n.x;
+        n.y = -n.y;
+        n.z = -n.z;
+    }
 }
 
 fn levelAppendGroundPlane(mesh: *mesh_module.Mesh, allocator: std.mem.Allocator) !void {
@@ -618,7 +986,6 @@ fn levelAppendGroundPlane(mesh: *mesh_module.Mesh, allocator: std.mem.Allocator)
 
     const base = old_vertex_count;
     const step = (plane_extent * 2.0) / @as(f32, @floatFromInt(segments));
-
     var row: usize = 0;
     while (row < verts_per_row) : (row += 1) {
         const z = -plane_extent + step * @as(f32, @floatFromInt(row));
@@ -627,15 +994,14 @@ fn levelAppendGroundPlane(mesh: *mesh_module.Mesh, allocator: std.mem.Allocator)
             const x = -plane_extent + step * @as(f32, @floatFromInt(col));
             const idx = base + row * verts_per_row + col;
             new_vertices[idx] = math.Vec3.new(x, plane_y, z);
-            const u = @as(f32, @floatFromInt(col)) / @as(f32, @floatFromInt(segments));
-            const v = @as(f32, @floatFromInt(row)) / @as(f32, @floatFromInt(segments));
-            new_tex_coords[idx] = math.Vec2.new(u, v);
+            new_tex_coords[idx] = math.Vec2.new(
+                @as(f32, @floatFromInt(col)) / @as(f32, @floatFromInt(segments)),
+                @as(f32, @floatFromInt(row)) / @as(f32, @floatFromInt(segments)),
+            );
         }
     }
 
-    // Copy the original mesh's triangles to the START so their indices don't shift.
     std.mem.copyForwards(mesh_module.Triangle, new_triangles[0..old_triangle_count], mesh.triangles);
-
     var tri_write: usize = old_triangle_count;
     row = 0;
     while (row < segments) : (row += 1) {
@@ -645,7 +1011,6 @@ fn levelAppendGroundPlane(mesh: *mesh_module.Mesh, allocator: std.mem.Allocator)
             const v10 = base + row * verts_per_row + (col + 1);
             const v01 = base + (row + 1) * verts_per_row + col;
             const v11 = base + (row + 1) * verts_per_row + (col + 1);
-
             new_triangles[tri_write] = mesh_module.Triangle.newWithColor(v00, v11, v10, plane_color);
             tri_write += 1;
             new_triangles[tri_write] = mesh_module.Triangle.newWithColor(v00, v01, v11, plane_color);
@@ -655,12 +1020,10 @@ fn levelAppendGroundPlane(mesh: *mesh_module.Mesh, allocator: std.mem.Allocator)
 
     const new_normals = try allocator.alloc(math.Vec3, new_triangle_count);
     errdefer allocator.free(new_normals);
-
     allocator.free(mesh.vertices);
     allocator.free(mesh.tex_coords);
     allocator.free(mesh.triangles);
     allocator.free(mesh.normals);
-
     mesh.vertices = new_vertices;
     mesh.tex_coords = new_tex_coords;
     mesh.triangles = new_triangles;

@@ -1,0 +1,9 @@
+{
+  "defaultScene": "gun_physics",
+  "loadingScene": "cornell",
+  "loadingFrames": 45,
+  "scenes": [
+    { "key": "gun_physics", "file": "assets/configs/scenes/gun_physics.scene.json" },
+    { "key": "cornell", "file": "assets/configs/scenes/cornell.scene.json" }
+  ]
+}
