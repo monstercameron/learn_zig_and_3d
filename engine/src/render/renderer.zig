@@ -4283,7 +4283,11 @@ pub const Renderer = struct {
             .light_dir_world = light_dir_world,
             .shadow_elapsed_ns = shadow_elapsed_ns,
         };
-        pass_registry.executePostPasses(ctx, isPostPassEnabled, runPostPassById);
+        const iface = pass_registry.PassInterface(PostPassExecutionContext){
+            .is_enabled = isPostPassEnabled,
+            .run = runPostPassById,
+        };
+        pass_registry.executeWithInterface(ctx, iface);
     }
 
     fn applySSGIPass(self: *Renderer) void {

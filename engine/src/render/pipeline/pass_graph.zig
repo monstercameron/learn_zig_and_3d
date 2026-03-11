@@ -52,6 +52,26 @@ pub const default_post_pass_order = [_]PassNode{
     .{ .id = .color_grade, .name = "color_grade", .flags = .{} },
 };
 
+pub const post_pass_count: usize = default_post_pass_order.len;
+
+pub fn passIndex(id: RenderPassId) ?usize {
+    for (default_post_pass_order, 0..) |node, idx| {
+        if (node.id == id) return idx;
+    }
+    return null;
+}
+
+pub fn passBit(id: RenderPassId) u64 {
+    const idx = passIndex(id) orelse return 0;
+    return @as(u64, 1) << @as(u6, @intCast(idx));
+}
+
+pub fn allPassMask() u64 {
+    if (post_pass_count == 0) return 0;
+    if (post_pass_count >= 64) return std.math.maxInt(u64);
+    return (@as(u64, 1) << @as(u6, @intCast(post_pass_count))) - 1;
+}
+
 pub fn containsPass(id: RenderPassId) bool {
     for (default_post_pass_order) |node| {
         if (node.id == id) return true;
@@ -61,4 +81,10 @@ pub fn containsPass(id: RenderPassId) bool {
 
 test "default pass order contains depth fog" {
     try std.testing.expect(containsPass(.depth_fog));
+}
+
+test "pass index and bit are stable" {
+    const taa_idx = passIndex(.taa) orelse unreachable;
+    try std.testing.expect(taa_idx < post_pass_count);
+    try std.testing.expect(passBit(.taa) != 0);
 }
