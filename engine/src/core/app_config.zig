@@ -25,6 +25,12 @@ pub var CAMERA_FOV_STEP: f32 = 1.5;
 pub var CAMERA_FOV_MIN: f32 = 20.0;
 /// The maximum allowed FOV in degrees (lowest zoom level/widest angle).
 pub var CAMERA_FOV_MAX: f32 = 120.0;
+/// Base first-person look sensitivity in radians per pixel.
+pub var CAMERA_MOUSE_SENSITIVITY: f32 = 0.0075;
+/// Optional DPI scaling multiplier applied on top of base mouse sensitivity.
+pub var CAMERA_MOUSE_DPI_SCALE: f32 = 1.0;
+/// Exponential smoothing factor for first-person mouse input [0, 0.95].
+pub var CAMERA_MOUSE_SMOOTHING: f32 = 0.32;
 /// The initial distance of the light source from the camera/center.
 pub var LIGHT_DISTANCE_INITIAL: f32 = 3.0;
 /// Minimum number of active renderer lights allocated at runtime.
@@ -213,6 +219,9 @@ const ConfigFile = struct {
         fovStep: ?f32 = null,
         minFov: ?f32 = null,
         maxFov: ?f32 = null,
+        mouseSensitivity: ?f32 = null,
+        mouseDpiScale: ?f32 = null,
+        mouseSmoothing: ?f32 = null,
     } = .{},
     debug: struct {
         showTileBorders: ?bool = null,
@@ -325,6 +334,9 @@ pub fn load(allocator: std.mem.Allocator, filepath: []const u8) !void {
     if (c.camera.fovStep) |v| CAMERA_FOV_STEP = v;
     if (c.camera.minFov) |v| CAMERA_FOV_MIN = v;
     if (c.camera.maxFov) |v| CAMERA_FOV_MAX = v;
+    if (c.camera.mouseSensitivity) |v| CAMERA_MOUSE_SENSITIVITY = std.math.clamp(v, 0.0001, 0.05);
+    if (c.camera.mouseDpiScale) |v| CAMERA_MOUSE_DPI_SCALE = std.math.clamp(v, 0.1, 8.0);
+    if (c.camera.mouseSmoothing) |v| CAMERA_MOUSE_SMOOTHING = std.math.clamp(v, 0.0, 0.95);
 
     if (c.debug.showTileBorders) |v| DEBUG_SHOW_TILE_BORDERS = v;
     if (c.debug.showWireframe) |v| DEBUG_SHOW_WIREFRAME = v;
@@ -519,6 +531,10 @@ pub fn loadEngineIni(allocator: std.mem.Allocator, filepath: []const u8) !void {
             if (std.mem.eql(u8, key, "enabled")) POST_SSGI_ENABLED = parseBool(val, POST_SSGI_ENABLED);
             if (std.mem.eql(u8, key, "samples")) POST_SSGI_SAMPLES = parseI32(val, POST_SSGI_SAMPLES);
             if (std.mem.eql(u8, key, "intensity")) POST_SSGI_INTENSITY = parseF32(val, POST_SSGI_INTENSITY);
+        } else if (std.mem.eql(u8, section, "camera")) {
+            if (std.mem.eql(u8, key, "mouse_sensitivity")) CAMERA_MOUSE_SENSITIVITY = std.math.clamp(parseF32(val, CAMERA_MOUSE_SENSITIVITY), 0.0001, 0.05);
+            if (std.mem.eql(u8, key, "mouse_dpi_scale")) CAMERA_MOUSE_DPI_SCALE = std.math.clamp(parseF32(val, CAMERA_MOUSE_DPI_SCALE), 0.1, 8.0);
+            if (std.mem.eql(u8, key, "mouse_smoothing")) CAMERA_MOUSE_SMOOTHING = std.math.clamp(parseF32(val, CAMERA_MOUSE_SMOOTHING), 0.0, 0.95);
         }
     }
 }

@@ -65,6 +65,7 @@ const pass_registry = @import("pipeline/pass_registry.zig");
 const pass_graph = @import("pipeline/pass_graph.zig");
 const render_utils = @import("core/utils.zig");
 const scene_item_gizmo = @import("scene_item_gizmo.zig");
+const camera_controller = @import("camera_controller.zig");
 const shadow_raster_kernel = @import("kernels/shadow_raster_kernel.zig");
 const shadow_sample_kernel = @import("kernels/shadow_sample_kernel.zig");
 const hybrid_shadow_cache_kernel = @import("kernels/hybrid_shadow_cache_kernel.zig");
@@ -89,6 +90,8 @@ const NEAR_CLIP: f32 = 0.01;
 const NEAR_EPSILON: f32 = 1e-4;
 const INVALID_PROJECTED_COORD: i32 = -1000;
 const ENABLE_MESHLET_CONE_CULL = false;
+const fps_camera_floor_y: f32 = 0.0;
+const fps_camera_eye_height: f32 = 1.6;
 const shadow_rebuild_dot_threshold: f32 = 0.9986; // about 3 degrees
 const hybrid_shadow_grid_dim: usize = 32;
 const hybrid_shadow_grid_cells: usize = hybrid_shadow_grid_dim * hybrid_shadow_grid_dim;
@@ -233,10 +236,7 @@ const LightGizmoState = struct {
     drag_last_pointer: ?math.Vec2 = null,
 };
 
-const CameraControlMode = enum(u8) {
-    first_person = 0,
-    editor = 1,
-};
+const CameraControlMode = camera_controller.ControlMode;
 
 pub const CursorStyle = enum(u8) {
     arrow = 0,
@@ -520,27 +520,10 @@ const FrameViewCache = struct {
         light_dir_world: math.Vec3,
         light_distance: f32,
     ) DerivedFrameViewState {
-        const yaw = rotation_angle;
-        const pitch = rotation_x;
-        const cos_pitch = @cos(pitch);
-        const sin_pitch = @sin(pitch);
-        const cos_yaw = @cos(yaw);
-        const sin_yaw = @sin(yaw);
-
-        var forward = math.Vec3.new(sin_yaw * cos_pitch, sin_pitch, cos_yaw * cos_pitch);
-        forward = math.Vec3.normalize(forward);
-
-        const world_up = math.Vec3.new(0.0, 1.0, 0.0);
-        var right = math.Vec3.cross(world_up, forward);
-        const right_len = math.Vec3.length(right);
-        if (right_len < 0.0001) {
-            right = math.Vec3.new(1.0, 0.0, 0.0);
-        } else {
-            right = math.Vec3.scale(right, 1.0 / right_len);
-        }
-
-        var up = math.Vec3.cross(forward, right);
-        up = math.Vec3.normalize(up);
+        const basis = camera_controller.computeViewBasis(rotation_angle, rotation_x);
+        const right = basis.right;
+        const up = basis.up;
+        const forward = basis.forward;
 
         var view_rotation = math.Mat4.identity();
         view_rotation.data[0] = right.x;
@@ -566,16 +549,11 @@ const FrameViewCache = struct {
             math.Vec3.dot(light_dir_world, forward),
         ));
 
-        const width_f = @as(f32, @floatFromInt(bitmap_width));
-        const height_f = @as(f32, @floatFromInt(bitmap_height));
-        const aspect_ratio = if (height_f > 0.0) width_f / height_f else 1.0;
-        const fov_rad = camera_fov_deg * (std.math.pi / 180.0);
-        const half_fov = fov_rad * 0.5;
-        const tan_half_fov = std.math.tan(half_fov);
-        const y_scale = if (tan_half_fov > 0.0) 1.0 / tan_half_fov else 1.0;
-        const x_scale = y_scale / aspect_ratio;
-        const center_x = width_f * 0.5;
-        const center_y = height_f * 0.5;
+        const projection_scalars = camera_controller.computeProjectionScalars(bitmap_width, bitmap_height, camera_fov_deg);
+        const center_x = projection_scalars.center_x;
+        const center_y = projection_scalars.center_y;
+        const x_scale = projection_scalars.x_scale;
+        const y_scale = projection_scalars.y_scale;
         const cache_projection = ProjectionParams{
             .center_x = center_x,
             .center_y = center_y,
@@ -1278,11 +1256,8 @@ pub const Renderer = struct {
     rotation_x: f32, // Camera pitch (up/down rotation).
     camera_position: math.Vec3, // Camera world position.
     camera_move_speed: f32, // Units per second for keyboard movement.
-    mouse_sensitivity: f32, // Mouse look sensitivity factor.
-    pending_mouse_delta: math.Vec2, // Accumulated mouse delta since last frame.
-    mouse_initialized: bool, // Tracks whether the initial mouse position has been captured.
-    mouse_last_pos: windows.POINT, // Last mouse position in client coordinates.
-    ignore_next_mouse_move: bool, // Set when the OS cursor is recentered by first-person lock.
+    mouse_state: camera_controller.MouseState, // First-person mouse accumulation/smoothing state.
+    fps_body_state: camera_controller.FpsBodyState,
 
     // Light state
     lights: std.ArrayList(LightInfo),
@@ -1884,11 +1859,10 @@ pub const Renderer = struct {
             .rotation_x = 0,
             .camera_position = math.Vec3.new(0.0, 1.5, -5.0),
             .camera_move_speed = 6.0,
-            .mouse_sensitivity = 0.0025,
-            .pending_mouse_delta = math.Vec2.new(0.0, 0.0),
-            .mouse_initialized = false,
-            .mouse_last_pos = .{ .x = 0, .y = 0 },
-            .ignore_next_mouse_move = false,
+            .mouse_state = .{
+                .sensitivity = config.CAMERA_MOUSE_SENSITIVITY,
+            },
+            .fps_body_state = .{},
             .lights = lights,
             .light_soa = .{
                 .dir_x = light_dir_x,
@@ -3805,9 +3779,7 @@ pub const Renderer = struct {
     }
 
     pub fn noteMouseWarp(self: *Renderer, client_x: i32, client_y: i32) void {
-        self.mouse_last_pos = .{ .x = client_x, .y = client_y };
-        self.mouse_initialized = true;
-        self.ignore_next_mouse_move = true;
+        camera_controller.noteMouseWarp(&self.mouse_state, client_x, client_y);
     }
 
     pub fn isSceneItemDragActive(self: *const Renderer) bool {
@@ -3815,23 +3787,9 @@ pub const Renderer = struct {
     }
 
     pub fn handleMouseMove(self: *Renderer, x: i32, y: i32) void {
-        const current = windows.POINT{ .x = x, .y = y };
-        if (!self.mouse_initialized) {
-            self.mouse_last_pos = current;
-            self.mouse_initialized = true;
-            return;
-        }
-        if (self.ignore_next_mouse_move) {
-            self.mouse_last_pos = current;
-            self.ignore_next_mouse_move = false;
-            return;
-        }
-
-        const dx = @as(f32, @floatFromInt(current.x - self.mouse_last_pos.x));
-        const dy = @as(f32, @floatFromInt(current.y - self.mouse_last_pos.y));
-        self.mouse_last_pos = current;
+        const raw_delta = camera_controller.nextRawDelta(&self.mouse_state, x, y) orelse return;
         if (self.camera_control_mode == .first_person) {
-            self.pending_mouse_delta = math.Vec2.new(self.pending_mouse_delta.x + dx, self.pending_mouse_delta.y + dy);
+            camera_controller.accumulateFirstPersonDelta(&self.mouse_state, raw_delta);
             return;
         }
 
@@ -3925,10 +3883,11 @@ pub const Renderer = struct {
 
     pub fn setCameraPosition(self: *Renderer, position: math.Vec3) void {
         self.camera_position = position;
+        camera_controller.resetFpsBody(&self.fps_body_state, self.camera_position, fps_camera_floor_y, fps_camera_eye_height);
     }
 
     pub fn setCameraOrientation(self: *Renderer, pitch: f32, yaw: f32) void {
-        self.rotation_x = std.math.clamp(pitch, -1.5, 1.5);
+        self.rotation_x = camera_controller.clampPitch(pitch);
         self.rotation_angle = yaw;
     }
 
@@ -3963,10 +3922,12 @@ pub const Renderer = struct {
         self.taa_previous_mesh_valid = true;
     }
 
-    fn consumeMouseDelta(self: *Renderer) math.Vec2 {
-        const delta = self.pending_mouse_delta;
-        self.pending_mouse_delta = math.Vec2.new(0.0, 0.0);
-        return delta;
+    fn consumeMouseDelta(self: *Renderer, frame_dt_seconds: f32) math.Vec2 {
+        return camera_controller.consumeLookDelta(&self.mouse_state, self.camera_control_mode, frame_dt_seconds);
+    }
+
+    fn effectiveMouseSensitivity(self: *const Renderer) f32 {
+        return camera_controller.effectiveSensitivity(&self.mouse_state);
     }
 
     const PointerViewState = struct {
@@ -3977,47 +3938,17 @@ pub const Renderer = struct {
     };
 
     fn computePointerViewState(self: *const Renderer) PointerViewState {
-        const yaw = self.rotation_angle;
-        const pitch = self.rotation_x;
-        const cos_pitch = @cos(pitch);
-        const sin_pitch = @sin(pitch);
-        const cos_yaw = @cos(yaw);
-        const sin_yaw = @sin(yaw);
-
-        var forward = math.Vec3.new(sin_yaw * cos_pitch, sin_pitch, cos_yaw * cos_pitch);
-        forward = math.Vec3.normalize(forward);
-
-        const world_up = math.Vec3.new(0.0, 1.0, 0.0);
-        var right = math.Vec3.cross(world_up, forward);
-        const right_len = math.Vec3.length(right);
-        if (right_len < 0.0001) {
-            right = math.Vec3.new(1.0, 0.0, 0.0);
-        } else {
-            right = math.Vec3.scale(right, 1.0 / right_len);
-        }
-
-        var up = math.Vec3.cross(forward, right);
-        up = math.Vec3.normalize(up);
-
-        const width_f = @as(f32, @floatFromInt(self.bitmap.width));
-        const height_f = @as(f32, @floatFromInt(self.bitmap.height));
-        const aspect_ratio = if (height_f > 0.0) width_f / height_f else 1.0;
-        const fov_rad = self.camera_fov_deg * (std.math.pi / 180.0);
-        const half_fov = fov_rad * 0.5;
-        const tan_half_fov = std.math.tan(half_fov);
-        const y_scale = if (tan_half_fov > 0.0) 1.0 / tan_half_fov else 1.0;
-        const x_scale = y_scale / aspect_ratio;
-        const center_x = width_f * 0.5;
-        const center_y = height_f * 0.5;
+        const basis = camera_controller.computeViewBasis(self.rotation_angle, self.rotation_x);
+        const projection = camera_controller.computeProjectionScalars(self.bitmap.width, self.bitmap.height, self.camera_fov_deg);
         return .{
-            .right = right,
-            .up = up,
-            .forward = forward,
+            .right = basis.right,
+            .up = basis.up,
+            .forward = basis.forward,
             .projection = .{
-                .center_x = center_x,
-                .center_y = center_y,
-                .x_scale = x_scale,
-                .y_scale = y_scale,
+                .center_x = projection.center_x,
+                .center_y = projection.center_y,
+                .x_scale = projection.x_scale,
+                .y_scale = projection.y_scale,
                 .near_plane = NEAR_CLIP,
                 .jitter_x = 0.0,
                 .jitter_y = 0.0,
@@ -4233,10 +4164,11 @@ pub const Renderer = struct {
                 if (self.camera_control_mode == .first_person) {
                     self.scene_item_gizmo.cancelInteraction();
                     self.clearLightGizmoInteraction();
+                    camera_controller.resetFpsBody(&self.fps_body_state, self.camera_position, fps_camera_floor_y, fps_camera_eye_height);
+                    const jump_down = (self.keys_pressed & input.KeyBits.space) != 0;
+                    camera_controller.setJumpHeldState(&self.fps_body_state, jump_down);
                 }
-                self.pending_mouse_delta = math.Vec2.new(0.0, 0.0);
-                self.mouse_initialized = false;
-                self.ignore_next_mouse_move = false;
+                camera_controller.resetForModeToggle(&self.mouse_state);
                 renderer_logger.infoSub(
                     "camera_mode",
                     "mode={s}",
@@ -4573,12 +4505,17 @@ pub const Renderer = struct {
         if ((self.keys_pressed & input.KeyBits.up) != 0) self.rotation_x -= rotation_speed * simulation_delta_seconds;
         if ((self.keys_pressed & input.KeyBits.down) != 0) self.rotation_x += rotation_speed * simulation_delta_seconds;
 
-        const mouse_delta = self.consumeMouseDelta();
+        const mouse_delta = self.consumeMouseDelta(delta_seconds);
         if (self.camera_control_mode == .first_person) {
-            self.rotation_angle += mouse_delta.x * self.mouse_sensitivity;
-            self.rotation_x -= mouse_delta.y * self.mouse_sensitivity;
+            const mouse_sensitivity = self.effectiveMouseSensitivity();
+            camera_controller.applyFirstPersonLook(
+                &self.rotation_angle,
+                &self.rotation_x,
+                mouse_delta,
+                mouse_sensitivity,
+            );
         }
-        self.rotation_x = std.math.clamp(self.rotation_x, -1.5, 1.5);
+        self.rotation_x = camera_controller.clampPitch(self.rotation_x);
 
         const fov_delta = self.consumePendingFovDelta();
         if (fov_delta != 0.0) self.adjustCameraFov(fov_delta);
@@ -4631,37 +4568,59 @@ pub const Renderer = struct {
         const right = frame_view.right;
         const up = frame_view.up;
         const forward = frame_view.forward;
-        const world_up = math.Vec3.new(0.0, 1.0, 0.0);
-
-        var forward_flat = math.Vec3.new(forward.x, 0.0, forward.z);
-        const forward_flat_len = math.Vec3.length(forward_flat);
-        if (forward_flat_len > 0.0001) {
-            forward_flat = math.Vec3.scale(forward_flat, 1.0 / forward_flat_len);
+        if (self.camera_control_mode == .first_person) {
+            const move_input = camera_controller.FpsMoveInput{
+                .move_forward = (self.keys_pressed & input.KeyBits.w) != 0,
+                .move_back = (self.keys_pressed & input.KeyBits.s) != 0,
+                .move_left = (self.keys_pressed & input.KeyBits.a) != 0,
+                .move_right = (self.keys_pressed & input.KeyBits.d) != 0,
+                .jump_down = (self.keys_pressed & input.KeyBits.space) != 0,
+            };
+            const basis = camera_controller.ViewBasis{
+                .right = right,
+                .up = up,
+                .forward = forward,
+            };
+            const fps_params = camera_controller.FpsStepParams{
+                .dt = simulation_delta_seconds,
+                .move_speed = self.camera_move_speed,
+                .floor_y = fps_camera_floor_y,
+                .eye_height = fps_camera_eye_height,
+            };
+            camera_controller.stepFpsBody(&self.fps_body_state, &self.camera_position, basis, move_input, fps_params);
         } else {
-            forward_flat = math.Vec3.new(0.0, 0.0, 0.0);
-        }
+            const world_up = math.Vec3.new(0.0, 1.0, 0.0);
 
-        var right_flat = math.Vec3.new(right.x, 0.0, right.z);
-        const right_flat_len = math.Vec3.length(right_flat);
-        if (right_flat_len > 0.0001) {
-            right_flat = math.Vec3.scale(right_flat, 1.0 / right_flat_len);
-        } else {
-            right_flat = math.Vec3.new(0.0, 0.0, 0.0);
-        }
+            var forward_flat = math.Vec3.new(forward.x, 0.0, forward.z);
+            const forward_flat_len = math.Vec3.length(forward_flat);
+            if (forward_flat_len > 0.0001) {
+                forward_flat = math.Vec3.scale(forward_flat, 1.0 / forward_flat_len);
+            } else {
+                forward_flat = math.Vec3.new(0.0, 0.0, 0.0);
+            }
 
-        var movement_dir = math.Vec3.new(0.0, 0.0, 0.0);
-        if ((self.keys_pressed & input.KeyBits.w) != 0) movement_dir = math.Vec3.add(movement_dir, forward_flat);
-        if ((self.keys_pressed & input.KeyBits.s) != 0) movement_dir = math.Vec3.sub(movement_dir, forward_flat);
-        if ((self.keys_pressed & input.KeyBits.d) != 0) movement_dir = math.Vec3.add(movement_dir, right_flat);
-        if ((self.keys_pressed & input.KeyBits.a) != 0) movement_dir = math.Vec3.sub(movement_dir, right_flat);
-        if ((self.keys_pressed & input.KeyBits.space) != 0) movement_dir = math.Vec3.add(movement_dir, world_up);
-        if ((self.keys_pressed & input.KeyBits.ctrl) != 0) movement_dir = math.Vec3.sub(movement_dir, world_up);
+            var right_flat = math.Vec3.new(right.x, 0.0, right.z);
+            const right_flat_len = math.Vec3.length(right_flat);
+            if (right_flat_len > 0.0001) {
+                right_flat = math.Vec3.scale(right_flat, 1.0 / right_flat_len);
+            } else {
+                right_flat = math.Vec3.new(0.0, 0.0, 0.0);
+            }
 
-        const movement_mag = math.Vec3.length(movement_dir);
-        if (movement_mag > 0.0001) {
-            const normalized_move = math.Vec3.scale(movement_dir, 1.0 / movement_mag);
-            const move_step = math.Vec3.scale(normalized_move, self.camera_move_speed * simulation_delta_seconds);
-            self.camera_position = math.Vec3.add(self.camera_position, move_step);
+            var movement_dir = math.Vec3.new(0.0, 0.0, 0.0);
+            if ((self.keys_pressed & input.KeyBits.w) != 0) movement_dir = math.Vec3.add(movement_dir, forward_flat);
+            if ((self.keys_pressed & input.KeyBits.s) != 0) movement_dir = math.Vec3.sub(movement_dir, forward_flat);
+            if ((self.keys_pressed & input.KeyBits.d) != 0) movement_dir = math.Vec3.add(movement_dir, right_flat);
+            if ((self.keys_pressed & input.KeyBits.a) != 0) movement_dir = math.Vec3.sub(movement_dir, right_flat);
+            if ((self.keys_pressed & input.KeyBits.space) != 0) movement_dir = math.Vec3.add(movement_dir, world_up);
+            if ((self.keys_pressed & input.KeyBits.ctrl) != 0) movement_dir = math.Vec3.sub(movement_dir, world_up);
+
+            const movement_mag = math.Vec3.length(movement_dir);
+            if (movement_mag > 0.0001) {
+                const normalized_move = math.Vec3.scale(movement_dir, 1.0 / movement_mag);
+                const move_step = math.Vec3.scale(normalized_move, self.camera_move_speed * simulation_delta_seconds);
+                self.camera_position = math.Vec3.add(self.camera_position, move_step);
+            }
         }
 
         const resolved_frame_view = if (self.frame_view_cache.needsUpdate(
@@ -4849,13 +4808,16 @@ pub const Renderer = struct {
             self.recordRenderPassTiming("meshlet_direct", scene_pass_start);
         }
 
-        self.scene_item_gizmo.resolvePendingPick(
-            self.bitmap.width,
-            self.bitmap.height,
-            @as(i32, @intCast(config.WINDOW_WIDTH)),
-            @as(i32, @intCast(config.WINDOW_HEIGHT)),
-            self.scene_surface,
-        );
+        const is_editor_mode = self.camera_control_mode != .first_person;
+        if (is_editor_mode) {
+            self.scene_item_gizmo.resolvePendingPick(
+                self.bitmap.width,
+                self.bitmap.height,
+                @as(i32, @intCast(config.WINDOW_WIDTH)),
+                @as(i32, @intCast(config.WINDOW_HEIGHT)),
+                self.scene_surface,
+            );
+        }
         self.applyPostProcessingPasses(
             mesh,
             self.camera_position,
@@ -4867,12 +4829,14 @@ pub const Renderer = struct {
             light_dir_world,
             self.shadow_build_elapsed_ns[0..self.lights.items.len],
         );
-        self.scene_item_gizmo.applyOutline(
-            self.bitmap.pixels,
-            self.bitmap.width,
-            self.bitmap.height,
-            self.scene_surface,
-        );
+        if (is_editor_mode) {
+            self.scene_item_gizmo.applyOutline(
+                self.bitmap.pixels,
+                self.bitmap.width,
+                self.bitmap.height,
+                self.scene_surface,
+            );
+        }
         try self.applyAdaptiveShadowBudgetPolicy();
         if (self.show_light_orb) {
             const light_camera_z = light_camera.z;
@@ -4891,10 +4855,10 @@ pub const Renderer = struct {
                 self.drawLightMarker(light_camera, light_camera_z, center_x, center_y, x_scale, y_scale);
             }
         }
-        if (self.light_gizmo.enabled) {
+        if (is_editor_mode and self.light_gizmo.enabled) {
             self.drawLightGizmo(self.camera_position, right, up, forward, cache_projection);
         }
-        if (self.scene_item_gizmo.isActive()) {
+        if (is_editor_mode and self.scene_item_gizmo.isActive()) {
             self.drawSceneItemGizmo(self.camera_position, right, up, forward, cache_projection);
         }
         const present_start = std.time.nanoTimestamp();
@@ -6359,14 +6323,29 @@ pub const Renderer = struct {
         }
 
         if (self.show_render_overlay or self.scene_item_gizmo.enabled) {
-            var line_buffer: [96]u8 = undefined;
+            var line_buffer: [160]u8 = undefined;
             if (self.render_pass_count != 0 or self.hybrid_shadow_debug.enabled or self.hybrid_shadow_stats.job_count != 0 or self.light_gizmo.enabled or self.scene_item_gizmo.enabled) y += 8;
             const mode_line = std.fmt.bufPrint(
                 &line_buffer,
                 "Camera Mode: {s} (V toggle)",
                 .{if (self.camera_control_mode == .first_person) "first_person" else "editor"},
             ) catch "";
-            if (mode_line.len != 0) self.drawOverlayTextLine(hdc_mem, 12, y, mode_line);
+            if (mode_line.len != 0) {
+                self.drawOverlayTextLine(hdc_mem, 12, y, mode_line);
+                y += 16;
+            }
+            if (self.camera_control_mode == .first_person) {
+                const mouse_line = std.fmt.bufPrint(
+                    &line_buffer,
+                    "Mouse sens={d:.4} dpi_scale={d:.2} smooth={d:.2}",
+                    .{
+                        self.mouse_state.sensitivity,
+                        config.CAMERA_MOUSE_DPI_SCALE,
+                        config.CAMERA_MOUSE_SMOOTHING,
+                    },
+                ) catch "";
+                if (mouse_line.len != 0) self.drawOverlayTextLine(hdc_mem, 12, y, mouse_line);
+            }
         }
     }
 
