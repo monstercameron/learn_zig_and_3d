@@ -1,0 +1,51 @@
+{
+  "key": "shadow_single_model",
+  "assets": [
+    {
+      "type": "camera",
+      "cameraName": "shadow_single_cam",
+      "cameraPosition": [0.0, 2.8, -9.0],
+      "cameraOrientation": [-0.08, 0.0]
+    },
+    {
+      "type": "light",
+      "position": [2.4, 4.2, -1.6],
+      "lightColor": [1.0, 0.98, 0.94],
+      "lightDistance": 6.0,
+      "lightShadowMode": "meshlet_ray",
+      "lightShadowUpdateInterval": 1,
+      "glowRadius": 18.0,
+      "glowIntensity": 0.4
+    },
+    {
+      "type": "light",
+      "position": [-3.0, 3.4, 2.2],
+      "lightColor": [0.72, 0.82, 1.0],
+      "lightDistance": 6.2,
+      "lightShadowMode": "meshlet_ray",
+      "lightShadowUpdateInterval": 1,
+      "glowRadius": 14.0,
+      "glowIntensity": 0.3
+    },
+    {
+      "type": "model",
+      "modelType": "obj",
+      "modelPath": "assets/models/box.obj",
+      "position": [0.0, -0.08, 0.0],
+      "rotationDeg": [0.0, 0.0, 0.0],
+      "scale": [10.0, 0.16, 10.0],
+      "physicsMotion": "static",
+      "textures": []
+    },
+    {
+      "type": "model",
+      "modelType": "obj",
+      "modelPath": "assets/models/teapot.obj",
+      "position": [0.0, 0.03, 0.0],
+      "rotationDeg": [0.0, 24.0, 0.0],
+      "scale": [0.55, 0.55, 0.55],
+      "physicsMotion": "static",
+      "textures": []
+    }
+  ]
+}

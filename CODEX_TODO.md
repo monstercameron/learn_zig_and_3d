@@ -258,6 +258,26 @@ Goal: add explicit SIMD/vectorized code paths in hottest kernels while preservin
 - [x] Align motion-blur enable scheduling with runtime history availability.
 - [x] Replace full-frame copy-back with buffer swaps for scratch-output passes where safe:
 - [x] `ssgi`, `ssr`, `motion_blur`, `god_rays`, `lens_flare`, `chromatic_aberration`.
+
+## Phase 12 - Frame Pacing Hardening
+Goal: make frame cadence explicit and stable instead of mixing software caps, OS yields, and compositor pacing.
+
+- [x] Define one pacing authority per mode:
+- [x] software-paced when `vsync=false` and `fps_limit>0`
+- [x] compositor-paced when `vsync=true` and `fps_limit=0`
+- [x] reject or clearly disable mixed pacing paths that fight each other
+- [x] Remove unconditional `Sleep(0)` from the main loop after frame present.
+- [x] Keep deadline pacing based on absolute frame deadlines, not frame-end relative sleeps.
+- [x] Improve Windows wait behavior for software pacing:
+- [x] prefer precise sleep or timer wait for coarse phase
+- [x] retain short yield/spin tail only near the deadline
+- [x] Add separate telemetry for:
+- [x] CPU frame time
+- [x] software pacing wait time
+- [x] present/compositor wait time
+- [x] total frame interval
+- [x] Update HUD text/graph so pacing mode is visible during profiling.
+- [x] Validate with `zig build check`, `zig build`, and a compositor-mode TTL smoke run; software-paced path is compile-validated in this change set.
 - [x] Validate runtime launch in `ReleaseFast` after composition swap changes.
 
 ## Phase 12 - Arbitrary Lights + Arbitrary Shadows (CPU-First Execution Model)

@@ -81,7 +81,7 @@ extern "user32" fn TranslateMessage(lpMsg: *const MSG) bool;
 
 extern "user32" fn DispatchMessageW(lpMsg: *const MSG) windows.LRESULT;
 extern "user32" fn GetAsyncKeyState(vKey: i32) i16;
-extern "user32" fn LoadCursorW(hInstance: ?windows.HINSTANCE, lpCursorName: [*:0]const u16) ?windows.HCURSOR;
+extern "user32" fn LoadCursorW(hInstance: ?windows.HINSTANCE, lpCursorName: [*:0]align(1) const u16) ?windows.HCURSOR;
 extern "user32" fn SetCursor(hCursor: ?windows.HCURSOR) ?windows.HCURSOR;
 extern "user32" fn GetClientRect(hWnd: windows.HWND, lpRect: *windows.RECT) windows.BOOL;
 extern "user32" fn ClientToScreen(hWnd: windows.HWND, lpPoint: *windows.POINT) windows.BOOL;
@@ -95,9 +95,6 @@ const MK_RBUTTON: usize = 0x0002;
 const IDC_ARROW_ID: usize = 32512;
 const IDC_SIZEALL_ID: usize = 32646;
 const IDC_HAND_ID: usize = 32649;
-
-// Windows Sleep function for frame pacing.
-extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
 
 // Import other modules from our project.
 // JS Analogy: `const Window = require('./window.js');`
@@ -283,8 +280,43 @@ const ScenePhysicsRuntime = struct {
     }
 };
 
+const SceneLoadingProgress = struct {
+    renderer: *Renderer,
+    running: *bool,
+    pump: ?*const fn (*Renderer) bool,
+    total_steps: usize,
+    completed_steps: usize = 0,
+};
+
 fn isEnterDown() bool {
     return GetAsyncKeyState(VK_RETURN) < 0;
+}
+
+fn sceneLoadingTotalSteps(scene_def: SceneDefinition) usize {
+    return @max(@as(usize, 1), scene_def.assets.len + scene_def.texture_slots.len + 1);
+}
+
+fn renderSceneLoadingFrame(progress: *SceneLoadingProgress) void {
+    if (!progress.running.*) return;
+    if (!progress.renderer.renderLoadingOverlayFrame(progress.pump)) {
+        progress.running.* = false;
+    }
+}
+
+fn startSceneLoadingProgress(progress: ?*SceneLoadingProgress) void {
+    if (progress) |state| {
+        state.renderer.updateSceneLoadingOverlay(0, state.total_steps, "Preparing assets...");
+        renderSceneLoadingFrame(state);
+    }
+}
+
+fn advanceSceneLoadingProgress(progress: ?*SceneLoadingProgress, phase: []const u8) void {
+    if (progress) |state| {
+        if (!state.running.*) return;
+        state.completed_steps = @min(state.total_steps, state.completed_steps + 1);
+        state.renderer.updateSceneLoadingOverlay(state.completed_steps, state.total_steps, phase);
+        renderSceneLoadingFrame(state);
+    }
 }
 
 /// # Application Entry Point
@@ -390,7 +422,7 @@ pub fn main() !void {
 
     var running = true;
     const MessagePump = struct {
-        fn cursorResource(id: usize) [*:0]const u16 {
+        fn cursorResource(id: usize) [*:0]align(1) const u16 {
             return @ptrFromInt(id);
         }
 
@@ -516,39 +548,24 @@ pub fn main() !void {
     defer allocator.free(scene_def.lights);
     app_logger.infoSub("bootstrap", "launch scene: {s}", .{scene_def.key});
     try renderer.setLightCapacity(scene_def.lights.len);
+    var scene_loading_progress: ?SceneLoadingProgress = null;
+    var scene_loading_overlay_active = false;
+    defer if (scene_loading_overlay_active) renderer.endSceneLoadingOverlay();
 
     if (parsed_scene_index.value.loadingScene) |loading_key| {
         const loading_file_path = resolveSceneFilePath(parsed_scene_index.value, loading_key) catch null;
-        if (loading_file_path) |path| {
-            const loading_bytes = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
-            defer allocator.free(loading_bytes);
-            const parsed_loading = try std.json.parseFromSlice(SceneFile, allocator, loading_bytes, .{ .ignore_unknown_fields = true });
-            defer parsed_loading.deinit();
-            const loading_scene = try buildSceneDefinition(allocator, parsed_loading.value);
-            defer allocator.free(loading_scene.assets);
-            defer allocator.free(loading_scene.texture_slots);
-            defer allocator.free(loading_scene.lights);
-
-            var loading_asset = try loadPrimaryMesh(allocator, loading_scene);
-            defer loading_asset.mesh.deinit();
-            defer allocator.free(loading_asset.model_instances);
-            try loading_asset.mesh.generateMeshlets(64, 126);
-            renderer.setCameraPosition(loading_scene.camera_position);
-            renderer.setCameraOrientation(loading_scene.camera_orientation_pitch, loading_scene.camera_orientation_yaw);
-
-            const loading_frames = parsed_scene_index.value.loadingFrames orelse 45;
-            var lf: u32 = 0;
-            while (lf < loading_frames and running) : (lf += 1) {
-                if (!MessagePump.pump(&renderer)) {
-                    running = false;
-                    break;
-                }
-                if (!renderer.shouldRenderFrame()) {
-                    renderer.waitUntilNextFrame();
-                    continue;
-                }
-                renderer.render3DMeshWithPump(&loading_asset.mesh, MessagePump.pump) catch {};
-                Sleep(0);
+        if (loading_file_path != null) {
+            const total_steps = sceneLoadingTotalSteps(scene_def);
+            renderer.beginSceneLoadingOverlay(scene_def.key, total_steps);
+            scene_loading_overlay_active = true;
+            scene_loading_progress = .{
+                .renderer = &renderer,
+                .running = &running,
+                .pump = MessagePump.pump,
+                .total_steps = total_steps,
+            };
+            if (scene_loading_progress) |*progress| {
+                startSceneLoadingProgress(progress);
             }
         }
     }
@@ -562,14 +579,20 @@ pub fn main() !void {
     try zphysics.init(allocator, .{});
     defer zphysics.deinit();
 
-    var scene_asset = try loadPrimaryMesh(allocator, scene_def);
+    var scene_asset = try loadPrimaryMeshWithProgress(allocator, scene_def, if (scene_loading_progress) |*progress| progress else null);
     defer scene_asset.mesh.deinit(); // Guarantees the mesh memory is freed on exit.
     defer allocator.free(scene_asset.model_instances);
     try configureSceneItemBindings(allocator, &renderer, &scene_asset, scene_def);
     var gun_runtime: ?GunRuntime = null;
     var scene_physics_runtime: ?ScenePhysicsRuntime = null;
     if (scene_def.texture_slots.len > 0) {
-        try loadSceneTextures(allocator, scene_def.assets, &scene_textures, &material_textures);
+        try loadSceneTexturesWithProgress(
+            allocator,
+            scene_def.assets,
+            &scene_textures,
+            &material_textures,
+            if (scene_loading_progress) |*progress| progress else null,
+        );
         renderer.setTextures(material_textures[0..]);
     }
     if (scene_def.hdri_path) |hdri_path| {
@@ -580,6 +603,7 @@ pub fn main() !void {
             app_logger.warn("failed to load HDRI {s}: {s}", .{ hdri_path, @errorName(err) });
         }
     }
+    try renderer.setLightCapacity(scene_def.lights.len);
     try configureSceneLights(&renderer, scene_def.lights);
     if (scene_def.runtime == .gun_physics) {
         gun_runtime = try setupGunRuntime(allocator, &scene_asset.mesh);
@@ -590,11 +614,16 @@ pub fn main() !void {
     defer if (scene_physics_runtime) |*runtime| runtime.deinit(allocator);
 
     try scene_asset.mesh.generateMeshlets(64, 126);
+    advanceSceneLoadingProgress(if (scene_loading_progress) |*progress| progress else null, "Building meshlets");
     app_logger.infoSub(
         "assets",
         "loaded scene mesh vertices={} triangles={} meshlets={}",
         .{ scene_asset.mesh.vertices.len, scene_asset.mesh.triangles.len, scene_asset.mesh.meshlets.len },
     );
+    if (scene_loading_overlay_active) {
+        renderer.endSceneLoadingOverlay();
+        scene_loading_overlay_active = false;
+    }
 
     renderer.setCameraPosition(scene_def.camera_position);
     renderer.setCameraOrientation(scene_def.camera_orientation_pitch, scene_def.camera_orientation_yaw);
@@ -744,11 +773,6 @@ pub fn main() !void {
         if (frame_count <= 3) {
             app_logger.debug("frame {} complete", .{frame_count});
         }
-
-        // Yield to the OS. This prevents our app from using 100% CPU if it's running
-        // faster than the target frame rate.
-        // JS Analogy: `setTimeout(0)` - hints to the OS to run other processes.
-        Sleep(0);
     }
 
     app_logger.info("exited main loop after {} frames", .{frame_count});
@@ -1065,6 +1089,14 @@ fn applySceneItemTranslateRequest(
 }
 
 fn loadPrimaryMesh(allocator: std.mem.Allocator, scene_def: SceneDefinition) !SceneAsset {
+    return loadPrimaryMeshWithProgress(allocator, scene_def, null);
+}
+
+fn loadPrimaryMeshWithProgress(
+    allocator: std.mem.Allocator,
+    scene_def: SceneDefinition,
+    progress: ?*SceneLoadingProgress,
+) !SceneAsset {
     if (scene_def.assets.len == 0) return error.SceneHasNoAssets;
 
     var merged_mesh: ?mesh_module.Mesh = null;
@@ -1110,6 +1142,14 @@ fn loadPrimaryMesh(allocator: std.mem.Allocator, scene_def: SceneDefinition) !Sc
             .bounds_max = bounds_max,
         };
         instance_count += 1;
+
+        var phase_buf: [160]u8 = undefined;
+        const phase = std.fmt.bufPrint(
+            &phase_buf,
+            "Loading mesh {}/{}: {s}",
+            .{ asset_index + 1, scene_def.assets.len, std.fs.path.basename(asset.model_path) },
+        ) catch "Loading mesh";
+        advanceSceneLoadingProgress(progress, phase);
     }
 
     return .{
@@ -1191,17 +1231,38 @@ fn loadSceneTextures(
     loaded_slots: *[3]?texture.Texture,
     material_textures: *[3]?*const texture.Texture,
 ) !void {
+    return loadSceneTexturesWithProgress(allocator, assets, loaded_slots, material_textures, null);
+}
+
+fn loadSceneTexturesWithProgress(
+    allocator: std.mem.Allocator,
+    assets: []const SceneAssetDefinition,
+    loaded_slots: *[3]?texture.Texture,
+    material_textures: *[3]?*const texture.Texture,
+    progress: ?*SceneLoadingProgress,
+) !void {
+    var texture_total: usize = 0;
+    for (assets) |asset| texture_total += asset.texture_slots.len;
+    var texture_index: usize = 0;
     for (assets) |asset| {
         for (asset.texture_slots) |slot| {
             if (slot.slot >= loaded_slots.len) {
                 app_logger.warn("texture slot {} out of range for {s}", .{ slot.slot, slot.path });
-                continue;
+            } else {
+                loaded_slots[slot.slot] = texture.loadBmp(allocator, slot.path) catch |err| blk: {
+                    app_logger.warn("failed to load texture slot {} {s}: {s}", .{ slot.slot, slot.path, @errorName(err) });
+                    break :blk null;
+                };
+                if (loaded_slots[slot.slot]) |*tex| material_textures[slot.slot] = tex;
             }
-            loaded_slots[slot.slot] = texture.loadBmp(allocator, slot.path) catch |err| blk: {
-                app_logger.warn("failed to load texture slot {} {s}: {s}", .{ slot.slot, slot.path, @errorName(err) });
-                break :blk null;
-            };
-            if (loaded_slots[slot.slot]) |*tex| material_textures[slot.slot] = tex;
+            texture_index += 1;
+            var phase_buf: [160]u8 = undefined;
+            const phase = std.fmt.bufPrint(
+                &phase_buf,
+                "Loading texture {}/{}: {s}",
+                .{ texture_index, texture_total, std.fs.path.basename(slot.path) },
+            ) catch "Loading texture";
+            advanceSceneLoadingProgress(progress, phase);
         }
     }
 }

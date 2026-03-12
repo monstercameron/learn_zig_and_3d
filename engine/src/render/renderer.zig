@@ -303,6 +303,26 @@ const LightWorkStats = struct {
     tile_light_overflow_tiles: usize = 0,
 };
 
+const LoadingOverlayState = struct {
+    enabled: bool = false,
+    progress: f32 = 0.0,
+    completed_steps: usize = 0,
+    total_steps: usize = 1,
+    spinner_tick: u32 = 0,
+    scene_text_len: usize = 0,
+    scene_text_buf: [64]u8 = [_]u8{0} ** 64,
+    phase_text_len: usize = 0,
+    phase_text_buf: [96]u8 = [_]u8{0} ** 96,
+
+    fn sceneText(self: *const LoadingOverlayState) []const u8 {
+        return self.scene_text_buf[0..self.scene_text_len];
+    }
+
+    fn phaseText(self: *const LoadingOverlayState) []const u8 {
+        return self.phase_text_buf[0..self.phase_text_len];
+    }
+};
+
 const max_render_passes = 32;
 
 const RenderPassTiming = struct {
@@ -1039,7 +1059,13 @@ extern "gdi32" fn SetTextColor(hdc: windows.HDC, color: u32) u32;
 extern "gdi32" fn TextOutW(hdc: windows.HDC, x: i32, y: i32, lpString: [*]const u16, c: i32) bool;
 extern "user32" fn SetWindowTextW(hWnd: windows.HWND, lpString: [*:0]const u16) bool;
 extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
+extern "kernel32" fn CreateWaitableTimerExW(lpTimerAttributes: ?*anyopaque, lpTimerName: ?[*:0]const u16, dwFlags: u32, dwDesiredAccess: u32) ?windows.HANDLE;
+extern "kernel32" fn SetWaitableTimerEx(hTimer: windows.HANDLE, lpDueTime: *const i64, lPeriod: i32, pfnCompletionRoutine: ?*const anyopaque, lpArgToCompletionRoutine: ?*anyopaque, wakeContext: ?*const anyopaque, tolerableDelay: u32) windows.BOOL;
 extern "dwmapi" fn DwmFlush() callconv(.winapi) windows.HRESULT;
+
+const TIMER_MODIFY_STATE: u32 = 0x0002;
+const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION: u32 = 0x0000_0002;
 
 // ========== MODULE IMPORTS ==========
 const Bitmap = @import("../assets/bitmap.zig").Bitmap;
@@ -1275,9 +1301,15 @@ pub const Renderer = struct {
     last_time: i128,
     last_frame_time: i128,
     next_frame_time: i128,
+    last_completed_frame_time: i128,
+    current_frame_start_time: i128,
+    pending_software_wait_ns: i128 = 0,
+    active_software_wait_ns: i128 = 0,
+    frame_pacing_sleep_bias_ns: i128 = 0,
     current_fps: u32,
     target_frame_time_ns: i128,
     frame_pacing: frame_pacing_hud.Tracker = .{},
+    frame_pacing_timer: ?windows.HANDLE = null,
     fps_zoom_state: camera_controller.FpsZoomState = .{},
     pending_fov_delta: f32,
     camera_control_mode: CameraControlMode = .editor,
@@ -1313,7 +1345,9 @@ pub const Renderer = struct {
     show_light_orb: bool = true,
     cull_light_orb: bool = true,
     use_tiled_rendering: bool = true,
+    show_frame_pacing_overlay: bool = builtin.mode == .Debug or builtin.mode == .ReleaseFast,
     show_render_overlay: bool = builtin.mode == .Debug,
+    loading_overlay: LoadingOverlayState = .{},
 
     ground_debug: GroundDebugState = .{},
     meshlet_telemetry: MeshletTelemetry = .{},
@@ -1851,6 +1885,32 @@ pub const Renderer = struct {
             },
         );
 
+        const profile_capture_frame = try parseProfileCaptureFrame(allocator);
+        const frame_pacing_timer = createFramePacingTimer();
+        const configured_target_frame_time_ns = config.targetFrameTimeNs();
+        const pacing_mode = pacingModeForTarget(configured_target_frame_time_ns);
+
+        if (config.WINDOW_VSYNC and configured_target_frame_time_ns > 0) {
+            renderer_logger.warnSub(
+                "pacing",
+                "vsync=true with fps_limit={} keeps compositor pacing active; software cap is disabled",
+                .{config.TARGET_FPS},
+            );
+        } else {
+            renderer_logger.infoSub(
+                "pacing",
+                "mode={s} target_fps={} target_ms={d:.3}",
+                .{
+                    pacing_mode.label(),
+                    config.TARGET_FPS,
+                    if (configured_target_frame_time_ns > 0)
+                        @as(f32, @floatFromInt(configured_target_frame_time_ns)) / 1_000_000.0
+                    else
+                        @as(f32, 0.0),
+                },
+            );
+        }
+
         return Renderer{
             .hwnd = hwnd,
             .bitmap = bitmap,
@@ -1887,15 +1947,18 @@ pub const Renderer = struct {
             .last_time = current_time,
             .last_frame_time = current_time,
             .next_frame_time = current_time,
+            .last_completed_frame_time = current_time,
+            .current_frame_start_time = current_time,
             .current_fps = 0,
-            .target_frame_time_ns = config.targetFrameTimeNs(),
+            .target_frame_time_ns = configured_target_frame_time_ns,
+            .frame_pacing_timer = frame_pacing_timer,
             .last_brightness_min = 0,
             .last_brightness_max = 0,
             .last_brightness_avg = 0,
             .last_reported_fov_deg = config.CAMERA_FOV_INITIAL,
             .light_marker_visible_last_frame = true,
             .pending_fov_delta = 0.0,
-            .profile_capture_frame = try parseProfileCaptureFrame(allocator),
+            .profile_capture_frame = profile_capture_frame,
             .profile_capture_emitted = false,
             .tile_grid = tile_grid,
             .tile_buffers = tile_buffers,
@@ -2050,6 +2113,18 @@ pub const Renderer = struct {
         return std.fmt.parseUnsigned(u64, raw_value, 10) catch 0;
     }
 
+    fn createFramePacingTimer() ?windows.HANDLE {
+        const desired_access = TIMER_MODIFY_STATE | SYNCHRONIZE_ACCESS;
+        return CreateWaitableTimerExW(null, null, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, desired_access) orelse
+            CreateWaitableTimerExW(null, null, 0, desired_access);
+    }
+
+    fn pacingModeForTarget(target_frame_time_ns: i128) frame_pacing_hud.Mode {
+        if (config.WINDOW_VSYNC) return .compositor;
+        if (target_frame_time_ns > 0) return .software;
+        return .uncapped;
+    }
+
     /// Cleans up all renderer resources in the reverse order of creation.
     pub fn deinit(self: *Renderer) void {
         renderer_logger.infoSub("shutdown", "deinitializing renderer frame_counter={}", .{self.frame_count});
@@ -2141,6 +2216,7 @@ pub const Renderer = struct {
             }
             _ = DeleteDC(hdc_mem);
         }
+        if (self.frame_pacing_timer) |timer| _ = windows.CloseHandle(timer);
         if (self.hdc) |hdc| _ = ReleaseDC(self.hwnd, hdc);
     }
 
@@ -4142,27 +4218,150 @@ pub const Renderer = struct {
     }
 
     pub fn shouldRenderFrame(self: *Renderer) bool {
-        if (self.target_frame_time_ns <= 0) return true;
+        if (!self.usesSoftwareFramePacing()) return true;
         const now = std.time.nanoTimestamp();
         return now >= self.next_frame_time;
     }
 
+    pub fn renderLoadingOverlayFrame(self: *Renderer, pump: ?*const fn (*Renderer) bool) bool {
+        if (pump) |pump_fn| {
+            if (!pump_fn(self)) return false;
+        }
+        if (!self.shouldRenderFrame()) {
+            self.waitUntilNextFrame();
+            return true;
+        }
+
+        @memset(self.bitmap.pixels, 0xFF0A1017);
+        self.drawBitmap();
+
+        const now = std.time.nanoTimestamp();
+        self.last_completed_frame_time = now;
+        self.total_frames_rendered += 1;
+        self.frame_count +%= 1;
+        self.advanceFrameDeadline(now);
+        return true;
+    }
+
+    fn copyTextTruncate(dest: []u8, src: []const u8) usize {
+        const copy_len = @min(dest.len, src.len);
+        if (copy_len > 0) std.mem.copyForwards(u8, dest[0..copy_len], src[0..copy_len]);
+        return copy_len;
+    }
+
+    pub fn beginSceneLoadingOverlay(self: *Renderer, scene_key: []const u8, total_steps: usize) void {
+        self.loading_overlay.enabled = true;
+        self.loading_overlay.total_steps = @max(@as(usize, 1), total_steps);
+        self.loading_overlay.completed_steps = 0;
+        self.loading_overlay.progress = 0.0;
+        self.loading_overlay.spinner_tick = 0;
+        self.loading_overlay.scene_text_len = copyTextTruncate(&self.loading_overlay.scene_text_buf, scene_key);
+        self.loading_overlay.phase_text_len = copyTextTruncate(&self.loading_overlay.phase_text_buf, "Preparing assets...");
+    }
+
+    pub fn updateSceneLoadingOverlay(self: *Renderer, completed_steps: usize, total_steps: usize, phase: []const u8) void {
+        if (!self.loading_overlay.enabled) return;
+        const resolved_total = @max(@as(usize, 1), total_steps);
+        const resolved_completed = @min(completed_steps, resolved_total);
+        self.loading_overlay.total_steps = resolved_total;
+        self.loading_overlay.completed_steps = resolved_completed;
+        self.loading_overlay.progress = @as(f32, @floatFromInt(resolved_completed)) / @as(f32, @floatFromInt(resolved_total));
+        self.loading_overlay.phase_text_len = copyTextTruncate(&self.loading_overlay.phase_text_buf, phase);
+        self.loading_overlay.spinner_tick +%= 1;
+    }
+
+    pub fn endSceneLoadingOverlay(self: *Renderer) void {
+        self.loading_overlay.enabled = false;
+        self.loading_overlay.progress = 0.0;
+        self.loading_overlay.completed_steps = 0;
+        self.loading_overlay.total_steps = 1;
+        self.loading_overlay.scene_text_len = 0;
+        self.loading_overlay.phase_text_len = 0;
+    }
+
+    fn currentPacingMode(self: *const Renderer) frame_pacing_hud.Mode {
+        return pacingModeForTarget(self.target_frame_time_ns);
+    }
+
+    fn usesSoftwareFramePacing(self: *const Renderer) bool {
+        return self.currentPacingMode() == .software;
+    }
+
+    fn effectiveFramePacingTargetNs(self: *const Renderer) i128 {
+        return if (self.usesSoftwareFramePacing()) self.target_frame_time_ns else 0;
+    }
+
+    fn waitWithFramePacingTimer(self: *Renderer, sleep_ns: i128) bool {
+        const timer = self.frame_pacing_timer orelse return false;
+        if (sleep_ns <= 0) return false;
+
+        const relative_100ns = @max(@as(i128, 1), @divTrunc(sleep_ns, 100));
+        const due_time: i64 = -@as(i64, @intCast(relative_100ns));
+        if (SetWaitableTimerEx(timer, &due_time, 0, null, null, null, 0) == 0) return false;
+        windows.WaitForSingleObject(timer, windows.INFINITE) catch return false;
+        return true;
+    }
+
+    fn framePacingSafetyMarginNs(self: *const Renderer) i128 {
+        if (self.target_frame_time_ns <= 0) return 500_000;
+        return std.math.clamp(@divTrunc(self.target_frame_time_ns, 40), @as(i128, 300_000), @as(i128, 1_500_000));
+    }
+
+    fn framePacingYieldThresholdNs(self: *const Renderer) i128 {
+        if (self.target_frame_time_ns <= 0) return 250_000;
+        return std.math.clamp(@divTrunc(self.target_frame_time_ns, 80), @as(i128, 150_000), @as(i128, 750_000));
+    }
+
+    fn framePacingCoarseThresholdNs(self: *const Renderer) i128 {
+        if (self.target_frame_time_ns <= 0) return 2_000_000;
+        return std.math.clamp(@divTrunc(self.target_frame_time_ns, 6), @as(i128, 2_000_000), @as(i128, 8_000_000));
+    }
+
+    fn framePacingRequestedSleepNs(self: *const Renderer, remaining_ns: i128) i128 {
+        const safety_margin_ns = self.framePacingSafetyMarginNs();
+        const bias_ns = std.math.clamp(self.frame_pacing_sleep_bias_ns, @as(i128, 0), safety_margin_ns);
+        return remaining_ns - safety_margin_ns - bias_ns;
+    }
+
+    fn updateFramePacingSleepBias(self: *Renderer, requested_sleep_ns: i128, actual_wait_ns: i128) void {
+        if (requested_sleep_ns <= 0 or actual_wait_ns <= 0) return;
+
+        const overshoot_ns = @max(actual_wait_ns - requested_sleep_ns, @as(i128, 0));
+        self.frame_pacing_sleep_bias_ns = @divTrunc(self.frame_pacing_sleep_bias_ns * 7 + overshoot_ns, 8);
+    }
+
     pub fn waitUntilNextFrame(self: *Renderer) void {
-        if (self.target_frame_time_ns <= 0) return;
+        if (!self.usesSoftwareFramePacing()) return;
+
+        const wait_start = std.time.nanoTimestamp();
+        const coarse_threshold_ns = self.framePacingCoarseThresholdNs();
+        const yield_threshold_ns = self.framePacingYieldThresholdNs();
 
         while (true) {
             const now = std.time.nanoTimestamp();
             const remaining_ns = self.next_frame_time - now;
-            if (remaining_ns <= 0) return;
-
-            if (remaining_ns > 2_000_000) {
-                const sleep_ns = remaining_ns - 500_000;
-                const sleep_ms = @max(@as(i128, 1), @divTrunc(sleep_ns, 1_000_000));
-                Sleep(@intCast(sleep_ms));
-                continue;
+            if (remaining_ns <= 0) {
+                self.pending_software_wait_ns += std.time.nanoTimestamp() - wait_start;
+                return;
             }
 
-            if (remaining_ns > 250_000) {
+            if (remaining_ns > coarse_threshold_ns) {
+                const sleep_ns = self.framePacingRequestedSleepNs(remaining_ns);
+                if (sleep_ns > 0) {
+                    const sleep_begin = std.time.nanoTimestamp();
+                    if (!self.waitWithFramePacingTimer(sleep_ns)) {
+                        const sleep_ms = @max(@as(i128, 1), @divTrunc(sleep_ns, 1_000_000));
+                        Sleep(@intCast(sleep_ms));
+                    }
+                    const sleep_end = std.time.nanoTimestamp();
+                    self.updateFramePacingSleepBias(sleep_ns, @max(sleep_end - sleep_begin, @as(i128, 0)));
+                    continue;
+                } else {
+                    self.frame_pacing_sleep_bias_ns = @divTrunc(self.frame_pacing_sleep_bias_ns * 7, 8);
+                }
+            }
+
+            if (remaining_ns > yield_threshold_ns) {
                 std.Thread.yield() catch {};
                 continue;
             }
@@ -4172,7 +4371,7 @@ pub const Renderer = struct {
     }
 
     fn advanceFrameDeadline(self: *Renderer, now_ns: i128) void {
-        if (self.target_frame_time_ns <= 0) {
+        if (!self.usesSoftwareFramePacing()) {
             self.next_frame_time = now_ns;
             return;
         }
@@ -4909,16 +5108,26 @@ pub const Renderer = struct {
         if (is_editor_mode and self.scene_item_gizmo.isActive()) {
             self.drawSceneItemGizmo(self.camera_position, right, up, forward, cache_projection);
         }
-        self.frame_pacing.recordSample(delta_seconds * 1000.0, self.target_frame_time_ns);
         const present_start = std.time.nanoTimestamp();
+        const cpu_frame_ns = present_start - self.current_frame_start_time;
         self.drawBitmap();
+        const present_end = std.time.nanoTimestamp();
         self.recordRenderPassTiming("present", present_start);
         pipeline_logger.debugSub("present", "bitmap presented", .{});
 
         self.frame_count += 1;
         self.total_frames_rendered += 1;
         self.maybeEmitSingleFrameProfile();
-        const current_time = std.time.nanoTimestamp();
+        const current_time = present_end;
+        const frame_interval_ns = current_time - self.last_completed_frame_time;
+        self.frame_pacing.recordSample(.{
+            .total_ms = @as(f32, @floatFromInt(@max(frame_interval_ns, @as(i128, 0)))) / 1_000_000.0,
+            .cpu_ms = @as(f32, @floatFromInt(@max(cpu_frame_ns, @as(i128, 0)))) / 1_000_000.0,
+            .software_wait_ms = @as(f32, @floatFromInt(@max(self.active_software_wait_ns, @as(i128, 0)))) / 1_000_000.0,
+            .present_wait_ms = @as(f32, @floatFromInt(@max(present_end - present_start, @as(i128, 0)))) / 1_000_000.0,
+        }, self.effectiveFramePacingTargetNs());
+        self.last_completed_frame_time = current_time;
+        self.active_software_wait_ns = 0;
         self.finalizeFrame(current_time);
         self.advanceFrameDeadline(current_time);
 
@@ -4938,6 +5147,9 @@ pub const Renderer = struct {
         var delta_ns = now - self.last_frame_time;
         if (delta_ns < 0) delta_ns = 0;
         self.last_frame_time = now;
+        self.current_frame_start_time = now;
+        self.active_software_wait_ns = self.pending_software_wait_ns;
+        self.pending_software_wait_ns = 0;
 
         const delta_ns_f = @as(f64, @floatFromInt(delta_ns));
         var delta_seconds = @as(f32, @floatCast(delta_ns_f / 1_000_000_000.0));
@@ -6190,8 +6402,11 @@ pub const Renderer = struct {
     fn drawBitmap(self: *Renderer) void {
         if (self.hdc) |hdc| {
             if (self.hdc_mem) |hdc_mem| {
-                if (self.show_render_overlay or self.hybrid_shadow_debug.enabled or self.scene_item_gizmo.enabled) {
+                if (self.show_render_overlay or self.hybrid_shadow_debug.enabled or self.scene_item_gizmo.enabled or self.loading_overlay.enabled) {
                     self.drawRenderPassOverlay(hdc_mem);
+                }
+                if (self.show_frame_pacing_overlay) {
+                    self.drawFramePacingPanel(hdc_mem);
                 }
 
                 const window_w = @as(i32, @intCast(config.WINDOW_WIDTH));
@@ -6279,7 +6494,8 @@ pub const Renderer = struct {
             .bitmap_width = self.bitmap.width,
             .bitmap_height = self.bitmap.height,
             .vsync_enabled = config.WINDOW_VSYNC,
-            .show_overlay = self.show_render_overlay,
+            .pacing_mode = self.currentPacingMode(),
+            .show_overlay = self.show_frame_pacing_overlay,
             .draw_ctx = @ptrCast(&draw_ctx),
             .fns = .{
                 .fillRectSolid = framePacingFillRect,
@@ -6290,7 +6506,7 @@ pub const Renderer = struct {
     }
 
     fn drawRenderPassOverlay(self: *Renderer, hdc_mem: windows.HDC) void {
-        if (self.render_pass_count == 0 and !self.hybrid_shadow_debug.enabled and self.hybrid_shadow_stats.job_count == 0 and !self.light_gizmo.enabled and !self.scene_item_gizmo.enabled and !self.show_render_overlay) return;
+        if (self.render_pass_count == 0 and !self.hybrid_shadow_debug.enabled and self.hybrid_shadow_stats.job_count == 0 and !self.light_gizmo.enabled and !self.scene_item_gizmo.enabled and !self.show_render_overlay and !self.loading_overlay.enabled) return;
 
         _ = SetBkMode(hdc_mem, TRANSPARENT);
 
@@ -6453,7 +6669,81 @@ pub const Renderer = struct {
             }
         }
 
-        self.drawFramePacingPanel(hdc_mem);
+        if (self.loading_overlay.enabled) {
+            self.drawSceneLoadingOverlay(hdc_mem);
+        }
+    }
+
+    fn drawSceneLoadingOverlay(self: *Renderer, hdc_mem: windows.HDC) void {
+        if (!self.loading_overlay.enabled) return;
+
+        const panel_w = std.math.clamp(@divTrunc(self.bitmap.width * 56, 100), 300, 620);
+        const panel_h: i32 = 120;
+        const panel_x = @divTrunc(self.bitmap.width - panel_w, 2);
+        const panel_y = @divTrunc(self.bitmap.height - panel_h, 2);
+        self.fillRectSolid(panel_x, panel_y, panel_w, panel_h, 0xDD0E141C);
+        self.drawLineColored(panel_x, panel_y, panel_x + panel_w - 1, panel_y, 0xFF2F435A);
+        self.drawLineColored(panel_x, panel_y + panel_h - 1, panel_x + panel_w - 1, panel_y + panel_h - 1, 0xFF2F435A);
+        self.drawLineColored(panel_x, panel_y, panel_x, panel_y + panel_h - 1, 0xFF2F435A);
+        self.drawLineColored(panel_x + panel_w - 1, panel_y, panel_x + panel_w - 1, panel_y + panel_h - 1, 0xFF2F435A);
+
+        const spinner_center_x = panel_x + 28;
+        const spinner_center_y = panel_y + 46;
+        const spinner_segments: u32 = 12;
+        const spinner_radius_inner: f32 = 7.0;
+        const spinner_radius_outer: f32 = 12.0;
+        const spinner_phase = self.loading_overlay.spinner_tick % spinner_segments;
+
+        var seg: u32 = 0;
+        while (seg < spinner_segments) : (seg += 1) {
+            const angle = (@as(f32, @floatFromInt(seg)) / @as(f32, @floatFromInt(spinner_segments))) * std.math.tau;
+            const c = @cos(angle);
+            const s = @sin(angle);
+            const x0 = spinner_center_x + @as(i32, @intFromFloat(c * spinner_radius_inner));
+            const y0 = spinner_center_y + @as(i32, @intFromFloat(s * spinner_radius_inner));
+            const x1 = spinner_center_x + @as(i32, @intFromFloat(c * spinner_radius_outer));
+            const y1 = spinner_center_y + @as(i32, @intFromFloat(s * spinner_radius_outer));
+            const dist_a = if (seg >= spinner_phase) seg - spinner_phase else spinner_segments - (spinner_phase - seg);
+            const shade: u32 = 64 + (spinner_segments - dist_a) * 12;
+            const color: u32 = 0xFF000000 | (shade << 16) | (shade << 8) | shade;
+            self.drawLineColored(x0, y0, x1, y1, color);
+        }
+
+        var line_buffer: [192]u8 = undefined;
+        const title_line = std.fmt.bufPrint(
+            &line_buffer,
+            "Loading scene: {s}",
+            .{self.loading_overlay.sceneText()},
+        ) catch "Loading scene...";
+        self.drawOverlayTextLine(hdc_mem, panel_x + 52, panel_y + 16, title_line);
+
+        const status_line = std.fmt.bufPrint(
+            &line_buffer,
+            "Assets {}/{}",
+            .{ self.loading_overlay.completed_steps, self.loading_overlay.total_steps },
+        ) catch "";
+        if (status_line.len != 0) self.drawOverlayTextLine(hdc_mem, panel_x + 52, panel_y + 34, status_line);
+
+        const phase = self.loading_overlay.phaseText();
+        if (phase.len != 0) self.drawOverlayTextLine(hdc_mem, panel_x + 52, panel_y + 52, phase);
+
+        const bar_x = panel_x + 16;
+        const bar_w = panel_w - 32;
+        const bar_y = panel_y + panel_h - 28;
+        const bar_h: i32 = 14;
+        self.fillRectSolid(bar_x, bar_y, bar_w, bar_h, 0xFF0A0E14);
+        self.drawLineColored(bar_x, bar_y, bar_x + bar_w - 1, bar_y, 0xFF304458);
+        self.drawLineColored(bar_x, bar_y + bar_h - 1, bar_x + bar_w - 1, bar_y + bar_h - 1, 0xFF304458);
+        self.drawLineColored(bar_x, bar_y, bar_x, bar_y + bar_h - 1, 0xFF304458);
+        self.drawLineColored(bar_x + bar_w - 1, bar_y, bar_x + bar_w - 1, bar_y + bar_h - 1, 0xFF304458);
+
+        const fill_max = @max(@as(i32, 0), bar_w - 2);
+        const fill_w = std.math.clamp(
+            @as(i32, @intFromFloat(self.loading_overlay.progress * @as(f32, @floatFromInt(fill_max)))),
+            0,
+            fill_max,
+        );
+        if (fill_w > 0) self.fillRectSolid(bar_x + 1, bar_y + 1, fill_w, bar_h - 2, 0xFF4ECFB5);
     }
 
     fn drawOverlayTextLine(self: *Renderer, hdc_mem: windows.HDC, x: i32, y: i32, text: []const u8) void {

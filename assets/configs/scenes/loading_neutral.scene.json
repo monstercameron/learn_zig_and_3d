@@ -1,0 +1,40 @@
+{
+  "key": "loading_neutral",
+  "assets": [
+    {
+      "type": "camera",
+      "cameraName": "loading_cam",
+      "cameraPosition": [0.0, 1.55, -5.4],
+      "cameraOrientation": [-0.02, 0.0]
+    },
+    {
+      "type": "light",
+      "position": [2.6, 3.9, -2.0],
+      "lightColor": [1.0, 0.98, 0.95],
+      "lightDistance": 6.4,
+      "lightShadowMode": "none",
+      "glowRadius": 0.0,
+      "glowIntensity": 0.0
+    },
+    {
+      "type": "model",
+      "modelType": "obj",
+      "modelPath": "assets/models/box.obj",
+      "position": [0.0, -0.1, 0.0],
+      "rotationDeg": [0.0, 0.0, 0.0],
+      "scale": [8.0, 0.2, 8.0],
+      "physicsMotion": "static",
+      "textures": []
+    },
+    {
+      "type": "model",
+      "modelType": "obj",
+      "modelPath": "assets/models/box.obj",
+      "position": [0.0, 1.0, 0.0],
+      "rotationDeg": [0.0, 20.0, 0.0],
+      "scale": [1.0, 2.0, 1.0],
+      "physicsMotion": "static",
+      "textures": []
+    }
+  ]
+}
