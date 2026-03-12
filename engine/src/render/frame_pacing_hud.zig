@@ -32,6 +32,7 @@ pub const Sample = struct {
     cpu_ms: f32,
     software_wait_ms: f32,
     present_wait_ms: f32,
+    deadline_error_ms: f32 = 0.0,
 };
 
 pub const Stats = struct {
@@ -49,6 +50,8 @@ pub const Stats = struct {
     cpu_latest_ms: f32 = 0.0,
     software_wait_latest_ms: f32 = 0.0,
     present_wait_latest_ms: f32 = 0.0,
+    deadline_error_latest_ms: f32 = 0.0,
+    deadline_error_mean_ms: f32 = 0.0,
 };
 
 pub const Tracker = struct {
@@ -56,6 +59,7 @@ pub const Tracker = struct {
     history_cpu_ms: [history_len]f32 = [_]f32{0.0} ** history_len,
     history_software_wait_ms: [history_len]f32 = [_]f32{0.0} ** history_len,
     history_present_wait_ms: [history_len]f32 = [_]f32{0.0} ** history_len,
+    history_deadline_error_ms: [history_len]f32 = [_]f32{0.0} ** history_len,
     graph_history_ms: [history_len]f32 = [_]f32{0.0} ** history_len,
     graph_count: usize = 0,
     graph_head: usize = 0,
@@ -90,6 +94,7 @@ pub const Tracker = struct {
         self.history_cpu_ms[self.head] = sample.cpu_ms;
         self.history_software_wait_ms[self.head] = sample.software_wait_ms;
         self.history_present_wait_ms[self.head] = sample.present_wait_ms;
+        self.history_deadline_error_ms[self.head] = sample.deadline_error_ms;
         self.head = (self.head + 1) % history_len;
         if (self.count < history_len) self.count += 1;
         if (self.count == 0) return;
@@ -100,6 +105,7 @@ pub const Tracker = struct {
         var cpu_sum_ms: f32 = 0.0;
         var software_wait_sum_ms: f32 = 0.0;
         var present_wait_sum_ms: f32 = 0.0;
+        var deadline_error_sum_ms: f32 = 0.0;
         var i: usize = 0;
         while (i < self.count) : (i += 1) {
             const total_ms = sampleOrdered(&self.history_total_ms, self.count, self.head, i);
@@ -108,6 +114,7 @@ pub const Tracker = struct {
             cpu_sum_ms += sampleOrdered(&self.history_cpu_ms, self.count, self.head, i);
             software_wait_sum_ms += sampleOrdered(&self.history_software_wait_ms, self.count, self.head, i);
             present_wait_sum_ms += sampleOrdered(&self.history_present_wait_ms, self.count, self.head, i);
+            deadline_error_sum_ms += sampleOrdered(&self.history_deadline_error_ms, self.count, self.head, i);
             if (total_ms > max_ms) max_ms = total_ms;
         }
         std.sort.block(f32, sorted[0..self.count], {}, lessThanF32);
@@ -145,6 +152,8 @@ pub const Tracker = struct {
             .cpu_latest_ms = self.history_cpu_ms[latest_idx],
             .software_wait_latest_ms = self.history_software_wait_ms[latest_idx],
             .present_wait_latest_ms = self.history_present_wait_ms[latest_idx],
+            .deadline_error_latest_ms = self.history_deadline_error_ms[latest_idx],
+            .deadline_error_mean_ms = deadline_error_sum_ms / @as(f32, @floatFromInt(self.count)),
         };
     }
 
@@ -187,10 +196,29 @@ pub const Tracker = struct {
             .cpu_ms = if (std.math.isFinite(sample.cpu_ms) and sample.cpu_ms >= 0.0) sample.cpu_ms else 0.0,
             .software_wait_ms = if (std.math.isFinite(sample.software_wait_ms) and sample.software_wait_ms >= 0.0) sample.software_wait_ms else 0.0,
             .present_wait_ms = if (std.math.isFinite(sample.present_wait_ms) and sample.present_wait_ms >= 0.0) sample.present_wait_ms else 0.0,
+            .deadline_error_ms = if (std.math.isFinite(sample.deadline_error_ms)) sample.deadline_error_ms else 0.0,
         };
 
         self.pushHistorySample(normalized, target_frame_time_ns);
         self.recordGraphSample(normalized.total_ms);
+    }
+
+    /// Write all recorded samples to a CSV file for offline analysis.
+    pub fn exportCsv(self: *const Tracker, path: []const u8) void {
+        const file = std.fs.cwd().createFile(path, .{}) catch return;
+        defer file.close();
+        file.writeAll("frame,total_ms,cpu_ms,software_wait_ms,present_wait_ms,deadline_error_ms\n") catch return;
+        var buf: [256]u8 = undefined;
+        var i: usize = 0;
+        while (i < self.count) : (i += 1) {
+            const total = sampleOrdered(&self.history_total_ms, self.count, self.head, i);
+            const cpu = sampleOrdered(&self.history_cpu_ms, self.count, self.head, i);
+            const sw = sampleOrdered(&self.history_software_wait_ms, self.count, self.head, i);
+            const pw = sampleOrdered(&self.history_present_wait_ms, self.count, self.head, i);
+            const de = sampleOrdered(&self.history_deadline_error_ms, self.count, self.head, i);
+            const line = std.fmt.bufPrint(&buf, "{},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4}\n", .{ i, total, cpu, sw, pw, de }) catch continue;
+            file.writeAll(line) catch return;
+        }
     }
 };
 
@@ -314,10 +342,21 @@ pub fn drawPanel(tracker: *const Tracker, params: DrawParams) void {
         "";
     if (line3.len != 0) fns.drawTextLine(draw_ctx, panel.x + 8, panel.y + 38, line3);
 
+    var line4_buffer: [192]u8 = undefined;
+    const line4 = if (stats.sample_count > 0 and stats.target_ms > 0.0)
+        std.fmt.bufPrint(
+            &line4_buffer,
+            "deadline err {d:.2} mean {d:.2} ms",
+            .{ stats.deadline_error_latest_ms, stats.deadline_error_mean_ms },
+        ) catch ""
+    else
+        "";
+    if (line4.len != 0) fns.drawTextLine(draw_ctx, panel.x + 8, panel.y + 50, line4);
+
     const graph_x = panel.x + 8;
-    const graph_y = panel.y + 56;
+    const graph_y = panel.y + 66;
     const graph_w = panel.w - 16;
-    const graph_h = panel.h - 64;
+    const graph_h = panel.h - 74;
     if (graph_w < 8 or graph_h < 8) return;
     const plot_padding: i32 = 2;
     const plot_x = graph_x + plot_padding;

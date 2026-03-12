@@ -1346,6 +1346,8 @@ pub const Renderer = struct {
     pending_software_wait_ns: i128 = 0,
     active_software_wait_ns: i128 = 0,
     frame_pacing_sleep_bias_ns: i128 = 0,
+    frame_deadline_error_ns: i128 = 0,
+    present_cost_ema_ns: i128 = 500_000,
     current_fps: u32,
     target_frame_time_ns: i128,
     frame_pacing: frame_pacing_hud.Tracker = .{},
@@ -2212,6 +2214,7 @@ pub const Renderer = struct {
     /// Cleans up all renderer resources in the reverse order of creation.
     pub fn deinit(self: *Renderer) void {
         renderer_logger.infoSub("shutdown", "deinitializing renderer frame_counter={}", .{self.frame_count});
+        self.frame_pacing.exportCsv("artifacts/perf/frame_times.csv");
         self.mesh_work_cache.deinit(self.allocator);
         self.sys_shadows.deinit();
         if (self.job_system) |js| js.deinit();
@@ -2746,7 +2749,6 @@ pub const Renderer = struct {
                     if (chunk_apply_ns > 0) _ = counter.fetchAdd(chunk_apply_ns, .monotonic);
                 }
             }
-
         }
     };
 
@@ -4762,12 +4764,7 @@ pub const Renderer = struct {
 
     fn framePacingSafetyMarginNs(self: *const Renderer) i128 {
         if (self.target_frame_time_ns <= 0) return 500_000;
-        return std.math.clamp(@divTrunc(self.target_frame_time_ns, 40), @as(i128, 300_000), @as(i128, 1_500_000));
-    }
-
-    fn framePacingYieldThresholdNs(self: *const Renderer) i128 {
-        if (self.target_frame_time_ns <= 0) return 250_000;
-        return std.math.clamp(@divTrunc(self.target_frame_time_ns, 80), @as(i128, 150_000), @as(i128, 750_000));
+        return std.math.clamp(@divTrunc(self.target_frame_time_ns, 30), @as(i128, 500_000), @as(i128, 2_000_000));
     }
 
     fn framePacingCoarseThresholdNs(self: *const Renderer) i128 {
@@ -4786,7 +4783,12 @@ pub const Renderer = struct {
         if (requested_sleep_ns <= 0 or actual_wait_ns <= 0) return;
 
         const overshoot_ns = @max(actual_wait_ns - requested_sleep_ns, @as(i128, 0));
-        self.frame_pacing_sleep_bias_ns = @divTrunc(self.frame_pacing_sleep_bias_ns * 7 + overshoot_ns, 8);
+        // Instant-spike / fast-decay: react immediately to overshoots, recover in ~4 frames.
+        if (overshoot_ns > self.frame_pacing_sleep_bias_ns) {
+            self.frame_pacing_sleep_bias_ns = overshoot_ns;
+        } else {
+            self.frame_pacing_sleep_bias_ns = @divTrunc(self.frame_pacing_sleep_bias_ns * 3 + overshoot_ns, 4);
+        }
     }
 
     /// Performs wait until next frame.
@@ -4796,7 +4798,6 @@ pub const Renderer = struct {
 
         const wait_start = std.time.nanoTimestamp();
         const coarse_threshold_ns = self.framePacingCoarseThresholdNs();
-        const yield_threshold_ns = self.framePacingYieldThresholdNs();
 
         while (true) {
             const now = std.time.nanoTimestamp();
@@ -4818,13 +4819,8 @@ pub const Renderer = struct {
                     self.updateFramePacingSleepBias(sleep_ns, @max(sleep_end - sleep_begin, @as(i128, 0)));
                     continue;
                 } else {
-                    self.frame_pacing_sleep_bias_ns = @divTrunc(self.frame_pacing_sleep_bias_ns * 7, 8);
+                    self.frame_pacing_sleep_bias_ns = @divTrunc(self.frame_pacing_sleep_bias_ns * 3, 4);
                 }
-            }
-
-            if (remaining_ns > yield_threshold_ns) {
-                std.Thread.yield() catch {};
-                continue;
             }
 
             std.atomic.spinLoopHint();
@@ -5513,8 +5509,25 @@ pub const Renderer = struct {
         }
         const present_start = std.time.nanoTimestamp();
         const cpu_frame_ns = present_start - self.current_frame_start_time;
+
+        // Pre-present compensation: if render finished early relative to the
+        // ideal present cadence, spin-wait so the present lands on the deadline.
+        // This absorbs render-time variance and produces evenly spaced presents.
+        if (self.usesSoftwareFramePacing() and self.last_completed_frame_time > 0) {
+            const ideal_present_time = self.last_completed_frame_time + self.target_frame_time_ns - self.present_cost_ema_ns;
+            var spin_now = std.time.nanoTimestamp();
+            while (spin_now < ideal_present_time) {
+                std.atomic.spinLoopHint();
+                spin_now = std.time.nanoTimestamp();
+            }
+        }
+
+        const pre_present_time = std.time.nanoTimestamp();
         self.drawBitmap();
         const present_end = std.time.nanoTimestamp();
+        // Update EMA of drawBitmap() cost so the pre-present spin accounts for it.
+        const draw_cost_ns = @max(present_end - pre_present_time, @as(i128, 0));
+        self.present_cost_ema_ns = @divTrunc(self.present_cost_ema_ns * 7 + draw_cost_ns, 8);
         self.recordRenderPassTiming("present", present_start);
         pipeline_logger.debugSub("present", "bitmap presented", .{});
 
@@ -5528,6 +5541,7 @@ pub const Renderer = struct {
             .cpu_ms = @as(f32, @floatFromInt(@max(cpu_frame_ns, @as(i128, 0)))) / 1_000_000.0,
             .software_wait_ms = @as(f32, @floatFromInt(@max(self.active_software_wait_ns, @as(i128, 0)))) / 1_000_000.0,
             .present_wait_ms = @as(f32, @floatFromInt(@max(present_end - present_start, @as(i128, 0)))) / 1_000_000.0,
+            .deadline_error_ms = @as(f32, @floatFromInt(self.frame_deadline_error_ns)) / 1_000_000.0,
         }, self.effectiveFramePacingTargetNs());
         self.last_completed_frame_time = current_time;
         self.active_software_wait_ns = 0;
@@ -5555,6 +5569,7 @@ pub const Renderer = struct {
         self.current_frame_start_time = now;
         self.active_software_wait_ns = self.pending_software_wait_ns;
         self.pending_software_wait_ns = 0;
+        self.frame_deadline_error_ns = if (self.next_frame_time > 0) now - self.next_frame_time else 0;
 
         const delta_ns_f = @as(f64, @floatFromInt(delta_ns));
         var delta_seconds = @as(f32, @floatCast(delta_ns_f / 1_000_000_000.0));
