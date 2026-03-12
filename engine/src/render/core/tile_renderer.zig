@@ -226,29 +226,56 @@ pub fn compositeTileToScreen(tile: *const Tile, tile_buffer: *const TileBuffer, 
         const screen_row_start = @as(usize, @intCast((tile.y + y) * bitmap.width + tile.x));
         const screen_row_end = screen_row_start + @as(usize, @intCast(tile.width));
 
-        var cx: usize = 0;
-        const width_usize = @as(usize, @intCast(tile.width));
-        while (cx < width_usize) : (cx += 1) {
-            const final_color_hdr = tile_buffer.data[tile_row_start + cx].color;
-            const final_color_rgb = math.Vec3.new(final_color_hdr.x, final_color_hdr.y, final_color_hdr.z);
-            const a = @as(u32, @intFromFloat(final_color_hdr.w * 255.0));
-            // pack and tonemap to sRGB
-            const packed_u32 = lighting.packColorTonemapped(final_color_rgb, a);
-            bitmap.pixels[screen_row_start + cx] = packed_u32;
+        const tile_row_data = tile_buffer.data[tile_row_start..tile_row_end];
+        const screen_pixels = bitmap.pixels[screen_row_start..screen_row_end];
 
-            // Re-interleave the structural data out from AoS to SoA Global buffers
-            if (camera_buffer) |camera_out| {
-                camera_out[screen_row_start + cx] = tile_buffer.data[tile_row_start + cx].camera;
+        // Tonemap & pack: SIMD batch (Reinhard + sqrt gamma) into screen bitmap
+        const batch_lanes = 8;
+        const row_len = tile_row_data.len;
+        var i: usize = 0;
+        while (i + batch_lanes <= row_len) : (i += batch_lanes) {
+            var cx: [batch_lanes]f32 = undefined;
+            var cy: [batch_lanes]f32 = undefined;
+            var cz: [batch_lanes]f32 = undefined;
+            var alphas: [batch_lanes]u32 = undefined;
+            inline for (0..batch_lanes) |lane| {
+                const pd = tile_row_data[i + lane];
+                cx[lane] = pd.color.x;
+                cy[lane] = pd.color.y;
+                cz[lane] = pd.color.z;
+                alphas[lane] = @intFromFloat(pd.color.w * 255.0);
             }
-            if (normal_buffer) |normal_out| {
-                normal_out[screen_row_start + cx] = tile_buffer.data[tile_row_start + cx].normal;
+            const batch_result = lighting.packColorTonemappedBatch(batch_lanes, &cx, &cy, &cz, &alphas);
+            @memcpy(screen_pixels[i..][0..batch_lanes], &batch_result);
+        }
+        // Scalar tail
+        while (i < row_len) : (i += 1) {
+            const pd = tile_row_data[i];
+            const final_color_rgb = math.Vec3.new(pd.color.x, pd.color.y, pd.color.z);
+            const a = @as(u32, @intFromFloat(pd.color.w * 255.0));
+            screen_pixels[i] = lighting.packColorTonemapped(final_color_rgb, a);
+        }
+
+        // Scatter structural data from AoS tile buffer into SoA global buffers.
+        // Each buffer is handled as a separate tight loop to keep the
+        // read stride predictable and give the prefetcher a chance.
+        if (camera_buffer) |camera_out| {
+            for (tile_row_data, 0..) |pd, cx| {
+                camera_out[screen_row_start + cx] = pd.camera;
             }
-            if (surface_buffer) |surface_out| {
-                surface_out[screen_row_start + cx] = tile_buffer.data[tile_row_start + cx].surface;
+        }
+        if (normal_buffer) |normal_out| {
+            for (tile_row_data, 0..) |pd, cx| {
+                normal_out[screen_row_start + cx] = pd.normal;
+            }
+        }
+        if (surface_buffer) |surface_out| {
+            for (tile_row_data, 0..) |pd, cx| {
+                surface_out[screen_row_start + cx] = pd.surface;
             }
         }
         if (depth_buffer) |buffer| {
-            std.mem.copyForwards(f32, buffer[screen_row_start..screen_row_end], tile_buffer.depth[tile_row_start..tile_row_end]);
+            @memcpy(buffer[screen_row_start..screen_row_end], tile_buffer.depth[tile_row_start..tile_row_end]);
         }
     }
 }
@@ -557,10 +584,21 @@ pub fn rasterizeTriangleToTile(
                 if (persp_sum <= 1e-6) continue;
 
                 const inv_persp_sum = 1.0 / persp_sum;
-                batch_weight0[gather_count] = persp0 * inv_persp_sum;
-                batch_weight1[gather_count] = persp1 * inv_persp_sum;
-                batch_weight2[gather_count] = persp2 * inv_persp_sum;
-                batch_indices[gather_count] = @as(usize, @intCast(y * tile_width + x));
+                const w0 = persp0 * inv_persp_sum;
+                const w1 = persp1 * inv_persp_sum;
+                const w2 = persp2 * inv_persp_sum;
+
+                // Early depth reject: interpolate camera Z cheaply and skip
+                // pixels already behind the depth buffer. This avoids all
+                // downstream interpolation, texture sampling, and PBR work.
+                const interp_z = camera_positions[0].z * w0 + camera_positions[1].z * w1 + camera_positions[2].z * w2;
+                const idx = @as(usize, @intCast(y * tile_width + x));
+                if (interp_z >= tile_depth[idx]) continue;
+
+                batch_weight0[gather_count] = w0;
+                batch_weight1[gather_count] = w1;
+                batch_weight2[gather_count] = w2;
+                batch_indices[gather_count] = idx;
                 gather_count += 1;
                 if (count_perf) covered_pixels_local += 1;
             }

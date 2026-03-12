@@ -55,9 +55,9 @@
       "scale": [1.0, 1.0, 1.0],
       "physicsMotion": "static",
       "textures": [
-        { "slot": 9, "path": "assets/models/acura_nsx/textures/brakedisk.bmp" },
-        { "slot": 14, "path": "assets/models/acura_nsx/textures/holes_opacity.bmp" },
-        { "slot": 16, "path": "assets/models/acura_nsx/textures/engine.bmp" }
+        { "slot": 1, "path": "assets/models/acura_nsx/textures/brakedisk.bmp" },
+        { "slot": 2, "path": "assets/models/acura_nsx/textures/holes_opacity.bmp" },
+        { "slot": 4, "path": "assets/models/acura_nsx/textures/engine.bmp" }
       ]
     }
   ]

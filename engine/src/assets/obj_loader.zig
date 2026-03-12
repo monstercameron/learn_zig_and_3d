@@ -36,13 +36,16 @@ const meshlet_builder = @import("../render/core/meshlets/meshlet_builder.zig");
 const meshlet_cache = @import("../render/core/meshlets/meshlet_cache.zig");
 pub const Vec3 = math.Vec3;
 pub const Vec2 = math.Vec2;
+const max_obj_file_bytes: usize = 512 * 1024 * 1024;
 
 /// Loads a mesh from a .obj file path.
 pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
     // Read the entire file into memory.
     var file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
-    const contents = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    const stat = try file.stat();
+    if (stat.size > max_obj_file_bytes) return error.FileTooLarge;
+    const contents = try file.readToEndAlloc(allocator, @intCast(stat.size));
     defer allocator.free(contents);
 
     // Temporary lists to store the raw data from the .obj file.
@@ -67,6 +70,14 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
     var bounds_max = Vec3.new(0.0, 0.0, 0.0);
     var has_bounds = false;
     var mesh_center = Vec3.new(0.0, 0.0, 0.0);
+
+    // Reusable face buffers hoisted out of the per-face loop to avoid
+    // heap alloc/free on every face line (typical face has 3-4 vertices,
+    // so these hit steady-state capacity almost immediately).
+    var face_indices = std.ArrayList(usize){};
+    defer face_indices.deinit(allocator);
+    var face_normals = std.ArrayList(Vec3){};
+    defer face_normals.deinit(allocator);
 
     // Process the file line by line.
     var line_it = std.mem.splitScalar(u8, contents, '\n');
@@ -135,10 +146,8 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
             // --- Parse Face --- (e.g., "f 1/1/1 2/2/1 3/3/1")
         } else if (std.mem.startsWith(u8, line, "f ")) {
             var parts = std.mem.tokenizeScalar(u8, line[2..], ' ');
-            var face_indices = std.ArrayList(usize){};
-            defer face_indices.deinit(allocator);
-            var face_normals = std.ArrayList(Vec3){};
-            defer face_normals.deinit(allocator);
+            face_indices.clearRetainingCapacity();
+            face_normals.clearRetainingCapacity();
 
             // First, parse all vertices in the face definition.
             while (parts.next()) |part| {

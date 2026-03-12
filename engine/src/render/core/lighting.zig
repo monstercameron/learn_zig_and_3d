@@ -141,12 +141,10 @@ pub fn shadeSolid(brightness: f32) u32 {
     return applyIntensity(DEFAULT_BASE_COLOR, computeIntensity(brightness));
 }
 
-
 /// Physically Based Rendering (PBR) metallic-roughness BRDF calculations.
-
 const PI: f32 = 3.14159265359;
 
-/// Schlick's approximation for Fresnel. 
+/// Schlick's approximation for Fresnel.
 /// f0 is the base reflectivity (typically 0.04 for non-metals, or the albedo color for metals).
 pub fn fresnelSchlick(cos_theta: f32, f0: math.Vec3) math.Vec3 {
     const clamp_cos = std.math.clamp(1.0 - cos_theta, 0.0, 1.0);
@@ -158,7 +156,7 @@ pub fn fresnelSchlick(cos_theta: f32, f0: math.Vec3) math.Vec3 {
     );
 }
 
-/// GGX Normal Distribution Function (NDF). 
+/// GGX Normal Distribution Function (NDF).
 /// Determines how many microfacets are aligned to the half-vector.
 pub fn distributionGGX(normal: math.Vec3, halfway: math.Vec3, roughness: f32) f32 {
     const a = roughness * roughness;
@@ -173,7 +171,7 @@ pub fn distributionGGX(normal: math.Vec3, halfway: math.Vec3, roughness: f32) f3
     return num / @max(denom, 0.000001);
 }
 
-/// Geometry function (Schlick-GGX). 
+/// Geometry function (Schlick-GGX).
 /// Calculates microfacet shadowing.
 pub fn geometrySchlickGGX(NdotV: f32, roughness: f32) f32 {
     const r = (roughness + 1.0);
@@ -221,20 +219,52 @@ pub fn packColorTonemapped(color: math.Vec3, alpha: u32) u32 {
     const r_val = std.math.clamp(r * 255.0, 0.0, 255.0);
     const g_val = std.math.clamp(g * 255.0, 0.0, 255.0);
     const b_val = std.math.clamp(b * 255.0, 0.0, 255.0);
-    
+
     return (alpha << 24) | (@as(u32, @intFromFloat(r_val)) << 16) | (@as(u32, @intFromFloat(g_val)) << 8) | @as(u32, @intFromFloat(b_val));
 }
 
+/// SIMD batch tonemapping: processes `lanes` pixels in parallel.
+/// Applies Reinhard tonemapping (exposure 2.5) + sqrt gamma + pack to ARGB u32.
+pub fn packColorTonemappedBatch(
+    comptime lanes: comptime_int,
+    colors_x: *const [lanes]f32,
+    colors_y: *const [lanes]f32,
+    colors_z: *const [lanes]f32,
+    alphas: *const [lanes]u32,
+) [lanes]u32 {
+    const FloatVec = @Vector(lanes, f32);
+    const U32Vec = @Vector(lanes, u32);
+
+    const exposure: FloatVec = @splat(2.5);
+    const one: FloatVec = @splat(1.0);
+    const scale255: FloatVec = @splat(255.0);
+    const zero: FloatVec = @splat(0.0);
+
+    // Reinhard tonemap per channel: mapped = (c * exposure) / (c * exposure + 1)
+    const cx: FloatVec = @as(FloatVec, colors_x.*) * exposure;
+    const cy: FloatVec = @as(FloatVec, colors_y.*) * exposure;
+    const cz: FloatVec = @as(FloatVec, colors_z.*) * exposure;
+
+    const mapped_x = cx / (cx + one);
+    const mapped_y = cy / (cy + one);
+    const mapped_z = cz / (cz + one);
+
+    // Gamma correction: sqrt
+    const r = @sqrt(mapped_x);
+    const g = @sqrt(mapped_y);
+    const b = @sqrt(mapped_z);
+
+    // Clamp to [0, 255] and convert to u32
+    const r_u32: U32Vec = @intFromFloat(@min(@max(r * scale255, zero), scale255));
+    const g_u32: U32Vec = @intFromFloat(@min(@max(g * scale255, zero), scale255));
+    const b_u32: U32Vec = @intFromFloat(@min(@max(b * scale255, zero), scale255));
+
+    const a_shifted: U32Vec = @as(U32Vec, alphas.*) << @splat(24);
+    return a_shifted | (r_u32 << @splat(16)) | (g_u32 << @splat(8)) | b_u32;
+}
+
 /// The core PBR shading function for a single light source.
-pub fn computePBR(
-    albedo: math.Vec3, 
-    normal: math.Vec3, 
-    view_dir: math.Vec3, 
-    light_dir: math.Vec3, 
-    light_color: math.Vec3, 
-    metallic: f32, 
-    roughness: f32
-) math.Vec3 {
+pub fn computePBR(albedo: math.Vec3, normal: math.Vec3, view_dir: math.Vec3, light_dir: math.Vec3, light_color: math.Vec3, metallic: f32, roughness: f32) math.Vec3 {
     // F0 is base reflectivity
     var f0 = math.Vec3.new(0.04, 0.04, 0.04);
     f0 = math.Vec3.new(
@@ -247,8 +277,8 @@ pub fn computePBR(
 
     // Cook-Torrance BRDF components
     const NDF = distributionGGX(normal, halfway, roughness);
-    const G   = geometrySmith(normal, view_dir, light_dir, roughness);
-    const F   = fresnelSchlick(@max(math.Vec3.dot(halfway, view_dir), 0.0), f0);
+    const G = geometrySmith(normal, view_dir, light_dir, roughness);
+    const F = fresnelSchlick(@max(math.Vec3.dot(halfway, view_dir), 0.0), f0);
 
     // Diffuse / Specular ratio
     const kS = F;
@@ -269,7 +299,7 @@ pub fn computePBR(
     const combined = math.Vec3.add(diffuse_scaled, specular);
 
     const radiance = math.Vec3.new(light_color.x * NdotL, light_color.y * NdotL, light_color.z * NdotL);
-    
+
     const direct = math.Vec3.new(combined.x * radiance.x, combined.y * radiance.y, combined.z * radiance.z);
     const ambient = math.Vec3.scale(albedo, 0.2); // Brighten ambient significantly // Ambient term to prevent pure black
     return math.Vec3.add(direct, ambient);

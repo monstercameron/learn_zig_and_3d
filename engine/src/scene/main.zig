@@ -31,6 +31,7 @@ pub const RendererControlAxis = world_module.RendererControlAxis;
 pub const ComponentStore = components_module.ComponentStore;
 pub const components = components_module;
 pub const TextureSlots = components_module.TextureSlots;
+pub const max_texture_slots = components_module.max_texture_slots;
 pub const HierarchyGraph = graph_module.HierarchyGraph;
 pub const DependencyGraph = dependency_graph_module.DependencyGraph;
 pub const DependencyEdge = dependency_graph_module.DependencyEdge;

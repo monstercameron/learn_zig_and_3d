@@ -27,6 +27,7 @@ const std = @import("std");
 const cpu_features = @import("../core/cpu_features.zig");
 const math = @import("../core/math.zig");
 const config = @import("../core/app_config.zig");
+const max_texture_file_bytes: usize = 512 * 1024 * 1024;
 
 // Helper functions to read little-endian integers from a byte slice.
 // File formats often specify a specific byte order (endianness).
@@ -266,34 +267,46 @@ fn sampleBilinearBatchImpl(comptime lanes: usize, pixels: []const u32, w: usize,
     const frac_x: [lanes]u32 = @bitCast(@as(U32Vec, @intFromFloat(dx * @as(FloatVec, @splat(255.0)))));
     const frac_y: [lanes]u32 = @bitCast(@as(U32Vec, @intFromFloat(dy * @as(FloatVec, @splat(255.0)))));
 
-    var result: [lanes]u32 = @splat(0);
-    inline for (0..lanes) |lane| {
-        const inv_x = 255 - frac_x[lane];
-        const inv_y = 255 - frac_y[lane];
-        const w00 = inv_x * inv_y;
-        const w10 = frac_x[lane] * inv_y;
-        const w01 = inv_x * frac_y[lane];
-        const w11 = frac_x[lane] * frac_y[lane];
+    // Vectorised bilinear blend: compute weights and blend all lanes simultaneously per channel.
+    const fx_vec: U32Vec = @as(U32Vec, frac_x);
+    const fy_vec: U32Vec = @as(U32Vec, frac_y);
+    const inv_x_vec: U32Vec = @as(U32Vec, @splat(@as(u32, 255))) - fx_vec;
+    const inv_y_vec: U32Vec = @as(U32Vec, @splat(@as(u32, 255))) - fy_vec;
+    const w00_vec = inv_x_vec * inv_y_vec;
+    const w10_vec = fx_vec * inv_y_vec;
+    const w01_vec = inv_x_vec * fy_vec;
+    const w11_vec = fx_vec * fy_vec;
 
-        inline for (.{ 0, 8, 16, 24 }) |shift| {
-            const val00 = (c00_arr[lane] >> shift) & 0xFF;
-            const val10 = (c10_arr[lane] >> shift) & 0xFF;
-            const val01 = (c01_arr[lane] >> shift) & 0xFF;
-            const val11 = (c11_arr[lane] >> shift) & 0xFF;
-            const sum = (val00 * w00 + val10 * w10 + val01 * w01 + val11 * w11);
-            const blended = sum / 65025;
-            result[lane] |= blended << shift;
-        }
+    const c00_vec: U32Vec = @as(U32Vec, c00_arr);
+    const c10_vec: U32Vec = @as(U32Vec, c10_arr);
+    const c01_vec: U32Vec = @as(U32Vec, c01_arr);
+    const c11_vec: U32Vec = @as(U32Vec, c11_arr);
+
+    const mask_ff: U32Vec = @splat(0xFF);
+    const divisor: U32Vec = @splat(65025);
+
+    var result: U32Vec = @splat(0);
+    inline for (.{ 0, 8, 16, 24 }) |shift| {
+        const s: U32Vec = @splat(shift);
+        const val00 = (c00_vec >> @truncate(s)) & mask_ff;
+        const val10 = (c10_vec >> @truncate(s)) & mask_ff;
+        const val01 = (c01_vec >> @truncate(s)) & mask_ff;
+        const val11 = (c11_vec >> @truncate(s)) & mask_ff;
+        const sum = val00 * w00_vec + val10 * w10_vec + val01 * w01_vec + val11 * w11_vec;
+        const blended = sum / divisor;
+        result |= blended << @truncate(s);
     }
 
-    return result;
+    return @bitCast(result);
 }
 
 /// Loads a texture from a .bmp file. This is a manual parser for the BMP format.
 pub fn loadBmp(allocator: std.mem.Allocator, path: []const u8) !Texture {
     var file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
-    const data = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    const stat = try file.stat();
+    if (stat.size > max_texture_file_bytes) return error.FileTooLarge;
+    const data = try file.readToEndAlloc(allocator, @intCast(stat.size));
     defer allocator.free(data);
 
     // --- BMP Header Parsing ---
@@ -419,7 +432,6 @@ pub fn loadBmp(allocator: std.mem.Allocator, path: []const u8) !Texture {
     return Texture{ .width = width, .height = height, .pixels = pixels, .mip_levels = mip_levels, .allocator = allocator };
 }
 
-
 /// A texture format storing raw 32-bit floats for High Dynamic Range (HDR) images.
 pub const HdrTexture = struct {
     width: usize,
@@ -434,7 +446,7 @@ pub const HdrTexture = struct {
 
     /// Sample the HDR texture using equirectangular mapping (latitude/longitude)
     /// dir: A normalized direction vector.
-        pub fn sampleEquirectangularFast(self: *const HdrTexture, dir: math.Vec3) math.Vec3 {
+    pub fn sampleEquirectangularFast(self: *const HdrTexture, dir: math.Vec3) math.Vec3 {
         if (self.width == 0 or self.height == 0) return math.Vec3.new(0, 0, 0);
 
         // Fast atan2 approximation for longitude
@@ -447,7 +459,7 @@ pub const HdrTexture = struct {
         const phi = std.math.acos(clamped_y);
 
         const u = theta * 0.159154943; // 1 / 2PI
-        const v = phi * 0.318309886;   // 1 / PI
+        const v = phi * 0.318309886; // 1 / PI
 
         const wf = @as(f32, @floatFromInt(self.width));
         const hf = @as(f32, @floatFromInt(self.height));
@@ -462,7 +474,7 @@ pub const HdrTexture = struct {
 
         const x0 = px % self.width;
         const y0 = py % self.height;
-        
+
         // Nearest neighbor for speed! Bilinear on a 4K texture is too much bandwidth
         return self.pixels[y0 * self.width + x0];
     }
@@ -510,7 +522,7 @@ pub const HdrTexture = struct {
         // Bilinear interpolation
         const c0 = math.Vec3.add(math.Vec3.scale(c00, 1.0 - sx), math.Vec3.scale(c10, sx));
         const c1 = math.Vec3.add(math.Vec3.scale(c01, 1.0 - sx), math.Vec3.scale(c11, sx));
-        
+
         return math.Vec3.add(math.Vec3.scale(c0, 1.0 - sy), math.Vec3.scale(c1, sy));
     }
 };
@@ -520,43 +532,43 @@ pub const HdrTexture = struct {
 pub fn loadHdrRaw(allocator: std.mem.Allocator, path: []const u8) !HdrTexture {
     var file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
-    
+
     // We expect header = 8 bytes. width (4 bytes) + height (4 bytes)
     const file_size = try file.getEndPos();
     if (file_size < 8) return error.InvalidHdrFile;
-    
+
     var header: [8]u8 = undefined;
     _ = try file.readAll(&header);
-    
+
     const width = @as(usize, @intCast(readU32le(header[0..4])));
     const height = @as(usize, @intCast(readU32le(header[4..8])));
-    
+
     const expected_pixels = width * height;
     const expected_bytes = expected_pixels * 3 * 4; // 3 floats per pixel, 4 bytes per float
     if (file_size - 8 < expected_bytes) return error.HdrDataTruncated;
-    
+
     const pixel_bytes = try allocator.alloc(u8, expected_bytes);
     defer allocator.free(pixel_bytes);
-    
+
     _ = try file.readAll(pixel_bytes);
-    
+
     const pixels = try allocator.alloc(math.Vec3, expected_pixels);
-    
+
     // Parse floats manually to avoid alignment/endian issues
     var i: usize = 0;
     while (i < expected_pixels) : (i += 1) {
         const base = i * 12;
-        const r_bits = readU32le(pixel_bytes[base .. base+4]);
-        const g_bits = readU32le(pixel_bytes[base+4 .. base+8]);
-        const b_bits = readU32le(pixel_bytes[base+8 .. base+12]);
-        
+        const r_bits = readU32le(pixel_bytes[base .. base + 4]);
+        const g_bits = readU32le(pixel_bytes[base + 4 .. base + 8]);
+        const b_bits = readU32le(pixel_bytes[base + 8 .. base + 12]);
+
         pixels[i] = math.Vec3.new(
             @as(f32, @bitCast(r_bits)),
             @as(f32, @bitCast(g_bits)),
             @as(f32, @bitCast(b_bits)),
         );
     }
-    
+
     return HdrTexture{
         .width = width,
         .height = height,

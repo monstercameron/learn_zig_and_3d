@@ -6,3 +6,6 @@ pub const shadow_system = @import("render/core/shadow_system.zig");
 pub const tile_renderer = @import("render/core/tile_renderer.zig");
 pub const hybrid_shadow_cache_kernel = @import("render/kernels/hybrid_shadow_cache_kernel.zig");
 pub const job_system = @import("core/job_system.zig");
+pub const binning_stage = @import("render/core/binning_stage.zig");
+pub const bitmap = @import("assets/bitmap.zig");
+pub const mesh_work_types = @import("render/core/mesh_work_types.zig");

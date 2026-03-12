@@ -188,6 +188,12 @@ pub fn binTrianglesRangeToTiles(
         const min_row = @as(usize, @intCast(std.math.clamp(@divTrunc(clamped_min_y, TileRenderer.TILE_SIZE), 0, @as(i32, @intCast(grid.rows)) - 1)));
         const max_row = @as(usize, @intCast(std.math.clamp(@divTrunc(clamped_max_y, TileRenderer.TILE_SIZE), 0, @as(i32, @intCast(grid.rows)) - 1)));
 
+        // Fast path: triangle fits entirely within a single tile — skip overlapsTile check.
+        if (min_col == max_col and min_row == max_row) {
+            try tile_lists[min_row * grid.cols + min_col].append(tri_idx);
+            continue;
+        }
+
         var row = min_row;
         while (row <= max_row) : (row += 1) {
             const base_idx = row * grid.cols;

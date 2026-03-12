@@ -14,6 +14,7 @@ const glb_magic = 0x46546C67;
 const glb_version = 2;
 const glb_json_chunk_type = 0x4E4F534A;
 const glb_bin_chunk_type = 0x004E4942;
+const max_asset_file_bytes: usize = 512 * 1024 * 1024;
 
 const Document = struct {
     scene: ?usize = null,
@@ -51,16 +52,21 @@ const Primitive = struct {
 };
 
 const Attributes = struct {
-    @"POSITION": usize,
-    @"TEXCOORD_0": ?usize = null,
+    POSITION: usize,
+    TEXCOORD_0: ?usize = null,
 };
 
 const Material = struct {
     pbrMetallicRoughness: ?PbrMetallicRoughness = null,
 };
 
+const TextureInfo = struct {
+    index: usize,
+};
+
 const PbrMetallicRoughness = struct {
     baseColorFactor: ?[4]f32 = null,
+    baseColorTexture: ?TextureInfo = null,
 };
 
 const Accessor = struct {
@@ -68,7 +74,7 @@ const Accessor = struct {
     byteOffset: usize = 0,
     componentType: u32,
     count: usize,
-    @"type": []const u8,
+    type: []const u8,
 };
 
 const BufferView = struct {
@@ -106,7 +112,7 @@ const ParsedAsset = struct {
 pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
     var file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
-    const contents = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    const contents = try readFileToEndAllocBounded(allocator, &file, max_asset_file_bytes);
     defer allocator.free(contents);
 
     var asset = try parseAsset(allocator, path, contents);
@@ -119,6 +125,32 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
     defer tex_coords.deinit(allocator);
     var triangles = std.ArrayList(Triangle){};
     defer triangles.deinit(allocator);
+
+    // Pre-allocate based on accessor hints to avoid repeated reallocations
+    // during appendAccessorPositions / appendAccessorTriangles.
+    {
+        var est_verts: usize = 0;
+        var est_tris: usize = 0;
+        for (document.meshes) |gltf_mesh| {
+            for (gltf_mesh.primitives) |prim| {
+                const pos_acc = try getAccessor(document, prim.attributes.POSITION);
+                est_verts += pos_acc.count;
+                if (prim.indices) |idx_acc_index| {
+                    const idx_acc = try getAccessor(document, idx_acc_index);
+                    est_tris += idx_acc.count / 3;
+                } else {
+                    est_tris += pos_acc.count / 3;
+                }
+            }
+        }
+        if (est_verts > 0) {
+            try vertices.ensureTotalCapacity(allocator, est_verts);
+            try tex_coords.ensureTotalCapacity(allocator, est_verts);
+        }
+        if (est_tris > 0) {
+            try triangles.ensureTotalCapacity(allocator, est_tris);
+        }
+    }
 
     if (document.scenes.len == 0) {
         try appendNodes(allocator, &vertices, &tex_coords, &triangles, document, asset.buffers, identityMatrix(), null);
@@ -237,6 +269,7 @@ fn parseGlbAsset(allocator: std.mem.Allocator, path: []const u8, contents: []con
             defer allocator.free(resolved_path);
             var file = try std.fs.cwd().openFile(resolved_path, .{});
             defer file.close();
+            if (buffer_def.byteLength > max_asset_file_bytes) return error.FileTooLarge;
             buffers[idx] = try file.readToEndAlloc(allocator, buffer_def.byteLength);
         } else if (idx == 0 and bin_chunk.len != 0) {
             buffers[idx] = try allocator.dupe(u8, bin_chunk);
@@ -273,9 +306,17 @@ fn loadExternalBuffers(allocator: std.mem.Allocator, gltf_path: []const u8, buff
 
         var file = try std.fs.cwd().openFile(resolved_path, .{});
         defer file.close();
+        if (buffer_def.byteLength > max_asset_file_bytes) return error.FileTooLarge;
         buffers[idx] = try file.readToEndAlloc(allocator, buffer_def.byteLength);
     }
     return buffers;
+}
+
+fn readFileToEndAllocBounded(allocator: std.mem.Allocator, file: *std.fs.File, max_bytes: usize) ![]u8 {
+    const stat = try file.stat();
+    if (stat.size > max_bytes) return error.FileTooLarge;
+    const read_limit: usize = @intCast(stat.size);
+    return file.readToEndAlloc(allocator, read_limit);
 }
 
 fn freeBuffers(allocator: std.mem.Allocator, buffers: [][]u8) void {
@@ -387,16 +428,16 @@ fn appendPrimitive(
     primitive: Primitive,
     world_transform: ColumnMajorMat4,
 ) !void {
-    const position_accessor_index = primitive.attributes.@"POSITION";
-    const position_accessor = getAccessor(document, position_accessor_index);
-    if (!std.mem.eql(u8, position_accessor.@"type", "VEC3") or position_accessor.componentType != 5126) {
+    const position_accessor_index = primitive.attributes.POSITION;
+    const position_accessor = try getAccessor(document, position_accessor_index);
+    if (!std.mem.eql(u8, position_accessor.type, "VEC3") or position_accessor.componentType != 5126) {
         return error.UnsupportedPositionAccessor;
     }
 
     const base_vertex = vertices.items.len;
     try appendAccessorPositions(allocator, vertices, document, buffers, position_accessor_index, world_transform);
 
-    if (primitive.attributes.@"TEXCOORD_0") |uv_accessor_index| {
+    if (primitive.attributes.TEXCOORD_0) |uv_accessor_index| {
         try appendAccessorTexCoords(allocator, tex_coords, document, buffers, uv_accessor_index, position_accessor.count);
     } else {
         try appendDefaultTexCoords(allocator, tex_coords, position_accessor.count);
@@ -439,9 +480,10 @@ fn appendAccessorPositions(
     accessor_index: usize,
     world_transform: ColumnMajorMat4,
 ) !void {
-    const accessor = getAccessor(document, accessor_index);
-    const buffer_view = getBufferView(document, accessor.bufferView);
-    const buffer = getBuffer(buffers, buffer_view.buffer);
+    const accessor = try getAccessor(document, accessor_index);
+    if (accessor.count == 0) return;
+    const buffer_view = try getBufferView(document, accessor.bufferView);
+    const buffer = try getBuffer(buffers, buffer_view.buffer);
     const elem_size: usize = 12;
     const stride = buffer_view.byteStride orelse elem_size;
     const start = buffer_view.byteOffset + accessor.byteOffset;
@@ -449,6 +491,22 @@ fn appendAccessorPositions(
     if (needed > buffer.len) return error.BufferViewOutOfBounds;
 
     var idx: usize = 0;
+    const batch = 4;
+    // Process vertices in batches of 4 using SIMD matrix multiply.
+    while (idx + batch <= accessor.count) : (idx += batch) {
+        var px: [batch]f32 = undefined;
+        var py: [batch]f32 = undefined;
+        var pz: [batch]f32 = undefined;
+        inline for (0..batch) |b| {
+            const bi = start + (idx + b) * stride;
+            px[b] = readF32(buffer[bi..][0..4]);
+            py[b] = readF32(buffer[bi + 4 ..][0..4]);
+            pz[b] = readF32(buffer[bi + 8 ..][0..4]);
+        }
+        const results = transformPointBatch(batch, world_transform, &px, &py, &pz);
+        try vertices.appendSlice(allocator, &results);
+    }
+    // Scalar tail
     while (idx < accessor.count) : (idx += 1) {
         const byte_index = start + idx * stride;
         const x = readF32(buffer[byte_index..][0..4]);
@@ -466,14 +524,15 @@ fn appendAccessorTexCoords(
     accessor_index: usize,
     expected_count: usize,
 ) !void {
-    const accessor = getAccessor(document, accessor_index);
-    if (!std.mem.eql(u8, accessor.@"type", "VEC2") or accessor.componentType != 5126) {
+    const accessor = try getAccessor(document, accessor_index);
+    if (!std.mem.eql(u8, accessor.type, "VEC2") or accessor.componentType != 5126) {
         return error.UnsupportedTexCoordAccessor;
     }
     if (accessor.count != expected_count) return error.MismatchedTexCoordCount;
+    if (accessor.count == 0) return;
 
-    const buffer_view = getBufferView(document, accessor.bufferView);
-    const buffer = getBuffer(buffers, buffer_view.buffer);
+    const buffer_view = try getBufferView(document, accessor.bufferView);
+    const buffer = try getBuffer(buffers, buffer_view.buffer);
     const elem_size: usize = 8;
     const stride = buffer_view.byteStride orelse elem_size;
     const start = buffer_view.byteOffset + accessor.byteOffset;
@@ -505,8 +564,9 @@ fn appendAccessorTriangles(
     base_vertex: usize,
     material_info: MaterialInfo,
 ) !void {
-    const accessor = getAccessor(document, accessor_index);
-    if (!std.mem.eql(u8, accessor.@"type", "SCALAR")) return error.UnsupportedIndexAccessor;
+    const accessor = try getAccessor(document, accessor_index);
+    if (!std.mem.eql(u8, accessor.type, "SCALAR")) return error.UnsupportedIndexAccessor;
+    if (accessor.count == 0) return;
 
     const component_size = switch (accessor.componentType) {
         5121 => @as(usize, 1),
@@ -514,8 +574,8 @@ fn appendAccessorTriangles(
         5125 => 4,
         else => return error.UnsupportedIndexAccessor,
     };
-    const buffer_view = getBufferView(document, accessor.bufferView);
-    const buffer = getBuffer(buffers, buffer_view.buffer);
+    const buffer_view = try getBufferView(document, accessor.bufferView);
+    const buffer = try getBuffer(buffers, buffer_view.buffer);
     const stride = buffer_view.byteStride orelse component_size;
     const start = buffer_view.byteOffset + accessor.byteOffset;
     const needed = start + stride * (accessor.count - 1) + component_size;
@@ -548,9 +608,19 @@ fn materialInfoForPrimitive(document: Document, primitive: Primitive) MaterialIn
                 (pbr.baseColorFactor orelse [4]f32{ 1.0, 1.0, 1.0, 1.0 })
             else
                 [4]f32{ 1.0, 1.0, 1.0, 1.0 };
+            const maybe_texture_index: ?usize = if (material.pbrMetallicRoughness) |pbr|
+                if (pbr.baseColorTexture) |base_color_tex| base_color_tex.index else null
+            else
+                null;
             return .{
                 .base_color = packColorFactor(factor),
-                .texture_index = if (material_index <= std.math.maxInt(u16))
+                // Prefer glTF baseColor texture index; fall back to material index for legacy scene slots.
+                .texture_index = if (maybe_texture_index) |texture_index|
+                    if (texture_index <= std.math.maxInt(u16))
+                        @intCast(texture_index)
+                    else
+                        Triangle.no_texture_index
+                else if (material_index <= std.math.maxInt(u16))
                     @intCast(material_index)
                 else
                     Triangle.no_texture_index,
@@ -603,20 +673,20 @@ fn readU32le(bytes: []const u8) u32 {
 }
 
 /// getAccessor returns state derived from Gltf Loader.
-fn getAccessor(document: Document, accessor_index: usize) Accessor {
-    if (accessor_index >= document.accessors.len) @panic("invalid gltf accessor index");
+fn getAccessor(document: Document, accessor_index: usize) !Accessor {
+    if (accessor_index >= document.accessors.len) return error.InvalidAccessorIndex;
     return document.accessors[accessor_index];
 }
 
 /// getBufferView returns state derived from Gltf Loader.
-fn getBufferView(document: Document, buffer_view_index: usize) BufferView {
-    if (buffer_view_index >= document.bufferViews.len) @panic("invalid gltf bufferView index");
+fn getBufferView(document: Document, buffer_view_index: usize) !BufferView {
+    if (buffer_view_index >= document.bufferViews.len) return error.InvalidBufferViewIndex;
     return document.bufferViews[buffer_view_index];
 }
 
 /// getBuffer returns state derived from Gltf Loader.
-fn getBuffer(buffers: [][]u8, buffer_index: usize) []const u8 {
-    if (buffer_index >= buffers.len) @panic("invalid gltf buffer index");
+fn getBuffer(buffers: [][]u8, buffer_index: usize) ![]const u8 {
+    if (buffer_index >= buffers.len) return error.InvalidBufferIndex;
     return buffers[buffer_index];
 }
 
@@ -702,6 +772,39 @@ fn transformPoint(matrix: ColumnMajorMat4, point: Vec3) Vec3 {
     if (@abs(w) <= 1e-6 or @abs(w - 1.0) <= 1e-6) return Vec3.new(x, y, z);
     const inv_w = 1.0 / w;
     return Vec3.new(x * inv_w, y * inv_w, z * inv_w);
+}
+
+/// SIMD batch transform: processes `lanes` points through a 4x4 column-major matrix simultaneously.
+fn transformPointBatch(comptime lanes: comptime_int, matrix: ColumnMajorMat4, px: *const [lanes]f32, py: *const [lanes]f32, pz: *const [lanes]f32) [lanes]Vec3 {
+    const V = @Vector(lanes, f32);
+    const vx: V = px.*;
+    const vy: V = py.*;
+    const vz: V = pz.*;
+
+    const rx = @as(V, @splat(matrix[0])) * vx + @as(V, @splat(matrix[4])) * vy + @as(V, @splat(matrix[8])) * vz + @as(V, @splat(matrix[12]));
+    const ry = @as(V, @splat(matrix[1])) * vx + @as(V, @splat(matrix[5])) * vy + @as(V, @splat(matrix[9])) * vz + @as(V, @splat(matrix[13]));
+    const rz = @as(V, @splat(matrix[2])) * vx + @as(V, @splat(matrix[6])) * vy + @as(V, @splat(matrix[10])) * vz + @as(V, @splat(matrix[14]));
+    const rw = @as(V, @splat(matrix[3])) * vx + @as(V, @splat(matrix[7])) * vy + @as(V, @splat(matrix[11])) * vz + @as(V, @splat(matrix[15]));
+
+    const eps: V = @splat(1e-6);
+    const one: V = @splat(1.0);
+    const abs_w = @abs(rw);
+    const dist_one = @abs(rw - one);
+    const needs_divide = (abs_w > eps) & (dist_one > eps);
+    const inv_w = one / @select(f32, needs_divide, rw, one);
+    const ox = @select(f32, needs_divide, rx * inv_w, rx);
+    const oy = @select(f32, needs_divide, ry * inv_w, ry);
+    const oz = @select(f32, needs_divide, rz * inv_w, rz);
+
+    const ox_arr: [lanes]f32 = ox;
+    const oy_arr: [lanes]f32 = oy;
+    const oz_arr: [lanes]f32 = oz;
+
+    var result: [lanes]Vec3 = undefined;
+    inline for (0..lanes) |i| {
+        result[i] = Vec3.new(ox_arr[i], oy_arr[i], oz_arr[i]);
+    }
+    return result;
 }
 
 test "decodeUri decodes percent escapes" {

@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const math = @import("math.zig");
+const max_utility_file_bytes: usize = 512 * 1024 * 1024;
 
 // ========== Math Utilities ========== 
 
@@ -41,6 +42,9 @@ pub fn remap(in_min: f32, in_max: f32, out_min: f32, out_max: f32, value: f32) f
 ///
 /// `result = x * x * (3 - 2 * x)`
 pub fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
+    if (std.math.approxEqAbs(f32, edge0, edge1, 0.00001)) {
+        return if (x < edge0) 0.0 else 1.0;
+    }
     const t = std.math.clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
 }
@@ -71,7 +75,9 @@ pub fn color_to_vec(color: u32) math.Vec3 {
 pub fn read_file_to_buffer(path: []const u8, allocator: std.mem.Allocator) ![]u8 {
     var file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
-    const contents = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    const stat = try file.stat();
+    if (stat.size > max_utility_file_bytes) return error.FileTooLarge;
+    const contents = try file.readToEndAlloc(allocator, @intCast(stat.size));
     return contents;
 }
 

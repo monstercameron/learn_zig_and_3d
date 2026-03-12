@@ -1259,6 +1259,21 @@ const AdaptiveShadowTileJob = struct {
 
 const BloomJobContext = bloom_pass.JobContext(BloomScratch);
 
+const CompositeJobContext = struct {
+    tile: *const TileRenderer.Tile,
+    tile_buffer: *const TileRenderer.TileBuffer,
+    bitmap: *Bitmap,
+    scene_depth: ?[]f32,
+    scene_camera: ?[]math.Vec3,
+    scene_normal: ?[]math.Vec3,
+    scene_surface: ?[]TileRenderer.SurfaceHandle,
+
+    fn run(ctx_ptr: *anyopaque) void {
+        const ctx: *CompositeJobContext = @ptrCast(@alignCast(ctx_ptr));
+        TileRenderer.compositeTileToScreen(ctx.tile, ctx.tile_buffer, ctx.bitmap, ctx.scene_depth, ctx.scene_camera, ctx.scene_normal, ctx.scene_surface);
+    }
+};
+
 fn noopRenderPassJob(ctx: *anyopaque) void {
     _ = ctx;
 }
@@ -1370,6 +1385,7 @@ pub const Renderer = struct {
     shadow_tile_jobs_buffer: ?[]AdaptiveShadowTileJob,
     job_buffer: ?[]Job,
     shadow_job_buffer: ?[]Job,
+    composite_job_contexts: ?[]CompositeJobContext,
     job_completion_buffer: ?[]bool,
     tile_triangle_lists: ?[]BinningStage.TileTriangleList,
     active_tile_flags: ?[]bool,
@@ -1789,6 +1805,8 @@ pub const Renderer = struct {
         errdefer allocator.free(job_buffer);
         const shadow_job_buffer = try allocator.alloc(Job, shadow_chunk_job_capacity);
         errdefer allocator.free(shadow_job_buffer);
+        const composite_job_contexts = try allocator.alloc(CompositeJobContext, tile_count);
+        errdefer allocator.free(composite_job_contexts);
         const job_completion_buffer = try allocator.alloc(bool, tile_count);
         errdefer allocator.free(job_completion_buffer);
         @memset(job_completion_buffer, false);
@@ -2041,6 +2059,7 @@ pub const Renderer = struct {
             .shadow_tile_jobs_buffer = shadow_tile_jobs_buffer,
             .job_buffer = job_buffer,
             .shadow_job_buffer = shadow_job_buffer,
+            .composite_job_contexts = composite_job_contexts,
             .job_completion_buffer = job_completion_buffer,
             .tile_triangle_lists = tile_triangle_lists,
             .active_tile_flags = active_tile_flags,
@@ -2220,6 +2239,7 @@ pub const Renderer = struct {
         if (self.job_system) |js| js.deinit();
         if (self.job_buffer) |jobs| self.allocator.free(jobs);
         if (self.shadow_job_buffer) |jobs| self.allocator.free(jobs);
+        if (self.composite_job_contexts) |ctxs| self.allocator.free(ctxs);
         if (self.tile_jobs_buffer) |tile_jobs| self.allocator.free(tile_jobs);
         if (self.shadow_chunk_jobs_buffer) |jobs| self.allocator.free(jobs);
         if (self.shadow_tile_jobs_buffer) |shadow_jobs| self.allocator.free(shadow_jobs);
@@ -7858,9 +7878,47 @@ pub const Renderer = struct {
         self.light_work_stats.alpha_pixels = self.alpha_pixels_counter.load(.acquire);
 
         // 4. Compositing: Copy the pixels from each completed tile buffer to the main screen bitmap.
-        for (active_indices[0..active_tile_count]) |tile_idx| {
-            const tile = &grid.tiles[tile_idx];
-            TileRenderer.compositeTileToScreen(tile, &tile_buffers[tile_idx], &self.bitmap, self.scene_depth, self.scene_camera, self.scene_normal, self.scene_surface);
+        // Each tile writes to non-overlapping screen regions, so dispatch in parallel when possible.
+        if (self.job_system) |job_sys| {
+            const comp_ctxs = self.composite_job_contexts.?;
+            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
+
+            for (active_indices[0..active_tile_count]) |tile_idx| {
+                comp_ctxs[tile_idx] = .{
+                    .tile = &grid.tiles[tile_idx],
+                    .tile_buffer = &tile_buffers[tile_idx],
+                    .bitmap = &self.bitmap,
+                    .scene_depth = self.scene_depth,
+                    .scene_camera = self.scene_camera,
+                    .scene_normal = self.scene_normal,
+                    .scene_surface = self.scene_surface,
+                };
+            }
+
+            if (active_tile_count > 1) {
+                const main_tile_idx = active_indices[0];
+                for (active_indices[1..active_tile_count]) |tile_idx| {
+                    jobs[tile_idx] = Job.init(
+                        CompositeJobContext.run,
+                        @ptrCast(&comp_ctxs[tile_idx]),
+                        &parent_job,
+                    );
+                    if (!job_sys.submitJobAuto(&jobs[tile_idx])) {
+                        CompositeJobContext.run(@ptrCast(&comp_ctxs[tile_idx]));
+                    }
+                }
+                CompositeJobContext.run(@ptrCast(&comp_ctxs[main_tile_idx]));
+                parent_job.complete();
+                job_sys.waitFor(&parent_job);
+            } else if (active_tile_count == 1) {
+                const tile_idx = active_indices[0];
+                TileRenderer.compositeTileToScreen(&grid.tiles[tile_idx], &tile_buffers[tile_idx], &self.bitmap, self.scene_depth, self.scene_camera, self.scene_normal, self.scene_surface);
+            }
+        } else {
+            for (active_indices[0..active_tile_count]) |tile_idx| {
+                const tile = &grid.tiles[tile_idx];
+                TileRenderer.compositeTileToScreen(tile, &tile_buffers[tile_idx], &self.bitmap, self.scene_depth, self.scene_camera, self.scene_normal, self.scene_surface);
+            }
         }
 
         return shadow_pass_elapsed_ns;

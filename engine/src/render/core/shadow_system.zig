@@ -292,6 +292,37 @@ fn preferLeftFirst(dir: math.Vec3, left: *const BLASNode, right: *const BLASNode
     };
 }
 
+fn preferAABBLeftFirst(dir: math.Vec3, left: AABB, right: AABB) bool {
+    const abs_x = @abs(dir.x);
+    const abs_y = @abs(dir.y);
+    const abs_z = @abs(dir.z);
+
+    var axis: u2 = 0;
+    if (abs_y > abs_x and abs_y >= abs_z) {
+        axis = 1;
+    } else if (abs_z > abs_x and abs_z > abs_y) {
+        axis = 2;
+    }
+
+    return switch (axis) {
+        0 => {
+            const left_center2 = left.min.x + left.max.x;
+            const right_center2 = right.min.x + right.max.x;
+            return if (dir.x >= 0.0) left_center2 <= right_center2 else left_center2 >= right_center2;
+        },
+        1 => {
+            const left_center2 = left.min.y + left.max.y;
+            const right_center2 = right.min.y + right.max.y;
+            return if (dir.y >= 0.0) left_center2 <= right_center2 else left_center2 >= right_center2;
+        },
+        else => {
+            const left_center2 = left.min.z + left.max.z;
+            const right_center2 = right.min.z + right.max.z;
+            return if (dir.z >= 0.0) left_center2 <= right_center2 else left_center2 >= right_center2;
+        },
+    };
+}
+
 // Represents a packet of rays for SIMD-style traversal within a screen tile
 pub const RayPacket = struct {
     origins_x: [64]f32,
@@ -315,6 +346,8 @@ pub const ShadowSystem = struct {
     cached_blas_root: u32,
     cached_tlas_fingerprint: u64,
     cached_instance_count: usize,
+    tlas_instances_world: std.ArrayList(math.Mat4),
+    tlas_instances_inverse: std.ArrayList(math.Mat4),
     blas_valid: bool,
     tlas_valid: bool,
 
@@ -331,6 +364,8 @@ pub const ShadowSystem = struct {
             .cached_blas_root = std.math.maxInt(u32),
             .cached_tlas_fingerprint = 0,
             .cached_instance_count = 0,
+            .tlas_instances_world = std.ArrayList(math.Mat4){},
+            .tlas_instances_inverse = std.ArrayList(math.Mat4){},
             .blas_valid = false,
             .tlas_valid = false,
         };
@@ -343,6 +378,8 @@ pub const ShadowSystem = struct {
         self.shadow_meshlets.deinit(self.allocator);
         self.shadow_triangles.deinit(self.allocator);
         self.shadow_triangle_packets.deinit(self.allocator);
+        self.tlas_instances_world.deinit(self.allocator);
+        self.tlas_instances_inverse.deinit(self.allocator);
     }
 
     /// Resets reset.
@@ -355,6 +392,8 @@ pub const ShadowSystem = struct {
     /// It marks cached/derived data stale so dependent work is recomputed on next use.
     pub fn invalidateTLAS(self: *ShadowSystem) void {
         self.tlas_nodes.clearRetainingCapacity();
+        self.tlas_instances_world.clearRetainingCapacity();
+        self.tlas_instances_inverse.clearRetainingCapacity();
         self.cached_tlas_fingerprint = 0;
         self.cached_instance_count = 0;
         self.tlas_valid = false;
@@ -427,6 +466,12 @@ pub const ShadowSystem = struct {
         aabb: AABB,
         centroid: math.Vec3,
         meshlet_offset: u32,
+    };
+
+    const TLASBuildEntry = struct {
+        aabb: AABB,
+        centroid: math.Vec3,
+        instance_index: u32,
     };
 
     /// updateNodeBounds updates Shadow System state for the current tick/frame.
@@ -582,19 +627,166 @@ pub const ShadowSystem = struct {
     /// buildTLAS builds data structures used by Shadow System.
     pub fn buildTLAS(self: *ShadowSystem, instances: []const math.Mat4) !void {
         self.tlas_nodes.clearRetainingCapacity();
+        self.tlas_instances_world.clearRetainingCapacity();
+        self.tlas_instances_inverse.clearRetainingCapacity();
         if (instances.len == 0 or self.blas_nodes.items.len == 0) return;
 
-        // Simply build a flat top level for now, assuming 1 instance pointing to BLAS 0.
-        // In a real system, you'd do an aabb transform of the BLAS root bounds for each instance.
-        const root_blas = &self.blas_nodes.items[0];
+        const root_idx: usize = if (self.cached_blas_root < self.blas_nodes.items.len)
+            self.cached_blas_root
+        else
+            0;
+        const root_blas = &self.blas_nodes.items[root_idx];
 
-        // Root TLAS node
+        var entries = try self.allocator.alloc(TLASBuildEntry, instances.len);
+        defer self.allocator.free(entries);
+
+        for (instances, 0..) |instance, idx| {
+            const inv = try invertAffineMatrix(instance);
+            try self.tlas_instances_world.append(self.allocator, instance);
+            try self.tlas_instances_inverse.append(self.allocator, inv);
+
+            const world_aabb = transformAABB(root_blas.aabb, instance);
+            entries[idx] = .{
+                .aabb = world_aabb,
+                .centroid = world_aabb.centroid(),
+                .instance_index = @intCast(idx),
+            };
+        }
+
+        _ = try self.buildTLASRecursive(entries);
+    }
+
+    fn buildTLASRecursive(self: *ShadowSystem, entries: []TLASBuildEntry) !u32 {
+        if (entries.len == 0) return error.EmptyTLAS;
+
+        const node_idx = @as(u32, @intCast(self.tlas_nodes.items.len));
         try self.tlas_nodes.append(self.allocator, .{
-            .aabb = root_blas.aabb, // TODO: transform AABB by instance mat
-            .left_child_or_instance = 0, // Instance 0
-            .right_child_or_count = 1,
-            .is_leaf = true,
+            .aabb = AABB.init(),
+            .left_child_or_instance = 0,
+            .right_child_or_count = 0,
+            .is_leaf = false,
         });
+
+        for (entries) |entry| {
+            self.tlas_nodes.items[node_idx].aabb.expandAABB(entry.aabb);
+        }
+
+        if (entries.len == 1) {
+            self.tlas_nodes.items[node_idx].left_child_or_instance = entries[0].instance_index;
+            self.tlas_nodes.items[node_idx].right_child_or_count = 1;
+            self.tlas_nodes.items[node_idx].is_leaf = true;
+            return node_idx;
+        }
+
+        var bounds = AABB.init();
+        for (entries) |entry| bounds.expandPattern(entry.centroid);
+        const extent = math.Vec3.sub(bounds.max, bounds.min);
+        var axis: u3 = 0;
+        if (extent.y > extent.x and extent.y > extent.z) axis = 1;
+        if (extent.z > extent.x and extent.z > extent.y) axis = 2;
+
+        const Context = struct {
+            axis: u3,
+            pub fn lessThan(ctx: @This(), a: TLASBuildEntry, b: TLASBuildEntry) bool {
+                return switch (ctx.axis) {
+                    0 => a.centroid.x < b.centroid.x,
+                    1 => a.centroid.y < b.centroid.y,
+                    else => a.centroid.z < b.centroid.z,
+                };
+            }
+        };
+
+        std.sort.block(TLASBuildEntry, entries, Context{ .axis = axis }, Context.lessThan);
+        const mid = entries.len / 2;
+        const left_child = try self.buildTLASRecursive(entries[0..mid]);
+        const right_child = try self.buildTLASRecursive(entries[mid..]);
+
+        self.tlas_nodes.items[node_idx].left_child_or_instance = left_child;
+        self.tlas_nodes.items[node_idx].right_child_or_count = right_child;
+        self.tlas_nodes.items[node_idx].is_leaf = false;
+        return node_idx;
+    }
+
+    fn transformAABB(aabb: AABB, transform: math.Mat4) AABB {
+        var out = AABB.init();
+        const corners = [_]math.Vec3{
+            .{ .x = aabb.min.x, .y = aabb.min.y, .z = aabb.min.z },
+            .{ .x = aabb.min.x, .y = aabb.min.y, .z = aabb.max.z },
+            .{ .x = aabb.min.x, .y = aabb.max.y, .z = aabb.min.z },
+            .{ .x = aabb.min.x, .y = aabb.max.y, .z = aabb.max.z },
+            .{ .x = aabb.max.x, .y = aabb.min.y, .z = aabb.min.z },
+            .{ .x = aabb.max.x, .y = aabb.min.y, .z = aabb.max.z },
+            .{ .x = aabb.max.x, .y = aabb.max.y, .z = aabb.min.z },
+            .{ .x = aabb.max.x, .y = aabb.max.y, .z = aabb.max.z },
+        };
+        for (corners) |corner| out.expandPattern(transformPointByMat4(transform, corner));
+        return out;
+    }
+
+    fn transformPointByMat4(m: math.Mat4, p: math.Vec3) math.Vec3 {
+        return .{
+            .x = m.data[0] * p.x + m.data[4] * p.y + m.data[8] * p.z + m.data[12],
+            .y = m.data[1] * p.x + m.data[5] * p.y + m.data[9] * p.z + m.data[13],
+            .z = m.data[2] * p.x + m.data[6] * p.y + m.data[10] * p.z + m.data[14],
+        };
+    }
+
+    fn transformVectorByMat4(m: math.Mat4, v: math.Vec3) math.Vec3 {
+        return .{
+            .x = m.data[0] * v.x + m.data[4] * v.y + m.data[8] * v.z,
+            .y = m.data[1] * v.x + m.data[5] * v.y + m.data[9] * v.z,
+            .z = m.data[2] * v.x + m.data[6] * v.y + m.data[10] * v.z,
+        };
+    }
+
+    fn invertAffineMatrix(m: math.Mat4) !math.Mat4 {
+        const r00 = m.data[0];
+        const r01 = m.data[4];
+        const r02 = m.data[8];
+        const r10 = m.data[1];
+        const r11 = m.data[5];
+        const r12 = m.data[9];
+        const r20 = m.data[2];
+        const r21 = m.data[6];
+        const r22 = m.data[10];
+
+        const c00 = r11 * r22 - r12 * r21;
+        const c01 = r02 * r21 - r01 * r22;
+        const c02 = r01 * r12 - r02 * r11;
+        const c10 = r12 * r20 - r10 * r22;
+        const c11 = r00 * r22 - r02 * r20;
+        const c12 = r02 * r10 - r00 * r12;
+        const c20 = r10 * r21 - r11 * r20;
+        const c21 = r01 * r20 - r00 * r21;
+        const c22 = r00 * r11 - r01 * r10;
+
+        const det = r00 * c00 + r01 * c10 + r02 * c20;
+        if (@abs(det) <= 1e-8) return error.NonInvertibleInstanceTransform;
+        const inv_det = 1.0 / det;
+
+        const inv00 = c00 * inv_det;
+        const inv01 = c01 * inv_det;
+        const inv02 = c02 * inv_det;
+        const inv10 = c10 * inv_det;
+        const inv11 = c11 * inv_det;
+        const inv12 = c12 * inv_det;
+        const inv20 = c20 * inv_det;
+        const inv21 = c21 * inv_det;
+        const inv22 = c22 * inv_det;
+
+        const tx = m.data[12];
+        const ty = m.data[13];
+        const tz = m.data[14];
+        const inv_tx = -(inv00 * tx + inv01 * ty + inv02 * tz);
+        const inv_ty = -(inv10 * tx + inv11 * ty + inv12 * tz);
+        const inv_tz = -(inv20 * tx + inv21 * ty + inv22 * tz);
+
+        return .{ .data = .{
+            inv00, inv10, inv20, 0.0,
+            inv01, inv11, inv21, 0.0,
+            inv02, inv12, inv22, 0.0,
+            inv_tx, inv_ty, inv_tz, 1.0,
+        } };
     }
 
     fn intersectAABB(aabb: AABB, origin: math.Vec3, inv_dir: math.Vec3) bool {
@@ -790,6 +982,79 @@ pub const ShadowSystem = struct {
         return occluded_mask;
     }
 
+    fn reciprocalOrInf(value: f32) f32 {
+        if (@abs(value) <= 1e-8) return if (value < 0.0) -std.math.inf(f32) else std.math.inf(f32);
+        return 1.0 / value;
+    }
+
+    fn inverseDirection(direction: math.Vec3) math.Vec3 {
+        return .{
+            .x = reciprocalOrInf(direction.x),
+            .y = reciprocalOrInf(direction.y),
+            .z = reciprocalOrInf(direction.z),
+        };
+    }
+
+    fn traceBLASAnyHitLanes(comptime lanes: usize, self: *ShadowSystem, packet: *RayPacket, candidate_mask: u64) void {
+        if (candidate_mask == 0 or self.blas_nodes.items.len == 0) return;
+        const root_idx: u32 = if (self.cached_blas_root < self.blas_nodes.items.len)
+            self.cached_blas_root
+        else
+            0;
+
+        var stack: [128]TraversalStackEntry = undefined;
+        var stack_ptr: usize = 0;
+        stack[stack_ptr] = .{ .node_idx = root_idx, .ray_mask = candidate_mask };
+        stack_ptr += 1;
+
+        while (stack_ptr > 0) {
+            stack_ptr -= 1;
+            const entry = stack[stack_ptr];
+            const active_rays = entry.ray_mask & ~packet.occluded_mask;
+            if (active_rays == 0) continue;
+            if (entry.node_idx >= self.blas_nodes.items.len) continue;
+
+            const node = &self.blas_nodes.items[entry.node_idx];
+            if (node.is_leaf) {
+                packet.occluded_mask |= meshletOccludesPacketMaskLanes(lanes, self, node.left_child_or_meshlet, packet, active_rays);
+                continue;
+            }
+
+            if (node.left_child_or_meshlet >= self.blas_nodes.items.len or node.right_child_or_count >= self.blas_nodes.items.len) continue;
+            const left = &self.blas_nodes.items[node.left_child_or_meshlet];
+            const right = &self.blas_nodes.items[node.right_child_or_count];
+            var left_mask: u64 = 0;
+            var right_mask: u64 = 0;
+            var chunk_start: usize = 0;
+            while (chunk_start < 64) : (chunk_start += lanes) {
+                const chunk_mask = active_rays & chunkBitMask(chunk_start, lanes);
+                if (chunk_mask == 0) continue;
+                left_mask |= intersectAABBPacketChunkMask(lanes, left.aabb, packet, chunk_start, chunk_mask, packet.shared_inv_dir);
+                right_mask |= intersectAABBPacketChunkMask(lanes, right.aabb, packet, chunk_start, chunk_mask, packet.shared_inv_dir);
+            }
+
+            if (left_mask != 0 and right_mask != 0) {
+                if (preferLeftFirst(packet.shared_dir, left, right)) {
+                    stack[stack_ptr] = .{ .node_idx = node.right_child_or_count, .ray_mask = right_mask };
+                    stack_ptr += 1;
+                    stack[stack_ptr] = .{ .node_idx = node.left_child_or_meshlet, .ray_mask = left_mask };
+                    stack_ptr += 1;
+                } else {
+                    stack[stack_ptr] = .{ .node_idx = node.left_child_or_meshlet, .ray_mask = left_mask };
+                    stack_ptr += 1;
+                    stack[stack_ptr] = .{ .node_idx = node.right_child_or_count, .ray_mask = right_mask };
+                    stack_ptr += 1;
+                }
+            } else if (left_mask != 0) {
+                stack[stack_ptr] = .{ .node_idx = node.left_child_or_meshlet, .ray_mask = left_mask };
+                stack_ptr += 1;
+            } else if (right_mask != 0) {
+                stack[stack_ptr] = .{ .node_idx = node.right_child_or_count, .ray_mask = right_mask };
+                stack_ptr += 1;
+            }
+        }
+    }
+
     fn tracePacketAnyHitLanes(comptime lanes: usize, self: *ShadowSystem, packet: *RayPacket) void {
         const remaining_mask = packet.active_mask & ~packet.occluded_mask;
         if (remaining_mask == 0) return;
@@ -805,7 +1070,7 @@ pub const ShadowSystem = struct {
         }
         if (root_mask == 0) return;
 
-        var stack: [128]TraversalStackEntry = undefined;
+        var stack: [512]TraversalStackEntry = undefined;
         var stack_ptr: usize = 0;
         stack[stack_ptr] = .{ .node_idx = 0, .ray_mask = root_mask };
         stack_ptr += 1;
@@ -815,16 +1080,44 @@ pub const ShadowSystem = struct {
             const entry = stack[stack_ptr];
             const active_rays = entry.ray_mask & ~packet.occluded_mask;
             if (active_rays == 0) continue;
+            if (entry.node_idx >= self.tlas_nodes.items.len) continue;
 
-            const node = &self.blas_nodes.items[entry.node_idx];
+            const node = &self.tlas_nodes.items[entry.node_idx];
             if (node.is_leaf) {
-                packet.occluded_mask |= meshletOccludesPacketMaskLanes(lanes, self, node.left_child_or_meshlet, packet, active_rays);
+                if (node.left_child_or_instance >= self.tlas_instances_inverse.items.len) continue;
+                var local_packet = packet.*;
+                local_packet.active_mask = active_rays;
+                local_packet.occluded_mask = packet.occluded_mask;
+
+                const inv = self.tlas_instances_inverse.items[node.left_child_or_instance];
+                const local_dir = transformVectorByMat4(inv, packet.shared_dir);
+                const local_dir_len = math.Vec3.length(local_dir);
+                local_packet.shared_dir = if (local_dir_len > 1e-6)
+                    math.Vec3.scale(local_dir, 1.0 / local_dir_len)
+                else
+                    packet.shared_dir;
+                local_packet.shared_inv_dir = inverseDirection(local_packet.shared_dir);
+
+                var lane: usize = 0;
+                while (lane < 64) : (lane += 1) {
+                    const bit = @as(u64, 1) << @intCast(lane);
+                    if ((active_rays & bit) == 0) continue;
+                    const world_origin = math.Vec3.new(packet.origins_x[lane], packet.origins_y[lane], packet.origins_z[lane]);
+                    const local_origin = transformPointByMat4(inv, world_origin);
+                    local_packet.origins_x[lane] = local_origin.x;
+                    local_packet.origins_y[lane] = local_origin.y;
+                    local_packet.origins_z[lane] = local_origin.z;
+                }
+
+                traceBLASAnyHitLanes(lanes, self, &local_packet, active_rays);
+                packet.occluded_mask |= local_packet.occluded_mask;
                 if ((packet.occluded_mask & remaining_mask) == remaining_mask) return;
                 continue;
             }
 
-            const left = &self.blas_nodes.items[node.left_child_or_meshlet];
-            const right = &self.blas_nodes.items[node.right_child_or_count];
+            if (node.left_child_or_instance >= self.tlas_nodes.items.len or node.right_child_or_count >= self.tlas_nodes.items.len) continue;
+            const left = &self.tlas_nodes.items[node.left_child_or_instance];
+            const right = &self.tlas_nodes.items[node.right_child_or_count];
             var left_mask: u64 = 0;
             var right_mask: u64 = 0;
             chunk_start = 0;
@@ -836,20 +1129,19 @@ pub const ShadowSystem = struct {
             }
 
             if (left_mask != 0 and right_mask != 0) {
-                if (preferLeftFirst(packet.shared_dir, left, right)) {
-                    // Push far child first so near child is popped/executed first (LIFO).
+                if (preferAABBLeftFirst(packet.shared_dir, left.aabb, right.aabb)) {
                     stack[stack_ptr] = .{ .node_idx = node.right_child_or_count, .ray_mask = right_mask };
                     stack_ptr += 1;
-                    stack[stack_ptr] = .{ .node_idx = node.left_child_or_meshlet, .ray_mask = left_mask };
+                    stack[stack_ptr] = .{ .node_idx = node.left_child_or_instance, .ray_mask = left_mask };
                     stack_ptr += 1;
                 } else {
-                    stack[stack_ptr] = .{ .node_idx = node.left_child_or_meshlet, .ray_mask = left_mask };
+                    stack[stack_ptr] = .{ .node_idx = node.left_child_or_instance, .ray_mask = left_mask };
                     stack_ptr += 1;
                     stack[stack_ptr] = .{ .node_idx = node.right_child_or_count, .ray_mask = right_mask };
                     stack_ptr += 1;
                 }
             } else if (left_mask != 0) {
-                stack[stack_ptr] = .{ .node_idx = node.left_child_or_meshlet, .ray_mask = left_mask };
+                stack[stack_ptr] = .{ .node_idx = node.left_child_or_instance, .ray_mask = left_mask };
                 stack_ptr += 1;
             } else if (right_mask != 0) {
                 stack[stack_ptr] = .{ .node_idx = node.right_child_or_count, .ray_mask = right_mask };

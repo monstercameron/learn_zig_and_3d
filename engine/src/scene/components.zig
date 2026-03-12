@@ -33,8 +33,10 @@ pub const Renderable = struct {
     casts_shadows: bool = true,
 };
 
+pub const max_texture_slots: usize = 32;
+
 pub const TextureSlots = struct {
-    slots: [4]AssetHandle = [_]AssetHandle{AssetHandle.invalid()} ** 4,
+    slots: [max_texture_slots]AssetHandle = [_]AssetHandle{AssetHandle.invalid()} ** max_texture_slots,
 };
 
 pub const Camera = struct {
