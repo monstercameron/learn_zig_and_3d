@@ -125,6 +125,7 @@ extern "user32" fn GetRawInputData(hRawInput: ?windows.HANDLE, uiCommand: u32, p
 extern "user32" fn LoadCursorW(hInstance: ?windows.HINSTANCE, lpCursorName: [*:0]align(1) const u16) ?windows.HCURSOR;
 extern "user32" fn SetCapture(hWnd: windows.HWND) ?windows.HWND;
 extern "user32" fn ReleaseCapture() windows.BOOL;
+extern "user32" fn GetFocus() ?windows.HWND;
 extern "user32" fn SetCursor(hCursor: ?windows.HCURSOR) ?windows.HCURSOR;
 extern "user32" fn GetClientRect(hWnd: windows.HWND, lpRect: *windows.RECT) windows.BOOL;
 extern "user32" fn ClientToScreen(hWnd: windows.HWND, lpPoint: *windows.POINT) windows.BOOL;
@@ -388,6 +389,35 @@ fn sceneLoadingTotalSteps(scene_desc: LoadedSceneDescription) usize {
     return @max(@as(usize, 1), scene_desc.assets.len + scene_desc.textureSlotCount() + 1);
 }
 
+fn centerCursorInWindow(hwnd: windows.HWND) void {
+    var rect: windows.RECT = undefined;
+    if (GetClientRect(hwnd, &rect) == 0) return;
+    var point = windows.POINT{
+        .x = @divTrunc(rect.right - rect.left, 2),
+        .y = @divTrunc(rect.bottom - rect.top, 2),
+    };
+    if (ClientToScreen(hwnd, &point) == 0) return;
+    _ = SetCursorPos(point.x, point.y);
+}
+
+fn syncFirstPersonMouseGrab(renderer: *Renderer, mouse_grabbed: *bool) void {
+    const focused = if (GetFocus()) |focused_hwnd| focused_hwnd == renderer.hwnd else false;
+    const should_grab = focused and renderer.isFirstPersonMode();
+    if (should_grab) {
+        if (!mouse_grabbed.*) {
+            _ = SetCapture(renderer.hwnd);
+            centerCursorInWindow(renderer.hwnd);
+            mouse_grabbed.* = true;
+        }
+        return;
+    }
+
+    if (mouse_grabbed.*) {
+        _ = ReleaseCapture();
+        mouse_grabbed.* = false;
+    }
+}
+
 /// renderSceneLoadingFrame renders Main output.
 fn renderSceneLoadingFrame(progress: *SceneLoadingProgress) void {
     if (!progress.running.*) return;
@@ -630,13 +660,11 @@ pub fn main() !void {
                     applyCursorFromRenderer(r);
                 } else if (m.message == WM_LBUTTONDOWN) {
                     const coords = decodeMouseCoords(m.lParam);
-                    if (r.isFirstPersonMode()) _ = SetCapture(r.hwnd);
                     r.handleMouseLeftClick(coords.x, coords.y);
                     applyCursorFromRenderer(r);
                 } else if (m.message == WM_LBUTTONUP) {
                     const coords = decodeMouseCoords(m.lParam);
                     r.handleMouseLeftRelease(coords.x, coords.y);
-                    if (r.isFirstPersonMode()) _ = ReleaseCapture();
                     applyCursorFromRenderer(r);
                 } else if (m.message == WM_RBUTTONDOWN) {
                     const coords = decodeMouseCoords(m.lParam);
@@ -752,6 +780,7 @@ pub fn main() !void {
     renderer.setCameraPosition(toRenderVec3(scene_desc.camera_position));
     renderer.setCameraOrientation(scene_desc.camera_orientation_pitch, scene_desc.camera_orientation_yaw);
     renderer.setSceneCameraScriptActive(true);
+    var mouse_grabbed = false;
     var selected_scene_entity_pin: ?scene_runtime.EntityId = null;
     defer if (selected_scene_entity_pin) |entity| phase13_runtime.residency.unpinEntity(entity);
 
@@ -844,6 +873,7 @@ pub fn main() !void {
             applySceneRendererCommand(&renderer, command);
         }
         phase13_runtime.clearRendererCommands();
+        syncFirstPersonMouseGrab(&renderer, &mouse_grabbed);
         MessagePump.applyCursorFromRenderer(&renderer);
         syncSceneMeshIfDirty(&renderer, &scene_resources, &phase13_runtime);
         if (selected_scene_entity_pin) |pinned_entity| {
@@ -1004,6 +1034,18 @@ fn resolveLaunchSceneKey(allocator: std.mem.Allocator, scene_index: SceneIndexFi
     const chosen_key = requested_scene orelse scene_index.defaultScene;
     for (scene_index.scenes) |entry| {
         if (std.ascii.eqlIgnoreCase(chosen_key, entry.key)) return entry.key;
+    }
+
+    for (scene_index.scenes) |entry| {
+        if (std.ascii.eqlIgnoreCase(chosen_key, entry.file)) return entry.key;
+
+        const entry_basename = std.fs.path.basename(entry.file);
+        if (std.ascii.eqlIgnoreCase(chosen_key, entry_basename)) return entry.key;
+
+        if (std.mem.endsWith(u8, entry_basename, ".scene.json")) {
+            const entry_stem = entry_basename[0 .. entry_basename.len - ".scene.json".len];
+            if (std.ascii.eqlIgnoreCase(chosen_key, entry_stem)) return entry.key;
+        }
     }
 
     for (scene_index.scenes) |entry| {

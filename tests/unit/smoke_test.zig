@@ -71,7 +71,7 @@ test "default camera controls debounce held mode toggle" {
     try std.testing.expectEqual(scene_main.Command{ .set_camera_mode = .toggle }, runtime.rendererCommands()[0]);
 }
 
-test "default camera controls only apply mouse look while right button is held" {
+test "default camera controls apply mouse look in first-person mode without right button" {
     var runtime = try scene_main.SceneRuntime.init(std.testing.allocator, .{
         .min = .{ .x = -16.0, .y = -16.0, .z = -16.0 },
         .max = .{ .x = 16.0, .y = 16.0, .z = 16.0 },
@@ -110,17 +110,26 @@ test "default camera controls only apply mouse look while right button is held" 
     var snapshot = try runtime.updateFrame(.{ .x = 0.0, .y = 1.0, .z = -4.0 }, 0.0, 0.0, 32.0, 64.0, 1, 1.0 / 60.0);
     snapshot.deinit();
 
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), runtime.components.cameras.items[camera_index].?.yaw, 1e-6);
+    const yaw_after_first_person_frame = runtime.components.cameras.items[camera_index].?.yaw;
+    try std.testing.expect(yaw_after_first_person_frame > 0.0);
 
     script_input = scene_main.ScriptInputState{};
-    script_input.first_person_active = true;
-    script_input.setMouseButton(.right, true);
     script_input.look_delta = .{ .x = 24.0, .y = 0.0 };
     runtime.setExecutionInputs(false, false, script_input);
     snapshot = try runtime.updateFrame(.{ .x = 0.0, .y = 1.0, .z = -4.0 }, 0.0, 0.0, 32.0, 64.0, 2, 1.0 / 60.0);
     snapshot.deinit();
 
-    try std.testing.expect(runtime.components.cameras.items[camera_index].?.yaw > 0.0);
+    const yaw_after_editor_frame = runtime.components.cameras.items[camera_index].?.yaw;
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), yaw_after_editor_frame, 1e-6);
+
+    script_input = scene_main.ScriptInputState{};
+    script_input.setMouseButton(.right, true);
+    script_input.look_delta = .{ .x = 24.0, .y = 0.0 };
+    runtime.setExecutionInputs(false, false, script_input);
+    snapshot = try runtime.updateFrame(.{ .x = 0.0, .y = 1.0, .z = -4.0 }, 0.0, 0.0, 32.0, 64.0, 3, 1.0 / 60.0);
+    snapshot.deinit();
+
+    try std.testing.expect(runtime.components.cameras.items[camera_index].?.yaw > yaw_after_editor_frame);
 }
 
 test "default renderer controls reserve bare k for gameplay and use ctrl plus l for positive nudge" {

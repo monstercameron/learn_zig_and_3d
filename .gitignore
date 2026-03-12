@@ -15,12 +15,9 @@ target/
 # Runtime caches and generated outputs
 cache/
 artifacts/
-artifacts/**
-!artifacts/
-!artifacts/perf/
-!artifacts/perf/hotspot-report-template.md
 *.meshlets
 profile.json
+*.log
 
 # Python environments and caches
 .venv/
@@ -43,5 +40,13 @@ benchmarks/src/*.tmp
 # OS files
 Thumbs.db
 .directory
+
+# Local scratch / backup files
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*.stackdump
 
 # Dependencies

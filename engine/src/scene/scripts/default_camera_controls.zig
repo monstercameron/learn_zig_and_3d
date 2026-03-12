@@ -60,7 +60,6 @@ fn updateCamera(ctx: *script_host.ScriptCallbackContext, state: *CameraControlSt
     initializeState(ctx, state);
     const state_view = getCameraState(ctx) orelse return;
     const keyboard = ctx.input.keyboard;
-    const mouse = ctx.input.mouse;
     var camera_position = state_view.transform.position;
     var pitch = state_view.camera.pitch;
     var yaw = state_view.camera.yaw;
@@ -74,9 +73,7 @@ fn updateCamera(ctx: *script_host.ScriptCallbackContext, state: *CameraControlSt
     if (keyboard.wasPressed(.e)) ctx.commands.queueAdjustCameraFov(fov_step) catch {};
 
     if (ctx.input.first_person_active) {
-        if (mouse.isDown(.right)) {
-            applyLook(&yaw, &pitch, ctx.input.look_delta.x, ctx.input.look_delta.y);
-        }
+        applyLook(&yaw, &pitch, ctx.input.look_delta.x, ctx.input.look_delta.y);
 
         if (!keyboard.isDown(.space)) {
             state.repeat_jump_when_grounded = false;

@@ -1,6 +1,7 @@
 const std = @import("std");
-const math = @import("engine/src/core/math.zig");
-const tile_renderer = @import("engine/src/render/core/tile_renderer.zig");
+const engine_bench = @import("engine_bench");
+const math = engine_bench.math;
+const tile_renderer = engine_bench.tile_renderer;
 
 const RasterCase = struct {
     name: []const u8,

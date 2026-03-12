@@ -1,12 +1,13 @@
 const std = @import("std");
-const math = @import("engine/src/core/math.zig");
-const config = @import("engine/src/core/app_config.zig");
-const texture = @import("engine/src/assets/texture.zig");
-const lighting = @import("engine/src/render/core/lighting.zig");
-const shadow_system = @import("engine/src/render/core/shadow_system.zig");
-const tile_renderer = @import("engine/src/render/core/tile_renderer.zig");
-const hybrid_shadow_cache_kernel = @import("engine/src/render/kernels/hybrid_shadow_cache_kernel.zig");
-const job_system = @import("engine/src/core/job_system.zig");
+const engine_bench = @import("engine_bench");
+const math = engine_bench.math;
+const config = engine_bench.app_config;
+const texture = engine_bench.texture;
+const lighting = engine_bench.lighting;
+const shadow_system = engine_bench.shadow_system;
+const tile_renderer = engine_bench.tile_renderer;
+const hybrid_shadow_cache_kernel = engine_bench.hybrid_shadow_cache_kernel;
+const job_system = engine_bench.job_system;
 
 const WarmupRuns: usize = 1;
 const MeasureRuns: usize = 7;
@@ -520,6 +521,7 @@ fn buildSyntheticShadowSystem(allocator: std.mem.Allocator, triangle_packet_coun
         .bound_aabb = scene_aabb,
         .normal_cone_axis = math.Vec3.new(0.0, 0.0, 1.0),
         .normal_cone_cutoff = -1.0,
+        .normal_cone_sine = 0.0,
         .triangle_offset = 0,
         .triangle_count = @as(u16, @intCast(@min(triangle_packet_count * 8, @as(usize, std.math.maxInt(u16))))),
         .triangle_packet_offset = 0,

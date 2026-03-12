@@ -225,7 +225,7 @@ For Phase 15 hotspot tickets, every before/after entry must include exact captur
 Use this targeted microbench to evaluate `rasterizeTriangleToTile` behavior across small, medium, and full-tile triangles:
 
 ```powershell
-zig run -O ReleaseFast rasterize-triangle-microbench.zig
+zig build run-raster-microbench -Doptimize=ReleaseFast
 ```
 
 It prints:
@@ -239,19 +239,19 @@ It prints:
 Run the full Phase 15 suite:
 
 ```powershell
-zig run -O ReleaseFast phase15-microbench.zig
+zig build run-phase15-microbench -Doptimize=ReleaseFast
 ```
 
 Run a specific bench:
 
 ```powershell
-zig run -O ReleaseFast phase15-microbench.zig -- raster
-zig run -O ReleaseFast phase15-microbench.zig -- chunk
-zig run -O ReleaseFast phase15-microbench.zig -- trace
-zig run -O ReleaseFast phase15-microbench.zig -- shadow_apply
-zig run -O ReleaseFast phase15-microbench.zig -- shadow_apply_threshold
-zig run -O ReleaseFast phase15-microbench.zig -- jobs
-zig run -O ReleaseFast phase15-microbench.zig -- tonemap
-zig run -O ReleaseFast phase15-microbench.zig -- bilinear
-zig run -O ReleaseFast phase15-microbench.zig -- cache
+zig build run-phase15-microbench -Doptimize=ReleaseFast -- raster
+zig build run-phase15-microbench -Doptimize=ReleaseFast -- chunk
+zig build run-phase15-microbench -Doptimize=ReleaseFast -- trace
+zig build run-phase15-microbench -Doptimize=ReleaseFast -- shadow_apply
+zig build run-phase15-microbench -Doptimize=ReleaseFast -- shadow_apply_threshold
+zig build run-phase15-microbench -Doptimize=ReleaseFast -- jobs
+zig build run-phase15-microbench -Doptimize=ReleaseFast -- tonemap
+zig build run-phase15-microbench -Doptimize=ReleaseFast -- bilinear
+zig build run-phase15-microbench -Doptimize=ReleaseFast -- cache
 ```

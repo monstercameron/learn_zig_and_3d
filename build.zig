@@ -134,6 +134,28 @@ pub fn build(b: *std.Build) void {
     benchmarks_run_cmd.cwd = b.path("benchmarks");
     run_benchmarks_step.dependOn(&benchmarks_run_cmd.step);
 
+    const run_raster_microbench_step = b.step("run-raster-microbench", "Run rasterize-triangle microbench");
+    const run_raster_microbench_cmd = b.addSystemCommand(&[_][]const u8{ "zig", "build", "run-raster-microbench" });
+    run_raster_microbench_cmd.cwd = b.path("benchmarks");
+    if (b.args) |args| {
+        if (args.len > 0) {
+            run_raster_microbench_cmd.addArg("--");
+            run_raster_microbench_cmd.addArgs(args);
+        }
+    }
+    run_raster_microbench_step.dependOn(&run_raster_microbench_cmd.step);
+
+    const run_phase15_microbench_step = b.step("run-phase15-microbench", "Run Phase 15 microbench suite");
+    const run_phase15_microbench_cmd = b.addSystemCommand(&[_][]const u8{ "zig", "build", "run-phase15-microbench" });
+    run_phase15_microbench_cmd.cwd = b.path("benchmarks");
+    if (b.args) |args| {
+        if (args.len > 0) {
+            run_phase15_microbench_cmd.addArg("--");
+            run_phase15_microbench_cmd.addArgs(args);
+        }
+    }
+    run_phase15_microbench_step.dependOn(&run_phase15_microbench_cmd.step);
+
     const hotreload_demo_step = b.step("hotreload-demo", "Build the hot reload experiment");
     const hotreload_demo_cmd = b.addSystemCommand(&[_][]const u8{ "zig", "build" });
     hotreload_demo_cmd.cwd = b.path("experiments/hotreload_demo");

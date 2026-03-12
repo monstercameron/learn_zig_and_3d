@@ -14,7 +14,7 @@ This folder contains scripts used to profile and sample renderer behavior.
 
 - Prefer running profiling builds with `-Dprofile=true` when native call stacks matter.
 - Keep generated output such as `profile.json` or temporary logs out of source control.
-- For focused raster hot-loop checks, run `zig run -O ReleaseFast rasterize-triangle-microbench.zig` from repo root.
-- For broader Phase 15 hotspot microbenches, run `zig run -O ReleaseFast phase15-microbench.zig` from repo root.
-- For shadow traversal scaling specifically, run `zig run -O ReleaseFast phase15-microbench.zig -- trace`.
-- For shadow apply threshold tuning, run `zig run -O ReleaseFast phase15-microbench.zig -- shadow_apply_threshold`.
+- For focused raster hot-loop checks, run `zig build run-raster-microbench -Doptimize=ReleaseFast` from repo root.
+- For broader Phase 15 hotspot microbenches, run `zig build run-phase15-microbench -Doptimize=ReleaseFast` from repo root.
+- For shadow traversal scaling specifically, run `zig build run-phase15-microbench -Doptimize=ReleaseFast -- trace`.
+- For shadow apply threshold tuning, run `zig build run-phase15-microbench -Doptimize=ReleaseFast -- shadow_apply_threshold`.

@@ -51,7 +51,7 @@ Goal: every standalone renderer feature becomes its own render pass module and i
 ### 6.1 Core Scene Passes
 - [x] Extract `SkyboxPass` to `engine/src/render/passes/skybox_pass.zig`.
 - [x] Extract row kernel to `engine/src/render/kernels/skybox_kernel.zig`.
-- [ ] Wire through pass graph and remove inline skybox code from renderer.
+- [x] Wire through pass graph and remove inline skybox code from renderer.
 - [ ] Add parity check screenshot for skybox-enabled frame.
 
 - [x] Extract `ShadowMapPass` to `engine/src/render/passes/shadow_map_pass.zig`.
@@ -197,17 +197,17 @@ Goal: add explicit SIMD/vectorized code paths in hottest kernels while preservin
 - [x] Runtime lane selection by backend (`1/8/16/32` or platform-appropriate subset).
 - [x] Keep identical clamp/saturation math.
 
-- [ ] `taa_kernel.zig`
-- [ ] Vectorize neighborhood/history blend sections where contiguous memory access exists.
+- [x] `taa_kernel.zig`
+- [x] Vectorize neighborhood/history blend sections where contiguous memory access exists.
 - [ ] Preserve rejection thresholds and history validity behavior.
 
 - [ ] `ssr_kernel.zig`
 - [ ] Vectorize ray-step accumulation where branch divergence is manageable.
 - [ ] Keep hit thickness/max-step behavior identical.
 
-- [ ] `ssao_blur_kernel.zig` and `ssao_sample_kernel.zig`
-- [ ] Vectorize blur taps and sample accumulation batches.
-- [ ] Preserve radius/bias/threshold semantics.
+- [x] `ssao_blur_kernel.zig` and `ssao_sample_kernel.zig`
+- [x] Vectorize blur taps and sample accumulation batches.
+- [x] Preserve radius/bias/threshold semantics.
 - [x] `ssao_blur_kernel.zig` and `ssao_sample_kernel.zig`
 - [x] Vectorize blur taps and sample accumulation batches. (implemented in `passes/ssao_rows.zig` batched lane blocks + SIMD composite path)
 - [x] Preserve radius/bias/threshold semantics.
@@ -571,10 +571,10 @@ Goal: add a scene runtime that supports parent/child hierarchy, dependency-aware
 Goal: remove remaining scalar bottlenecks in hot render paths, improve SIMD utilization, and cut scheduling/memory overhead while preserving image parity.
 
 ### 14.0 Baseline and Safety Gates
-- [ ] Capture a locked baseline frame profile for `mixed_shadows_static` (fixed resolution, fixed camera, fixed frame id).
-- [ ] Export baseline `profile.json` and store summarized top zones (`renderTileJob`, `meshletShadowTile`, `meshletShadowTrace`, `meshletShadowApply`).
+- [x] Capture a locked baseline frame profile for `mixed_shadows_static` (fixed resolution, fixed camera, fixed frame id).
+- [x] Export baseline `profile.json` and store summarized top zones (`renderTileJob`, `meshletShadowTile`, `meshletShadowTrace`, `meshletShadowApply`).
 - [ ] Record baseline counters: active tiles, shadow queries, meshlet-ray tests, total shadow jobs.
-- [ ] Add a per-change perf log template (`before_us`, `after_us`, `delta_pct`, scene, config).
+- [x] Add a per-change perf log template (`before_us`, `after_us`, `delta_pct`, scene, config).
 - [ ] Add a parity capture checklist: screenshot pair + max per-channel error + pass/fail.
 - [ ] Require one `Debug` and one `ReleaseFast` run for each hotspot optimization ticket.
 
@@ -617,7 +617,7 @@ Goal: remove remaining scalar bottlenecks in hot render paths, improve SIMD util
 - [ ] Convert `applyMeshletShadows` pixel gather to strict SoA staging (origins/dirs/skip ids).
 - [ ] Sort or bucket ray packets by coherence key (tile-local direction/depth band).
 - [ ] Reduce per-ray normal/world reconstruction FLOPs via hoisted matrix rows.
-- [ ] Add early reject for clearly backfacing/light-opposed fragments before packet fill.
+- [x] Add early reject for clearly backfacing/light-opposed fragments before packet fill.
 - [ ] Replace scalar occlusion apply loop with masked vectorized attenuation writeback.
 - [ ] Add per-tile telemetry fields: packet_count, avg_active_lanes, occluded_ratio.
 - [ ] Tune shadow chunk splitting thresholds from measured worker utilization data.
@@ -692,7 +692,7 @@ Goal: remove remaining scalar bottlenecks in hot render paths, improve SIMD util
 - [ ] Audit hot buffers for alignment suitable for `@Vector` loads/stores.
 - [ ] Add explicit alignment assertions where SIMD block casts are used.
 - [ ] Expand SoA adoption in per-light/per-ray loops that still read AoS fields in hot code.
-- [ ] Remove avoidable pointer-chasing from per-pixel inner loops.
+- [x] Remove avoidable pointer-chasing from per-pixel inner loops.
 - [ ] Add cache-miss-focused profiling notes per optimized hotspot.
   Status: removed avoidable pointer-chasing/row-base recomputation in `depth_of_field_kernel.zig`, `ssr_kernel.zig`, `ssgi_kernel.zig`, `chromatic_aberration_kernel.zig`, and `skybox_kernel.zig`; attempted row-slice rewrite for `lens_flare_kernel.zig` regressed microbench throughput and was rolled back.
 
@@ -768,8 +768,8 @@ Goal: execute a focused optimization pass on measured frame hotspots (`renderTil
 
 ### 15.5 Job System Throughput and Wait Strategy
 - [ ] Replace mutex-heavy deque operations (`push/pop/steal`) with a lock-free or low-lock design.
-- [ ] Add worker wake signaling (semaphore/event) to avoid `yield`-only idle loops.
-- [ ] Add "help while waiting" parent-job behavior so waiting threads execute pending work.
+- [x] Add worker wake signaling (semaphore/event) to avoid `yield`-only idle loops.
+- [x] Add "help while waiting" parent-job behavior so waiting threads execute pending work.
 - [x] Remove renderer-side manual polling loops where parent-job wait is sufficient.
 - [ ] Add scheduler perf counters: steals, failed steals, queue contention, idle-wait time.
 - [ ] Add stress test with many tiny jobs to validate throughput scaling across core counts.

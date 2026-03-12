@@ -80,41 +80,33 @@ pub const Job = struct {
     }
 };
 
-// ========== JOB QUEUE (LOCK-FREE CHASE-LEV DEQUE) ==========
+// ========== JOB QUEUE ==========
 
-fn roundUpPow2(v: usize) usize {
-    if (v <= 1) return 1;
-    var x = v - 1;
-    const bits = @bitSizeOf(usize);
-    var shift: usize = 1;
-    while (shift < bits) : (shift <<= 1) {
-        x |= x >> @intCast(shift);
-    }
-    return x + 1;
-}
-
-/// Work-stealing deque:
-/// - Owner thread pushes/pops from `bottom` (LIFO), lock-free.
-/// - Thieves steal from `top` (FIFO-ish), lock-free CAS.
+/// Thread-safe work queue:
+/// - Submissions can come from any thread.
+/// - Workers pop from the tail for cache-friendly LIFO behavior.
+/// - Idle workers steal from the head to balance load.
 pub const JobQueue = struct {
     jobs: []?*Job,
     capacity: usize,
-    mask: usize,
-    top: std.atomic.Value(usize),
-    bottom: std.atomic.Value(usize),
+    head: usize,
+    tail: usize,
+    len: usize,
+    mutex: std.Thread.Mutex,
     allocator: std.mem.Allocator,
 
     pub fn init(capacity: u32, allocator: std.mem.Allocator) !JobQueue {
         if (capacity == 0) return error.InvalidCapacity;
-        const cap = roundUpPow2(@as(usize, capacity));
+        const cap = @as(usize, capacity);
         const jobs = try allocator.alloc(?*Job, cap);
         @memset(jobs, null);
         return JobQueue{
             .jobs = jobs,
             .capacity = cap,
-            .mask = cap - 1,
-            .top = std.atomic.Value(usize).init(0),
-            .bottom = std.atomic.Value(usize).init(0),
+            .head = 0,
+            .tail = 0,
+            .len = 0,
+            .mutex = .{},
             .allocator = allocator,
         };
     }
@@ -123,58 +115,46 @@ pub const JobQueue = struct {
         self.allocator.free(self.jobs);
     }
 
-    /// Owner-thread only.
     pub fn push(self: *JobQueue, job: *Job) bool {
-        const b = self.bottom.load(.monotonic);
-        const t = self.top.load(.acquire);
-        if (b - t >= self.capacity) return false; // Full.
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
-        self.jobs[b & self.mask] = job;
-        self.bottom.store(b + 1, .release);
+        if (self.len == self.capacity) return false;
+        self.jobs[self.tail] = job;
+        self.tail = (self.tail + 1) % self.capacity;
+        self.len += 1;
         return true;
     }
 
-    /// Owner-thread only.
     pub fn pop(self: *JobQueue) ?*Job {
-        const b_start = self.bottom.load(.monotonic);
-        if (b_start == 0) return null;
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
-        const b = b_start - 1;
-        self.bottom.store(b, .monotonic);
-        const t = self.top.load(.monotonic);
-        if (t > b) {
-            self.bottom.store(t, .release);
-            return null;
-        }
-
-        var job = self.jobs[b & self.mask];
-        if (t == b) {
-            // Last item races with stealers.
-            if (self.top.cmpxchgStrong(t, t + 1, .seq_cst, .monotonic) != null) {
-                job = null;
-            }
-            self.bottom.store(t + 1, .release);
-        }
+        if (self.len == 0) return null;
+        self.tail = (self.tail + self.capacity - 1) % self.capacity;
+        const job = self.jobs[self.tail];
+        self.jobs[self.tail] = null;
+        self.len -= 1;
         return job;
     }
 
-    /// Thief-thread safe.
     pub fn steal(self: *JobQueue) ?*Job {
-        const t = self.top.load(.acquire);
-        const b = self.bottom.load(.acquire);
-        if (t >= b) return null;
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
-        const job = self.jobs[t & self.mask];
-        if (self.top.cmpxchgStrong(t, t + 1, .acq_rel, .acquire) != null) return null;
+        if (self.len == 0) return null;
+        const job = self.jobs[self.head];
+        self.jobs[self.head] = null;
+        self.head = (self.head + 1) % self.capacity;
+        self.len -= 1;
         return job;
     }
 
     pub fn count(self: *const JobQueue) u32 {
-        const t = self.top.load(.acquire);
-        const b = self.bottom.load(.acquire);
-        if (b <= t) return 0;
-        const diff = b - t;
-        return @intCast(@min(diff, @as(usize, std.math.maxInt(u32))));
+        const queue = @constCast(self);
+        queue.mutex.lock();
+        defer queue.mutex.unlock();
+        return @intCast(@min(queue.len, @as(usize, std.math.maxInt(u32))));
     }
 };
 
@@ -287,15 +267,31 @@ pub const JobSystem = struct {
     pub fn submitJobAuto(self: *JobSystem, job: *Job) bool {
         if (self.worker_count == 0) return false;
 
-        if (job.parent) |parent| parent.registerChild();
-        errdefer if (job.parent) |parent| parent.unregisterChild();
+        var parent_registered = false;
+        if (job.parent) |parent| {
+            parent.registerChild();
+            parent_registered = true;
+        }
+        defer if (parent_registered) {
+            if (job.parent) |parent| parent.unregisterChild();
+        };
+
+        _ = self.pending_jobs.fetchAdd(1, .acq_rel);
+        var should_rollback_pending = true;
+        defer if (should_rollback_pending) {
+            const pending_before = self.pending_jobs.fetchSub(1, .acq_rel);
+            if (pending_before == 0) {
+                self.pending_jobs.store(0, .release);
+            }
+        };
 
         const start = self.submit_seed.fetchAdd(1, .monotonic) % self.worker_count;
         var attempts: u32 = 0;
         while (attempts < self.worker_count) : (attempts += 1) {
             const worker_idx = (start + attempts) % self.worker_count;
             if (self.workers[worker_idx].queue.push(job)) {
-                _ = self.pending_jobs.fetchAdd(1, .acq_rel);
+                should_rollback_pending = false;
+                parent_registered = false;
                 self.work_mutex.lock();
                 self.work_cond.signal();
                 self.work_mutex.unlock();
@@ -380,8 +376,15 @@ pub const JobSystem = struct {
         }
 
         const previous = self.pending_jobs.fetchSub(1, .acq_rel);
-        if (previous <= 1) {
+        if (previous == 0) {
             self.pending_jobs.store(0, .release);
+            job_logger.errorSub("accounting", "pending_jobs underflow detected while finalizing job", .{});
+            self.work_mutex.lock();
+            self.work_cond.broadcast();
+            self.work_mutex.unlock();
+            return;
+        }
+        if (previous <= 1) {
             self.work_mutex.lock();
             self.work_cond.broadcast();
             self.work_mutex.unlock();
