@@ -53,6 +53,8 @@ const WM_SYSKEYUP = 0x0105;
 const WM_CHAR = 0x0102;
 const WM_QUIT = 0x12;
 const WM_MOUSEMOVE = 0x0200;
+const WM_LBUTTONDOWN = 0x0201;
+const WM_LBUTTONUP = 0x0202;
 
 // Declarations for Windows API functions.
 // JS Analogy: These are low-level functions to interact with the OS event queue.
@@ -77,10 +79,19 @@ extern "user32" fn TranslateMessage(lpMsg: *const MSG) bool;
 
 extern "user32" fn DispatchMessageW(lpMsg: *const MSG) windows.LRESULT;
 extern "user32" fn GetAsyncKeyState(vKey: i32) i16;
+extern "user32" fn LoadCursorW(hInstance: ?windows.HINSTANCE, lpCursorName: [*:0]const u16) ?windows.HCURSOR;
+extern "user32" fn SetCursor(hCursor: ?windows.HCURSOR) ?windows.HCURSOR;
+extern "user32" fn GetClientRect(hWnd: windows.HWND, lpRect: *windows.RECT) windows.BOOL;
+extern "user32" fn ClientToScreen(hWnd: windows.HWND, lpPoint: *windows.POINT) windows.BOOL;
+extern "user32" fn SetCursorPos(X: i32, Y: i32) windows.BOOL;
 
 // Constant for PeekMessageW: remove the message from the queue after reading.
 const PM_REMOVE = 1;
 const VK_RETURN = 0x0D;
+const MK_LBUTTON: usize = 0x0001;
+const IDC_ARROW_ID: usize = 32512;
+const IDC_SIZEALL_ID: usize = 32646;
+const IDC_HAND_ID: usize = 32649;
 
 // Windows Sleep function for frame pacing.
 extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
@@ -91,6 +102,9 @@ const Window = @import("platform/window.zig").Window;
 const renderer_module = @import("render/renderer.zig");
 const Renderer = renderer_module.Renderer;
 const LightShadowMode = renderer_module.LightInfo.ShadowMode;
+const CursorStyle = renderer_module.CursorStyle;
+const SceneItemBinding = renderer_module.SceneItemBinding;
+const SceneItemTranslateRequest = renderer_module.SceneItemTranslateRequest;
 const gltf_loader = @import("assets/gltf_loader.zig");
 const obj_loader = @import("assets/obj_loader.zig");
 const texture = @import("assets/texture.zig");
@@ -241,11 +255,13 @@ const GunRuntime = struct {
 };
 
 const ScenePhysicsBinding = struct {
+    instance_index: usize,
     body_id: zphysics.BodyId,
     vertex_start: usize,
     vertex_count: usize,
     triangle_start: usize,
     triangle_count: usize,
+    gizmo_offset_local: math.Vec3,
     local_vertices: []math.Vec3,
     local_normals: []math.Vec3,
 };
@@ -371,6 +387,49 @@ pub fn main() !void {
 
     var running = true;
     const MessagePump = struct {
+        fn cursorResource(id: usize) [*:0]const u16 {
+            return @ptrFromInt(id);
+        }
+
+        fn applyCursorFromRenderer(r: *Renderer) void {
+            const desired = r.desiredCursorStyle();
+            switch (desired) {
+                .hidden => {
+                    _ = SetCursor(null);
+                },
+                else => {
+                    const cursor_id: usize = switch (desired) {
+                        .arrow => IDC_ARROW_ID,
+                        .grab => IDC_HAND_ID,
+                        .grabbing => IDC_SIZEALL_ID,
+                        .hidden => unreachable,
+                    };
+                    const cursor = LoadCursorW(null, cursorResource(cursor_id));
+                    _ = SetCursor(cursor);
+                },
+            }
+        }
+
+        fn recenterFirstPersonCursor(r: *Renderer, current_client: windows.POINT) void {
+            if (!r.isFirstPersonMode()) return;
+            var client_rect: windows.RECT = undefined;
+            if (GetClientRect(r.hwnd, &client_rect) == 0) return;
+            const width = client_rect.right - client_rect.left;
+            const height = client_rect.bottom - client_rect.top;
+            if (width <= 0 or height <= 0) return;
+
+            const center_x = @divTrunc(width, 2);
+            const center_y = @divTrunc(height, 2);
+            if (current_client.x == center_x and current_client.y == center_y) return;
+            var screen_center = windows.POINT{
+                .x = center_x,
+                .y = center_y,
+            };
+            if (ClientToScreen(r.hwnd, &screen_center) == 0) return;
+            _ = SetCursorPos(screen_center.x, screen_center.y);
+            r.noteMouseWarp(center_x, center_y);
+        }
+
         fn decodeMouseCoords(lParam: windows.LPARAM) windows.POINT {
             const raw: usize = @bitCast(lParam);
             const x16: u16 = @intCast(raw & 0xFFFF);
@@ -399,9 +458,24 @@ pub fn main() !void {
                 } else if (m.message == WM_CHAR) {
                     const char_code: u32 = @intCast(m.wParam);
                     r.handleCharInput(char_code);
+                    applyCursorFromRenderer(r);
                 } else if (m.message == WM_MOUSEMOVE) {
                     const coords = decodeMouseCoords(m.lParam);
+                    const button_mask: usize = @intCast(m.wParam);
+                    if ((button_mask & MK_LBUTTON) == 0) {
+                        r.handleMouseLeftRelease(coords.x, coords.y);
+                    }
                     r.handleMouseMove(coords.x, coords.y);
+                    recenterFirstPersonCursor(r, coords);
+                    applyCursorFromRenderer(r);
+                } else if (m.message == WM_LBUTTONDOWN) {
+                    const coords = decodeMouseCoords(m.lParam);
+                    r.handleMouseLeftClick(coords.x, coords.y);
+                    applyCursorFromRenderer(r);
+                } else if (m.message == WM_LBUTTONUP) {
+                    const coords = decodeMouseCoords(m.lParam);
+                    r.handleMouseLeftRelease(coords.x, coords.y);
+                    applyCursorFromRenderer(r);
                 }
                 _ = TranslateMessage(&m);
                 _ = DispatchMessageW(&m);
@@ -477,6 +551,7 @@ pub fn main() !void {
     var scene_asset = try loadPrimaryMesh(allocator, scene_def);
     defer scene_asset.mesh.deinit(); // Guarantees the mesh memory is freed on exit.
     defer allocator.free(scene_asset.model_instances);
+    try configureSceneItemBindings(allocator, &renderer, &scene_asset, scene_def);
     var gun_runtime: ?GunRuntime = null;
     var scene_physics_runtime: ?ScenePhysicsRuntime = null;
     if (scene_def.texture_slots.len > 0) {
@@ -492,15 +567,6 @@ pub fn main() !void {
         }
     }
     try configureSceneLights(&renderer, scene_def.lights);
-    if (scene_def.runtime == .scene_physics) {
-        // Scene-physics showcases (Cornell) should always run with direct shadow resolve enabled.
-        config.POST_SHADOW_ENABLED = true;
-        config.POST_HYBRID_SHADOW_ENABLED = false;
-        config.POST_SHADOW_STRENGTH_PERCENT = @max(config.POST_SHADOW_STRENGTH_PERCENT, 52);
-        // Tone down visible screen-space noise by ~75% for showcase scenes.
-        config.POST_SSAO_STRENGTH_PERCENT = @max(1, @divTrunc(config.POST_SSAO_STRENGTH_PERCENT, 4));
-        config.POST_FILM_GRAIN_STRENGTH *= 0.25;
-    }
     if (scene_def.runtime == .gun_physics) {
         gun_runtime = try setupGunRuntime(allocator, &scene_asset.mesh);
     } else if (scene_def.runtime == .scene_physics) {
@@ -551,6 +617,16 @@ pub fn main() !void {
             break;
         }
 
+        if (renderer.consumeSceneItemTranslateRequest()) |move_request| {
+            applySceneItemTranslateRequest(
+                &renderer,
+                &scene_asset,
+                scene_def,
+                if (scene_physics_runtime) |*runtime| runtime else null,
+                move_request,
+            );
+        }
+
         if (gun_runtime) |*runtime| {
             const enter_is_down = ((renderer.keys_pressed & input.KeyBits.enter) != 0) or isEnterDown();
             if (enter_is_down and !runtime.enter_was_down) {
@@ -585,7 +661,10 @@ pub fn main() !void {
             scene_asset.mesh.refreshMeshlets();
             renderer.invalidateMeshWork();
         } else if (scene_physics_runtime) |*runtime| {
-            runtime.pw.system.update(1.0 / 60.0, .{ .collision_steps = 1 }) catch {};
+            const pause_scene_physics = renderer.isSceneItemDragActive();
+            if (!pause_scene_physics) {
+                runtime.pw.system.update(1.0 / 60.0, .{ .collision_steps = 1 }) catch {};
+            }
             const lock_iface = runtime.pw.system.getBodyLockInterfaceNoLock();
             for (runtime.bindings) |binding| {
                 var read_lock: zphysics.BodyLockRead = .{};
@@ -606,6 +685,20 @@ pub fn main() !void {
                     n.y = rot[1] * on.x + rot[4] * on.y + rot[7] * on.z;
                     n.z = rot[2] * on.x + rot[5] * on.y + rot[8] * on.z;
                 }
+                const offset = binding.gizmo_offset_local;
+                const gizmo_offset_world = math.Vec3.new(
+                    rot[0] * offset.x + rot[3] * offset.y + rot[6] * offset.z,
+                    rot[1] * offset.x + rot[4] * offset.y + rot[7] * offset.z,
+                    rot[2] * offset.x + rot[5] * offset.y + rot[8] * offset.z,
+                );
+                renderer.setSceneItemCenter(
+                    binding.instance_index,
+                    math.Vec3.new(
+                        @as(f32, @floatCast(pos[0])) + gizmo_offset_world.x,
+                        @as(f32, @floatCast(pos[1])) + gizmo_offset_world.y,
+                        @as(f32, @floatCast(pos[2])) + gizmo_offset_world.z,
+                    ),
+                );
             }
             scene_asset.mesh.refreshMeshlets();
             renderer.invalidateMeshWork();
@@ -886,6 +979,75 @@ fn configureSceneLights(renderer: *Renderer, lights: []const SceneLightDefinitio
         try renderer.setLightShadowMapSize(i, light.shadow_map_size);
         renderer.setLightGlow(i, light.glow_radius, light.glow_intensity);
     }
+}
+
+fn configureSceneItemBindings(
+    allocator: std.mem.Allocator,
+    renderer: *Renderer,
+    scene_asset: *const SceneAsset,
+    scene_def: SceneDefinition,
+) !void {
+    const bindings = try allocator.alloc(SceneItemBinding, scene_asset.model_instances.len);
+    defer allocator.free(bindings);
+    for (scene_asset.model_instances, 0..) |instance, idx| {
+        const asset = scene_def.assets[instance.asset_index];
+        bindings[idx] = .{
+            .vertex_start = instance.vertex_start,
+            .vertex_count = instance.vertex_count,
+            .triangle_start = instance.triangle_start,
+            .triangle_count = instance.triangle_count,
+            .bounds_min = instance.bounds_min,
+            .bounds_max = instance.bounds_max,
+            .gizmo_origin = asset.position,
+        };
+    }
+    try renderer.setSceneItemBindings(bindings, scene_asset.mesh.triangles.len);
+}
+
+fn applySceneItemTranslateRequest(
+    renderer: *Renderer,
+    scene_asset: *SceneAsset,
+    scene_def: SceneDefinition,
+    scene_physics_runtime: ?*ScenePhysicsRuntime,
+    request: SceneItemTranslateRequest,
+) void {
+    if (request.item_index >= scene_asset.model_instances.len) return;
+    const instance = &scene_asset.model_instances[request.item_index];
+    const asset = scene_def.assets[instance.asset_index];
+    const is_dynamic = asset.physics_motion != null and std.ascii.eqlIgnoreCase(asset.physics_motion.?, "dynamic");
+
+    if (is_dynamic) {
+        if (scene_physics_runtime) |runtime| {
+            const body_interface = runtime.pw.system.getBodyInterfaceMut();
+            for (runtime.bindings) |binding| {
+                if (binding.instance_index != request.item_index) continue;
+                const pos = body_interface.getPosition(binding.body_id);
+                const next_pos = [3]zphysics.Real{
+                    pos[0] + @as(zphysics.Real, @floatCast(request.delta.x)),
+                    pos[1] + @as(zphysics.Real, @floatCast(request.delta.y)),
+                    pos[2] + @as(zphysics.Real, @floatCast(request.delta.z)),
+                };
+                body_interface.setPosition(binding.body_id, next_pos, .activate);
+                body_interface.setLinearVelocity(binding.body_id, .{ 0.0, 0.0, 0.0 });
+                body_interface.setAngularVelocity(binding.body_id, .{ 0.0, 0.0, 0.0 });
+                instance.bounds_min = math.Vec3.add(instance.bounds_min, request.delta);
+                instance.bounds_max = math.Vec3.add(instance.bounds_max, request.delta);
+                renderer.notifySceneItemTranslated(request.item_index, request.delta);
+                return;
+            }
+        }
+    }
+
+    if (instance.vertex_count == 0) return;
+    const vertex_slice = scene_asset.mesh.vertices[instance.vertex_start .. instance.vertex_start + instance.vertex_count];
+    for (vertex_slice) |*v| {
+        v.* = math.Vec3.add(v.*, request.delta);
+    }
+    instance.bounds_min = math.Vec3.add(instance.bounds_min, request.delta);
+    instance.bounds_max = math.Vec3.add(instance.bounds_max, request.delta);
+    scene_asset.mesh.refreshMeshlets();
+    renderer.notifySceneItemTranslated(request.item_index, request.delta);
+    renderer.invalidateMeshWork();
 }
 
 fn loadPrimaryMesh(allocator: std.mem.Allocator, scene_def: SceneDefinition) !SceneAsset {
@@ -1201,7 +1363,7 @@ fn setupScenePhysicsRuntime(allocator: std.mem.Allocator, scene_asset: *SceneAss
 
     const bindings = try allocator.alloc(ScenePhysicsBinding, dynamic_count);
     var bind_idx: usize = 0;
-    for (scene_asset.model_instances) |inst| {
+    for (scene_asset.model_instances, 0..) |inst, instance_index| {
         const asset = scene_def.assets[inst.asset_index];
         if (asset.physics_motion == null or !std.ascii.eqlIgnoreCase(asset.physics_motion.?, "dynamic")) continue;
 
@@ -1253,11 +1415,13 @@ fn setupScenePhysicsRuntime(allocator: std.mem.Allocator, scene_asset: *SceneAss
         };
 
         bindings[bind_idx] = .{
+            .instance_index = instance_index,
             .body_id = body_id,
             .vertex_start = inst.vertex_start,
             .vertex_count = inst.vertex_count,
             .triangle_start = inst.triangle_start,
             .triangle_count = inst.triangle_count,
+            .gizmo_offset_local = math.Vec3.sub(asset.position, center),
             .local_vertices = local_vertices,
             .local_normals = local_normals,
         };

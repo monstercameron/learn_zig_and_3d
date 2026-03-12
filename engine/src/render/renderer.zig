@@ -64,6 +64,7 @@ const adaptive_shadow_tile_pass = @import("passes/adaptive_shadow_tile_pass.zig"
 const pass_registry = @import("pipeline/pass_registry.zig");
 const pass_graph = @import("pipeline/pass_graph.zig");
 const render_utils = @import("core/utils.zig");
+const scene_item_gizmo = @import("scene_item_gizmo.zig");
 const shadow_raster_kernel = @import("kernels/shadow_raster_kernel.zig");
 const shadow_sample_kernel = @import("kernels/shadow_sample_kernel.zig");
 const hybrid_shadow_cache_kernel = @import("kernels/hybrid_shadow_cache_kernel.zig");
@@ -215,6 +216,69 @@ const MeshletTelemetry = struct {
     emitted_triangles: usize = 0,
     touched_tiles: usize = 0,
 };
+
+const LightGizmoAxis = enum(u8) {
+    x = 0,
+    y = 1,
+    z = 2,
+};
+
+const LightGizmoState = struct {
+    enabled: bool = true,
+    selected_light_index: usize = 0,
+    active_axis: LightGizmoAxis = .x,
+    move_step: f32 = 0.2,
+    hover_axis: ?LightGizmoAxis = null,
+    drag_axis: ?LightGizmoAxis = null,
+    drag_last_pointer: ?math.Vec2 = null,
+};
+
+const CameraControlMode = enum(u8) {
+    first_person = 0,
+    editor = 1,
+};
+
+pub const CursorStyle = enum(u8) {
+    arrow = 0,
+    grab = 1,
+    grabbing = 2,
+    hidden = 3,
+};
+
+fn lightGizmoAxisName(axis: LightGizmoAxis) []const u8 {
+    return switch (axis) {
+        .x => "x",
+        .y => "y",
+        .z => "z",
+    };
+}
+
+fn lightGizmoAxisUnit(axis: LightGizmoAxis) math.Vec3 {
+    return switch (axis) {
+        .x => math.Vec3.new(1.0, 0.0, 0.0),
+        .y => math.Vec3.new(0.0, 1.0, 0.0),
+        .z => math.Vec3.new(0.0, 0.0, 1.0),
+    };
+}
+
+fn lightGizmoAxisColor(axis: LightGizmoAxis, active_axis: LightGizmoAxis, hot_axis: ?LightGizmoAxis) u32 {
+    if (hot_axis != null and hot_axis.? == axis) return 0xFFFFFF66;
+    if (axis == active_axis) {
+        return switch (axis) {
+            .x => 0xFFFFA0A0,
+            .y => 0xFFA0FFA0,
+            .z => 0xFFA0B8FF,
+        };
+    }
+    return switch (axis) {
+        .x => 0xFFDD4040,
+        .y => 0xFF40DD40,
+        .z => 0xFF4060DD,
+    };
+}
+
+pub const SceneItemBinding = scene_item_gizmo.ItemBinding;
+pub const SceneItemTranslateRequest = scene_item_gizmo.TranslateRequest;
 
 const LightWorkStats = struct {
     active_lights: usize = 0,
@@ -599,7 +663,6 @@ const ShadowResolveConfig = struct {
     darkness_percent: i32,
 };
 
-
 const fastScale255 = render_utils.fastScale255;
 
 fn averageBlur5(sum: i32) u8 {
@@ -653,7 +716,6 @@ const TemporalAAViewState = struct {
 
 const chooseShadowBasis = render_utils.chooseShadowBasis;
 
-
 fn reconstructWorldPosition(
     x: usize,
     y: usize,
@@ -678,7 +740,6 @@ fn reconstructWorldPosition(
         ),
     );
 }
-
 
 const darkenPackedColor = render_utils.darkenPackedColor;
 
@@ -754,7 +815,6 @@ fn taaJitterForFrame(frame_index: u64) math.Vec2 {
 fn projectCameraPositionFloat(position: math.Vec3, projection: ProjectionParams) math.Vec2 {
     return render_utils.projectCameraPositionFloat(position, projection, NEAR_EPSILON);
 }
-
 
 fn addPackedColorBatchSimd(
     comptime lanes: usize,
@@ -893,7 +953,6 @@ fn packShiftedColorBatch(
         else => unreachable,
     }
 }
-
 
 fn tryApplyTemporalAAMeshletBatch(
     self: *Renderer,
@@ -1223,6 +1282,7 @@ pub const Renderer = struct {
     pending_mouse_delta: math.Vec2, // Accumulated mouse delta since last frame.
     mouse_initialized: bool, // Tracks whether the initial mouse position has been captured.
     mouse_last_pos: windows.POINT, // Last mouse position in client coordinates.
+    ignore_next_mouse_move: bool, // Set when the OS cursor is recentered by first-person lock.
 
     // Light state
     lights: std.ArrayList(LightInfo),
@@ -1242,6 +1302,7 @@ pub const Renderer = struct {
     current_fps: u32,
     target_frame_time_ns: i128,
     pending_fov_delta: f32,
+    camera_control_mode: CameraControlMode = .editor,
     profile_capture_frame: u64,
     profile_capture_emitted: bool,
     shadow_budget_pressure_frames: u32 = 0,
@@ -1278,6 +1339,8 @@ pub const Renderer = struct {
 
     ground_debug: GroundDebugState = .{},
     meshlet_telemetry: MeshletTelemetry = .{},
+    light_gizmo: LightGizmoState = .{},
+    scene_item_gizmo: scene_item_gizmo.State = .{},
     render_pass_timings: [max_render_passes]RenderPassTiming,
     render_pass_count: usize,
     color_grade_profile: ColorGradeProfile,
@@ -1825,6 +1888,7 @@ pub const Renderer = struct {
             .pending_mouse_delta = math.Vec2.new(0.0, 0.0),
             .mouse_initialized = false,
             .mouse_last_pos = .{ .x = 0, .y = 0 },
+            .ignore_next_mouse_move = false,
             .lights = lights,
             .light_soa = .{
                 .dir_x = light_dir_x,
@@ -2030,6 +2094,7 @@ pub const Renderer = struct {
         self.allocator.free(self.scene_camera);
         self.allocator.free(self.scene_normal);
         self.allocator.free(self.scene_surface);
+        self.scene_item_gizmo.deinit(self.allocator);
         self.allocator.free(self.taa_scratch.history_pixels);
         self.allocator.free(self.taa_scratch.resolve_pixels);
         self.allocator.free(self.taa_scratch.history_depth);
@@ -3735,6 +3800,20 @@ pub const Renderer = struct {
         _ = input.updateKeyState(&self.keys_pressed, key, is_down);
     }
 
+    pub fn isFirstPersonMode(self: *const Renderer) bool {
+        return self.camera_control_mode == .first_person;
+    }
+
+    pub fn noteMouseWarp(self: *Renderer, client_x: i32, client_y: i32) void {
+        self.mouse_last_pos = .{ .x = client_x, .y = client_y };
+        self.mouse_initialized = true;
+        self.ignore_next_mouse_move = true;
+    }
+
+    pub fn isSceneItemDragActive(self: *const Renderer) bool {
+        return self.scene_item_gizmo.isDragging();
+    }
+
     pub fn handleMouseMove(self: *Renderer, x: i32, y: i32) void {
         const current = windows.POINT{ .x = x, .y = y };
         if (!self.mouse_initialized) {
@@ -3742,11 +3821,106 @@ pub const Renderer = struct {
             self.mouse_initialized = true;
             return;
         }
+        if (self.ignore_next_mouse_move) {
+            self.mouse_last_pos = current;
+            self.ignore_next_mouse_move = false;
+            return;
+        }
 
         const dx = @as(f32, @floatFromInt(current.x - self.mouse_last_pos.x));
         const dy = @as(f32, @floatFromInt(current.y - self.mouse_last_pos.y));
-        self.pending_mouse_delta = math.Vec2.new(self.pending_mouse_delta.x + dx, self.pending_mouse_delta.y + dy);
         self.mouse_last_pos = current;
+        if (self.camera_control_mode == .first_person) {
+            self.pending_mouse_delta = math.Vec2.new(self.pending_mouse_delta.x + dx, self.pending_mouse_delta.y + dy);
+            return;
+        }
+
+        const pointer_view = self.computePointerViewState();
+        var pointer_ctx = SceneItemGizmoDrawContext{
+            .renderer = self,
+            .camera_position = self.camera_position,
+            .basis_right = pointer_view.right,
+            .basis_up = pointer_view.up,
+            .basis_forward = pointer_view.forward,
+            .projection = pointer_view.projection,
+        };
+        self.scene_item_gizmo.handlePointerMove(
+            x,
+            y,
+            self.bitmap.width,
+            self.bitmap.height,
+            @as(i32, @intCast(config.WINDOW_WIDTH)),
+            @as(i32, @intCast(config.WINDOW_HEIGHT)),
+            @ptrCast(&pointer_ctx),
+            projectSceneItemWorld,
+        );
+
+        const mapped_pointer = self.mapWindowPointToBackbuffer(x, y) orelse {
+            if (self.light_gizmo.drag_axis == null) self.light_gizmo.hover_axis = null;
+            return;
+        };
+        self.updateLightGizmoPointer(
+            math.Vec2.new(
+                @as(f32, @floatFromInt(mapped_pointer.x)),
+                @as(f32, @floatFromInt(mapped_pointer.y)),
+            ),
+            pointer_view,
+        );
+    }
+
+    pub fn handleMouseLeftClick(self: *Renderer, x: i32, y: i32) void {
+        if (self.camera_control_mode == .first_person) return;
+        const pointer_view = self.computePointerViewState();
+        if (self.beginLightGizmoDrag(x, y, pointer_view)) return;
+        var pointer_ctx = SceneItemGizmoDrawContext{
+            .renderer = self,
+            .camera_position = self.camera_position,
+            .basis_right = pointer_view.right,
+            .basis_up = pointer_view.up,
+            .basis_forward = pointer_view.forward,
+            .projection = pointer_view.projection,
+        };
+        _ = self.scene_item_gizmo.handlePointerDown(
+            x,
+            y,
+            self.bitmap.width,
+            self.bitmap.height,
+            @as(i32, @intCast(config.WINDOW_WIDTH)),
+            @as(i32, @intCast(config.WINDOW_HEIGHT)),
+            @ptrCast(&pointer_ctx),
+            projectSceneItemWorld,
+        );
+    }
+
+    pub fn handleMouseLeftRelease(self: *Renderer, x: i32, y: i32) void {
+        _ = x;
+        _ = y;
+        self.scene_item_gizmo.handlePointerUp();
+        self.clearLightGizmoInteraction();
+    }
+
+    pub fn desiredCursorStyle(self: *const Renderer) CursorStyle {
+        if (self.camera_control_mode == .first_person) return .hidden;
+        const item_hint = self.scene_item_gizmo.cursorHint();
+        if (item_hint == .grabbing or self.light_gizmo.drag_axis != null) return .grabbing;
+        if (item_hint == .grab or self.light_gizmo.hover_axis != null) return .grab;
+        return .arrow;
+    }
+
+    pub fn setSceneItemBindings(self: *Renderer, bindings: []const SceneItemBinding, triangle_count: usize) !void {
+        try self.scene_item_gizmo.setBindings(self.allocator, bindings, triangle_count);
+    }
+
+    pub fn notifySceneItemTranslated(self: *Renderer, item_index: usize, delta: math.Vec3) void {
+        self.scene_item_gizmo.notifyItemTranslated(item_index, delta);
+    }
+
+    pub fn setSceneItemCenter(self: *Renderer, item_index: usize, center: math.Vec3) void {
+        self.scene_item_gizmo.setItemOrigin(item_index, center);
+    }
+
+    pub fn consumeSceneItemTranslateRequest(self: *Renderer) ?SceneItemTranslateRequest {
+        return self.scene_item_gizmo.consumeTranslateRequest();
     }
 
     pub fn setCameraPosition(self: *Renderer, position: math.Vec3) void {
@@ -3795,6 +3969,231 @@ pub const Renderer = struct {
         return delta;
     }
 
+    const PointerViewState = struct {
+        right: math.Vec3,
+        up: math.Vec3,
+        forward: math.Vec3,
+        projection: ProjectionParams,
+    };
+
+    fn computePointerViewState(self: *const Renderer) PointerViewState {
+        const yaw = self.rotation_angle;
+        const pitch = self.rotation_x;
+        const cos_pitch = @cos(pitch);
+        const sin_pitch = @sin(pitch);
+        const cos_yaw = @cos(yaw);
+        const sin_yaw = @sin(yaw);
+
+        var forward = math.Vec3.new(sin_yaw * cos_pitch, sin_pitch, cos_yaw * cos_pitch);
+        forward = math.Vec3.normalize(forward);
+
+        const world_up = math.Vec3.new(0.0, 1.0, 0.0);
+        var right = math.Vec3.cross(world_up, forward);
+        const right_len = math.Vec3.length(right);
+        if (right_len < 0.0001) {
+            right = math.Vec3.new(1.0, 0.0, 0.0);
+        } else {
+            right = math.Vec3.scale(right, 1.0 / right_len);
+        }
+
+        var up = math.Vec3.cross(forward, right);
+        up = math.Vec3.normalize(up);
+
+        const width_f = @as(f32, @floatFromInt(self.bitmap.width));
+        const height_f = @as(f32, @floatFromInt(self.bitmap.height));
+        const aspect_ratio = if (height_f > 0.0) width_f / height_f else 1.0;
+        const fov_rad = self.camera_fov_deg * (std.math.pi / 180.0);
+        const half_fov = fov_rad * 0.5;
+        const tan_half_fov = std.math.tan(half_fov);
+        const y_scale = if (tan_half_fov > 0.0) 1.0 / tan_half_fov else 1.0;
+        const x_scale = y_scale / aspect_ratio;
+        const center_x = width_f * 0.5;
+        const center_y = height_f * 0.5;
+        return .{
+            .right = right,
+            .up = up,
+            .forward = forward,
+            .projection = .{
+                .center_x = center_x,
+                .center_y = center_y,
+                .x_scale = x_scale,
+                .y_scale = y_scale,
+                .near_plane = NEAR_CLIP,
+                .jitter_x = 0.0,
+                .jitter_y = 0.0,
+            },
+        };
+    }
+
+    fn clearLightGizmoInteraction(self: *Renderer) void {
+        self.light_gizmo.hover_axis = null;
+        self.light_gizmo.drag_axis = null;
+        self.light_gizmo.drag_last_pointer = null;
+    }
+
+    fn mapWindowPointToBackbuffer(self: *const Renderer, window_x: i32, window_y: i32) ?windows.POINT {
+        if (window_x < 0 or window_y < 0) return null;
+        if (self.bitmap.width <= 0 or self.bitmap.height <= 0) return null;
+        const window_width: i32 = @intCast(config.WINDOW_WIDTH);
+        const window_height: i32 = @intCast(config.WINDOW_HEIGHT);
+        if (window_width <= 0 or window_height <= 0) return null;
+        if (window_x >= window_width or window_y >= window_height) return null;
+
+        const x_scale = @as(f32, @floatFromInt(self.bitmap.width)) / @as(f32, @floatFromInt(window_width));
+        const y_scale = @as(f32, @floatFromInt(self.bitmap.height)) / @as(f32, @floatFromInt(window_height));
+        const mapped_x = std.math.clamp(
+            @as(i32, @intFromFloat(@floor(@as(f32, @floatFromInt(window_x)) * x_scale))),
+            0,
+            self.bitmap.width - 1,
+        );
+        const mapped_y = std.math.clamp(
+            @as(i32, @intFromFloat(@floor(@as(f32, @floatFromInt(window_y)) * y_scale))),
+            0,
+            self.bitmap.height - 1,
+        );
+        return .{ .x = mapped_x, .y = mapped_y };
+    }
+
+    fn lightGizmoAxisEndpoint(origin: math.Vec3, axis: LightGizmoAxis, axis_extent: f32) math.Vec3 {
+        return math.Vec3.add(origin, math.Vec3.scale(lightGizmoAxisUnit(axis), axis_extent));
+    }
+
+    fn distancePointToSegment2D(point: math.Vec2, seg_a: math.Vec2, seg_b: math.Vec2) f32 {
+        const ab = math.Vec2.sub(seg_b, seg_a);
+        const ap = math.Vec2.sub(point, seg_a);
+        const ab_len_sq = ab.x * ab.x + ab.y * ab.y;
+        if (ab_len_sq <= 1e-6) {
+            const dx = point.x - seg_a.x;
+            const dy = point.y - seg_a.y;
+            return @sqrt(dx * dx + dy * dy);
+        }
+        const t = std.math.clamp((ap.x * ab.x + ap.y * ab.y) / ab_len_sq, 0.0, 1.0);
+        const closest = math.Vec2.new(seg_a.x + ab.x * t, seg_a.y + ab.y * t);
+        const dx = point.x - closest.x;
+        const dy = point.y - closest.y;
+        return @sqrt(dx * dx + dy * dy);
+    }
+
+    fn lightGizmoOriginWorld(self: *Renderer) ?math.Vec3 {
+        if (!self.light_gizmo.enabled or self.lights.items.len == 0) return null;
+        self.clampLightGizmoSelection();
+        const light = self.lights.items[self.light_gizmo.selected_light_index];
+        return math.Vec3.scale(light.direction, light.distance);
+    }
+
+    fn hoverLightGizmoAxisAtPointer(self: *Renderer, pointer: math.Vec2, pointer_view: PointerViewState) ?LightGizmoAxis {
+        const origin_world = self.lightGizmoOriginWorld() orelse return null;
+        const origin_screen = self.projectWorldToScreen(
+            self.camera_position,
+            pointer_view.right,
+            pointer_view.up,
+            pointer_view.forward,
+            pointer_view.projection,
+            origin_world,
+        ) orelse return null;
+        const origin_v = math.Vec2.new(@floatFromInt(origin_screen[0]), @floatFromInt(origin_screen[1]));
+        const light = self.lights.items[self.light_gizmo.selected_light_index];
+        const axis_extent = std.math.clamp(light.distance * 0.18, 0.3, 1.25);
+
+        var best_axis: ?LightGizmoAxis = null;
+        var best_dist: f32 = 8.0;
+        for ([_]LightGizmoAxis{ .x, .y, .z }) |axis| {
+            const endpoint_world = lightGizmoAxisEndpoint(origin_world, axis, axis_extent);
+            const endpoint_screen = self.projectWorldToScreen(
+                self.camera_position,
+                pointer_view.right,
+                pointer_view.up,
+                pointer_view.forward,
+                pointer_view.projection,
+                endpoint_world,
+            ) orelse continue;
+            const endpoint_v = math.Vec2.new(@floatFromInt(endpoint_screen[0]), @floatFromInt(endpoint_screen[1]));
+            const dist = distancePointToSegment2D(pointer, origin_v, endpoint_v);
+            if (dist <= best_dist) {
+                best_dist = dist;
+                best_axis = axis;
+            }
+        }
+        return best_axis;
+    }
+
+    fn computeLightGizmoDragDelta(
+        self: *Renderer,
+        axis: LightGizmoAxis,
+        prev: math.Vec2,
+        current: math.Vec2,
+        pointer_view: PointerViewState,
+    ) f32 {
+        const origin_world = self.lightGizmoOriginWorld() orelse return 0.0;
+        const light = self.lights.items[self.light_gizmo.selected_light_index];
+        const axis_extent = std.math.clamp(light.distance * 0.18, 0.3, 1.25);
+        const endpoint_world = lightGizmoAxisEndpoint(origin_world, axis, axis_extent);
+        const origin_screen = self.projectWorldToScreen(
+            self.camera_position,
+            pointer_view.right,
+            pointer_view.up,
+            pointer_view.forward,
+            pointer_view.projection,
+            origin_world,
+        ) orelse return 0.0;
+        const endpoint_screen = self.projectWorldToScreen(
+            self.camera_position,
+            pointer_view.right,
+            pointer_view.up,
+            pointer_view.forward,
+            pointer_view.projection,
+            endpoint_world,
+        ) orelse return 0.0;
+        const origin_v = math.Vec2.new(@floatFromInt(origin_screen[0]), @floatFromInt(origin_screen[1]));
+        const endpoint_v = math.Vec2.new(@floatFromInt(endpoint_screen[0]), @floatFromInt(endpoint_screen[1]));
+        const axis_screen = math.Vec2.sub(endpoint_v, origin_v);
+        const axis_screen_len = @sqrt(axis_screen.x * axis_screen.x + axis_screen.y * axis_screen.y);
+        if (axis_screen_len < 1.0) return 0.0;
+        const axis_dir = math.Vec2.new(axis_screen.x / axis_screen_len, axis_screen.y / axis_screen_len);
+        const mouse_delta = math.Vec2.sub(current, prev);
+        const pixels_along_axis = mouse_delta.x * axis_dir.x + mouse_delta.y * axis_dir.y;
+        return pixels_along_axis * (axis_extent / axis_screen_len);
+    }
+
+    fn updateLightGizmoPointer(self: *Renderer, pointer: math.Vec2, pointer_view: PointerViewState) void {
+        if (!self.light_gizmo.enabled or self.lights.items.len == 0) {
+            self.clearLightGizmoInteraction();
+            return;
+        }
+        if (self.scene_item_gizmo.isDragging() and self.light_gizmo.drag_axis == null) {
+            self.light_gizmo.hover_axis = null;
+            return;
+        }
+        if (self.light_gizmo.drag_axis) |axis| {
+            if (self.light_gizmo.drag_last_pointer) |prev| {
+                const delta = self.computeLightGizmoDragDelta(axis, prev, pointer, pointer_view);
+                if (@abs(delta) > 1e-6) {
+                    self.light_gizmo.active_axis = axis;
+                    self.moveSelectedLightAlongAxis(delta);
+                }
+            }
+            self.light_gizmo.drag_last_pointer = pointer;
+            self.light_gizmo.hover_axis = axis;
+            return;
+        }
+        self.light_gizmo.hover_axis = self.hoverLightGizmoAxisAtPointer(pointer, pointer_view);
+    }
+
+    fn beginLightGizmoDrag(self: *Renderer, window_x: i32, window_y: i32, pointer_view: PointerViewState) bool {
+        if (!self.light_gizmo.enabled or self.lights.items.len == 0) return false;
+        const mapped = self.mapWindowPointToBackbuffer(window_x, window_y) orelse return false;
+        const pointer = math.Vec2.new(
+            @as(f32, @floatFromInt(mapped.x)),
+            @as(f32, @floatFromInt(mapped.y)),
+        );
+        const hovered = self.hoverLightGizmoAxisAtPointer(pointer, pointer_view) orelse return false;
+        self.light_gizmo.active_axis = hovered;
+        self.light_gizmo.hover_axis = hovered;
+        self.light_gizmo.drag_axis = hovered;
+        self.light_gizmo.drag_last_pointer = pointer;
+        return true;
+    }
+
     pub fn shouldRenderFrame(self: *Renderer) bool {
         if (self.target_frame_time_ns <= 0) return true;
         const now = std.time.nanoTimestamp();
@@ -3829,6 +4228,106 @@ pub const Renderer = struct {
         switch (char_code) {
             'q', 'Q' => self.pending_fov_delta -= config.CAMERA_FOV_STEP,
             'e', 'E' => self.pending_fov_delta += config.CAMERA_FOV_STEP,
+            'v', 'V' => {
+                self.camera_control_mode = if (self.camera_control_mode == .first_person) .editor else .first_person;
+                if (self.camera_control_mode == .first_person) {
+                    self.scene_item_gizmo.cancelInteraction();
+                    self.clearLightGizmoInteraction();
+                }
+                self.pending_mouse_delta = math.Vec2.new(0.0, 0.0);
+                self.mouse_initialized = false;
+                self.ignore_next_mouse_move = false;
+                renderer_logger.infoSub(
+                    "camera_mode",
+                    "mode={s}",
+                    .{if (self.camera_control_mode == .first_person) "first_person" else "editor"},
+                );
+            },
+            'm', 'M' => {
+                self.scene_item_gizmo.toggleEnabled();
+                if (self.scene_item_gizmo.isActive()) {
+                    renderer_logger.infoSub(
+                        "scene_gizmo",
+                        "enabled item={} axis={s} step={d:.2}",
+                        .{
+                            self.scene_item_gizmo.selected_item_index.?,
+                            scene_item_gizmo.axisName(self.scene_item_gizmo.active_axis),
+                            self.scene_item_gizmo.move_step,
+                        },
+                    );
+                } else if (self.scene_item_gizmo.enabled) {
+                    renderer_logger.infoSub("scene_gizmo", "enabled (no selected item)", .{});
+                } else {
+                    renderer_logger.infoSub("scene_gizmo", "disabled", .{});
+                }
+            },
+            'g', 'G' => {
+                self.light_gizmo.enabled = !self.light_gizmo.enabled;
+                self.clampLightGizmoSelection();
+                if (self.light_gizmo.enabled and self.lights.items.len > 0) {
+                    renderer_logger.infoSub(
+                        "light_gizmo",
+                        "enabled light={} axis={s} step={d:.2}",
+                        .{
+                            self.light_gizmo.selected_light_index,
+                            lightGizmoAxisName(self.light_gizmo.active_axis),
+                            self.light_gizmo.move_step,
+                        },
+                    );
+                } else if (self.light_gizmo.enabled) {
+                    renderer_logger.infoSub("light_gizmo", "enabled (no lights)", .{});
+                } else {
+                    self.clearLightGizmoInteraction();
+                    renderer_logger.infoSub("light_gizmo", "disabled", .{});
+                }
+            },
+            'x', 'X' => {
+                if (self.scene_item_gizmo.isActive()) {
+                    self.scene_item_gizmo.setAxis(.x);
+                    renderer_logger.infoSub("scene_gizmo", "axis={s}", .{scene_item_gizmo.axisName(self.scene_item_gizmo.active_axis)});
+                } else {
+                    self.light_gizmo.active_axis = .x;
+                    renderer_logger.infoSub("light_gizmo", "axis={s}", .{lightGizmoAxisName(self.light_gizmo.active_axis)});
+                }
+            },
+            'y', 'Y' => {
+                if (self.scene_item_gizmo.isActive()) {
+                    self.scene_item_gizmo.setAxis(.y);
+                    renderer_logger.infoSub("scene_gizmo", "axis={s}", .{scene_item_gizmo.axisName(self.scene_item_gizmo.active_axis)});
+                } else {
+                    self.light_gizmo.active_axis = .y;
+                    renderer_logger.infoSub("light_gizmo", "axis={s}", .{lightGizmoAxisName(self.light_gizmo.active_axis)});
+                }
+            },
+            'z', 'Z' => {
+                if (self.scene_item_gizmo.isActive()) {
+                    self.scene_item_gizmo.setAxis(.z);
+                    renderer_logger.infoSub("scene_gizmo", "axis={s}", .{scene_item_gizmo.axisName(self.scene_item_gizmo.active_axis)});
+                } else {
+                    self.light_gizmo.active_axis = .z;
+                    renderer_logger.infoSub("light_gizmo", "axis={s}", .{lightGizmoAxisName(self.light_gizmo.active_axis)});
+                }
+            },
+            'l', 'L' => {
+                if (self.lights.items.len == 0) return;
+                self.clampLightGizmoSelection();
+                self.light_gizmo.selected_light_index = (self.light_gizmo.selected_light_index + 1) % self.lights.items.len;
+                renderer_logger.infoSub("light_gizmo", "light={}", .{self.light_gizmo.selected_light_index});
+            },
+            'j', 'J' => {
+                if (self.scene_item_gizmo.isActive()) {
+                    self.scene_item_gizmo.queueSelectedTranslation(-self.scene_item_gizmo.move_step);
+                } else if (self.light_gizmo.enabled) {
+                    self.moveSelectedLightAlongAxis(-self.light_gizmo.move_step);
+                }
+            },
+            'k', 'K' => {
+                if (self.scene_item_gizmo.isActive()) {
+                    self.scene_item_gizmo.queueSelectedTranslation(self.scene_item_gizmo.move_step);
+                } else if (self.light_gizmo.enabled) {
+                    self.moveSelectedLightAlongAxis(self.light_gizmo.move_step);
+                }
+            },
             'p', 'P' => {
                 self.show_render_overlay = !self.show_render_overlay;
                 renderer_logger.infoSub(
@@ -3851,6 +4350,60 @@ pub const Renderer = struct {
             },
             else => {},
         }
+    }
+
+    fn clampLightGizmoSelection(self: *Renderer) void {
+        if (self.lights.items.len == 0) {
+            self.light_gizmo.selected_light_index = 0;
+            self.clearLightGizmoInteraction();
+            return;
+        }
+        if (self.light_gizmo.selected_light_index >= self.lights.items.len) {
+            self.light_gizmo.selected_light_index = self.lights.items.len - 1;
+        }
+    }
+
+    fn moveSelectedLightAlongAxis(self: *Renderer, delta: f32) void {
+        if (self.lights.items.len == 0) return;
+        self.clampLightGizmoSelection();
+        const light_index = self.light_gizmo.selected_light_index;
+        const light = self.lights.items[light_index];
+
+        var light_position = math.Vec3.scale(light.direction, light.distance);
+        switch (self.light_gizmo.active_axis) {
+            .x => light_position.x += delta,
+            .y => light_position.y += delta,
+            .z => light_position.z += delta,
+        }
+
+        const updated_distance = @max(@as(f32, 0.01), math.Vec3.length(light_position));
+        self.setDirectionalLight(light_index, light_position, updated_distance, null);
+    }
+
+    const SceneItemGizmoDrawContext = struct {
+        renderer: *Renderer,
+        camera_position: math.Vec3,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        projection: ProjectionParams,
+    };
+
+    fn projectSceneItemWorld(ctx_ptr: *anyopaque, world_position: math.Vec3) ?[2]i32 {
+        const ctx: *const SceneItemGizmoDrawContext = @ptrCast(@alignCast(ctx_ptr));
+        return ctx.renderer.projectWorldToScreen(
+            ctx.camera_position,
+            ctx.basis_right,
+            ctx.basis_up,
+            ctx.basis_forward,
+            ctx.projection,
+            world_position,
+        );
+    }
+
+    fn drawSceneItemGizmoLine(ctx_ptr: *anyopaque, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) void {
+        const ctx: *SceneItemGizmoDrawContext = @ptrCast(@alignCast(ctx_ptr));
+        ctx.renderer.drawLineColored(x0, y0, x1, y1, color);
     }
 
     pub fn setTexture(self: *Renderer, tex: *const texture.Texture) void {
@@ -3948,6 +4501,12 @@ pub const Renderer = struct {
         self.lights.items[index].distance = @max(distance, 0.01);
         if (color) |c| self.lights.items[index].color = c;
         self.lights.items[index].manual_direction = true;
+        self.lights.items[index].shadow_map.active = false;
+        self.lights.items[index].shadow_last_build_frame = 0;
+        self.lights.items[index].shadow_last_build_ns = 0;
+        if (index < self.shadow_build_elapsed_ns.len) self.shadow_build_elapsed_ns[index] = 0;
+        if (index < self.shadow_resolve_elapsed_ns.len) self.shadow_resolve_elapsed_ns[index] = 0;
+        self.syncLightSoA();
         self.frame_view_cache.invalidate();
     }
 
@@ -4015,8 +4574,10 @@ pub const Renderer = struct {
         if ((self.keys_pressed & input.KeyBits.down) != 0) self.rotation_x += rotation_speed * simulation_delta_seconds;
 
         const mouse_delta = self.consumeMouseDelta();
-        self.rotation_angle += mouse_delta.x * self.mouse_sensitivity;
-        self.rotation_x -= mouse_delta.y * self.mouse_sensitivity;
+        if (self.camera_control_mode == .first_person) {
+            self.rotation_angle += mouse_delta.x * self.mouse_sensitivity;
+            self.rotation_x -= mouse_delta.y * self.mouse_sensitivity;
+        }
         self.rotation_x = std.math.clamp(self.rotation_x, -1.5, 1.5);
 
         const fov_delta = self.consumePendingFovDelta();
@@ -4288,6 +4849,13 @@ pub const Renderer = struct {
             self.recordRenderPassTiming("meshlet_direct", scene_pass_start);
         }
 
+        self.scene_item_gizmo.resolvePendingPick(
+            self.bitmap.width,
+            self.bitmap.height,
+            @as(i32, @intCast(config.WINDOW_WIDTH)),
+            @as(i32, @intCast(config.WINDOW_HEIGHT)),
+            self.scene_surface,
+        );
         self.applyPostProcessingPasses(
             mesh,
             self.camera_position,
@@ -4298,6 +4866,12 @@ pub const Renderer = struct {
             raster_projection,
             light_dir_world,
             self.shadow_build_elapsed_ns[0..self.lights.items.len],
+        );
+        self.scene_item_gizmo.applyOutline(
+            self.bitmap.pixels,
+            self.bitmap.width,
+            self.bitmap.height,
+            self.scene_surface,
         );
         try self.applyAdaptiveShadowBudgetPolicy();
         if (self.show_light_orb) {
@@ -4316,6 +4890,12 @@ pub const Renderer = struct {
                 }
                 self.drawLightMarker(light_camera, light_camera_z, center_x, center_y, x_scale, y_scale);
             }
+        }
+        if (self.light_gizmo.enabled) {
+            self.drawLightGizmo(self.camera_position, right, up, forward, cache_projection);
+        }
+        if (self.scene_item_gizmo.isActive()) {
+            self.drawSceneItemGizmo(self.camera_position, right, up, forward, cache_projection);
         }
         const present_start = std.time.nanoTimestamp();
         self.drawBitmap();
@@ -4679,6 +5259,121 @@ pub const Renderer = struct {
                 if (idx < self.bitmap.pixels.len) self.bitmap.pixels[idx] = color;
             }
         }
+    }
+
+    fn worldToCameraPosition(
+        camera_position: math.Vec3,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        world_position: math.Vec3,
+    ) math.Vec3 {
+        const relative = math.Vec3.sub(world_position, camera_position);
+        return math.Vec3.new(
+            math.Vec3.dot(relative, basis_right),
+            math.Vec3.dot(relative, basis_up),
+            math.Vec3.dot(relative, basis_forward),
+        );
+    }
+
+    fn projectWorldToScreen(
+        self: *Renderer,
+        camera_position: math.Vec3,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        projection: ProjectionParams,
+        world_position: math.Vec3,
+    ) ?[2]i32 {
+        const camera_space = worldToCameraPosition(camera_position, basis_right, basis_up, basis_forward, world_position);
+        if (camera_space.z <= NEAR_CLIP) return null;
+
+        const projected = projectCameraPositionFloat(camera_space, projection);
+        if (!std.math.isFinite(projected.x) or !std.math.isFinite(projected.y)) return null;
+
+        const max_x = @as(f32, @floatFromInt(self.bitmap.width * 8));
+        const max_y = @as(f32, @floatFromInt(self.bitmap.height * 8));
+        if (projected.x < -max_x or projected.x > max_x or projected.y < -max_y or projected.y > max_y) return null;
+
+        return .{
+            @as(i32, @intFromFloat(projected.x)),
+            @as(i32, @intFromFloat(projected.y)),
+        };
+    }
+
+    fn drawLightGizmo(
+        self: *Renderer,
+        camera_position: math.Vec3,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        projection: ProjectionParams,
+    ) void {
+        if (self.lights.items.len == 0) return;
+        self.clampLightGizmoSelection();
+        const light = self.lights.items[self.light_gizmo.selected_light_index];
+        const origin_world = math.Vec3.scale(light.direction, light.distance);
+        const origin_screen = self.projectWorldToScreen(
+            camera_position,
+            basis_right,
+            basis_up,
+            basis_forward,
+            projection,
+            origin_world,
+        ) orelse return;
+
+        const axis_extent = std.math.clamp(light.distance * 0.18, 0.3, 1.25);
+        const x_endpoint = math.Vec3.add(origin_world, math.Vec3.new(axis_extent, 0.0, 0.0));
+        const y_endpoint = math.Vec3.add(origin_world, math.Vec3.new(0.0, axis_extent, 0.0));
+        const z_endpoint = math.Vec3.add(origin_world, math.Vec3.new(0.0, 0.0, axis_extent));
+        const hot_axis = self.light_gizmo.drag_axis orelse self.light_gizmo.hover_axis;
+
+        if (self.projectWorldToScreen(camera_position, basis_right, basis_up, basis_forward, projection, x_endpoint)) |p| {
+            const color = lightGizmoAxisColor(.x, self.light_gizmo.active_axis, hot_axis);
+            self.drawLineColored(origin_screen[0], origin_screen[1], p[0], p[1], color);
+            self.drawLightGizmoHandle(p[0], p[1], color);
+        }
+        if (self.projectWorldToScreen(camera_position, basis_right, basis_up, basis_forward, projection, y_endpoint)) |p| {
+            const color = lightGizmoAxisColor(.y, self.light_gizmo.active_axis, hot_axis);
+            self.drawLineColored(origin_screen[0], origin_screen[1], p[0], p[1], color);
+            self.drawLightGizmoHandle(p[0], p[1], color);
+        }
+        if (self.projectWorldToScreen(camera_position, basis_right, basis_up, basis_forward, projection, z_endpoint)) |p| {
+            const color = lightGizmoAxisColor(.z, self.light_gizmo.active_axis, hot_axis);
+            self.drawLineColored(origin_screen[0], origin_screen[1], p[0], p[1], color);
+            self.drawLightGizmoHandle(p[0], p[1], color);
+        }
+
+        self.drawLineColored(origin_screen[0] - 2, origin_screen[1], origin_screen[0] + 2, origin_screen[1], 0xFFFFFFFF);
+        self.drawLineColored(origin_screen[0], origin_screen[1] - 2, origin_screen[0], origin_screen[1] + 2, 0xFFFFFFFF);
+    }
+
+    fn drawLightGizmoHandle(self: *Renderer, x: i32, y: i32, color: u32) void {
+        self.drawLineColored(x - 3, y, x + 3, y, color);
+        self.drawLineColored(x, y - 3, x, y + 3, color);
+    }
+
+    fn drawSceneItemGizmo(
+        self: *Renderer,
+        camera_position: math.Vec3,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        projection: ProjectionParams,
+    ) void {
+        var draw_ctx = SceneItemGizmoDrawContext{
+            .renderer = self,
+            .camera_position = camera_position,
+            .basis_right = basis_right,
+            .basis_up = basis_up,
+            .basis_forward = basis_forward,
+            .projection = projection,
+        };
+        self.scene_item_gizmo.drawGizmo(
+            @ptrCast(&draw_ctx),
+            projectSceneItemWorld,
+            drawSceneItemGizmoLine,
+        );
     }
 
     fn drawLightGlow(
@@ -5484,7 +6179,7 @@ pub const Renderer = struct {
     fn drawBitmap(self: *Renderer) void {
         if (self.hdc) |hdc| {
             if (self.hdc_mem) |hdc_mem| {
-                if (self.show_render_overlay or self.hybrid_shadow_debug.enabled) {
+                if (self.show_render_overlay or self.hybrid_shadow_debug.enabled or self.scene_item_gizmo.enabled) {
                     self.drawRenderPassOverlay(hdc_mem);
                 }
 
@@ -5526,7 +6221,7 @@ pub const Renderer = struct {
     }
 
     fn drawRenderPassOverlay(self: *Renderer, hdc_mem: windows.HDC) void {
-        if (self.render_pass_count == 0 and !self.hybrid_shadow_debug.enabled and self.hybrid_shadow_stats.job_count == 0) return;
+        if (self.render_pass_count == 0 and !self.hybrid_shadow_debug.enabled and self.hybrid_shadow_stats.job_count == 0 and !self.light_gizmo.enabled and !self.scene_item_gizmo.enabled) return;
 
         _ = SetBkMode(hdc_mem, TRANSPARENT);
 
@@ -5602,6 +6297,76 @@ pub const Renderer = struct {
                 self.drawOverlayTextLine(hdc_mem, 12, y, stats_line);
                 y += 16;
             }
+        }
+
+        if (self.light_gizmo.enabled) {
+            var line_buffer: [192]u8 = undefined;
+            if (self.render_pass_count != 0 or self.hybrid_shadow_debug.enabled or self.hybrid_shadow_stats.job_count != 0) y += 8;
+            self.drawOverlayTextLine(hdc_mem, 12, y, "Light Gizmo");
+            y += 20;
+            self.drawOverlayTextLine(hdc_mem, 12, y, "G toggle, L cycle, X/Y/Z axis, J/K move");
+            y += 16;
+
+            if (self.lights.items.len > 0) {
+                self.clampLightGizmoSelection();
+                const status_line = std.fmt.bufPrint(
+                    &line_buffer,
+                    "light={}/{} axis={s} step={d:.2}",
+                    .{
+                        self.light_gizmo.selected_light_index + 1,
+                        self.lights.items.len,
+                        lightGizmoAxisName(self.light_gizmo.active_axis),
+                        self.light_gizmo.move_step,
+                    },
+                ) catch "";
+                if (status_line.len != 0) {
+                    self.drawOverlayTextLine(hdc_mem, 12, y, status_line);
+                    y += 16;
+                }
+            } else {
+                self.drawOverlayTextLine(hdc_mem, 12, y, "no lights available");
+                y += 16;
+            }
+        }
+
+        if (self.scene_item_gizmo.enabled) {
+            var line_buffer: [192]u8 = undefined;
+            if (self.render_pass_count != 0 or self.hybrid_shadow_debug.enabled or self.hybrid_shadow_stats.job_count != 0 or self.light_gizmo.enabled) y += 8;
+            self.drawOverlayTextLine(hdc_mem, 12, y, "Scene Gizmo");
+            y += 20;
+            self.drawOverlayTextLine(hdc_mem, 12, y, "click select, M toggle, X/Y/Z axis, J/K move");
+            y += 16;
+
+            if (self.scene_item_gizmo.selectedItemIndex()) |selected_item| {
+                const status_line = std.fmt.bufPrint(
+                    &line_buffer,
+                    "item={}/{} axis={s} step={d:.2}",
+                    .{
+                        selected_item + 1,
+                        self.scene_item_gizmo.itemCount(),
+                        scene_item_gizmo.axisName(self.scene_item_gizmo.active_axis),
+                        self.scene_item_gizmo.move_step,
+                    },
+                ) catch "";
+                if (status_line.len != 0) {
+                    self.drawOverlayTextLine(hdc_mem, 12, y, status_line);
+                    y += 16;
+                }
+            } else {
+                self.drawOverlayTextLine(hdc_mem, 12, y, "no selected item");
+                y += 16;
+            }
+        }
+
+        if (self.show_render_overlay or self.scene_item_gizmo.enabled) {
+            var line_buffer: [96]u8 = undefined;
+            if (self.render_pass_count != 0 or self.hybrid_shadow_debug.enabled or self.hybrid_shadow_stats.job_count != 0 or self.light_gizmo.enabled or self.scene_item_gizmo.enabled) y += 8;
+            const mode_line = std.fmt.bufPrint(
+                &line_buffer,
+                "Camera Mode: {s} (V toggle)",
+                .{if (self.camera_control_mode == .first_person) "first_person" else "editor"},
+            ) catch "";
+            if (mode_line.len != 0) self.drawOverlayTextLine(hdc_mem, 12, y, mode_line);
         }
     }
 
@@ -6611,11 +7376,33 @@ pub const Renderer = struct {
     }
 
     fn drawLineColored(self: *Renderer, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) void {
-        _ = self;
-        _ = x0;
-        _ = y0;
-        _ = x1;
-        _ = y1;
-        _ = color;
+        var cx = x0;
+        var cy = y0;
+
+        const dx = if (x1 >= x0) (x1 - x0) else (x0 - x1);
+        const dy = if (y1 >= y0) (y1 - y0) else (y0 - y1);
+        const sx: i32 = if (x0 < x1) 1 else -1;
+        const sy: i32 = if (y0 < y1) 1 else -1;
+        var err: i32 = dx - dy;
+
+        while (true) {
+            if (cx >= 0 and cx < self.bitmap.width and cy >= 0 and cy < self.bitmap.height) {
+                const idx = @as(usize, @intCast(cy)) * @as(usize, @intCast(self.bitmap.width)) + @as(usize, @intCast(cx));
+                if (idx < self.bitmap.pixels.len) {
+                    self.bitmap.pixels[idx] = color;
+                }
+            }
+
+            if (cx == x1 and cy == y1) break;
+            const doubled_err = err * 2;
+            if (doubled_err > -dy) {
+                err -= dy;
+                cx += sx;
+            }
+            if (doubled_err < dx) {
+                err += dx;
+                cy += sy;
+            }
+        }
     }
 };
