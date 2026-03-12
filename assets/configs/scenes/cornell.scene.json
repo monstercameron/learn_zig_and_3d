@@ -9,16 +9,64 @@
     },
     {
       "type": "runtime",
-      "runtimeName": "static"
+      "runtimeName": "scene_physics"
+    },
+    {
+      "type": "light",
+      "position": [0.0, 3.8, 0.0],
+      "lightColor": [1.0, 0.98, 0.92],
+      "lightDistance": 3.8,
+      "glowRadius": 42.0,
+      "glowIntensity": 1.4
     },
     {
       "type": "model",
       "modelType": "obj",
-      "modelPath": "assets/models/cornell_box.obj",
+      "modelPath": "assets/models/light_sphere.obj",
+      "position": [0.0, 3.2, 0.0],
+      "rotationDeg": [0.0, 0.0, 0.0],
+      "scale": [0.18, 0.18, 0.18],
+      "physicsMotion": "dynamic",
+      "physicsShape": "sphere",
+      "physicsMass": 1.2,
+      "physicsRestitution": 0.45,
+      "textures": []
+    },
+    {
+      "type": "model",
+      "modelType": "obj",
+      "modelPath": "assets/models/box.obj",
+      "position": [-0.95, 0.7, 0.55],
+      "rotationDeg": [0.0, 18.0, 0.0],
+      "scale": [0.9, 1.3, 0.9],
+      "physicsMotion": "dynamic",
+      "physicsShape": "box",
+      "physicsMass": 6.0,
+      "physicsRestitution": 0.18,
+      "textures": []
+    },
+    {
+      "type": "model",
+      "modelType": "obj",
+      "modelPath": "assets/models/box.obj",
+      "position": [0.75, 1.1, -0.7],
+      "rotationDeg": [0.0, -12.0, 0.0],
+      "scale": [1.0, 2.1, 1.0],
+      "physicsMotion": "dynamic",
+      "physicsShape": "box",
+      "physicsMass": 11.0,
+      "physicsRestitution": 0.12,
+      "textures": []
+    },
+    {
+      "type": "model",
+      "modelType": "obj",
+      "modelPath": "assets/models/cornell_room.obj",
       "applyCornellPalette": true,
       "position": [0.0, 0.0, 0.0],
       "rotationDeg": [0.0, 0.0, 0.0],
       "scale": [1.0, 1.0, 1.0],
+      "physicsMotion": "static",
       "textures": []
     }
   ]

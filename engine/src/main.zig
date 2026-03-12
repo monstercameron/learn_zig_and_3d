@@ -106,6 +106,7 @@ const gun_jump_velocity: [3]f32 = .{ 0.0, 12.0, 0.0 };
 const SceneRuntime = enum {
     static,
     gun_physics,
+    scene_physics,
 };
 
 const SceneModelType = enum {
@@ -128,6 +129,14 @@ const SceneAssetConfigEntry = struct {
     cameraPosition: ?[3]f32 = null,
     cameraOrientation: ?[2]f32 = null,
     cameraName: ?[]const u8 = null,
+    lightColor: ?[3]f32 = null,
+    lightDistance: ?f32 = null,
+    glowRadius: ?f32 = null,
+    glowIntensity: ?f32 = null,
+    physicsMotion: ?[]const u8 = null,
+    physicsShape: ?[]const u8 = null,
+    physicsMass: ?f32 = null,
+    physicsRestitution: ?f32 = null,
 };
 
 const SceneTextureSlotEntry = struct {
@@ -161,6 +170,10 @@ const SceneAssetDefinition = struct {
     rotation_deg: math.Vec3,
     scale: math.Vec3,
     texture_slots: []SceneTextureSlotDefinition,
+    physics_motion: ?[]const u8,
+    physics_shape: ?[]const u8,
+    physics_mass: ?f32,
+    physics_restitution: ?f32,
 };
 
 const SceneTextureSlotDefinition = struct {
@@ -172,6 +185,7 @@ const SceneDefinition = struct {
     key: []const u8,
     assets: []SceneAssetDefinition,
     texture_slots: []SceneTextureSlotDefinition,
+    lights: []SceneLightDefinition,
     runtime: SceneRuntime,
     hdri_path: ?[]const u8,
     camera_position: math.Vec3,
@@ -179,8 +193,27 @@ const SceneDefinition = struct {
     camera_orientation_yaw: f32,
 };
 
+const SceneLightDefinition = struct {
+    direction: math.Vec3,
+    distance: f32,
+    color: math.Vec3,
+    glow_radius: f32,
+    glow_intensity: f32,
+};
+
 const SceneAsset = struct {
     mesh: mesh_module.Mesh,
+    model_instances: []SceneModelInstance,
+};
+
+const SceneModelInstance = struct {
+    asset_index: usize,
+    vertex_start: usize,
+    vertex_count: usize,
+    triangle_start: usize,
+    triangle_count: usize,
+    bounds_min: math.Vec3,
+    bounds_max: math.Vec3,
 };
 
 const GunRuntime = struct {
@@ -195,6 +228,30 @@ const GunRuntime = struct {
     fn deinit(self: *GunRuntime, allocator: std.mem.Allocator) void {
         allocator.free(self.original_gun_vertices);
         allocator.free(self.original_gun_normals);
+        self.pw.deinit(allocator);
+    }
+};
+
+const ScenePhysicsBinding = struct {
+    body_id: zphysics.BodyId,
+    vertex_start: usize,
+    vertex_count: usize,
+    triangle_start: usize,
+    triangle_count: usize,
+    local_vertices: []math.Vec3,
+    local_normals: []math.Vec3,
+};
+
+const ScenePhysicsRuntime = struct {
+    pw: *physics_utils.PhysicsWorld,
+    bindings: []ScenePhysicsBinding,
+
+    fn deinit(self: *ScenePhysicsRuntime, allocator: std.mem.Allocator) void {
+        for (self.bindings) |binding| {
+            allocator.free(binding.local_vertices);
+            allocator.free(binding.local_normals);
+        }
+        allocator.free(self.bindings);
         self.pw.deinit(allocator);
     }
 };
@@ -276,6 +333,14 @@ pub fn main() !void {
     config.load(allocator, "assets/configs/default.settings.json") catch |err| {
         app_logger.errSub("bootstrap", "Failed to load config: {any}", .{err});
     };
+    // Keep pass toggles in explicit override files so scene agents know where to edit
+    // without searching renderer internals.
+    config.loadRenderPasses(allocator, "assets/configs/render_passes.json") catch |err| {
+        app_logger.errSub("bootstrap", "Failed to load render pass config: {any}", .{err});
+    };
+    config.loadEngineIni(allocator, "assets/configs/engine.ini") catch |err| {
+        app_logger.errSub("bootstrap", "Failed to load engine ini: {any}", .{err});
+    };
     defer config.deinit();
 
     const initial_width = @as(i32, @intCast(config.WINDOW_WIDTH));
@@ -352,6 +417,7 @@ pub fn main() !void {
     const scene_def = try buildSceneDefinition(allocator, parsed_scene_file.value);
     defer allocator.free(scene_def.assets);
     defer allocator.free(scene_def.texture_slots);
+    defer allocator.free(scene_def.lights);
     app_logger.infoSub("bootstrap", "launch scene: {s}", .{scene_def.key});
 
     if (parsed_scene_index.value.loadingScene) |loading_key| {
@@ -364,9 +430,11 @@ pub fn main() !void {
             const loading_scene = try buildSceneDefinition(allocator, parsed_loading.value);
             defer allocator.free(loading_scene.assets);
             defer allocator.free(loading_scene.texture_slots);
+            defer allocator.free(loading_scene.lights);
 
             var loading_asset = try loadPrimaryMesh(allocator, loading_scene);
             defer loading_asset.mesh.deinit();
+            defer allocator.free(loading_asset.model_instances);
             try loading_asset.mesh.generateMeshlets(64, 126);
             renderer.setCameraPosition(loading_scene.camera_position);
             renderer.setCameraOrientation(loading_scene.camera_orientation_pitch, loading_scene.camera_orientation_yaw);
@@ -399,7 +467,9 @@ pub fn main() !void {
 
     var scene_asset = try loadPrimaryMesh(allocator, scene_def);
     defer scene_asset.mesh.deinit(); // Guarantees the mesh memory is freed on exit.
+    defer allocator.free(scene_asset.model_instances);
     var gun_runtime: ?GunRuntime = null;
+    var scene_physics_runtime: ?ScenePhysicsRuntime = null;
     if (scene_def.texture_slots.len > 0) {
         try loadSceneTextures(allocator, scene_def.assets, &scene_textures, &material_textures);
         renderer.setTextures(material_textures[0..]);
@@ -412,10 +482,23 @@ pub fn main() !void {
             app_logger.warn("failed to load HDRI {s}: {s}", .{ hdri_path, @errorName(err) });
         }
     }
+    configureSceneLights(&renderer, scene_def.lights);
+    if (scene_def.runtime == .scene_physics) {
+        // Scene-physics showcases (Cornell) should always run with direct shadow resolve enabled.
+        config.POST_SHADOW_ENABLED = true;
+        config.POST_HYBRID_SHADOW_ENABLED = false;
+        config.POST_SHADOW_STRENGTH_PERCENT = @max(config.POST_SHADOW_STRENGTH_PERCENT, 52);
+        // Tone down visible screen-space noise by ~75% for showcase scenes.
+        config.POST_SSAO_STRENGTH_PERCENT = @max(1, @divTrunc(config.POST_SSAO_STRENGTH_PERCENT, 4));
+        config.POST_FILM_GRAIN_STRENGTH *= 0.25;
+    }
     if (scene_def.runtime == .gun_physics) {
         gun_runtime = try setupGunRuntime(allocator, &scene_asset.mesh);
+    } else if (scene_def.runtime == .scene_physics) {
+        scene_physics_runtime = try setupScenePhysicsRuntime(allocator, &scene_asset, scene_def);
     }
     defer if (gun_runtime) |*runtime| runtime.deinit(allocator);
+    defer if (scene_physics_runtime) |*runtime| runtime.deinit(allocator);
 
     try scene_asset.mesh.generateMeshlets(64, 126);
     app_logger.infoSub(
@@ -489,6 +572,31 @@ pub fn main() !void {
                 n.x = rot[0] * on.x + rot[3] * on.y + rot[6] * on.z;
                 n.y = rot[1] * on.x + rot[4] * on.y + rot[7] * on.z;
                 n.z = rot[2] * on.x + rot[5] * on.y + rot[8] * on.z;
+            }
+            scene_asset.mesh.refreshMeshlets();
+            renderer.invalidateMeshWork();
+        } else if (scene_physics_runtime) |*runtime| {
+            runtime.pw.system.update(1.0 / 60.0, .{ .collision_steps = 1 }) catch {};
+            const lock_iface = runtime.pw.system.getBodyLockInterfaceNoLock();
+            for (runtime.bindings) |binding| {
+                var read_lock: zphysics.BodyLockRead = .{};
+                read_lock.lock(lock_iface, binding.body_id);
+                const body = read_lock.body.?;
+                const xform = body.getWorldTransform();
+                const rot = xform.rotation;
+                const pos = xform.position;
+                for (scene_asset.mesh.vertices[binding.vertex_start .. binding.vertex_start + binding.vertex_count], 0..) |*v, i| {
+                    const lv = binding.local_vertices[i];
+                    v.x = rot[0] * lv.x + rot[3] * lv.y + rot[6] * lv.z + pos[0];
+                    v.y = rot[1] * lv.x + rot[4] * lv.y + rot[7] * lv.z + pos[1];
+                    v.z = rot[2] * lv.x + rot[5] * lv.y + rot[8] * lv.z + pos[2];
+                }
+                for (scene_asset.mesh.normals[binding.triangle_start .. binding.triangle_start + binding.triangle_count], 0..) |*n, i| {
+                    const on = binding.local_normals[i];
+                    n.x = rot[0] * on.x + rot[3] * on.y + rot[6] * on.z;
+                    n.y = rot[1] * on.x + rot[4] * on.y + rot[7] * on.z;
+                    n.z = rot[2] * on.x + rot[5] * on.y + rot[8] * on.z;
+                }
             }
             scene_asset.mesh.refreshMeshlets();
             renderer.invalidateMeshWork();
@@ -641,6 +749,7 @@ fn buildSceneDefinition(allocator: std.mem.Allocator, scene_file: SceneFile) !Sc
 
     var model_count: usize = 0;
     var texture_count: usize = 0;
+    var light_count: usize = 0;
     for (scene_file.assets) |asset| {
         if (std.ascii.eqlIgnoreCase(asset.type, "model")) {
             model_count += 1;
@@ -648,6 +757,7 @@ fn buildSceneDefinition(allocator: std.mem.Allocator, scene_file: SceneFile) !Sc
         } else if (std.ascii.eqlIgnoreCase(asset.type, "runtime")) {
             if (asset.runtimeName) |runtime_name| {
                 if (std.ascii.eqlIgnoreCase(runtime_name, "gun_physics")) runtime = .gun_physics;
+                if (std.ascii.eqlIgnoreCase(runtime_name, "scene_physics")) runtime = .scene_physics;
             }
         } else if (std.ascii.eqlIgnoreCase(asset.type, "hdri")) {
             hdri_path = asset.path;
@@ -659,14 +769,33 @@ fn buildSceneDefinition(allocator: std.mem.Allocator, scene_file: SceneFile) !Sc
                 camera_orientation_pitch = angles[0];
                 camera_orientation_yaw = angles[1];
             }
+        } else if (std.ascii.eqlIgnoreCase(asset.type, "light")) {
+            light_count += 1;
         }
     }
 
     const assets = try allocator.alloc(SceneAssetDefinition, model_count);
     const texture_slots = try allocator.alloc(SceneTextureSlotDefinition, texture_count);
+    const lights = try allocator.alloc(SceneLightDefinition, light_count);
     var model_index: usize = 0;
     var texture_index: usize = 0;
+    var light_index: usize = 0;
     for (scene_file.assets) |asset| {
+        if (std.ascii.eqlIgnoreCase(asset.type, "light")) {
+            const pos = math.Vec3.new(asset.position[0], asset.position[1], asset.position[2]);
+            const dist = asset.lightDistance orelse @max(0.01, math.Vec3.length(pos));
+            const color_arr = asset.lightColor orelse [3]f32{ 1.0, 1.0, 1.0 };
+            const direction = if (math.Vec3.length(pos) > 1e-6) math.Vec3.normalize(pos) else math.Vec3.new(0.0, 1.0, 0.0);
+            lights[light_index] = .{
+                .direction = direction,
+                .distance = dist,
+                .color = math.Vec3.new(color_arr[0], color_arr[1], color_arr[2]),
+                .glow_radius = asset.glowRadius orelse 0.0,
+                .glow_intensity = asset.glowIntensity orelse 0.0,
+            };
+            light_index += 1;
+            continue;
+        }
         if (!std.ascii.eqlIgnoreCase(asset.type, "model")) continue;
 
         const model_type = if (std.ascii.eqlIgnoreCase(asset.modelType, "gltf"))
@@ -694,6 +823,10 @@ fn buildSceneDefinition(allocator: std.mem.Allocator, scene_file: SceneFile) !Sc
             .rotation_deg = math.Vec3.new(asset.rotationDeg[0], asset.rotationDeg[1], asset.rotationDeg[2]),
             .scale = math.Vec3.new(asset.scale[0], asset.scale[1], asset.scale[2]),
             .texture_slots = texture_slots[start..texture_index],
+            .physics_motion = asset.physicsMotion,
+            .physics_shape = asset.physicsShape,
+            .physics_mass = asset.physicsMass,
+            .physics_restitution = asset.physicsRestitution,
         };
         model_index += 1;
     }
@@ -702,6 +835,7 @@ fn buildSceneDefinition(allocator: std.mem.Allocator, scene_file: SceneFile) !Sc
         .key = scene_file.key,
         .assets = assets,
         .texture_slots = texture_slots,
+        .lights = lights,
         .runtime = runtime,
         .hdri_path = hdri_path,
         .camera_position = camera_position,
@@ -710,16 +844,40 @@ fn buildSceneDefinition(allocator: std.mem.Allocator, scene_file: SceneFile) !Sc
     };
 }
 
+fn configureSceneLights(renderer: *Renderer, lights: []const SceneLightDefinition) void {
+    for (lights, 0..) |light, i| {
+        renderer.setDirectionalLight(i, light.direction, light.distance, light.color);
+        renderer.setLightGlow(i, light.glow_radius, light.glow_intensity);
+    }
+}
+
 fn loadPrimaryMesh(allocator: std.mem.Allocator, scene_def: SceneDefinition) !SceneAsset {
     if (scene_def.assets.len == 0) return error.SceneHasNoAssets;
 
     var merged_mesh: ?mesh_module.Mesh = null;
-    for (scene_def.assets) |asset| {
+    const instances = try allocator.alloc(SceneModelInstance, scene_def.assets.len);
+    var instance_count: usize = 0;
+    for (scene_def.assets, 0..) |asset, asset_index| {
+        const prev_vertex_count = if (merged_mesh) |m| m.vertices.len else 0;
+        const prev_triangle_count = if (merged_mesh) |m| m.triangles.len else 0;
         var loaded_mesh: mesh_module.Mesh = switch (asset.model_type) {
             .gltf => try loadGltfMeshAsset(allocator, asset),
             .obj => try loadObjMeshAsset(allocator, asset),
         };
         applyAssetTransform(&loaded_mesh, asset);
+        const loaded_vertex_count = loaded_mesh.vertices.len;
+        const loaded_triangle_count = loaded_mesh.triangles.len;
+        var bounds_min = loaded_mesh.vertices[0];
+        var bounds_max = loaded_mesh.vertices[0];
+        for (loaded_mesh.vertices[1..]) |v| {
+            bounds_min.x = @min(bounds_min.x, v.x);
+            bounds_min.y = @min(bounds_min.y, v.y);
+            bounds_min.z = @min(bounds_min.z, v.z);
+            bounds_max.x = @max(bounds_max.x, v.x);
+            bounds_max.y = @max(bounds_max.y, v.y);
+            bounds_max.z = @max(bounds_max.z, v.z);
+        }
+
         if (merged_mesh == null) {
             merged_mesh = loaded_mesh;
         } else {
@@ -728,9 +886,23 @@ fn loadPrimaryMesh(allocator: std.mem.Allocator, scene_def: SceneDefinition) !Sc
             loaded_mesh.deinit();
             merged_mesh = existing;
         }
+
+        instances[instance_count] = .{
+            .asset_index = asset_index,
+            .vertex_start = prev_vertex_count,
+            .vertex_count = loaded_vertex_count,
+            .triangle_start = prev_triangle_count,
+            .triangle_count = loaded_triangle_count,
+            .bounds_min = bounds_min,
+            .bounds_max = bounds_max,
+        };
+        instance_count += 1;
     }
 
-    return .{ .mesh = merged_mesh.? };
+    return .{
+        .mesh = merged_mesh.?,
+        .model_instances = instances[0..instance_count],
+    };
 }
 
 fn loadGltfMeshAsset(allocator: std.mem.Allocator, asset: SceneAssetDefinition) !mesh_module.Mesh {
@@ -902,6 +1074,39 @@ fn setupGunRuntime(allocator: std.mem.Allocator, mesh: *mesh_module.Mesh) !GunRu
         .object_layer = physics_utils.object_layers.non_moving,
     };
     _ = try body_interface.createAndAddBody(floor_body_settings, .activate);
+    const wall_thickness: f32 = 0.1;
+    const wall_height: f32 = 2.1;
+    const wall_half_depth: f32 = 2.0;
+    const wall_half_width: f32 = 2.0;
+    const wall_shape_lr = try zphysics.BoxShapeSettings.create(.{ wall_thickness, wall_height, wall_half_depth });
+    defer wall_shape_lr.asShapeSettings().release();
+    const wall_shape_lr_obj = try wall_shape_lr.asShapeSettings().createShape();
+    defer wall_shape_lr_obj.release();
+    _ = try body_interface.createAndAddBody(.{
+        .shape = wall_shape_lr_obj,
+        .position = .{ -2.0, wall_height, 0.0, 0.0 },
+        .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
+        .motion_type = .static,
+        .object_layer = physics_utils.object_layers.non_moving,
+    }, .activate);
+    _ = try body_interface.createAndAddBody(.{
+        .shape = wall_shape_lr_obj,
+        .position = .{ 2.0, wall_height, 0.0, 0.0 },
+        .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
+        .motion_type = .static,
+        .object_layer = physics_utils.object_layers.non_moving,
+    }, .activate);
+    const wall_shape_back = try zphysics.BoxShapeSettings.create(.{ wall_half_width, wall_height, wall_thickness });
+    defer wall_shape_back.asShapeSettings().release();
+    const wall_shape_back_obj = try wall_shape_back.asShapeSettings().createShape();
+    defer wall_shape_back_obj.release();
+    _ = try body_interface.createAndAddBody(.{
+        .shape = wall_shape_back_obj,
+        .position = .{ 0.0, wall_height, 2.0, 0.0 },
+        .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
+        .motion_type = .static,
+        .object_layer = physics_utils.object_layers.non_moving,
+    }, .activate);
 
     const gun_hx = (gun_max_b.x - gun_min_b.x) * 0.5;
     const gun_hy = (gun_max_b.y - gun_min_b.y) * 0.5;
@@ -929,6 +1134,102 @@ fn setupGunRuntime(allocator: std.mem.Allocator, mesh: *mesh_module.Mesh) !GunRu
         .num_gun_triangles = num_gun_triangles,
         .original_gun_vertices = original_gun_vertices,
         .original_gun_normals = original_gun_normals,
+    };
+}
+
+fn setupScenePhysicsRuntime(allocator: std.mem.Allocator, scene_asset: *SceneAsset, scene_def: SceneDefinition) !ScenePhysicsRuntime {
+    var pw = try physics_utils.PhysicsWorld.init(allocator);
+    errdefer pw.deinit(allocator);
+    const body_interface = pw.system.getBodyInterfaceMut();
+
+    // Basic floor collider for scene_physics layouts like Cornell.
+    const floor_shape_settings = try zphysics.BoxShapeSettings.create(.{ 6.0, 0.1, 6.0 });
+    defer floor_shape_settings.asShapeSettings().release();
+    const floor_shape = try floor_shape_settings.asShapeSettings().createShape();
+    defer floor_shape.release();
+    const floor_body_settings = zphysics.BodyCreationSettings{
+        .shape = floor_shape,
+        .position = .{ 0.0, -0.1, 0.0, 0.0 },
+        .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
+        .motion_type = .static,
+        .object_layer = physics_utils.object_layers.non_moving,
+    };
+    _ = try body_interface.createAndAddBody(floor_body_settings, .activate);
+
+    var dynamic_count: usize = 0;
+    for (scene_asset.model_instances) |inst| {
+        const asset = scene_def.assets[inst.asset_index];
+        if (asset.physics_motion != null and std.ascii.eqlIgnoreCase(asset.physics_motion.?, "dynamic")) dynamic_count += 1;
+    }
+
+    const bindings = try allocator.alloc(ScenePhysicsBinding, dynamic_count);
+    var bind_idx: usize = 0;
+    for (scene_asset.model_instances) |inst| {
+        const asset = scene_def.assets[inst.asset_index];
+        if (asset.physics_motion == null or !std.ascii.eqlIgnoreCase(asset.physics_motion.?, "dynamic")) continue;
+
+        const center = math.Vec3.scale(math.Vec3.add(inst.bounds_min, inst.bounds_max), 0.5);
+        const extents = math.Vec3.scale(math.Vec3.sub(inst.bounds_max, inst.bounds_min), 0.5);
+        const local_vertices = try allocator.alloc(math.Vec3, inst.vertex_count);
+        for (scene_asset.mesh.vertices[inst.vertex_start .. inst.vertex_start + inst.vertex_count], 0..) |v, i| {
+            local_vertices[i] = math.Vec3.sub(v, center);
+        }
+        const local_normals = try allocator.alloc(math.Vec3, inst.triangle_count);
+        @memcpy(local_normals, scene_asset.mesh.normals[inst.triangle_start .. inst.triangle_start + inst.triangle_count]);
+
+        const use_sphere = asset.physics_shape != null and std.ascii.eqlIgnoreCase(asset.physics_shape.?, "sphere");
+        const body_id = if (use_sphere) blk: {
+            const radius = @max(extents.x, @max(extents.y, extents.z));
+            const sphere_shape_settings = try zphysics.SphereShapeSettings.create(radius);
+            defer sphere_shape_settings.asShapeSettings().release();
+            const sphere_shape = try sphere_shape_settings.asShapeSettings().createShape();
+            defer sphere_shape.release();
+            var body_settings = zphysics.BodyCreationSettings{
+                .shape = sphere_shape,
+                .position = .{ center.x, center.y, center.z, 0.0 },
+                .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
+                .motion_type = .dynamic,
+                .object_layer = physics_utils.object_layers.moving,
+            };
+            const mass_hint = asset.physics_mass orelse 2.0;
+            body_settings.inertia_multiplier = std.math.clamp(mass_hint / 3.0, 0.3, 6.0);
+            body_settings.linear_damping = std.math.clamp(mass_hint * 0.02, 0.02, 0.25);
+            body_settings.restitution = asset.physics_restitution orelse 0.35;
+            break :blk try body_interface.createAndAddBody(body_settings, .activate);
+        } else blk: {
+            const box_shape_settings = try zphysics.BoxShapeSettings.create(.{ extents.x, extents.y, extents.z });
+            defer box_shape_settings.asShapeSettings().release();
+            const box_shape = try box_shape_settings.asShapeSettings().createShape();
+            defer box_shape.release();
+            var body_settings = zphysics.BodyCreationSettings{
+                .shape = box_shape,
+                .position = .{ center.x, center.y, center.z, 0.0 },
+                .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
+                .motion_type = .dynamic,
+                .object_layer = physics_utils.object_layers.moving,
+            };
+            const mass_hint = asset.physics_mass orelse 6.0;
+            body_settings.inertia_multiplier = std.math.clamp(mass_hint / 4.0, 0.4, 8.0);
+            body_settings.linear_damping = std.math.clamp(mass_hint * 0.015, 0.02, 0.3);
+            body_settings.restitution = asset.physics_restitution orelse 0.2;
+            break :blk try body_interface.createAndAddBody(body_settings, .activate);
+        };
+
+        bindings[bind_idx] = .{
+            .body_id = body_id,
+            .vertex_start = inst.vertex_start,
+            .vertex_count = inst.vertex_count,
+            .triangle_start = inst.triangle_start,
+            .triangle_count = inst.triangle_count,
+            .local_vertices = local_vertices,
+            .local_normals = local_normals,
+        };
+        bind_idx += 1;
+    }
+
+    return .{
+        .pw = pw,
+        .bindings = bindings,
     };
 }
 

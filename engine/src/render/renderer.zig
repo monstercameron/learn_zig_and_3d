@@ -1149,6 +1149,9 @@ pub const LightInfo = struct {
     elevation: f32,
     color: math.Vec3,
     direction: math.Vec3 = math.Vec3.new(0, -1, 0),
+    manual_direction: bool = false,
+    glow_radius: f32 = 0.0,
+    glow_intensity: f32 = 0.0,
     shadow_map: ShadowMap,
 };
 
@@ -3501,6 +3504,26 @@ pub const Renderer = struct {
         self.textures = textures;
     }
 
+    pub fn setDirectionalLight(self: *Renderer, index: usize, direction: math.Vec3, distance: f32, color: ?math.Vec3) void {
+        if (index >= self.lights.items.len) return;
+        const dir_len = math.Vec3.length(direction);
+        const normalized = if (dir_len > 1e-6)
+            math.Vec3.scale(direction, 1.0 / dir_len)
+        else
+            math.Vec3.new(0.0, 1.0, 0.0);
+        self.lights.items[index].direction = normalized;
+        self.lights.items[index].distance = @max(distance, 0.01);
+        if (color) |c| self.lights.items[index].color = c;
+        self.lights.items[index].manual_direction = true;
+        self.frame_view_cache.invalidate();
+    }
+
+    pub fn setLightGlow(self: *Renderer, index: usize, radius: f32, intensity: f32) void {
+        if (index >= self.lights.items.len) return;
+        self.lights.items[index].glow_radius = std.math.clamp(radius, 0.0, 256.0);
+        self.lights.items[index].glow_intensity = std.math.clamp(intensity, 0.0, 8.0);
+    }
+
     /// The main render loop function for a single frame.
     pub fn render3DMesh(self: *Renderer, mesh: *const Mesh) !void {
         try self.render3DMeshWithPump(mesh, null);
@@ -3552,16 +3575,18 @@ pub const Renderer = struct {
 
         const sweep_half_angle = std.math.pi / 2.0;
         for (self.lights.items) |*light| {
-            light.orbit_x += light.orbit_speed * simulation_delta_seconds;
-            const sweep_angle = @sin(light.orbit_x) * sweep_half_angle;
-            const horizontal_radius = light.distance * @cos(light.elevation);
-            const light_height = @max(0.35, light.distance * @sin(light.elevation));
-            const light_pos = math.Vec3.new(
-                @sin(sweep_angle) * horizontal_radius,
-                light_height,
-                @cos(sweep_angle) * horizontal_radius,
-            );
-            light.direction = math.Vec3.normalize(light_pos);
+            if (!light.manual_direction) {
+                light.orbit_x += light.orbit_speed * simulation_delta_seconds;
+                const sweep_angle = @sin(light.orbit_x) * sweep_half_angle;
+                const horizontal_radius = light.distance * @cos(light.elevation);
+                const light_height = @max(0.35, light.distance * @sin(light.elevation));
+                const light_pos = math.Vec3.new(
+                    @sin(sweep_angle) * horizontal_radius,
+                    light_height,
+                    @cos(sweep_angle) * horizontal_radius,
+                );
+                light.direction = math.Vec3.normalize(light_pos);
+            }
         }
         const light_distance_0 = if (self.lights.items.len > 0) self.lights.items[0].distance else 10.0;
         const light_dir_world = if (self.lights.items.len > 0) self.lights.items[0].direction else math.Vec3.new(0, -1, 0);
@@ -3746,6 +3771,17 @@ pub const Renderer = struct {
         if (self.show_light_orb) {
             const light_camera_z = light_camera.z;
             if (light_camera_z > NEAR_CLIP) {
+                var glow_color = math.Vec3.new(1.0, 1.0, 1.0);
+                var glow_radius: f32 = 0.0;
+                var glow_intensity: f32 = 0.0;
+                if (self.lights.items.len > 0) {
+                    glow_color = self.lights.items[0].color;
+                    glow_radius = self.lights.items[0].glow_radius;
+                    glow_intensity = self.lights.items[0].glow_intensity;
+                }
+                if (glow_radius > 0.0 and glow_intensity > 0.0) {
+                    self.drawLightGlow(light_camera, light_camera_z, center_x, center_y, x_scale, y_scale, glow_color, glow_radius, glow_intensity);
+                }
                 self.drawLightMarker(light_camera, light_camera_z, center_x, center_y, x_scale, y_scale);
             }
         }
@@ -4070,6 +4106,60 @@ pub const Renderer = struct {
                 if ((dx * dx + dy * dy) > @as(f32, @floatFromInt(radius * radius))) continue;
                 const idx = @as(usize, @intCast(py)) * @as(usize, @intCast(self.bitmap.width)) + @as(usize, @intCast(px));
                 if (idx < self.bitmap.pixels.len) self.bitmap.pixels[idx] = color;
+            }
+        }
+    }
+
+    fn drawLightGlow(
+        self: *Renderer,
+        light_pos: math.Vec3,
+        light_camera_z: f32,
+        center_x: f32,
+        center_y: f32,
+        x_scale: f32,
+        y_scale: f32,
+        glow_color: math.Vec3,
+        radius_px: f32,
+        intensity: f32,
+    ) void {
+        if (light_camera_z <= NEAR_CLIP) return;
+        if (radius_px <= 0.5 or intensity <= 0.0) return;
+
+        const ndc_x = (light_pos.x / light_camera_z) * x_scale;
+        const ndc_y = (light_pos.y / light_camera_z) * y_scale;
+        const screen_x = ndc_x * center_x + center_x;
+        const screen_y = -ndc_y * center_y + center_y;
+        const cx = @as(i32, @intFromFloat(screen_x));
+        const cy = @as(i32, @intFromFloat(screen_y));
+        const radius: i32 = @intFromFloat(radius_px);
+        const inv_radius = 1.0 / @max(radius_px, 1.0);
+
+        var py = cy - radius;
+        while (py <= cy + radius) : (py += 1) {
+            if (py < 0 or py >= self.bitmap.height) continue;
+            var px = cx - radius;
+            while (px <= cx + radius) : (px += 1) {
+                if (px < 0 or px >= self.bitmap.width) continue;
+                const dx = @as(f32, @floatFromInt(px - cx));
+                const dy = @as(f32, @floatFromInt(py - cy));
+                const dist = @sqrt(dx * dx + dy * dy);
+                if (dist > radius_px) continue;
+                const falloff = (1.0 - dist * inv_radius);
+                const glow = falloff * falloff * intensity;
+                const idx = @as(usize, @intCast(py)) * @as(usize, @intCast(self.bitmap.width)) + @as(usize, @intCast(px));
+                if (idx >= self.bitmap.pixels.len) continue;
+
+                const src = self.bitmap.pixels[idx];
+                const sr: i32 = @intCast((src >> 16) & 0xFF);
+                const sg: i32 = @intCast((src >> 8) & 0xFF);
+                const sb: i32 = @intCast(src & 0xFF);
+                const add_r: i32 = @intFromFloat(std.math.clamp(glow_color.x * 255.0 * glow, 0.0, 255.0));
+                const add_g: i32 = @intFromFloat(std.math.clamp(glow_color.y * 255.0 * glow, 0.0, 255.0));
+                const add_b: i32 = @intFromFloat(std.math.clamp(glow_color.z * 255.0 * glow, 0.0, 255.0));
+                const out_r: u32 = @intCast(std.math.clamp(sr + add_r, 0, 255));
+                const out_g: u32 = @intCast(std.math.clamp(sg + add_g, 0, 255));
+                const out_b: u32 = @intCast(std.math.clamp(sb + add_b, 0, 255));
+                self.bitmap.pixels[idx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b;
             }
         }
     }

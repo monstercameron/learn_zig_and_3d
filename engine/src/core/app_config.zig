@@ -240,6 +240,27 @@ const ConfigFile = struct {
     } = .{},
 };
 
+const RenderPassConfigFile = struct {
+    passes: struct {
+        colorCorrection: ?bool = null,
+        bloom: ?bool = null,
+        depthFog: ?bool = null,
+        skybox: ?bool = null,
+        shadows: ?bool = null,
+        hybridShadows: ?bool = null,
+        ssao: ?bool = null,
+        ssgi: ?bool = null,
+        ssr: ?bool = null,
+        taa: ?bool = null,
+        dof: ?bool = null,
+        motionBlur: ?bool = null,
+        lensFlare: ?bool = null,
+        chromaticAberration: ?bool = null,
+        filmGrain: ?bool = null,
+        godRays: ?bool = null,
+    } = .{},
+};
+
 // Global arena just for the config so parsed strings stay alive
 var config_arena: ?std.heap.ArenaAllocator = null;
 
@@ -323,6 +344,154 @@ pub fn load(allocator: std.mem.Allocator, filepath: []const u8) !void {
     if (c.postProcessing.colorProfileName) |v| POST_COLOR_PROFILE_NAME = v;
     if (c.postProcessing.colorBrightnessBias) |v| POST_COLOR_BRIGHTNESS_BIAS = v;
     if (c.postProcessing.colorContrastPercent) |v| POST_COLOR_CONTRAST_PERCENT = v;
+}
+
+pub fn loadRenderPasses(allocator: std.mem.Allocator, filepath: []const u8) !void {
+    // JSON-level pass toggles. This is intentionally separate from default.settings.json
+    // so pass experiments can be switched quickly without touching base app config.
+    if (config_arena == null) {
+        config_arena = std.heap.ArenaAllocator.init(allocator);
+    }
+    const arena = config_arena.?.allocator();
+
+    const file_contents = std.fs.cwd().readFileAlloc(arena, filepath, 1024 * 1024) catch |err| {
+        std.debug.print("Failed to read render pass config {s}: {any}, using existing pass settings\n", .{ filepath, err });
+        return;
+    };
+
+    const parsed = std.json.parseFromSlice(RenderPassConfigFile, arena, file_contents, .{ .ignore_unknown_fields = true }) catch |err| {
+        std.debug.print("Failed to parse render pass config json {s}: {any}\n", .{ filepath, err });
+        return;
+    };
+
+    const p = parsed.value.passes;
+    if (p.colorCorrection) |v| POST_COLOR_CORRECTION_ENABLED = v;
+    if (p.bloom) |v| POST_BLOOM_ENABLED = v;
+    if (p.depthFog) |v| POST_DEPTH_FOG_ENABLED = v;
+    if (p.skybox) |v| POST_SKYBOX_ENABLED = v;
+    if (p.shadows) |v| POST_SHADOW_ENABLED = v;
+    if (p.hybridShadows) |v| POST_HYBRID_SHADOW_ENABLED = v;
+    if (p.ssao) |v| POST_SSAO_ENABLED = v;
+    if (p.ssgi) |v| POST_SSGI_ENABLED = v;
+    if (p.ssr) |v| POST_SSR_ENABLED = v;
+    if (p.taa) |v| POST_TAA_ENABLED = v;
+    if (p.dof) |v| POST_DOF_ENABLED = v;
+    if (p.motionBlur) |v| POST_MOTION_BLUR_ENABLED = v;
+    if (p.lensFlare) |v| POST_LENS_FLARE_ENABLED = v;
+    if (p.chromaticAberration) |v| POST_CHROMATIC_ABERRATION_ENABLED = v;
+    if (p.filmGrain) |v| POST_FILM_GRAIN_VIGNETTE_ENABLED = v;
+    if (p.godRays) |v| POST_GOD_RAYS_ENABLED = v;
+}
+
+pub fn loadEngineIni(allocator: std.mem.Allocator, filepath: []const u8) !void {
+    // Highest-priority runtime overrides for pass toggles and key pass parameters.
+    // Keep this in sync with README "Render Pass Config Files" for agent discoverability.
+    if (config_arena == null) {
+        config_arena = std.heap.ArenaAllocator.init(allocator);
+    }
+    const arena = config_arena.?.allocator();
+    const contents = std.fs.cwd().readFileAlloc(arena, filepath, 1024 * 1024) catch |err| {
+        std.debug.print("Failed to read engine ini {s}: {any}, using existing settings\n", .{ filepath, err });
+        return;
+    };
+
+    var section: []const u8 = "";
+    var line_it = std.mem.splitScalar(u8, contents, '\n');
+    while (line_it.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0 or line[0] == ';' or line[0] == '#') continue;
+        if (line[0] == '[' and line[line.len - 1] == ']') {
+            section = std.mem.trim(u8, line[1 .. line.len - 1], " \t");
+            continue;
+        }
+        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const key = std.mem.trim(u8, line[0..eq], " \t");
+        const val = std.mem.trim(u8, line[eq + 1 ..], " \t");
+
+        if (std.mem.eql(u8, section, "passes")) {
+            if (std.mem.eql(u8, key, "color_correction")) POST_COLOR_CORRECTION_ENABLED = parseBool(val, POST_COLOR_CORRECTION_ENABLED);
+            if (std.mem.eql(u8, key, "bloom")) POST_BLOOM_ENABLED = parseBool(val, POST_BLOOM_ENABLED);
+            if (std.mem.eql(u8, key, "depth_fog")) POST_DEPTH_FOG_ENABLED = parseBool(val, POST_DEPTH_FOG_ENABLED);
+            if (std.mem.eql(u8, key, "skybox")) POST_SKYBOX_ENABLED = parseBool(val, POST_SKYBOX_ENABLED);
+            if (std.mem.eql(u8, key, "shadows")) POST_SHADOW_ENABLED = parseBool(val, POST_SHADOW_ENABLED);
+            if (std.mem.eql(u8, key, "hybrid_shadows")) POST_HYBRID_SHADOW_ENABLED = parseBool(val, POST_HYBRID_SHADOW_ENABLED);
+            if (std.mem.eql(u8, key, "ssao")) POST_SSAO_ENABLED = parseBool(val, POST_SSAO_ENABLED);
+            if (std.mem.eql(u8, key, "ssgi")) POST_SSGI_ENABLED = parseBool(val, POST_SSGI_ENABLED);
+            if (std.mem.eql(u8, key, "ssr")) POST_SSR_ENABLED = parseBool(val, POST_SSR_ENABLED);
+            if (std.mem.eql(u8, key, "taa")) POST_TAA_ENABLED = parseBool(val, POST_TAA_ENABLED);
+            if (std.mem.eql(u8, key, "dof")) POST_DOF_ENABLED = parseBool(val, POST_DOF_ENABLED);
+            if (std.mem.eql(u8, key, "motion_blur")) POST_MOTION_BLUR_ENABLED = parseBool(val, POST_MOTION_BLUR_ENABLED);
+            if (std.mem.eql(u8, key, "lens_flare")) POST_LENS_FLARE_ENABLED = parseBool(val, POST_LENS_FLARE_ENABLED);
+            if (std.mem.eql(u8, key, "chromatic_aberration")) POST_CHROMATIC_ABERRATION_ENABLED = parseBool(val, POST_CHROMATIC_ABERRATION_ENABLED);
+            if (std.mem.eql(u8, key, "film_grain")) POST_FILM_GRAIN_VIGNETTE_ENABLED = parseBool(val, POST_FILM_GRAIN_VIGNETTE_ENABLED);
+            if (std.mem.eql(u8, key, "god_rays")) POST_GOD_RAYS_ENABLED = parseBool(val, POST_GOD_RAYS_ENABLED);
+        } else if (std.mem.eql(u8, section, "bloom")) {
+            if (std.mem.eql(u8, key, "threshold")) POST_BLOOM_THRESHOLD = parseI32(val, POST_BLOOM_THRESHOLD);
+            if (std.mem.eql(u8, key, "intensity_percent")) POST_BLOOM_INTENSITY_PERCENT = parseI32(val, POST_BLOOM_INTENSITY_PERCENT);
+            if (std.mem.eql(u8, key, "enabled")) POST_BLOOM_ENABLED = parseBool(val, POST_BLOOM_ENABLED);
+        } else if (std.mem.eql(u8, section, "shadows")) {
+            if (std.mem.eql(u8, key, "enabled")) POST_SHADOW_ENABLED = parseBool(val, POST_SHADOW_ENABLED);
+            if (std.mem.eql(u8, key, "strength_percent")) POST_SHADOW_STRENGTH_PERCENT = parseI32(val, POST_SHADOW_STRENGTH_PERCENT);
+            if (std.mem.eql(u8, key, "depth_bias")) POST_SHADOW_DEPTH_BIAS = parseF32(val, POST_SHADOW_DEPTH_BIAS);
+        } else if (std.mem.eql(u8, section, "ssao")) {
+            if (std.mem.eql(u8, key, "enabled")) POST_SSAO_ENABLED = parseBool(val, POST_SSAO_ENABLED);
+            if (std.mem.eql(u8, key, "radius")) POST_SSAO_RADIUS = parseF32(val, POST_SSAO_RADIUS);
+            if (std.mem.eql(u8, key, "strength_percent")) POST_SSAO_STRENGTH_PERCENT = parseI32(val, POST_SSAO_STRENGTH_PERCENT);
+        } else if (std.mem.eql(u8, section, "taa")) {
+            if (std.mem.eql(u8, key, "enabled")) POST_TAA_ENABLED = parseBool(val, POST_TAA_ENABLED);
+            if (std.mem.eql(u8, key, "history_percent")) POST_TAA_HISTORY_PERCENT = parseI32(val, POST_TAA_HISTORY_PERCENT);
+            if (std.mem.eql(u8, key, "depth_threshold")) POST_TAA_DEPTH_THRESHOLD = parseF32(val, POST_TAA_DEPTH_THRESHOLD);
+        } else if (std.mem.eql(u8, section, "motion_blur")) {
+            if (std.mem.eql(u8, key, "enabled")) POST_MOTION_BLUR_ENABLED = parseBool(val, POST_MOTION_BLUR_ENABLED);
+            if (std.mem.eql(u8, key, "samples")) POST_MOTION_BLUR_SAMPLES = parseI32(val, POST_MOTION_BLUR_SAMPLES);
+            if (std.mem.eql(u8, key, "intensity")) POST_MOTION_BLUR_INTENSITY = parseF32(val, POST_MOTION_BLUR_INTENSITY);
+        } else if (std.mem.eql(u8, section, "depth_fog")) {
+            if (std.mem.eql(u8, key, "enabled")) POST_DEPTH_FOG_ENABLED = parseBool(val, POST_DEPTH_FOG_ENABLED);
+            if (std.mem.eql(u8, key, "near")) POST_DEPTH_FOG_NEAR = parseF32(val, POST_DEPTH_FOG_NEAR);
+            if (std.mem.eql(u8, key, "far")) POST_DEPTH_FOG_FAR = parseF32(val, POST_DEPTH_FOG_FAR);
+        } else if (std.mem.eql(u8, section, "lens_flare")) {
+            if (std.mem.eql(u8, key, "enabled")) POST_LENS_FLARE_ENABLED = parseBool(val, POST_LENS_FLARE_ENABLED);
+            if (std.mem.eql(u8, key, "threshold")) POST_LENS_FLARE_THRESHOLD = parseI32(val, POST_LENS_FLARE_THRESHOLD);
+            if (std.mem.eql(u8, key, "intensity_percent")) POST_LENS_FLARE_INTENSITY_PERCENT = parseI32(val, POST_LENS_FLARE_INTENSITY_PERCENT);
+        } else if (std.mem.eql(u8, section, "chromatic_aberration")) {
+            if (std.mem.eql(u8, key, "enabled")) POST_CHROMATIC_ABERRATION_ENABLED = parseBool(val, POST_CHROMATIC_ABERRATION_ENABLED);
+            if (std.mem.eql(u8, key, "strength")) POST_CHROMATIC_ABERRATION_STRENGTH = parseF32(val, POST_CHROMATIC_ABERRATION_STRENGTH);
+        } else if (std.mem.eql(u8, section, "film_grain")) {
+            if (std.mem.eql(u8, key, "enabled")) POST_FILM_GRAIN_VIGNETTE_ENABLED = parseBool(val, POST_FILM_GRAIN_VIGNETTE_ENABLED);
+            if (std.mem.eql(u8, key, "grain_strength")) POST_FILM_GRAIN_STRENGTH = parseF32(val, POST_FILM_GRAIN_STRENGTH);
+            if (std.mem.eql(u8, key, "vignette_strength")) POST_VIGNETTE_STRENGTH = parseF32(val, POST_VIGNETTE_STRENGTH);
+        } else if (std.mem.eql(u8, section, "god_rays")) {
+            if (std.mem.eql(u8, key, "enabled")) POST_GOD_RAYS_ENABLED = parseBool(val, POST_GOD_RAYS_ENABLED);
+            if (std.mem.eql(u8, key, "samples")) POST_GOD_RAYS_SAMPLES = parseI32(val, POST_GOD_RAYS_SAMPLES);
+            if (std.mem.eql(u8, key, "exposure")) POST_GOD_RAYS_EXPOSURE = parseF32(val, POST_GOD_RAYS_EXPOSURE);
+        } else if (std.mem.eql(u8, section, "dof")) {
+            if (std.mem.eql(u8, key, "enabled")) POST_DOF_ENABLED = parseBool(val, POST_DOF_ENABLED);
+            if (std.mem.eql(u8, key, "focal_distance")) POST_DOF_FOCAL_DISTANCE = parseF32(val, POST_DOF_FOCAL_DISTANCE);
+            if (std.mem.eql(u8, key, "focal_range")) POST_DOF_FOCAL_RANGE = parseF32(val, POST_DOF_FOCAL_RANGE);
+        } else if (std.mem.eql(u8, section, "ssr")) {
+            if (std.mem.eql(u8, key, "enabled")) POST_SSR_ENABLED = parseBool(val, POST_SSR_ENABLED);
+            if (std.mem.eql(u8, key, "max_samples")) POST_SSR_MAX_SAMPLES = parseI32(val, POST_SSR_MAX_SAMPLES);
+            if (std.mem.eql(u8, key, "intensity")) POST_SSR_INTENSITY = parseF32(val, POST_SSR_INTENSITY);
+        } else if (std.mem.eql(u8, section, "ssgi")) {
+            if (std.mem.eql(u8, key, "enabled")) POST_SSGI_ENABLED = parseBool(val, POST_SSGI_ENABLED);
+            if (std.mem.eql(u8, key, "samples")) POST_SSGI_SAMPLES = parseI32(val, POST_SSGI_SAMPLES);
+            if (std.mem.eql(u8, key, "intensity")) POST_SSGI_INTENSITY = parseF32(val, POST_SSGI_INTENSITY);
+        }
+    }
+}
+
+fn parseBool(value: []const u8, fallback: bool) bool {
+    if (std.ascii.eqlIgnoreCase(value, "true") or std.ascii.eqlIgnoreCase(value, "1") or std.ascii.eqlIgnoreCase(value, "on")) return true;
+    if (std.ascii.eqlIgnoreCase(value, "false") or std.ascii.eqlIgnoreCase(value, "0") or std.ascii.eqlIgnoreCase(value, "off")) return false;
+    return fallback;
+}
+
+fn parseI32(value: []const u8, fallback: i32) i32 {
+    return std.fmt.parseInt(i32, value, 10) catch fallback;
+}
+
+fn parseF32(value: []const u8, fallback: f32) f32 {
+    return std.fmt.parseFloat(f32, value) catch fallback;
 }
 pub fn deinit() void {
     if (config_arena) |*arena| {

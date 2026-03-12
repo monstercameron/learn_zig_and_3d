@@ -133,6 +133,23 @@ zig build -Doptimize=ReleaseFast -Dprofile=true
 zig build -Dcpu=x86_64_v4 -Doptimize=ReleaseFast
 ```
 
+## Render Pass Config Files
+
+Render pass toggles and tuning are configured in files, not in renderer code:
+
+- `assets/configs/default.settings.json`: base app + rendering defaults
+- `assets/configs/render_passes.json`: JSON pass toggle override layer
+- `assets/configs/engine.ini`: highest-priority pass toggles + top per-pass params
+
+Load order at startup is exactly:
+
+1. `default.settings.json`
+2. `render_passes.json`
+3. `engine.ini`
+
+If an AI agent needs to enable/disable passes (motion blur, noise/film grain, shadows, etc.),
+edit `assets/configs/engine.ini` first.
+
 ## Profiling
 
 The project already includes two useful profiling paths:

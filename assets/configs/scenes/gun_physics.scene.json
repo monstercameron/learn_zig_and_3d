@@ -16,6 +16,18 @@
       "path": "assets/hdri/envmap.raw"
     },
     {
+      "type": "light",
+      "position": [1.8, 2.8, 1.2],
+      "lightColor": [1.0, 0.92, 0.84],
+      "lightDistance": 3.6
+    },
+    {
+      "type": "light",
+      "position": [-1.6, 2.4, -1.0],
+      "lightColor": [0.58, 0.66, 1.0],
+      "lightDistance": 3.2
+    },
+    {
       "type": "model",
       "modelType": "gltf",
       "modelPath": "assets/models/gun/rovelver1.0.0.glb",

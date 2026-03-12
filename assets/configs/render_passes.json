@@ -1,0 +1,20 @@
+{
+  "passes": {
+    "colorCorrection": true,
+    "bloom": true,
+    "depthFog": true,
+    "skybox": true,
+    "shadows": false,
+    "hybridShadows": false,
+    "ssao": true,
+    "ssgi": false,
+    "ssr": false,
+    "taa": true,
+    "dof": false,
+    "motionBlur": false,
+    "lensFlare": false,
+    "chromaticAberration": false,
+    "filmGrain": false,
+    "godRays": false
+  }
+}
