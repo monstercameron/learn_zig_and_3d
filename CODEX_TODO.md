@@ -720,3 +720,121 @@ Goal: remove remaining scalar bottlenecks in hot render paths, improve SIMD util
 - [ ] Add a SIMD row path for `skybox_kernel.zig` direction reconstruction + tone/gamma stage (`8/16/32` lanes) with scalar tail fallback.
 - [ ] In `skybox_kernel.zig`, add depth-mask span skipping (contiguous non-sky runs) to avoid per-pixel math on rows where most pixels are already filled.
 - [ ] In `chromatic_aberration_kernel.zig`, replace current regressed SIMD gather path with a tile-local offset-table strategy and require recovery to >= scalar baseline before keeping SIMD path enabled.
+
+## Phase 15 - CPU Hot Path Execution Backlog (IPC + SIMD + Cache)
+Goal: execute a focused optimization pass on measured frame hotspots (`renderTileJob`, `meshletShadowTile`, `meshletShadowTrace`, `meshletShadowApply`) and remove key scalability bottlenecks in scheduling and memory access.
+
+### 15.0 Hotspot Baseline Automation
+- [x] Add `tools/profile-hotspots.ps1` to run a fixed-scene capture and emit top-zone totals + p50/p90/p99.
+- [x] Parse `profile.json` and print per-zone imbalance metrics (`max/p50`, `p99/p50`) for tile and shadow jobs.
+- [x] Persist baseline artifact set per run (`profile.json`, scene/config hash, summary markdown).
+- [x] Add a "hotspot report" template in `artifacts/perf/` with before/after tables.
+- [x] Require all Phase 15 tasks to include exact baseline and post-change frame id + scene id.
+
+### 15.1 `renderTileJob` Raster IPC Cleanup
+- [x] In `tile_renderer.zig`, remove redundant per-lane index bounds checks in the clipped bbox inner loop.
+- [x] Split opaque vs alpha handling into separate write paths to reduce branch pressure in hot pixels.
+- [x] Convert barycentric evaluation to incremental edge stepping across x/y spans.
+- [x] Hoist invariant setup from pixel loops (`light_dir`, texture flags, packed constants).
+- [x] Add a microbench for `rasterizeTriangleToTile` with small, medium, and full-tile triangles.
+- [x] Add perf counters: triangles_rasterized, covered_pixels, depth_tests_passed, alpha_pixels.
+
+### 15.2 Meshlet Shadow Tile Work Balancing
+- [x] Replace pixel-count-only chunking with a cost model including tile triangle count and candidate density.
+- [ ] Add adaptive split policy for long-running shadow chunks (mid-execution split allowed).
+- [x] Add queueing support for finer-grain chunk stealability when worker_count > 4.
+- [x] Add telemetry per chunk: `pixels`, `active_rays`, `trace_us`, `apply_us`.
+- [x] Add imbalance guardrail: target `meshletShadowTile p99 <= 2.5x p50`.
+- [ ] Re-tune default `shadow_chunk_pixels` and `shadow_min_chunk_pixels` based on telemetry.
+
+### 15.3 Meshlet Shadow Packet Build + Apply Path
+- [ ] In `renderer.zig` `applyMeshletShadows`, precompute world-space camera basis row products once per chunk.
+- [ ] Build strict SoA staging for normals and camera positions before packet fill.
+- [x] Add an early reject mask pass (depth invalid, backfacing, near-zero normal length) before any world transform math.
+- [ ] Replace scalar occlusion darken loop with masked SIMD attenuation writes for active occluded lanes.
+- [x] Add separate fast path for fully occluded packet chunks (uniform darken span).
+- [x] Track packet efficiency counters: avg_active_lanes, avg_occluded_lanes, packets_skipped.
+- [x] Replace per-lane occlusion scan with set-bit iteration (`ctz`/bitwalk) to cut branch work on sparse occlusion masks.
+- [x] Remove redundant per-lane ray-direction stores/loads in shadow packet tracing; use `shared_dir` splats in packet intersection kernels.
+- [x] Add dual-path occlusion apply strategy (`bitwalk` for sparse masks, contiguous full-span path for dense masks).
+
+### 15.4 Adaptive Hybrid Shadow Traversal Unification
+- [ ] In `adaptive_shadow_tile_pass.zig`, remove per-iteration repacking of triangle vertices from AoS mesh data.
+- [ ] Add a path that reuses `shadow_system.zig` packetized triangles for candidate meshlet intersection.
+- [ ] Add a candidate-meshlet packet trace API in `shadow_system.zig` for tile-local query workloads.
+- [ ] Reuse cached meshlet triangle packets in adaptive shadow pass (no duplicate pack in inner loops).
+- [ ] Add correctness checks for skip-self triangle behavior to avoid self-shadow artifacts.
+- [ ] Benchmark adaptive shadow pass alone before/after (`candidate_ms`, `execute_ms`, `rays/test`).
+
+### 15.5 Job System Throughput and Wait Strategy
+- [ ] Replace mutex-heavy deque operations (`push/pop/steal`) with a lock-free or low-lock design.
+- [ ] Add worker wake signaling (semaphore/event) to avoid `yield`-only idle loops.
+- [ ] Add "help while waiting" parent-job behavior so waiting threads execute pending work.
+- [x] Remove renderer-side manual polling loops where parent-job wait is sufficient.
+- [ ] Add scheduler perf counters: steals, failed steals, queue contention, idle-wait time.
+- [ ] Add stress test with many tiny jobs to validate throughput scaling across core counts.
+
+### 15.6 Mesh Work Build + Binning Dataflow
+- [ ] Avoid post-job triangle compaction copy where possible by computing final packed offsets up front.
+- [ ] Add optional two-pass meshlet emit mode (count pass then write pass) for deterministic contiguous output.
+- [ ] Optimize `MeshletContribution` lookup hashing in hot insert path (fewer probes/re-hashes).
+- [ ] Add cache-friendly layout for contribution entries to reduce pointer chasing during tile population.
+- [ ] Add perf counters for mesh work generation: cull_jobs_us, emit_jobs_us, compaction_us, binning_us.
+- [ ] Validate no regressions in triangle/meshlet accounting invariants after dataflow changes.
+
+### 15.7 Composite + Tonemap Vectorization
+- [ ] Add SIMD row kernel for `packColorTonemapped` usage in `compositeTileToScreen`.
+- [ ] Provide specialized composite variants for attachment combinations (color-only vs color+depth+gbuffer).
+- [ ] Minimize optional-attachment branches inside pixel loops by selecting function pointers up front.
+- [ ] Evaluate SoA tile-local color/depth/normal staging for write-combine friendly screen writes.
+- [ ] Add composite bandwidth benchmark (`GB/s`, `ns/pixel`) with 720p and 1080p targets.
+- [ ] Validate tonemap parity tolerance after SIMD conversion.
+
+### 15.8 Texture Bilinear Sampling Cache Behavior
+- [ ] In `texture.zig`, replace lane-by-lane bilinear gather loop with a cache-aware block sampler.
+- [ ] Evaluate tiled/swizzled texture storage for better locality on bilinear quad fetches.
+- [ ] Add an AVX2/AVX512 gather-assisted path behind CPU feature checks where beneficial.
+- [ ] Add prefetch hints for predictable row-neighbor loads in large texture sampling batches.
+- [x] Add microbench cases for random UVs vs coherent UVs to quantify cache behavior.
+- [ ] Gate SIMD bilinear path by measured speedup; fallback to scalar if regressed.
+
+### 15.9 Hybrid Shadow Cache Lifetime Strategy
+- [ ] Replace full-cache clear (`0xFF`) per pass with generation-stamped validity.
+- [ ] Add partial invalidation by active tile bounds and changed caster bounds.
+- [ ] Add cache hit/miss counters for coarse and edge caches.
+- [ ] Add policy for stale-cell reuse across frames with camera/light movement thresholds.
+- [ ] Validate no stale-shadow artifacts under fast camera motion and light rotation.
+- [ ] Measure cache-clear time reduction and total hybrid-shadow pass impact.
+
+### 15.11 Additional Shadow-System Hot Path Candidates (Post 15.3 Scan)
+- [x] In `shadow_system.zig`, specialize `tracePacketAnyHit` by lane width (`1/8/16`) once per call to remove per-chunk lane-width switches from traversal loops.
+- [x] In `shadow_system.zig`, precompute/pack per-triangle lane activity as an 8-bit mask to avoid `active_mask[triangle_lane]` scalar checks in inner loops.
+- [x] In `shadow_system.zig`, add near-first child traversal ordering heuristic for BLAS DFS (ray-direction sign based or centroid-dot ordering) and benchmark early-occlusion effect.
+- [x] In `shadow_system.zig`, add packet-level early-exit in traversal when `occluded_mask` covers all currently active rays.
+- [x] In `shadow_system.zig`, eliminate by-value `ShadowTrianglePacket` copies in hot loops/intersection calls (pointer-based access).
+- [ ] In `shadow_system.zig`, evaluate triangle-test loop reordering (`chunk -> triangle_lane` vs current `triangle_lane -> chunk`) using microbench to improve origin/dir reuse and cache locality.
+- [x] In `renderer.zig` meshlet shadow packet build, split reject-only prepass (depth/backface/normal-length) from world-space transform pass to reduce wasted math on invalid lanes.
+- [x] Add `phase15-microbench` shadow trace sub-bench with occupancy sweeps (`active lanes 1/4/8/16/32/64`) and triangle packet counts (`1/4/8/16`) to isolate traversal scaling.
+- [x] Add `phase15-microbench` apply dual-path threshold sweep to determine switch point between sparse bitwalk and dense contiguous span writes.
+
+### 15.10 Exit Criteria
+- [ ] Reduce `renderTileJob` total zone time by >= 20% in baseline profile scene.
+- [ ] Reduce `meshletShadowTile` total zone time by >= 30% and cut p99/p50 imbalance by >= 35%.
+- [ ] Reduce combined `meshletShadowTrace + meshletShadowApply` time by >= 25%.
+- [ ] Improve frame-time stability (95th percentile frame time) by >= 15% in stress scene.
+- [ ] Document all accepted optimizations with before/after evidence in `docs/performance-profiling.md`.
+
+### 15.12 Random Hot-Path Scan Additions (2026-03-12)
+- [x] `H1` `shadow_system.zig`: precompute and store meshlet cone-sine once during BLAS build; remove per-trace `sqrt` in `meshletOccludesRay` and `meshletOccludesPacketMaskLanes`.
+- [x] `H1` `renderer.zig` `applyMeshletShadows`: collapse reject prepass + origin build into one pass to remove candidate staging arrays and extra memory traffic.
+- [ ] `H1` `adaptive_shadow_tile_pass.zig`: stop repacking triangle AoS data inside `isPointShadowed`; consume prepacked packets from `shadow_system.zig`.
+- [x] `H1` `shadow_system.zig`: add near-first BLAS child traversal ordering heuristic and benchmark packet early-occlusion impact.
+- [ ] `H2` `renderer.zig` meshlet apply: add masked SIMD attenuation path for dense/sparse occluded masks and keep scalar fallback for tails.
+- [ ] `H2` `core/job_system.zig`: prototype low-lock queue path + worker wake signaling; benchmark tiny-job throughput and idle spin reduction.
+- [ ] `H2` `render/kernels/dispatcher.zig`: remove per-group heap alloc/free for job contexts/shared scratch via reusable pools.
+- [ ] `H2` `render/core/tile_renderer.zig`: reduce temporary lane-array pressure in triangle inner loop (fewer gather/scatter scratch arrays).
+- [ ] `H3` `assets/texture.zig`: replace lane-scalar bilinear gather/write loop in `sampleBilinearBatchImpl` with cache-aware blocked path and gather-assisted variants.
+- [ ] `H3` `scene/script_host.zig`: replace O(events * instances) queued dispatch with entity-indexed dispatch buckets for large script counts.
+- [ ] Add microbench set for new random-scan tasks: `shadow cone test`, `meshlet packet build`, `dispatcher group submit`, `job queue tiny jobs`, `texture bilinear coherent/random`, `script dispatch fanout`.
+- [ ] Add before/after hotspot report entries for each landed `H1`/`H2` task with frame id + scene hash.
+  Status: first `H1` batch landed (`cone-sine precompute`, `single-pass packet origin build`, `near-first traversal ordering`) and compared against `profile-20260312-165313.json`: combined `meshletShadowTile+Trace+Apply` improved by `-13.78%` (`169.516ms -> 146.164ms`).

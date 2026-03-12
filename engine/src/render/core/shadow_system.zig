@@ -65,6 +65,7 @@ pub const ShadowMeshlet = struct {
     bound_aabb: AABB,
     normal_cone_axis: math.Vec3,
     normal_cone_cutoff: f32,
+    normal_cone_sine: f32,
     triangle_offset: u32,
     triangle_count: u16,
     triangle_packet_offset: u32,
@@ -91,6 +92,7 @@ pub const ShadowTrianglePacket = struct {
     edge2_z: PacketFloat8,
     source_triangle_ids: [8]u32,
     active_mask: PacketBool8,
+    active_lane_mask: u8,
 };
 
 const PacketFloat8 = @Vector(8, f32);
@@ -177,9 +179,9 @@ fn intersectSpherePacketChunkMask(comptime lanes: usize, sphere: BoundingSphere,
     const origin_x = loadFloatChunk(lanes, &packet.origins_x, start);
     const origin_y = loadFloatChunk(lanes, &packet.origins_y, start);
     const origin_z = loadFloatChunk(lanes, &packet.origins_z, start);
-    const dir_x = loadFloatChunk(lanes, &packet.dirs_x, start);
-    const dir_y = loadFloatChunk(lanes, &packet.dirs_y, start);
-    const dir_z = loadFloatChunk(lanes, &packet.dirs_z, start);
+    const dir_x: FloatVec = @splat(packet.shared_dir.x);
+    const dir_y: FloatVec = @splat(packet.shared_dir.y);
+    const dir_z: FloatVec = @splat(packet.shared_dir.z);
 
     const center_x: FloatVec = @splat(sphere.center.x);
     const center_y: FloatVec = @splat(sphere.center.y);
@@ -203,7 +205,7 @@ fn intersectSpherePacketChunkMask(comptime lanes: usize, sphere: BoundingSphere,
     return result_mask;
 }
 
-fn intersectTrianglePacketChunkMask(comptime lanes: usize, packet: *const RayPacket, start: usize, active_mask: u64, triangle_packet: ShadowTrianglePacket, triangle_lane: usize) u64 {
+fn intersectTrianglePacketChunkMask(comptime lanes: usize, packet: *const RayPacket, start: usize, active_mask: u64, triangle_packet: *const ShadowTrianglePacket, triangle_lane: usize) u64 {
     const FloatVec = @Vector(lanes, f32);
     const eps: FloatVec = @splat(1e-6);
     const zeros: FloatVec = @splat(0.0);
@@ -212,9 +214,9 @@ fn intersectTrianglePacketChunkMask(comptime lanes: usize, packet: *const RayPac
     const origin_x = loadFloatChunk(lanes, &packet.origins_x, start);
     const origin_y = loadFloatChunk(lanes, &packet.origins_y, start);
     const origin_z = loadFloatChunk(lanes, &packet.origins_z, start);
-    const dir_x = loadFloatChunk(lanes, &packet.dirs_x, start);
-    const dir_y = loadFloatChunk(lanes, &packet.dirs_y, start);
-    const dir_z = loadFloatChunk(lanes, &packet.dirs_z, start);
+    const dir_x: FloatVec = @splat(packet.shared_dir.x);
+    const dir_y: FloatVec = @splat(packet.shared_dir.y);
+    const dir_z: FloatVec = @splat(packet.shared_dir.z);
 
     const v0x: FloatVec = @splat(triangle_packet.v0x[triangle_lane]);
     const v0y: FloatVec = @splat(triangle_packet.v0y[triangle_lane]);
@@ -259,14 +261,42 @@ fn intersectTrianglePacketChunkMask(comptime lanes: usize, packet: *const RayPac
     return result_mask;
 }
 
+fn preferLeftFirst(dir: math.Vec3, left: *const BLASNode, right: *const BLASNode) bool {
+    const abs_x = @abs(dir.x);
+    const abs_y = @abs(dir.y);
+    const abs_z = @abs(dir.z);
+
+    var axis: u2 = 0;
+    if (abs_y > abs_x and abs_y >= abs_z) {
+        axis = 1;
+    } else if (abs_z > abs_x and abs_z > abs_y) {
+        axis = 2;
+    }
+
+    return switch (axis) {
+        0 => {
+            const left_center2 = left.aabb.min.x + left.aabb.max.x;
+            const right_center2 = right.aabb.min.x + right.aabb.max.x;
+            return if (dir.x >= 0.0) left_center2 <= right_center2 else left_center2 >= right_center2;
+        },
+        1 => {
+            const left_center2 = left.aabb.min.y + left.aabb.max.y;
+            const right_center2 = right.aabb.min.y + right.aabb.max.y;
+            return if (dir.y >= 0.0) left_center2 <= right_center2 else left_center2 >= right_center2;
+        },
+        else => {
+            const left_center2 = left.aabb.min.z + left.aabb.max.z;
+            const right_center2 = right.aabb.min.z + right.aabb.max.z;
+            return if (dir.z >= 0.0) left_center2 <= right_center2 else left_center2 >= right_center2;
+        },
+    };
+}
+
 // Represents a packet of rays for SIMD-style traversal within a screen tile
 pub const RayPacket = struct {
     origins_x: [64]f32,
     origins_y: [64]f32,
     origins_z: [64]f32,
-    dirs_x: [64]f32,
-    dirs_y: [64]f32,
-    dirs_z: [64]f32,
     shared_dir: math.Vec3,
     shared_inv_dir: math.Vec3,
     skip_triangle_ids: [64]u32,
@@ -389,6 +419,7 @@ pub const ShadowSystem = struct {
             .edge2_z = @splat(0.0),
             .source_triangle_ids = @splat(std.math.maxInt(u32)),
             .active_mask = @splat(false),
+            .active_lane_mask = 0,
         };
     }
 
@@ -452,6 +483,7 @@ pub const ShadowSystem = struct {
                 triangle_packet.edge2_z[triangle_packet_lane] = p2.z - p0.z;
                 triangle_packet.source_triangle_ids[triangle_packet_lane] = source_triangle_id;
                 triangle_packet.active_mask[triangle_packet_lane] = true;
+                triangle_packet.active_lane_mask |= (@as(u8, 1) << @as(u3, @intCast(triangle_packet_lane)));
                 triangle_packet_lane += 1;
 
                 if (triangle_packet_lane == 8) {
@@ -476,6 +508,7 @@ pub const ShadowSystem = struct {
                 .bound_aabb = aabb,
                 .normal_cone_axis = m.normal_cone_axis,
                 .normal_cone_cutoff = m.normal_cone_cutoff,
+                .normal_cone_sine = @sqrt(@max(0.0, 1.0 - m.normal_cone_cutoff * m.normal_cone_cutoff)),
                 .triangle_offset = triangle_offset,
                 .triangle_count = triangle_count,
                 .triangle_packet_offset = triangle_packet_offset,
@@ -671,8 +704,7 @@ pub const ShadowSystem = struct {
     fn meshletOccludesRay(self: *const ShadowSystem, meshlet_index: u32, origin: math.Vec3, inv_dir: math.Vec3, dir: math.Vec3, skip_triangle_id: u32) bool {
         const shadow_meshlet = self.shadow_meshlets.items[meshlet_index];
         if (shadow_meshlet.normal_cone_cutoff > -1.0) {
-            const cone_sine = @sqrt(@max(0.0, 1.0 - shadow_meshlet.normal_cone_cutoff * shadow_meshlet.normal_cone_cutoff));
-            if (math.Vec3.dot(shadow_meshlet.normal_cone_axis, dir) < -cone_sine) return false;
+            if (math.Vec3.dot(shadow_meshlet.normal_cone_axis, dir) < -shadow_meshlet.normal_cone_sine) return false;
         }
         if (!intersectAABB(shadow_meshlet.bound_aabb, origin, inv_dir)) return false;
         if (!intersectSphere(shadow_meshlet.bound_sphere, origin, dir)) return false;
@@ -688,7 +720,7 @@ pub const ShadowSystem = struct {
         const dir_y: PacketFloat8 = @splat(dir.y);
         const dir_z: PacketFloat8 = @splat(dir.z);
 
-        for (self.shadow_triangle_packets.items[triangle_packet_start..triangle_packet_end]) |triangle_packet| {
+        for (self.shadow_triangle_packets.items[triangle_packet_start..triangle_packet_end]) |*triangle_packet| {
             var active_mask = triangle_packet.active_mask;
             if (skip_triangle_id != std.math.maxInt(u32)) {
                 for (0..8) |lane| {
@@ -706,34 +738,24 @@ pub const ShadowSystem = struct {
         return false;
     }
 
-    fn meshletOccludesPacketMask(self: *const ShadowSystem, meshlet_index: u32, packet: *const RayPacket, ray_mask: u64) u64 {
+    fn meshletOccludesPacketMaskLanes(comptime lanes: usize, self: *const ShadowSystem, meshlet_index: u32, packet: *const RayPacket, ray_mask: u64) u64 {
         if (ray_mask == 0) return 0;
 
         const shadow_meshlet = self.shadow_meshlets.items[meshlet_index];
         if (shadow_meshlet.normal_cone_cutoff > -1.0) {
-            const cone_sine = @sqrt(@max(0.0, 1.0 - shadow_meshlet.normal_cone_cutoff * shadow_meshlet.normal_cone_cutoff));
-            if (math.Vec3.dot(shadow_meshlet.normal_cone_axis, packet.shared_dir) < -cone_sine) return 0;
+            if (math.Vec3.dot(shadow_meshlet.normal_cone_axis, packet.shared_dir) < -shadow_meshlet.normal_cone_sine) return 0;
         }
 
-        const lane_width = runtimeTracePacketLanes();
         var candidate_mask: u64 = 0;
         var chunk_start: usize = 0;
-        while (chunk_start < 64) : (chunk_start += lane_width) {
-            const chunk_mask = ray_mask & chunkBitMask(chunk_start, lane_width);
+        while (chunk_start < 64) : (chunk_start += lanes) {
+            const chunk_mask = ray_mask & chunkBitMask(chunk_start, lanes);
             if (chunk_mask == 0) continue;
 
-            const aabb_mask = switch (lane_width) {
-                16 => intersectAABBPacketChunkMask(16, shadow_meshlet.bound_aabb, packet, chunk_start, chunk_mask, packet.shared_inv_dir),
-                8 => intersectAABBPacketChunkMask(8, shadow_meshlet.bound_aabb, packet, chunk_start, chunk_mask, packet.shared_inv_dir),
-                else => if (intersectAABB(shadow_meshlet.bound_aabb, math.Vec3.new(packet.origins_x[chunk_start], packet.origins_y[chunk_start], packet.origins_z[chunk_start]), packet.shared_inv_dir)) chunk_mask else 0,
-            };
+            const aabb_mask = intersectAABBPacketChunkMask(lanes, shadow_meshlet.bound_aabb, packet, chunk_start, chunk_mask, packet.shared_inv_dir);
             if (aabb_mask == 0) continue;
 
-            const sphere_mask = switch (lane_width) {
-                16 => intersectSpherePacketChunkMask(16, shadow_meshlet.bound_sphere, packet, chunk_start, aabb_mask),
-                8 => intersectSpherePacketChunkMask(8, shadow_meshlet.bound_sphere, packet, chunk_start, aabb_mask),
-                else => if (intersectSphere(shadow_meshlet.bound_sphere, math.Vec3.new(packet.origins_x[chunk_start], packet.origins_y[chunk_start], packet.origins_z[chunk_start]), math.Vec3.new(packet.dirs_x[chunk_start], packet.dirs_y[chunk_start], packet.dirs_z[chunk_start]))) aabb_mask else 0,
-            };
+            const sphere_mask = intersectSpherePacketChunkMask(lanes, shadow_meshlet.bound_sphere, packet, chunk_start, aabb_mask);
             candidate_mask |= sphere_mask;
         }
         if (candidate_mask == 0) return 0;
@@ -743,38 +765,23 @@ pub const ShadowSystem = struct {
         if (triangle_packet_end > self.shadow_triangle_packets.items.len) return 0;
 
         var occluded_mask: u64 = 0;
-        for (self.shadow_triangle_packets.items[triangle_packet_start..triangle_packet_end]) |triangle_packet| {
-            var triangle_lane: usize = 0;
-            while (triangle_lane < 8) : (triangle_lane += 1) {
-                if (!triangle_packet.active_mask[triangle_lane]) continue;
+        for (self.shadow_triangle_packets.items[triangle_packet_start..triangle_packet_end]) |*triangle_packet| {
+            var active_lanes: u8 = triangle_packet.active_lane_mask;
+
+            while (active_lanes != 0) {
+                const triangle_lane = @as(usize, @intCast(@ctz(active_lanes)));
+                active_lanes &= active_lanes - 1;
 
                 // Early-out once every candidate ray is already occluded by previously tested triangles.
                 const pending_mask = candidate_mask & ~occluded_mask;
                 if (pending_mask == 0) return occluded_mask;
 
                 chunk_start = 0;
-                while (chunk_start < 64) : (chunk_start += lane_width) {
-                    const chunk_mask = pending_mask & chunkBitMask(chunk_start, lane_width);
+                while (chunk_start < 64) : (chunk_start += lanes) {
+                    const chunk_mask = pending_mask & chunkBitMask(chunk_start, lanes);
                     if (chunk_mask == 0) continue;
 
-                    const hit_mask = switch (lane_width) {
-                        16 => intersectTrianglePacketChunkMask(16, packet, chunk_start, chunk_mask, triangle_packet, triangle_lane),
-                        8 => intersectTrianglePacketChunkMask(8, packet, chunk_start, chunk_mask, triangle_packet, triangle_lane),
-                        else => blk: {
-                            const ray_origin = math.Vec3.new(packet.origins_x[chunk_start], packet.origins_y[chunk_start], packet.origins_z[chunk_start]);
-                            const ray_dir = math.Vec3.new(packet.dirs_x[chunk_start], packet.dirs_y[chunk_start], packet.dirs_z[chunk_start]);
-                            const tri = ShadowTriangle{
-                                .v0 = math.Vec3.new(triangle_packet.v0x[triangle_lane], triangle_packet.v0y[triangle_lane], triangle_packet.v0z[triangle_lane]),
-                                .edge1 = math.Vec3.new(triangle_packet.edge1_x[triangle_lane], triangle_packet.edge1_y[triangle_lane], triangle_packet.edge1_z[triangle_lane]),
-                                .edge2 = math.Vec3.new(triangle_packet.edge2_x[triangle_lane], triangle_packet.edge2_y[triangle_lane], triangle_packet.edge2_z[triangle_lane]),
-                                .source_triangle_id = triangle_packet.source_triangle_ids[triangle_lane],
-                            };
-                            if (packet.skip_triangle_ids[chunk_start] != tri.source_triangle_id and intersectTriangle(ray_origin, ray_dir, tri)) {
-                                break :blk chunk_mask;
-                            }
-                            break :blk 0;
-                        },
-                    };
+                    const hit_mask = intersectTrianglePacketChunkMask(lanes, packet, chunk_start, chunk_mask, triangle_packet, triangle_lane);
                     occluded_mask |= hit_mask;
                 }
             }
@@ -783,26 +790,18 @@ pub const ShadowSystem = struct {
         return occluded_mask;
     }
 
-    /// Processes trace packet any hit.
-    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
-    pub fn tracePacketAnyHit(self: *ShadowSystem, packet: *RayPacket) void {
+    fn tracePacketAnyHitLanes(comptime lanes: usize, self: *ShadowSystem, packet: *RayPacket) void {
         const remaining_mask = packet.active_mask & ~packet.occluded_mask;
         if (remaining_mask == 0) return;
         if (self.tlas_nodes.items.len == 0 or self.blas_nodes.items.len == 0) return;
 
-        // Reject packets against the TLAS root first so traversal only pays for rays that can touch scene bounds.
         const root_tlas = &self.tlas_nodes.items[0];
         var root_mask: u64 = 0;
-        const lane_width = runtimeTracePacketLanes();
         var chunk_start: usize = 0;
-        while (chunk_start < 64) : (chunk_start += lane_width) {
-            const chunk_mask = remaining_mask & chunkBitMask(chunk_start, lane_width);
+        while (chunk_start < 64) : (chunk_start += lanes) {
+            const chunk_mask = remaining_mask & chunkBitMask(chunk_start, lanes);
             if (chunk_mask == 0) continue;
-            root_mask |= switch (lane_width) {
-                16 => intersectAABBPacketChunkMask(16, root_tlas.aabb, packet, chunk_start, chunk_mask, packet.shared_inv_dir),
-                8 => intersectAABBPacketChunkMask(8, root_tlas.aabb, packet, chunk_start, chunk_mask, packet.shared_inv_dir),
-                else => if (intersectAABB(root_tlas.aabb, math.Vec3.new(packet.origins_x[chunk_start], packet.origins_y[chunk_start], packet.origins_z[chunk_start]), packet.shared_inv_dir)) chunk_mask else 0,
-            };
+            root_mask |= intersectAABBPacketChunkMask(lanes, root_tlas.aabb, packet, chunk_start, chunk_mask, packet.shared_inv_dir);
         }
         if (root_mask == 0) return;
 
@@ -811,7 +810,6 @@ pub const ShadowSystem = struct {
         stack[stack_ptr] = .{ .node_idx = 0, .ray_mask = root_mask };
         stack_ptr += 1;
 
-        // Masked DFS traversal: each stack entry carries only rays still alive for that subtree.
         while (stack_ptr > 0) {
             stack_ptr -= 1;
             const entry = stack[stack_ptr];
@@ -820,7 +818,8 @@ pub const ShadowSystem = struct {
 
             const node = &self.blas_nodes.items[entry.node_idx];
             if (node.is_leaf) {
-                packet.occluded_mask |= self.meshletOccludesPacketMask(node.left_child_or_meshlet, packet, active_rays);
+                packet.occluded_mask |= meshletOccludesPacketMaskLanes(lanes, self, node.left_child_or_meshlet, packet, active_rays);
+                if ((packet.occluded_mask & remaining_mask) == remaining_mask) return;
                 continue;
             }
 
@@ -829,30 +828,43 @@ pub const ShadowSystem = struct {
             var left_mask: u64 = 0;
             var right_mask: u64 = 0;
             chunk_start = 0;
-            while (chunk_start < 64) : (chunk_start += lane_width) {
-                const chunk_mask = active_rays & chunkBitMask(chunk_start, lane_width);
+            while (chunk_start < 64) : (chunk_start += lanes) {
+                const chunk_mask = active_rays & chunkBitMask(chunk_start, lanes);
                 if (chunk_mask == 0) continue;
-                left_mask |= switch (lane_width) {
-                    16 => intersectAABBPacketChunkMask(16, left.aabb, packet, chunk_start, chunk_mask, packet.shared_inv_dir),
-                    8 => intersectAABBPacketChunkMask(8, left.aabb, packet, chunk_start, chunk_mask, packet.shared_inv_dir),
-                    else => if (intersectAABB(left.aabb, math.Vec3.new(packet.origins_x[chunk_start], packet.origins_y[chunk_start], packet.origins_z[chunk_start]), packet.shared_inv_dir)) chunk_mask else 0,
-                };
-                right_mask |= switch (lane_width) {
-                    16 => intersectAABBPacketChunkMask(16, right.aabb, packet, chunk_start, chunk_mask, packet.shared_inv_dir),
-                    8 => intersectAABBPacketChunkMask(8, right.aabb, packet, chunk_start, chunk_mask, packet.shared_inv_dir),
-                    else => if (intersectAABB(right.aabb, math.Vec3.new(packet.origins_x[chunk_start], packet.origins_y[chunk_start], packet.origins_z[chunk_start]), packet.shared_inv_dir)) chunk_mask else 0,
-                };
+                left_mask |= intersectAABBPacketChunkMask(lanes, left.aabb, packet, chunk_start, chunk_mask, packet.shared_inv_dir);
+                right_mask |= intersectAABBPacketChunkMask(lanes, right.aabb, packet, chunk_start, chunk_mask, packet.shared_inv_dir);
             }
 
-            // Push both children; each child gets its own surviving ray mask to keep divergence bounded.
-            if (left_mask != 0) {
+            if (left_mask != 0 and right_mask != 0) {
+                if (preferLeftFirst(packet.shared_dir, left, right)) {
+                    // Push far child first so near child is popped/executed first (LIFO).
+                    stack[stack_ptr] = .{ .node_idx = node.right_child_or_count, .ray_mask = right_mask };
+                    stack_ptr += 1;
+                    stack[stack_ptr] = .{ .node_idx = node.left_child_or_meshlet, .ray_mask = left_mask };
+                    stack_ptr += 1;
+                } else {
+                    stack[stack_ptr] = .{ .node_idx = node.left_child_or_meshlet, .ray_mask = left_mask };
+                    stack_ptr += 1;
+                    stack[stack_ptr] = .{ .node_idx = node.right_child_or_count, .ray_mask = right_mask };
+                    stack_ptr += 1;
+                }
+            } else if (left_mask != 0) {
                 stack[stack_ptr] = .{ .node_idx = node.left_child_or_meshlet, .ray_mask = left_mask };
                 stack_ptr += 1;
-            }
-            if (right_mask != 0) {
+            } else if (right_mask != 0) {
                 stack[stack_ptr] = .{ .node_idx = node.right_child_or_count, .ray_mask = right_mask };
                 stack_ptr += 1;
             }
+        }
+    }
+
+    /// Processes trace packet any hit.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
+    pub fn tracePacketAnyHit(self: *ShadowSystem, packet: *RayPacket) void {
+        switch (runtimeTracePacketLanes()) {
+            16 => tracePacketAnyHitLanes(16, self, packet),
+            8 => tracePacketAnyHitLanes(8, self, packet),
+            else => tracePacketAnyHitLanes(1, self, packet),
         }
     }
 };

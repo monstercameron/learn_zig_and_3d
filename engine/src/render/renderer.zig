@@ -295,6 +295,19 @@ const LightWorkStats = struct {
     shadow_cadence_decreased_lights: usize = 0,
     shadow_queries: usize = 0,
     meshlet_ray_tests: usize = 0,
+    meshlet_shadow_chunks: usize = 0,
+    meshlet_shadow_chunk_pixels: usize = 0,
+    meshlet_shadow_chunk_active_rays: usize = 0,
+    meshlet_shadow_packets: usize = 0,
+    meshlet_shadow_packets_skipped: usize = 0,
+    meshlet_shadow_packet_active_lanes: usize = 0,
+    meshlet_shadow_packet_occluded_lanes: usize = 0,
+    meshlet_shadow_trace_us: u64 = 0,
+    meshlet_shadow_apply_us: u64 = 0,
+    triangles_rasterized: usize = 0,
+    covered_pixels: usize = 0,
+    depth_tests_passed: usize = 0,
+    alpha_pixels: usize = 0,
     shadow_budget_ns: i128 = 0,
     shadow_build_ns: i128 = 0,
     shadow_resolve_ns: i128 = 0,
@@ -1310,6 +1323,7 @@ pub const Renderer = struct {
     camera_position: math.Vec3, // Camera world position.
     camera_move_speed: f32, // Units per second for keyboard movement.
     mouse_state: camera_controller.MouseState, // First-person mouse accumulation/smoothing state.
+    mouse_input: input.MouseState,
     fps_body_state: camera_controller.FpsBodyState,
 
     // Light state
@@ -1320,7 +1334,7 @@ pub const Renderer = struct {
     sys_shadows: shadow_system.ShadowSystem,
 
     // Input and timing state
-    keys_pressed: u32, // Bitmask of currently pressed keys.
+    keys_pressed: input.KeyboardState, // Typed keyboard state snapshot.
     camera_fov_deg: f32,
     frame_count: u32,
     total_frames_rendered: u64,
@@ -1339,6 +1353,7 @@ pub const Renderer = struct {
     fps_zoom_state: camera_controller.FpsZoomState = .{},
     pending_fov_delta: f32,
     camera_control_mode: CameraControlMode = .editor,
+    scene_camera_script_active: bool = false,
     profile_capture_frame: u64,
     profile_capture_emitted: bool,
     shadow_budget_pressure_frames: u32 = 0,
@@ -1420,6 +1435,19 @@ pub const Renderer = struct {
     hybrid_shadow_stats: HybridShadowStats = .{},
     light_work_stats: LightWorkStats = .{},
     meshlet_ray_tests_counter: std.atomic.Value(usize),
+    meshlet_shadow_chunk_counter: std.atomic.Value(usize),
+    meshlet_shadow_chunk_pixels_counter: std.atomic.Value(usize),
+    meshlet_shadow_chunk_active_rays_counter: std.atomic.Value(usize),
+    meshlet_shadow_packet_counter: std.atomic.Value(usize),
+    meshlet_shadow_packet_skipped_counter: std.atomic.Value(usize),
+    meshlet_shadow_packet_active_lanes_counter: std.atomic.Value(usize),
+    meshlet_shadow_packet_occluded_lanes_counter: std.atomic.Value(usize),
+    meshlet_shadow_trace_ns_counter: std.atomic.Value(u64),
+    meshlet_shadow_apply_ns_counter: std.atomic.Value(u64),
+    triangles_rasterized_counter: std.atomic.Value(usize),
+    covered_pixels_counter: std.atomic.Value(usize),
+    depth_tests_passed_counter: std.atomic.Value(usize),
+    alpha_pixels_counter: std.atomic.Value(usize),
     hybrid_shadow_debug: HybridShadowDebugState = .{},
     ao_scratch: AOScratch,
     bloom_scratch: BloomScratch,
@@ -1457,6 +1485,11 @@ pub const Renderer = struct {
     last_brightness_avg: f32,
     last_reported_fov_deg: f32,
     light_marker_visible_last_frame: bool,
+    light_capacity_log_initialized: bool = false,
+    last_logged_light_capacity: usize = 0,
+    last_logged_min_shadow_size: usize = 0,
+    last_logged_max_shadow_size: usize = 0,
+    last_logged_total_shadow_bytes: usize = 0,
 
     /// Initializes the renderer, creating all necessary resources.
     /// JS Analogy: The `constructor` for our main rendering class.
@@ -1959,6 +1992,7 @@ pub const Renderer = struct {
             .mouse_state = .{
                 .sensitivity = config.CAMERA_MOUSE_SENSITIVITY,
             },
+            .mouse_input = .{},
             .fps_body_state = .{},
             .lights = lights,
             .light_soa = .{
@@ -1975,7 +2009,7 @@ pub const Renderer = struct {
             .shadow_resolve_elapsed_ns = shadow_resolve_elapsed_ns,
             .sys_shadows = shadow_system.ShadowSystem.init(allocator),
             .camera_fov_deg = config.CAMERA_FOV_INITIAL,
-            .keys_pressed = 0,
+            .keys_pressed = .{},
             .frame_count = 0,
             .total_frames_rendered = 0,
             .last_time = current_time,
@@ -2094,6 +2128,19 @@ pub const Renderer = struct {
             .hybrid_shadow_cached_meshlet_primitive_count = 0,
             .hybrid_shadow_stats = .{},
             .meshlet_ray_tests_counter = std.atomic.Value(usize).init(0),
+            .meshlet_shadow_chunk_counter = std.atomic.Value(usize).init(0),
+            .meshlet_shadow_chunk_pixels_counter = std.atomic.Value(usize).init(0),
+            .meshlet_shadow_chunk_active_rays_counter = std.atomic.Value(usize).init(0),
+            .meshlet_shadow_packet_counter = std.atomic.Value(usize).init(0),
+            .meshlet_shadow_packet_skipped_counter = std.atomic.Value(usize).init(0),
+            .meshlet_shadow_packet_active_lanes_counter = std.atomic.Value(usize).init(0),
+            .meshlet_shadow_packet_occluded_lanes_counter = std.atomic.Value(usize).init(0),
+            .meshlet_shadow_trace_ns_counter = std.atomic.Value(u64).init(0),
+            .meshlet_shadow_apply_ns_counter = std.atomic.Value(u64).init(0),
+            .triangles_rasterized_counter = std.atomic.Value(usize).init(0),
+            .covered_pixels_counter = std.atomic.Value(usize).init(0),
+            .depth_tests_passed_counter = std.atomic.Value(usize).init(0),
+            .alpha_pixels_counter = std.atomic.Value(usize).init(0),
             .hybrid_shadow_debug = .{},
             .ao_scratch = .{
                 .width = ao_width,
@@ -2278,6 +2325,19 @@ pub const Renderer = struct {
         cam_up: math.Vec3,
         cam_fwd: math.Vec3,
         meshlet_ray_counter: ?*std.atomic.Value(usize),
+        shadow_chunk_counter: ?*std.atomic.Value(usize),
+        shadow_chunk_pixels_counter: ?*std.atomic.Value(usize),
+        shadow_chunk_active_rays_counter: ?*std.atomic.Value(usize),
+        shadow_packet_counter: ?*std.atomic.Value(usize),
+        shadow_packet_skipped_counter: ?*std.atomic.Value(usize),
+        shadow_packet_active_lanes_counter: ?*std.atomic.Value(usize),
+        shadow_packet_occluded_lanes_counter: ?*std.atomic.Value(usize),
+        shadow_trace_ns_counter: ?*std.atomic.Value(u64),
+        shadow_apply_ns_counter: ?*std.atomic.Value(u64),
+        triangles_rasterized_counter: ?*std.atomic.Value(usize),
+        covered_pixels_counter: ?*std.atomic.Value(usize),
+        depth_tests_passed_counter: ?*std.atomic.Value(usize),
+        alpha_pixels_counter: ?*std.atomic.Value(usize),
         shadow_start_idx: usize = 0,
         shadow_end_idx: usize = 0,
 
@@ -2371,7 +2431,16 @@ pub const Renderer = struct {
             return @abs(cross) < 0.5;
         }
 
-        fn rasterizeFan(job: *TileRenderJob, vertices: []ClipVertex, base_color: u32, texture_index: u16, intensity: f32, triangle_id: usize, meshlet_id: usize) void {
+        fn rasterizeFan(
+            job: *TileRenderJob,
+            vertices: []ClipVertex,
+            base_color: u32,
+            texture_index: u16,
+            intensity: f32,
+            triangle_id: usize,
+            meshlet_id: usize,
+            perf_stats: *TileRenderer.RasterizePerfStats,
+        ) void {
             if (vertices.len < 3) return;
 
             var screen_pts: [max_clipped_vertices]math.Vec2 = undefined;
@@ -2416,7 +2485,7 @@ pub const Renderer = struct {
                     camera_positions[tri_idx],
                     camera_positions[tri_idx + 1],
                 };
-                TileRenderer.rasterizeTriangleToTile(job.tile, job.tile_buffer, p0, p1, p2, camera_values, depth_values, shading);
+                TileRenderer.rasterizeTriangleToTile(job.tile, job.tile_buffer, p0, p1, p2, camera_values, depth_values, shading, perf_stats);
             }
         }
 
@@ -2426,6 +2495,7 @@ pub const Renderer = struct {
             defer if (_z_renderTileJob) |z| z.end();
             const job: *TileRenderJob = @ptrCast(@alignCast(ctx));
             const near_plane = job.projection.near_plane;
+            var raster_perf_stats: TileRenderer.RasterizePerfStats = .{};
             job.tile_buffer.clear();
 
             for (job.tri_list.triangles.items) |tri_idx| {
@@ -2449,7 +2519,16 @@ pub const Renderer = struct {
                 const clipped_count = clipPolygonToNearPlane(clip_input[0..], near_plane, &clipped);
                 if (clipped_count < 3) continue;
 
-                rasterizeFan(job, clipped[0..clipped_count], packet.base_color, packet.texture_index, packet.intensity, packet.triangle_id, packet.meshlet_id);
+                rasterizeFan(
+                    job,
+                    clipped[0..clipped_count],
+                    packet.base_color,
+                    packet.texture_index,
+                    packet.intensity,
+                    packet.triangle_id,
+                    packet.meshlet_id,
+                    &raster_perf_stats,
+                );
 
                 if (job.draw_wireframe and !packet.flags.cull_wire) {
                     const p0 = job.projectToScreen(camera_positions[0]);
@@ -2459,6 +2538,19 @@ pub const Renderer = struct {
                     TileRenderer.drawLineToTile(job.tile, job.tile_buffer, p1, p2, wire_color);
                     TileRenderer.drawLineToTile(job.tile, job.tile_buffer, p2, p0, wire_color);
                 }
+            }
+
+            if (job.triangles_rasterized_counter) |counter| {
+                if (raster_perf_stats.triangles_rasterized > 0) _ = counter.fetchAdd(raster_perf_stats.triangles_rasterized, .monotonic);
+            }
+            if (job.covered_pixels_counter) |counter| {
+                if (raster_perf_stats.covered_pixels > 0) _ = counter.fetchAdd(raster_perf_stats.covered_pixels, .monotonic);
+            }
+            if (job.depth_tests_passed_counter) |counter| {
+                if (raster_perf_stats.depth_tests_passed > 0) _ = counter.fetchAdd(raster_perf_stats.depth_tests_passed, .monotonic);
+            }
+            if (job.alpha_pixels_counter) |counter| {
+                if (raster_perf_stats.alpha_pixels > 0) _ = counter.fetchAdd(raster_perf_stats.alpha_pixels, .monotonic);
             }
         }
 
@@ -2473,13 +2565,18 @@ pub const Renderer = struct {
                 const shadow_start = @min(job.shadow_start_idx, total_pixels);
                 const shadow_end = if (job.shadow_end_idx == 0) total_pixels else @min(job.shadow_end_idx, total_pixels);
                 if (shadow_start >= shadow_end) return;
+                const chunk_pixels = shadow_end - shadow_start;
+                var chunk_active_rays: usize = 0;
+                var chunk_packets: usize = 0;
+                var chunk_packets_skipped: usize = 0;
+                var chunk_packet_active_lanes: usize = 0;
+                var chunk_packet_occluded_lanes: usize = 0;
+                var chunk_trace_ns: u64 = 0;
+                var chunk_apply_ns: u64 = 0;
                 var packet = shadow_system.RayPacket{
                     .origins_x = undefined,
                     .origins_y = undefined,
                     .origins_z = undefined,
-                    .dirs_x = undefined,
-                    .dirs_y = undefined,
-                    .dirs_z = undefined,
                     .shared_dir = undefined,
                     .shared_inv_dir = undefined,
                     .skip_triangle_ids = undefined,
@@ -2504,67 +2601,104 @@ pub const Renderer = struct {
                 const cam_pos = job.cam_pos;
                 const nx_bias = 0.02;
                 const ray_bias = 0.005;
+                const ray_bias_x = ray_dir.x * ray_bias;
+                const ray_bias_y = ray_dir.y * ray_bias;
+                const ray_bias_z = ray_dir.z * ray_bias;
+                packet.shared_dir = ray_dir;
+                packet.shared_inv_dir = ray_inv_dir;
 
                 var pixel_idx: usize = shadow_start;
                 while (pixel_idx < shadow_end) {
                     packet.active_mask = 0;
                     packet.occluded_mask = 0;
-                    packet.shared_dir = ray_dir;
-                    packet.shared_inv_dir = ray_inv_dir;
 
                     const batch_size = @min(@as(usize, 64), shadow_end - pixel_idx);
-                    for (0..batch_size) |i| {
-                        const idx = pixel_idx + i;
+                    var active_rays: usize = 0;
+                    for (0..batch_size) |lane| {
+                        const idx = pixel_idx + lane;
                         const depth = job.tile_buffer.depth[idx];
-                        if (depth < std.math.inf(f32) and depth > 0.0) {
-                            const normal_camera = job.tile_buffer.data[idx].normal;
-                            if (math.Vec3.dot(normal_camera, light_dir_camera) <= 0.0) continue;
+                        if (!(depth < std.math.inf(f32) and depth > 0.0)) continue;
 
-                            const cs_pos = job.tile_buffer.data[idx].camera;
-                            const world_pos_x = cam_pos.x + cam_right.x * cs_pos.x + cam_up.x * cs_pos.y + cam_fwd.x * cs_pos.z;
-                            const world_pos_y = cam_pos.y + cam_right.y * cs_pos.x + cam_up.y * cs_pos.y + cam_fwd.y * cs_pos.z;
-                            const world_pos_z = cam_pos.z + cam_right.z * cs_pos.x + cam_up.z * cs_pos.y + cam_fwd.z * cs_pos.z;
-                            const wn_x = cam_right.x * normal_camera.x + cam_up.x * normal_camera.y + cam_fwd.x * normal_camera.z;
-                            const wn_y = cam_right.y * normal_camera.x + cam_up.y * normal_camera.y + cam_fwd.y * normal_camera.z;
-                            const wn_z = cam_right.z * normal_camera.x + cam_up.z * normal_camera.y + cam_fwd.z * normal_camera.z;
-                            const wn_len_sq = wn_x * wn_x + wn_y * wn_y + wn_z * wn_z;
-                            if (wn_len_sq <= 1e-8) continue;
-                            const wn_inv_len = 1.0 / @sqrt(wn_len_sq);
-                            const bias_x = wn_x * wn_inv_len * nx_bias + ray_dir.x * ray_bias;
-                            const bias_y = wn_y * wn_inv_len * nx_bias + ray_dir.y * ray_bias;
-                            const bias_z = wn_z * wn_inv_len * nx_bias + ray_dir.z * ray_bias;
-                            const surface = job.tile_buffer.data[idx].surface;
+                        const sample = job.tile_buffer.data[idx];
+                        const normal_camera = sample.normal;
+                        const normal_len_sq = math.Vec3.dot(normal_camera, normal_camera);
+                        if (normal_len_sq <= 1e-8) continue;
+                        if (math.Vec3.dot(normal_camera, light_dir_camera) <= 0.0) continue;
 
-                            packet.origins_x[i] = world_pos_x + bias_x;
-                            packet.origins_y[i] = world_pos_y + bias_y;
-                            packet.origins_z[i] = world_pos_z + bias_z;
+                        const cs_pos = sample.camera;
 
-                            packet.dirs_x[i] = ray_dir.x;
-                            packet.dirs_y[i] = ray_dir.y;
-                            packet.dirs_z[i] = ray_dir.z;
-                            packet.skip_triangle_ids[i] = if (surface.isValid()) surface.triangle_id else TileRenderer.invalid_surface_id;
+                        const world_pos_x = cam_pos.x + cam_right.x * cs_pos.x + cam_up.x * cs_pos.y + cam_fwd.x * cs_pos.z;
+                        const world_pos_y = cam_pos.y + cam_right.y * cs_pos.x + cam_up.y * cs_pos.y + cam_fwd.y * cs_pos.z;
+                        const world_pos_z = cam_pos.z + cam_right.z * cs_pos.x + cam_up.z * cs_pos.y + cam_fwd.z * cs_pos.z;
+                        const wn_x = cam_right.x * normal_camera.x + cam_up.x * normal_camera.y + cam_fwd.x * normal_camera.z;
+                        const wn_y = cam_right.y * normal_camera.x + cam_up.y * normal_camera.y + cam_fwd.y * normal_camera.z;
+                        const wn_z = cam_right.z * normal_camera.x + cam_up.z * normal_camera.y + cam_fwd.z * normal_camera.z;
+                        const bias_scale = nx_bias / @sqrt(normal_len_sq);
+                        const surface = sample.surface;
 
-                            packet.active_mask |= (@as(u64, 1) << @intCast(i));
-                        }
+                        packet.origins_x[lane] = world_pos_x + wn_x * bias_scale + ray_bias_x;
+                        packet.origins_y[lane] = world_pos_y + wn_y * bias_scale + ray_bias_y;
+                        packet.origins_z[lane] = world_pos_z + wn_z * bias_scale + ray_bias_z;
+                        packet.skip_triangle_ids[lane] = if (surface.isValid()) surface.triangle_id else TileRenderer.invalid_surface_id;
+                        packet.active_mask |= (@as(u64, 1) << @as(u6, @intCast(lane)));
+                        active_rays += 1;
                     }
 
-                    if (packet.active_mask != 0) {
+                    if (active_rays != 0) {
+                        chunk_packets += 1;
+                        chunk_active_rays += active_rays;
+                        chunk_packet_active_lanes += active_rays;
                         if (job.meshlet_ray_counter) |counter| {
-                            _ = counter.fetchAdd(@as(usize, @intCast(@popCount(packet.active_mask))), .monotonic);
+                            _ = counter.fetchAdd(active_rays, .monotonic);
                         }
                         {
                             const _z_meshletShadowTrace = profiler.zone("meshletShadowTrace");
                             defer if (_z_meshletShadowTrace) |z| z.end();
+                            const trace_start = std.time.nanoTimestamp();
                             _ = job.mesh_ptr;
                             sys.tracePacketAnyHit(&packet);
+                            const trace_elapsed_ns = std.time.nanoTimestamp() - trace_start;
+                            if (trace_elapsed_ns > 0) {
+                                chunk_trace_ns +%= @as(u64, @intCast(trace_elapsed_ns));
+                            }
                         }
 
-                        if (packet.occluded_mask != 0) {
+                        const batch_mask: u64 = if (batch_size == 64) std.math.maxInt(u64) else ((@as(u64, 1) << @intCast(batch_size)) - 1);
+                        const occluded_mask = packet.occluded_mask & batch_mask;
+                        const occluded_lanes = @as(usize, @intCast(@popCount(occluded_mask)));
+                        chunk_packet_occluded_lanes += occluded_lanes;
+
+                        if (occluded_mask != 0) {
                             const _z_meshletShadowApply = profiler.zone("meshletShadowApply");
                             defer if (_z_meshletShadowApply) |z| z.end();
-                            for (0..batch_size) |i| {
-                                if ((packet.occluded_mask & (@as(u64, 1) << @intCast(i))) != 0) {
-                                    const idx = pixel_idx + i;
+                            const apply_start = std.time.nanoTimestamp();
+                            if (occluded_mask == batch_mask) {
+                                // Dense fast path: all lanes occluded, so avoid per-lane mask checks.
+                                for (0..batch_size) |lane| {
+                                    const idx = pixel_idx + lane;
+                                    var color = job.tile_buffer.data[idx].color;
+                                    color.x *= 0.2;
+                                    color.y *= 0.2;
+                                    color.z *= 0.2;
+                                    job.tile_buffer.data[idx].color = color;
+                                }
+                            } else if (occluded_lanes >= 48) {
+                                var lane: usize = 0;
+                                while (lane < batch_size) : (lane += 1) {
+                                    if ((occluded_mask & (@as(u64, 1) << @as(u6, @intCast(lane)))) == 0) continue;
+                                    const idx = pixel_idx + lane;
+                                    var color = job.tile_buffer.data[idx].color;
+                                    color.x *= 0.2;
+                                    color.y *= 0.2;
+                                    color.z *= 0.2;
+                                    job.tile_buffer.data[idx].color = color;
+                                }
+                            } else {
+                                var pending = occluded_mask;
+                                while (pending != 0) {
+                                    const lane = @as(usize, @intCast(@ctz(pending)));
+                                    pending &= pending - 1;
+                                    const idx = pixel_idx + lane;
                                     var color = job.tile_buffer.data[idx].color;
                                     color.x *= 0.2;
                                     color.y *= 0.2;
@@ -2572,12 +2706,47 @@ pub const Renderer = struct {
                                     job.tile_buffer.data[idx].color = color;
                                 }
                             }
+                            const apply_elapsed_ns = std.time.nanoTimestamp() - apply_start;
+                            if (apply_elapsed_ns > 0) {
+                                chunk_apply_ns +%= @as(u64, @intCast(apply_elapsed_ns));
+                            }
                         }
+                    } else {
+                        chunk_packets_skipped += 1;
                     }
 
                     pixel_idx += batch_size;
                 }
+
+                if (job.shadow_chunk_counter) |counter| {
+                    _ = counter.fetchAdd(1, .monotonic);
+                }
+                if (job.shadow_chunk_pixels_counter) |counter| {
+                    _ = counter.fetchAdd(chunk_pixels, .monotonic);
+                }
+                if (job.shadow_chunk_active_rays_counter) |counter| {
+                    _ = counter.fetchAdd(chunk_active_rays, .monotonic);
+                }
+                if (job.shadow_packet_counter) |counter| {
+                    if (chunk_packets > 0) _ = counter.fetchAdd(chunk_packets, .monotonic);
+                }
+                if (job.shadow_packet_skipped_counter) |counter| {
+                    if (chunk_packets_skipped > 0) _ = counter.fetchAdd(chunk_packets_skipped, .monotonic);
+                }
+                if (job.shadow_packet_active_lanes_counter) |counter| {
+                    if (chunk_packet_active_lanes > 0) _ = counter.fetchAdd(chunk_packet_active_lanes, .monotonic);
+                }
+                if (job.shadow_packet_occluded_lanes_counter) |counter| {
+                    if (chunk_packet_occluded_lanes > 0) _ = counter.fetchAdd(chunk_packet_occluded_lanes, .monotonic);
+                }
+                if (job.shadow_trace_ns_counter) |counter| {
+                    if (chunk_trace_ns > 0) _ = counter.fetchAdd(chunk_trace_ns, .monotonic);
+                }
+                if (job.shadow_apply_ns_counter) |counter| {
+                    if (chunk_apply_ns > 0) _ = counter.fetchAdd(chunk_apply_ns, .monotonic);
+                }
             }
+
         }
     };
 
@@ -3934,9 +4103,133 @@ pub const Renderer = struct {
         return self.scene_item_gizmo.isDragging();
     }
 
+    pub fn setSceneCameraScriptActive(self: *Renderer, active: bool) void {
+        self.scene_camera_script_active = active;
+    }
+
+    pub fn requestCameraFovDelta(self: *Renderer, delta: f32) void {
+        if (!camera_controller.isHoldZoomHeld(&self.fps_zoom_state)) {
+            self.pending_fov_delta += delta;
+        }
+    }
+
+    pub fn applyCameraModeCommand(self: *Renderer, mode_tag: u8) void {
+        switch (mode_tag) {
+            2 => {
+                const next_mode: CameraControlMode = if (self.camera_control_mode == .first_person) .editor else .first_person;
+                self.setCameraControlMode(next_mode);
+            },
+            0 => self.setCameraControlMode(.editor),
+            1 => self.setCameraControlMode(.first_person),
+            else => {},
+        }
+    }
+
+    pub fn toggleSceneItemGizmo(self: *Renderer) void {
+        self.scene_item_gizmo.toggleEnabled();
+        if (self.scene_item_gizmo.isActive()) {
+            renderer_logger.infoSub(
+                "scene_gizmo",
+                "enabled item={} axis={s} step={d:.2}",
+                .{
+                    self.scene_item_gizmo.selected_item_index.?,
+                    scene_item_gizmo.axisName(self.scene_item_gizmo.active_axis),
+                    self.scene_item_gizmo.move_step,
+                },
+            );
+        } else if (self.scene_item_gizmo.enabled) {
+            renderer_logger.infoSub("scene_gizmo", "enabled (no selected item)", .{});
+        } else {
+            renderer_logger.infoSub("scene_gizmo", "disabled", .{});
+        }
+    }
+
+    pub fn toggleLightGizmo(self: *Renderer) void {
+        self.light_gizmo.enabled = !self.light_gizmo.enabled;
+        self.clampLightGizmoSelection();
+        if (self.light_gizmo.enabled and self.lights.items.len > 0) {
+            renderer_logger.infoSub(
+                "light_gizmo",
+                "enabled light={} axis={s} step={d:.2}",
+                .{
+                    self.light_gizmo.selected_light_index,
+                    lightGizmoAxisName(self.light_gizmo.active_axis),
+                    self.light_gizmo.move_step,
+                },
+            );
+        } else if (self.light_gizmo.enabled) {
+            renderer_logger.infoSub("light_gizmo", "enabled (no lights)", .{});
+        } else {
+            self.clearLightGizmoInteraction();
+            renderer_logger.infoSub("light_gizmo", "disabled", .{});
+        }
+    }
+
+    pub fn setActiveGizmoAxis(self: *Renderer, axis_tag: u8) void {
+        const light_axis: LightGizmoAxis = switch (axis_tag) {
+            0 => .x,
+            1 => .y,
+            2 => .z,
+            else => return,
+        };
+        if (self.scene_item_gizmo.isActive()) {
+            self.scene_item_gizmo.setAxis(switch (axis_tag) {
+                0 => .x,
+                1 => .y,
+                2 => .z,
+                else => unreachable,
+            });
+            renderer_logger.infoSub("scene_gizmo", "axis={s}", .{scene_item_gizmo.axisName(self.scene_item_gizmo.active_axis)});
+        } else {
+            self.light_gizmo.active_axis = light_axis;
+            renderer_logger.infoSub("light_gizmo", "axis={s}", .{lightGizmoAxisName(self.light_gizmo.active_axis)});
+        }
+    }
+
+    pub fn cycleLightGizmoSelection(self: *Renderer) void {
+        if (self.lights.items.len == 0) return;
+        self.clampLightGizmoSelection();
+        self.light_gizmo.selected_light_index = (self.light_gizmo.selected_light_index + 1) % self.lights.items.len;
+        renderer_logger.infoSub("light_gizmo", "light={}", .{self.light_gizmo.selected_light_index});
+    }
+
+    pub fn nudgeActiveGizmo(self: *Renderer, delta: f32) void {
+        if (self.scene_item_gizmo.isActive()) {
+            self.scene_item_gizmo.queueSelectedTranslation(delta);
+        } else if (self.light_gizmo.enabled) {
+            self.moveSelectedLightAlongAxis(delta);
+        }
+    }
+
+    pub fn toggleRenderOverlay(self: *Renderer) void {
+        self.show_render_overlay = !self.show_render_overlay;
+        renderer_logger.infoSub(
+            "overlay",
+            "render overlay {s}",
+            .{if (self.show_render_overlay) "enabled" else "disabled"},
+        );
+    }
+
+    pub fn toggleHybridShadowDebug(self: *Renderer) void {
+        self.hybrid_shadow_debug.enabled = !self.hybrid_shadow_debug.enabled;
+        self.hybrid_shadow_debug.reset();
+        renderer_logger.infoSub(
+            "shadow_debug",
+            "hybrid shadow stepping {s}",
+            .{if (self.hybrid_shadow_debug.enabled) "enabled" else "disabled"},
+        );
+    }
+
+    pub fn advanceHybridShadowDebug(self: *Renderer) void {
+        if (self.hybrid_shadow_debug.enabled) {
+            self.hybrid_shadow_debug.advance_requested = true;
+        }
+    }
+
     /// Handles handle mouse move.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleMouseMove(self: *Renderer, x: i32, y: i32) void {
+        _ = self.mouse_input.setPosition(x, y);
         if (self.camera_control_mode == .first_person) return;
 
         const pointer_view = self.computePointerViewState();
@@ -3975,6 +4268,7 @@ pub const Renderer = struct {
     /// Handles handle raw mouse delta.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleRawMouseDelta(self: *Renderer, delta_x: i32, delta_y: i32) void {
+        _ = self.mouse_input.addRawDelta(delta_x, delta_y);
         if (self.camera_control_mode != .first_person) return;
         camera_controller.accumulateFirstPersonDelta(
             &self.mouse_state,
@@ -3988,6 +4282,7 @@ pub const Renderer = struct {
     /// Handles handle mouse left click.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleMouseLeftClick(self: *Renderer, x: i32, y: i32) void {
+        _ = self.mouse_input.setButton(.left, true);
         if (self.camera_control_mode == .first_person) {
             camera_controller.beginHoldZoom(&self.fps_zoom_state, self.camera_fov_deg, .left_button);
             return;
@@ -4017,6 +4312,7 @@ pub const Renderer = struct {
     /// Handles handle mouse left release.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleMouseLeftRelease(self: *Renderer, x: i32, y: i32) void {
+        _ = self.mouse_input.setButton(.left, false);
         _ = x;
         _ = y;
         if (self.camera_control_mode == .first_person) {
@@ -4030,6 +4326,7 @@ pub const Renderer = struct {
     /// Handles handle mouse right click.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleMouseRightClick(self: *Renderer, x: i32, y: i32) void {
+        _ = self.mouse_input.setButton(.right, true);
         _ = x;
         _ = y;
         if (self.camera_control_mode != .first_person) return;
@@ -4039,6 +4336,7 @@ pub const Renderer = struct {
     /// Handles handle mouse right release.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleMouseRightRelease(self: *Renderer, x: i32, y: i32) void {
+        _ = self.mouse_input.setButton(.right, false);
         _ = x;
         _ = y;
         camera_controller.endHoldZoom(&self.fps_zoom_state, self.camera_fov_deg, .right_button);
@@ -4047,7 +4345,8 @@ pub const Renderer = struct {
     /// Handles handle focus lost.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleFocusLost(self: *Renderer) void {
-        self.keys_pressed = 0;
+        self.keys_pressed.clear();
+        self.mouse_input.clear();
         self.scene_item_gizmo.handlePointerUp();
         self.clearLightGizmoInteraction();
         camera_controller.cancelHoldZoom(&self.fps_zoom_state, &self.camera_fov_deg, true);
@@ -4104,7 +4403,9 @@ pub const Renderer = struct {
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setCameraPosition(self: *Renderer, position: math.Vec3) void {
         self.camera_position = position;
-        camera_controller.resetFpsBody(&self.fps_body_state, self.camera_position, fps_camera_floor_y, fps_camera_eye_height);
+        if (!self.scene_camera_script_active) {
+            camera_controller.resetFpsBody(&self.fps_body_state, self.camera_position, fps_camera_floor_y, fps_camera_eye_height);
+        }
     }
 
     /// Sets s et ca me ra or ie nt at io n.
@@ -4151,6 +4452,11 @@ pub const Renderer = struct {
 
     fn consumeMouseDelta(self: *Renderer, frame_dt_seconds: f32) math.Vec2 {
         return camera_controller.consumeLookDelta(&self.mouse_state, self.camera_control_mode, frame_dt_seconds);
+    }
+
+    pub fn consumeSceneCameraLookDelta(self: *Renderer, frame_dt_seconds: f32) math.Vec2 {
+        if (!self.scene_camera_script_active or self.camera_control_mode != .first_person) return math.Vec2.new(0.0, 0.0);
+        return self.consumeMouseDelta(frame_dt_seconds);
     }
 
     fn effectiveMouseSensitivity(self: *const Renderer) f32 {
@@ -4550,140 +4856,32 @@ pub const Renderer = struct {
     /// Handles handle char input.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleCharInput(self: *Renderer, char_code: u32) void {
-        switch (char_code) {
-            'q', 'Q' => {
-                if (!camera_controller.isHoldZoomHeld(&self.fps_zoom_state)) self.pending_fov_delta -= config.CAMERA_FOV_STEP;
-            },
-            'e', 'E' => {
-                if (!camera_controller.isHoldZoomHeld(&self.fps_zoom_state)) self.pending_fov_delta += config.CAMERA_FOV_STEP;
-            },
-            'v', 'V' => {
-                self.camera_control_mode = if (self.camera_control_mode == .first_person) .editor else .first_person;
-                if (self.camera_control_mode == .first_person) {
-                    self.scene_item_gizmo.cancelInteraction();
-                    self.clearLightGizmoInteraction();
-                    camera_controller.resetFpsBody(&self.fps_body_state, self.camera_position, fps_camera_floor_y, fps_camera_eye_height);
-                    const jump_down = (self.keys_pressed & input.KeyBits.space) != 0;
-                    camera_controller.setJumpHeldState(&self.fps_body_state, jump_down);
-                    camera_controller.onEnterFirstPerson(&self.fps_zoom_state, self.camera_fov_deg);
-                } else {
-                    camera_controller.cancelHoldZoom(&self.fps_zoom_state, &self.camera_fov_deg, true);
-                    self.last_reported_fov_deg = self.camera_fov_deg;
-                }
-                camera_controller.resetForModeToggle(&self.mouse_state);
-                renderer_logger.infoSub(
-                    "camera_mode",
-                    "mode={s}",
-                    .{if (self.camera_control_mode == .first_person) "first_person" else "editor"},
-                );
-            },
-            'm', 'M' => {
-                self.scene_item_gizmo.toggleEnabled();
-                if (self.scene_item_gizmo.isActive()) {
-                    renderer_logger.infoSub(
-                        "scene_gizmo",
-                        "enabled item={} axis={s} step={d:.2}",
-                        .{
-                            self.scene_item_gizmo.selected_item_index.?,
-                            scene_item_gizmo.axisName(self.scene_item_gizmo.active_axis),
-                            self.scene_item_gizmo.move_step,
-                        },
-                    );
-                } else if (self.scene_item_gizmo.enabled) {
-                    renderer_logger.infoSub("scene_gizmo", "enabled (no selected item)", .{});
-                } else {
-                    renderer_logger.infoSub("scene_gizmo", "disabled", .{});
-                }
-            },
-            'g', 'G' => {
-                self.light_gizmo.enabled = !self.light_gizmo.enabled;
-                self.clampLightGizmoSelection();
-                if (self.light_gizmo.enabled and self.lights.items.len > 0) {
-                    renderer_logger.infoSub(
-                        "light_gizmo",
-                        "enabled light={} axis={s} step={d:.2}",
-                        .{
-                            self.light_gizmo.selected_light_index,
-                            lightGizmoAxisName(self.light_gizmo.active_axis),
-                            self.light_gizmo.move_step,
-                        },
-                    );
-                } else if (self.light_gizmo.enabled) {
-                    renderer_logger.infoSub("light_gizmo", "enabled (no lights)", .{});
-                } else {
-                    self.clearLightGizmoInteraction();
-                    renderer_logger.infoSub("light_gizmo", "disabled", .{});
-                }
-            },
-            'x', 'X' => {
-                if (self.scene_item_gizmo.isActive()) {
-                    self.scene_item_gizmo.setAxis(.x);
-                    renderer_logger.infoSub("scene_gizmo", "axis={s}", .{scene_item_gizmo.axisName(self.scene_item_gizmo.active_axis)});
-                } else {
-                    self.light_gizmo.active_axis = .x;
-                    renderer_logger.infoSub("light_gizmo", "axis={s}", .{lightGizmoAxisName(self.light_gizmo.active_axis)});
-                }
-            },
-            'y', 'Y' => {
-                if (self.scene_item_gizmo.isActive()) {
-                    self.scene_item_gizmo.setAxis(.y);
-                    renderer_logger.infoSub("scene_gizmo", "axis={s}", .{scene_item_gizmo.axisName(self.scene_item_gizmo.active_axis)});
-                } else {
-                    self.light_gizmo.active_axis = .y;
-                    renderer_logger.infoSub("light_gizmo", "axis={s}", .{lightGizmoAxisName(self.light_gizmo.active_axis)});
-                }
-            },
-            'z', 'Z' => {
-                if (self.scene_item_gizmo.isActive()) {
-                    self.scene_item_gizmo.setAxis(.z);
-                    renderer_logger.infoSub("scene_gizmo", "axis={s}", .{scene_item_gizmo.axisName(self.scene_item_gizmo.active_axis)});
-                } else {
-                    self.light_gizmo.active_axis = .z;
-                    renderer_logger.infoSub("light_gizmo", "axis={s}", .{lightGizmoAxisName(self.light_gizmo.active_axis)});
-                }
-            },
-            'l', 'L' => {
-                if (self.lights.items.len == 0) return;
-                self.clampLightGizmoSelection();
-                self.light_gizmo.selected_light_index = (self.light_gizmo.selected_light_index + 1) % self.lights.items.len;
-                renderer_logger.infoSub("light_gizmo", "light={}", .{self.light_gizmo.selected_light_index});
-            },
-            'j', 'J' => {
-                if (self.scene_item_gizmo.isActive()) {
-                    self.scene_item_gizmo.queueSelectedTranslation(-self.scene_item_gizmo.move_step);
-                } else if (self.light_gizmo.enabled) {
-                    self.moveSelectedLightAlongAxis(-self.light_gizmo.move_step);
-                }
-            },
-            'k', 'K' => {
-                if (self.scene_item_gizmo.isActive()) {
-                    self.scene_item_gizmo.queueSelectedTranslation(self.scene_item_gizmo.move_step);
-                } else if (self.light_gizmo.enabled) {
-                    self.moveSelectedLightAlongAxis(self.light_gizmo.move_step);
-                }
-            },
-            'p', 'P' => {
-                self.show_render_overlay = !self.show_render_overlay;
-                renderer_logger.infoSub(
-                    "overlay",
-                    "render overlay {s}",
-                    .{if (self.show_render_overlay) "enabled" else "disabled"},
-                );
-            },
-            'h', 'H' => {
-                self.hybrid_shadow_debug.enabled = !self.hybrid_shadow_debug.enabled;
-                self.hybrid_shadow_debug.reset();
-                renderer_logger.infoSub(
-                    "shadow_debug",
-                    "hybrid shadow stepping {s}",
-                    .{if (self.hybrid_shadow_debug.enabled) "enabled" else "disabled"},
-                );
-            },
-            'n', 'N' => if (self.hybrid_shadow_debug.enabled) {
-                self.hybrid_shadow_debug.advance_requested = true;
-            },
-            else => {},
+        _ = self;
+        _ = char_code;
+    }
+
+    fn setCameraControlMode(self: *Renderer, next_mode: CameraControlMode) void {
+        if (self.camera_control_mode == next_mode) return;
+        self.camera_control_mode = next_mode;
+        if (self.camera_control_mode == .first_person) {
+            self.scene_item_gizmo.cancelInteraction();
+            self.clearLightGizmoInteraction();
+            if (!self.scene_camera_script_active) {
+                camera_controller.resetFpsBody(&self.fps_body_state, self.camera_position, fps_camera_floor_y, fps_camera_eye_height);
+                const jump_down = self.keys_pressed.isDown(.space);
+                camera_controller.setJumpHeldState(&self.fps_body_state, jump_down);
+            }
+            camera_controller.onEnterFirstPerson(&self.fps_zoom_state, self.camera_fov_deg);
+        } else {
+            camera_controller.cancelHoldZoom(&self.fps_zoom_state, &self.camera_fov_deg, true);
+            self.last_reported_fov_deg = self.camera_fov_deg;
         }
+        camera_controller.resetForModeToggle(&self.mouse_state);
+        renderer_logger.infoSub(
+            "camera_mode",
+            "mode={s}",
+            .{if (self.camera_control_mode == .first_person) "first_person" else "editor"},
+        );
     }
 
     /// Clamps light gizmo selection to a valid range for downstream code.
@@ -4821,16 +5019,28 @@ pub const Renderer = struct {
             }
         }
         const total_shadow_bytes = self.totalShadowMapBytes();
-        renderer_logger.infoSub(
-            "lights",
-            "capacity={} shadow_map_range={}..{} total_shadow_mem={d:.2} MiB",
-            .{
-                self.lights.items.len,
-                min_shadow_size,
-                max_shadow_size,
-                @as(f64, @floatFromInt(total_shadow_bytes)) / (1024.0 * 1024.0),
-            },
-        );
+        const should_log_light_capacity = !self.light_capacity_log_initialized or
+            self.last_logged_light_capacity != self.lights.items.len or
+            self.last_logged_min_shadow_size != min_shadow_size or
+            self.last_logged_max_shadow_size != max_shadow_size or
+            self.last_logged_total_shadow_bytes != total_shadow_bytes;
+        if (should_log_light_capacity) {
+            renderer_logger.infoSub(
+                "lights",
+                "capacity={} shadow_map_range={}..{} total_shadow_mem={d:.2} MiB",
+                .{
+                    self.lights.items.len,
+                    min_shadow_size,
+                    max_shadow_size,
+                    @as(f64, @floatFromInt(total_shadow_bytes)) / (1024.0 * 1024.0),
+                },
+            );
+            self.light_capacity_log_initialized = true;
+            self.last_logged_light_capacity = self.lights.items.len;
+            self.last_logged_min_shadow_size = min_shadow_size;
+            self.last_logged_max_shadow_size = max_shadow_size;
+            self.last_logged_total_shadow_bytes = total_shadow_bytes;
+        }
         self.syncLightSoA();
         self.frame_view_cache.invalidate();
     }
@@ -4922,14 +5132,19 @@ pub const Renderer = struct {
             },
         );
 
-        const rotation_speed = 2.0;
-        if ((self.keys_pressed & input.KeyBits.left) != 0) self.rotation_angle -= rotation_speed * simulation_delta_seconds;
-        if ((self.keys_pressed & input.KeyBits.right) != 0) self.rotation_angle += rotation_speed * simulation_delta_seconds;
-        if ((self.keys_pressed & input.KeyBits.up) != 0) self.rotation_x -= rotation_speed * simulation_delta_seconds;
-        if ((self.keys_pressed & input.KeyBits.down) != 0) self.rotation_x += rotation_speed * simulation_delta_seconds;
+        if (!self.scene_camera_script_active) {
+            const rotation_speed = 2.0;
+            if (self.keys_pressed.isDown(.left)) self.rotation_angle -= rotation_speed * simulation_delta_seconds;
+            if (self.keys_pressed.isDown(.right)) self.rotation_angle += rotation_speed * simulation_delta_seconds;
+            if (self.keys_pressed.isDown(.up)) self.rotation_x -= rotation_speed * simulation_delta_seconds;
+            if (self.keys_pressed.isDown(.down)) self.rotation_x += rotation_speed * simulation_delta_seconds;
+        }
 
-        const mouse_delta = self.consumeMouseDelta(delta_seconds);
-        if (self.camera_control_mode == .first_person) {
+        const mouse_delta = if (self.scene_camera_script_active)
+            math.Vec2.new(0.0, 0.0)
+        else
+            self.consumeMouseDelta(delta_seconds);
+        if (self.camera_control_mode == .first_person and !self.scene_camera_script_active) {
             const mouse_sensitivity = self.effectiveMouseSensitivity();
             camera_controller.applyFirstPersonLook(
                 &self.rotation_angle,
@@ -4994,26 +5209,28 @@ pub const Renderer = struct {
         const up = frame_view.up;
         const forward = frame_view.forward;
         if (self.camera_control_mode == .first_person) {
-            const move_input = camera_controller.FpsMoveInput{
-                .move_forward = (self.keys_pressed & input.KeyBits.w) != 0,
-                .move_back = (self.keys_pressed & input.KeyBits.s) != 0,
-                .move_left = (self.keys_pressed & input.KeyBits.a) != 0,
-                .move_right = (self.keys_pressed & input.KeyBits.d) != 0,
-                .jump_down = (self.keys_pressed & input.KeyBits.space) != 0,
-            };
-            const basis = camera_controller.ViewBasis{
-                .right = right,
-                .up = up,
-                .forward = forward,
-            };
-            const fps_params = camera_controller.FpsStepParams{
-                .dt = simulation_delta_seconds,
-                .move_speed = self.camera_move_speed,
-                .floor_y = fps_camera_floor_y,
-                .eye_height = fps_camera_eye_height,
-            };
-            camera_controller.stepFpsBody(&self.fps_body_state, &self.camera_position, basis, move_input, fps_params);
-        } else {
+            if (!self.scene_camera_script_active) {
+                const move_input = camera_controller.FpsMoveInput{
+                    .move_forward = self.keys_pressed.isDown(.w),
+                    .move_back = self.keys_pressed.isDown(.s),
+                    .move_left = self.keys_pressed.isDown(.a),
+                    .move_right = self.keys_pressed.isDown(.d),
+                    .jump_down = self.keys_pressed.isDown(.space),
+                };
+                const basis = camera_controller.ViewBasis{
+                    .right = right,
+                    .up = up,
+                    .forward = forward,
+                };
+                const fps_params = camera_controller.FpsStepParams{
+                    .dt = simulation_delta_seconds,
+                    .move_speed = self.camera_move_speed,
+                    .floor_y = fps_camera_floor_y,
+                    .eye_height = fps_camera_eye_height,
+                };
+                camera_controller.stepFpsBody(&self.fps_body_state, &self.camera_position, basis, move_input, fps_params);
+            }
+        } else if (!self.scene_camera_script_active) {
             const world_up = math.Vec3.new(0.0, 1.0, 0.0);
 
             var forward_flat = math.Vec3.new(forward.x, 0.0, forward.z);
@@ -5033,12 +5250,12 @@ pub const Renderer = struct {
             }
 
             var movement_dir = math.Vec3.new(0.0, 0.0, 0.0);
-            if ((self.keys_pressed & input.KeyBits.w) != 0) movement_dir = math.Vec3.add(movement_dir, forward_flat);
-            if ((self.keys_pressed & input.KeyBits.s) != 0) movement_dir = math.Vec3.sub(movement_dir, forward_flat);
-            if ((self.keys_pressed & input.KeyBits.d) != 0) movement_dir = math.Vec3.add(movement_dir, right_flat);
-            if ((self.keys_pressed & input.KeyBits.a) != 0) movement_dir = math.Vec3.sub(movement_dir, right_flat);
-            if ((self.keys_pressed & input.KeyBits.space) != 0) movement_dir = math.Vec3.add(movement_dir, world_up);
-            if ((self.keys_pressed & input.KeyBits.ctrl) != 0) movement_dir = math.Vec3.sub(movement_dir, world_up);
+            if (self.keys_pressed.isDown(.w)) movement_dir = math.Vec3.add(movement_dir, forward_flat);
+            if (self.keys_pressed.isDown(.s)) movement_dir = math.Vec3.sub(movement_dir, forward_flat);
+            if (self.keys_pressed.isDown(.d)) movement_dir = math.Vec3.add(movement_dir, right_flat);
+            if (self.keys_pressed.isDown(.a)) movement_dir = math.Vec3.sub(movement_dir, right_flat);
+            if (self.keys_pressed.isDown(.space)) movement_dir = math.Vec3.add(movement_dir, world_up);
+            if (self.keys_pressed.isDown(.ctrl)) movement_dir = math.Vec3.sub(movement_dir, world_up);
 
             const movement_mag = math.Vec3.length(movement_dir);
             if (movement_mag > 0.0001) {
@@ -5162,6 +5379,19 @@ pub const Renderer = struct {
         self.light_work_stats.shadow_cadence_decreased_lights = 0;
         self.light_work_stats.shadow_queries = self.bitmap.pixels.len * shadow_map_light_count;
         self.light_work_stats.meshlet_ray_tests = 0;
+        self.light_work_stats.meshlet_shadow_chunks = 0;
+        self.light_work_stats.meshlet_shadow_chunk_pixels = 0;
+        self.light_work_stats.meshlet_shadow_chunk_active_rays = 0;
+        self.light_work_stats.meshlet_shadow_packets = 0;
+        self.light_work_stats.meshlet_shadow_packets_skipped = 0;
+        self.light_work_stats.meshlet_shadow_packet_active_lanes = 0;
+        self.light_work_stats.meshlet_shadow_packet_occluded_lanes = 0;
+        self.light_work_stats.meshlet_shadow_trace_us = 0;
+        self.light_work_stats.meshlet_shadow_apply_us = 0;
+        self.light_work_stats.triangles_rasterized = 0;
+        self.light_work_stats.covered_pixels = 0;
+        self.light_work_stats.depth_tests_passed = 0;
+        self.light_work_stats.alpha_pixels = 0;
         self.light_work_stats.shadow_budget_ns = 0;
         self.light_work_stats.shadow_build_ns = 0;
         self.light_work_stats.shadow_resolve_ns = 0;
@@ -5350,9 +5580,14 @@ pub const Renderer = struct {
         for (self.render_pass_timings[0..self.render_pass_count]) |pass| {
             renderer_logger.infoSub("frame_profile", "{s}: {d:.3} ms", .{ pass.name, pass.frame_duration_ms });
         }
+        const packet_count = @max(@as(usize, 1), self.light_work_stats.meshlet_shadow_packets);
+        const avg_active_lanes = @as(f32, @floatFromInt(self.light_work_stats.meshlet_shadow_packet_active_lanes)) /
+            @as(f32, @floatFromInt(packet_count));
+        const avg_occluded_lanes = @as(f32, @floatFromInt(self.light_work_stats.meshlet_shadow_packet_occluded_lanes)) /
+            @as(f32, @floatFromInt(packet_count));
         renderer_logger.infoSub(
             "frame_profile",
-            "light_work active={} shadow_map_lights={} meshlet_shadow_lights={} shadow_map_reused={} shadow_budget_skipped={} shadow_map_downscaled={} shadow_map_upscaled={} shadow_cadence_increased={} shadow_cadence_decreased={} shadow_queries={} meshlet_ray_tests={} shadow_budget={d:.3} ms shadow_build={d:.3} ms shadow_resolve={d:.3} ms active_tiles={} tile_light_candidates={} tile_light_final={} tile_light_rejected={} tile_light_overflow_tiles={}",
+            "light_work active={} shadow_map_lights={} meshlet_shadow_lights={} shadow_map_reused={} shadow_budget_skipped={} shadow_map_downscaled={} shadow_map_upscaled={} shadow_cadence_increased={} shadow_cadence_decreased={} shadow_queries={} meshlet_ray_tests={} meshlet_shadow_chunks={} meshlet_shadow_chunk_pixels={} meshlet_shadow_chunk_active_rays={} meshlet_shadow_packets={} meshlet_shadow_packets_skipped={} meshlet_shadow_avg_active_lanes={d:.2} meshlet_shadow_avg_occluded_lanes={d:.2} meshlet_shadow_trace={d:.3} ms meshlet_shadow_apply={d:.3} ms shadow_budget={d:.3} ms shadow_build={d:.3} ms shadow_resolve={d:.3} ms active_tiles={} tile_light_candidates={} tile_light_final={} tile_light_rejected={} tile_light_overflow_tiles={}",
             .{
                 self.light_work_stats.active_lights,
                 self.light_work_stats.shadow_map_lights,
@@ -5365,6 +5600,15 @@ pub const Renderer = struct {
                 self.light_work_stats.shadow_cadence_decreased_lights,
                 self.light_work_stats.shadow_queries,
                 self.light_work_stats.meshlet_ray_tests,
+                self.light_work_stats.meshlet_shadow_chunks,
+                self.light_work_stats.meshlet_shadow_chunk_pixels,
+                self.light_work_stats.meshlet_shadow_chunk_active_rays,
+                self.light_work_stats.meshlet_shadow_packets,
+                self.light_work_stats.meshlet_shadow_packets_skipped,
+                avg_active_lanes,
+                avg_occluded_lanes,
+                @as(f32, @floatFromInt(self.light_work_stats.meshlet_shadow_trace_us)) / 1000.0,
+                @as(f32, @floatFromInt(self.light_work_stats.meshlet_shadow_apply_us)) / 1000.0,
                 render_utils.nanosecondsToMs(self.light_work_stats.shadow_budget_ns),
                 render_utils.nanosecondsToMs(self.light_work_stats.shadow_build_ns),
                 render_utils.nanosecondsToMs(self.light_work_stats.shadow_resolve_ns),
@@ -5373,6 +5617,16 @@ pub const Renderer = struct {
                 self.light_work_stats.tile_light_final,
                 self.light_work_stats.tile_light_rejected,
                 self.light_work_stats.tile_light_overflow_tiles,
+            },
+        );
+        renderer_logger.infoSub(
+            "frame_profile",
+            "raster_work triangles_rasterized={} covered_pixels={} depth_tests_passed={} alpha_pixels={}",
+            .{
+                self.light_work_stats.triangles_rasterized,
+                self.light_work_stats.covered_pixels,
+                self.light_work_stats.depth_tests_passed,
+                self.light_work_stats.alpha_pixels,
             },
         );
         for (0..self.lights.items.len) |light_index| {
@@ -7303,6 +7557,19 @@ pub const Renderer = struct {
         defer if (_z_renderTiled) |z| z.end();
         _ = light_dir;
         self.meshlet_ray_tests_counter.store(0, .release);
+        self.meshlet_shadow_chunk_counter.store(0, .release);
+        self.meshlet_shadow_chunk_pixels_counter.store(0, .release);
+        self.meshlet_shadow_chunk_active_rays_counter.store(0, .release);
+        self.meshlet_shadow_packet_counter.store(0, .release);
+        self.meshlet_shadow_packet_skipped_counter.store(0, .release);
+        self.meshlet_shadow_packet_active_lanes_counter.store(0, .release);
+        self.meshlet_shadow_packet_occluded_lanes_counter.store(0, .release);
+        self.meshlet_shadow_trace_ns_counter.store(0, .release);
+        self.meshlet_shadow_apply_ns_counter.store(0, .release);
+        self.triangles_rasterized_counter.store(0, .release);
+        self.covered_pixels_counter.store(0, .release);
+        self.depth_tests_passed_counter.store(0, .release);
+        self.alpha_pixels_counter.store(0, .release);
         const grid = self.tile_grid.?;
         const tile_buffers = self.tile_buffers.?;
         const tile_lists = self.tile_triangle_lists.?;
@@ -7399,6 +7666,19 @@ pub const Renderer = struct {
                 .cam_up = cam_up,
                 .cam_fwd = cam_fwd,
                 .meshlet_ray_counter = &self.meshlet_ray_tests_counter,
+                .shadow_chunk_counter = &self.meshlet_shadow_chunk_counter,
+                .shadow_chunk_pixels_counter = &self.meshlet_shadow_chunk_pixels_counter,
+                .shadow_chunk_active_rays_counter = &self.meshlet_shadow_chunk_active_rays_counter,
+                .shadow_packet_counter = &self.meshlet_shadow_packet_counter,
+                .shadow_packet_skipped_counter = &self.meshlet_shadow_packet_skipped_counter,
+                .shadow_packet_active_lanes_counter = &self.meshlet_shadow_packet_active_lanes_counter,
+                .shadow_packet_occluded_lanes_counter = &self.meshlet_shadow_packet_occluded_lanes_counter,
+                .shadow_trace_ns_counter = &self.meshlet_shadow_trace_ns_counter,
+                .shadow_apply_ns_counter = &self.meshlet_shadow_apply_ns_counter,
+                .triangles_rasterized_counter = &self.triangles_rasterized_counter,
+                .covered_pixels_counter = &self.covered_pixels_counter,
+                .depth_tests_passed_counter = &self.depth_tests_passed_counter,
+                .alpha_pixels_counter = &self.alpha_pixels_counter,
                 .shadow_start_idx = 0,
                 .shadow_end_idx = 0,
             };
@@ -7445,14 +7725,16 @@ pub const Renderer = struct {
             TileRenderJob.renderTileJob(@ptrCast(&tile_jobs[main_tile_idx]));
             parent_job.complete();
 
-            var interrupted = false;
-            while (!parent_job.isComplete()) {
-                if (pump) |p| {
+            if (pump) |p| {
+                var interrupted = false;
+                while (!parent_job.isComplete()) {
                     if (!p(self)) interrupted = true;
+                    std.Thread.yield() catch {};
                 }
-                std.Thread.yield() catch {};
+                if (interrupted) return error.RenderInterrupted;
+            } else {
+                parent_job.wait();
             }
-            if (interrupted) return error.RenderInterrupted;
         } else {
             for (active_indices[0..active_tile_count]) |tile_idx| {
                 TileRenderJob.renderTileJob(@ptrCast(&tile_jobs[tile_idx]));
@@ -7469,6 +7751,9 @@ pub const Renderer = struct {
             const shadow_min_chunk_pixels: usize = 1024;
             const shadow_split_tri_threshold: usize = 96;
             const worker_count: usize = if (self.job_system) |js| @intCast(js.worker_count) else 1;
+            const high_parallelism = worker_count > 4;
+            const runtime_shadow_min_chunk_pixels: usize = if (high_parallelism) @max(@as(usize, 512), @divTrunc(shadow_min_chunk_pixels, 2)) else shadow_min_chunk_pixels;
+            const shadow_max_chunks_per_tile: usize = if (high_parallelism) 16 else 8;
             var shadow_job_count: usize = 0;
 
             for (active_indices[0..active_tile_count]) |tile_idx| {
@@ -7478,12 +7763,18 @@ pub const Renderer = struct {
                 if (base_job.sys_shadows == null) continue;
                 const total_pixels = @as(usize, @intCast(base_job.tile.width)) * @as(usize, @intCast(base_job.tile.height));
                 const tri_cost = tile_lists[tile_idx].count();
-                const should_split = worker_count > 2 and total_pixels >= shadow_chunk_pixels and tri_cost >= shadow_split_tri_threshold;
-                const desired_chunks: usize = if (should_split)
-                    @max(@as(usize, 1), @min(@as(usize, 4), @min(worker_count, total_pixels / shadow_min_chunk_pixels)))
-                else
-                    1;
-                const adaptive_chunk_pixels: usize = @max(shadow_min_chunk_pixels, @divTrunc(total_pixels + desired_chunks - 1, desired_chunks));
+                const light_cost = @max(@as(usize, 1), tile_light_range.count);
+                const tri_weight = @max(@as(usize, 1), @divTrunc(tri_cost + shadow_split_tri_threshold - 1, shadow_split_tri_threshold));
+                // Cost model uses pixels plus tile-local geometric/light pressure to reduce long-tail chunk stragglers.
+                const estimated_work_units = total_pixels * tri_weight * light_cost;
+                const target_work_units = shadow_chunk_pixels * 2;
+                const desired_chunks_by_work = @max(@as(usize, 1), @divTrunc(estimated_work_units + target_work_units - 1, target_work_units));
+                const desired_chunks_by_pixels = @max(@as(usize, 1), @divTrunc(total_pixels + shadow_chunk_pixels - 1, shadow_chunk_pixels));
+                const max_chunks = @max(@as(usize, 1), @min(shadow_max_chunks_per_tile, worker_count * 2));
+                const should_split = worker_count > 2 and total_pixels >= runtime_shadow_min_chunk_pixels and tri_cost >= @divTrunc(shadow_split_tri_threshold, 2);
+                const desired_chunks_base: usize = if (should_split) @min(max_chunks, @max(desired_chunks_by_work, desired_chunks_by_pixels)) else 1;
+                const desired_chunks: usize = if (high_parallelism and should_split) @min(max_chunks, desired_chunks_base * 2) else desired_chunks_base;
+                const adaptive_chunk_pixels: usize = @max(runtime_shadow_min_chunk_pixels, @divTrunc(total_pixels + desired_chunks - 1, desired_chunks));
 
                 var start: usize = 0;
                 while (start < total_pixels and shadow_job_count < shadow_chunk_jobs.len) {
@@ -7522,14 +7813,16 @@ pub const Renderer = struct {
                 TileRenderJob.applyMeshletShadows(@ptrCast(&shadow_chunk_jobs[main_job_idx]));
                 parent_job.complete();
 
-                var interrupted = false;
-                while (!parent_job.isComplete()) {
-                    if (pump) |p| {
+                if (pump) |p| {
+                    var interrupted = false;
+                    while (!parent_job.isComplete()) {
                         if (!p(self)) interrupted = true;
+                        std.Thread.yield() catch {};
                     }
-                    std.Thread.yield() catch {};
+                    if (interrupted) return error.RenderInterrupted;
+                } else {
+                    parent_job.wait();
                 }
-                if (interrupted) return error.RenderInterrupted;
             } else {
                 for (shadow_chunk_jobs[0..shadow_job_count]) |*chunk_job| {
                     TileRenderJob.applyMeshletShadows(@ptrCast(chunk_job));
@@ -7542,6 +7835,19 @@ pub const Renderer = struct {
             }
         }
         self.light_work_stats.meshlet_ray_tests = self.meshlet_ray_tests_counter.load(.acquire);
+        self.light_work_stats.meshlet_shadow_chunks = self.meshlet_shadow_chunk_counter.load(.acquire);
+        self.light_work_stats.meshlet_shadow_chunk_pixels = self.meshlet_shadow_chunk_pixels_counter.load(.acquire);
+        self.light_work_stats.meshlet_shadow_chunk_active_rays = self.meshlet_shadow_chunk_active_rays_counter.load(.acquire);
+        self.light_work_stats.meshlet_shadow_packets = self.meshlet_shadow_packet_counter.load(.acquire);
+        self.light_work_stats.meshlet_shadow_packets_skipped = self.meshlet_shadow_packet_skipped_counter.load(.acquire);
+        self.light_work_stats.meshlet_shadow_packet_active_lanes = self.meshlet_shadow_packet_active_lanes_counter.load(.acquire);
+        self.light_work_stats.meshlet_shadow_packet_occluded_lanes = self.meshlet_shadow_packet_occluded_lanes_counter.load(.acquire);
+        self.light_work_stats.meshlet_shadow_trace_us = @divTrunc(self.meshlet_shadow_trace_ns_counter.load(.acquire), 1000);
+        self.light_work_stats.meshlet_shadow_apply_us = @divTrunc(self.meshlet_shadow_apply_ns_counter.load(.acquire), 1000);
+        self.light_work_stats.triangles_rasterized = self.triangles_rasterized_counter.load(.acquire);
+        self.light_work_stats.covered_pixels = self.covered_pixels_counter.load(.acquire);
+        self.light_work_stats.depth_tests_passed = self.depth_tests_passed_counter.load(.acquire);
+        self.light_work_stats.alpha_pixels = self.alpha_pixels_counter.load(.acquire);
 
         // 4. Compositing: Copy the pixels from each completed tile buffer to the main screen bitmap.
         for (active_indices[0..active_tile_count]) |tile_idx| {
@@ -7702,8 +8008,8 @@ pub const Renderer = struct {
                 try cache_ptr.ensureMeshletCullJobCapacity(self.allocator, job_count);
                 var cull_jobs = cache_ptr.meshlet_cull_jobs[0..job_count];
                 var jobs = cache_ptr.meshlet_cull_job_handles[0..job_count];
-                var job_completion = cache_ptr.meshlet_cull_job_completion[0..job_count];
-                @memset(job_completion, false);
+                _ = cache_ptr.meshlet_cull_job_completion[0..job_count];
+                var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
 
                 var job_idx: usize = 0;
                 while (job_idx < job_count) : (job_idx += 1) {
@@ -7721,26 +8027,13 @@ pub const Renderer = struct {
                         .basis_forward = forward,
                         .projection = projection,
                     };
-                    jobs[job_idx] = Job.init(MeshletCullJob.run, @ptrCast(&cull_jobs[job_idx]), null);
+                    jobs[job_idx] = Job.init(MeshletCullJob.run, @ptrCast(&cull_jobs[job_idx]), &parent_job);
                     if (!js.submitJobAuto(&jobs[job_idx])) {
                         cull_jobs[job_idx].process();
-                        job_completion[job_idx] = true;
                     }
                 }
-
-                var remaining = job_count;
-                while (remaining > 0) {
-                    var progress = false;
-                    for (jobs, 0..) |*job_entry, idx| {
-                        if (job_completion[idx]) continue;
-                        if (job_entry.isComplete()) {
-                            job_completion[idx] = true;
-                            remaining -= 1;
-                            progress = true;
-                        }
-                    }
-                    if (!progress) std.Thread.yield() catch {};
-                }
+                parent_job.complete();
+                parent_job.wait();
             }
         } else {
             var meshlet_idx: usize = 0;
@@ -7840,10 +8133,10 @@ pub const Renderer = struct {
             try cache_ptr.ensureMeshletJobCapacity(self.allocator, visible_meshlet_count);
             var meshlet_jobs = cache_ptr.meshlet_jobs[0..visible_meshlet_count];
             var jobs = cache_ptr.meshlet_job_handles[0..visible_meshlet_count];
-            var job_completion = cache_ptr.meshlet_job_completion[0..visible_meshlet_count];
+            _ = cache_ptr.meshlet_job_completion[0..visible_meshlet_count];
             var contributions = cache_ptr.meshlet_contributions[0..visible_meshlet_count];
-            @memset(job_completion, false);
             for (contributions) |*contrib| contrib.clear();
+            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
 
             var job_idx: usize = 0;
             while (job_idx < visible_meshlet_count) : (job_idx += 1) {
@@ -7875,27 +8168,14 @@ pub const Renderer = struct {
                     .grid = if (self.tile_grid) |*grid_ref| grid_ref else null,
                     .contribution = &contributions[job_idx],
                 };
-                jobs[job_idx] = Job.init(MeshletRenderJob.run, @ptrCast(&meshlet_jobs[job_idx]), null);
+                jobs[job_idx] = Job.init(MeshletRenderJob.run, @ptrCast(&meshlet_jobs[job_idx]), &parent_job);
                 if (!js.submitJobAuto(&jobs[job_idx])) {
                     meshlet_logger.errorSub("dispatch", "meshlet job {} failed to submit", .{job_idx});
                     meshlet_jobs[job_idx].process();
-                    job_completion[job_idx] = true;
                 }
             }
-
-            var remaining = visible_meshlet_count;
-            while (remaining > 0) {
-                var progress = false;
-                for (jobs, 0..) |*job_entry, idx| {
-                    if (job_completion[idx]) continue;
-                    if (job_entry.isComplete()) {
-                        job_completion[idx] = true;
-                        remaining -= 1;
-                        progress = true;
-                    }
-                }
-                if (!progress) std.Thread.yield() catch {};
-            }
+            parent_job.complete();
+            parent_job.wait();
 
             var packed_offset: usize = 0;
             for (meshlet_jobs[0..visible_meshlet_count], 0..) |job_info, idx| {
