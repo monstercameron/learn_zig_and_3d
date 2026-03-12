@@ -165,7 +165,7 @@ pub fn runBuild(
 
     CtxType.run(@ptrCast(&self.shadow_raster_job_contexts[0]));
     parent_job.complete();
-    parent_job.wait();
+    self.job_system.?.waitFor(&parent_job);
 
     return std.time.nanoTimestamp() - pass_start;
 }
@@ -236,6 +236,6 @@ pub fn runPipeline(
 
     CtxType.run(@ptrCast(&self.shadow_resolve_job_contexts[0]));
     parent_job.complete();
-    parent_job.wait();
+    self.job_system.?.waitFor(&parent_job);
     return std.time.nanoTimestamp() - pass_start;
 }

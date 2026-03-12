@@ -100,7 +100,7 @@ pub fn runPipeline(
 
         CtxType.run(@ptrCast(&self.taa_job_contexts[0]));
         parent_job.complete();
-        parent_job.wait();
+        self.job_system.?.waitFor(&parent_job);
     }
 
     finalizeHistory(

@@ -161,7 +161,7 @@ fn dispatchStage(
         composite_fn,
     );
     parent_job.complete();
-    parent_job.wait();
+    self.job_system.?.waitFor(&parent_job);
 }
 
 /// runPipeline executes the full SSAO Pass pipeline for the current frame.

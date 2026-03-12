@@ -4,7 +4,7 @@
 const std = @import("std");
 const compute = @import("compute.zig");
 const dispatcher = @import("dispatcher.zig");
-const job_system = @import("../../job_system.zig");
+const job_system = @import("../../core/job_system.zig");
 const InvertKernel = @import("invert_kernel.zig").InvertKernel;
 
 /// Runs invert example.

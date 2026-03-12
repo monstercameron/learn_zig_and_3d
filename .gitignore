@@ -16,6 +16,9 @@ target/
 cache/
 artifacts/
 artifacts/**
+!artifacts/
+!artifacts/perf/
+!artifacts/perf/hotspot-report-template.md
 *.meshlets
 profile.json
 

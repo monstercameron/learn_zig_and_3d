@@ -444,7 +444,7 @@ pub fn runPipeline(
 
         ShadowCtxType.run(@ptrCast(&shadow_jobs[main_tile_idx]));
         parent_job.complete();
-        parent_job.wait();
+        self.job_system.?.waitFor(&parent_job);
     } else {
         for (active_indices[0..shadow_job_count]) |tile_index| {
             ShadowCtxType.run(@ptrCast(&shadow_jobs[tile_index]));

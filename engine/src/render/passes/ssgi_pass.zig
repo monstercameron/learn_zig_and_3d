@@ -71,5 +71,5 @@ pub fn runPipeline(self: anytype, height: usize, comptime noop_job_fn: fn (*anyo
 
     CtxType.run(@ptrCast(&self.ssgi_job_contexts[0]));
     parent_job.complete();
-    parent_job.wait();
+    self.job_system.?.waitFor(&parent_job);
 }

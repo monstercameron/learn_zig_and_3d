@@ -41,6 +41,8 @@ At the selected frame, the renderer logs lines like:
 [renderer.core] [INFO] [frame_profile] meshlet_tiled: 2.446 ms
 [renderer.core] [INFO] [frame_profile] hybrid_shadow: 75.012 ms
 [renderer.core] [INFO] [frame_profile] ssao: 2.678 ms
+[renderer.core] [INFO] [frame_profile] light_work ... meshlet_shadow_packets=... meshlet_shadow_packets_skipped=... meshlet_shadow_avg_active_lanes=... meshlet_shadow_avg_occluded_lanes=...
+[renderer.core] [INFO] [frame_profile] raster_work triangles_rasterized=... covered_pixels=... depth_tests_passed=... alpha_pixels=...
 ```
 
 For hybrid shadows, it also prints detailed sub-metrics:
@@ -183,4 +185,73 @@ If you only want folded stacks (for other viewers/tools):
 
 ```powershell
 python tools\trace-to-flamegraph.py --input profile.json --out artifacts\flame\frame120 --no-svg
+```
+
+## 10. Hotspot Snapshot Script
+
+Use `tools\profile-hotspots.ps1` to summarize `profile.json` into hotspot tables and an artifact report.
+
+Summarize an existing trace:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\profile-hotspots.ps1 -InputPath profile.json
+```
+
+Capture + summarize in one step:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\profile-hotspots.ps1 -Capture -Scene mixed_shadows_static -ProfileFrame 120 -TtlFrames 150
+```
+
+Enforce the meshlet-shadow imbalance guardrail (`meshletShadowTile p99/p50 <= 2.5`) for automation:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\profile-hotspots.ps1 -InputPath profile.json -FailOnGuardrail
+```
+
+This writes:
+
+- console tables for top zones and focus zones
+- a markdown snapshot under `artifacts\perf\hotspots-<timestamp>.md`
+- a copied trace under `artifacts\perf\profile-<timestamp>.json`
+
+For Phase 15 hotspot tickets, every before/after entry must include exact capture IDs in the report:
+
+- baseline `<scene_id>@<frame_id>`
+- post-change `<scene_id>@<frame_id>`
+
+## 11. Raster Triangle Microbench
+
+Use this targeted microbench to evaluate `rasterizeTriangleToTile` behavior across small, medium, and full-tile triangles:
+
+```powershell
+zig run -O ReleaseFast rasterize-triangle-microbench.zig
+```
+
+It prints:
+
+- average and best `ns/triangle`
+- approximate `ns/covered-pixel`
+- depth checksum to keep writes observable
+
+## 12. Phase 15 Microbench Suite
+
+Run the full Phase 15 suite:
+
+```powershell
+zig run -O ReleaseFast phase15-microbench.zig
+```
+
+Run a specific bench:
+
+```powershell
+zig run -O ReleaseFast phase15-microbench.zig -- raster
+zig run -O ReleaseFast phase15-microbench.zig -- chunk
+zig run -O ReleaseFast phase15-microbench.zig -- trace
+zig run -O ReleaseFast phase15-microbench.zig -- shadow_apply
+zig run -O ReleaseFast phase15-microbench.zig -- shadow_apply_threshold
+zig run -O ReleaseFast phase15-microbench.zig -- jobs
+zig run -O ReleaseFast phase15-microbench.zig -- tonemap
+zig run -O ReleaseFast phase15-microbench.zig -- bilinear
+zig run -O ReleaseFast phase15-microbench.zig -- cache
 ```

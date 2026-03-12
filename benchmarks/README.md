@@ -24,6 +24,20 @@ zig build
 zig build run
 ```
 
+Focused raster triangle microbench from repository root:
+
+```powershell
+zig run -O ReleaseFast rasterize-triangle-microbench.zig
+```
+
+Phase 15 hotspot microbench suite from repository root:
+
+```powershell
+zig run -O ReleaseFast phase15-microbench.zig
+zig run -O ReleaseFast phase15-microbench.zig -- trace
+zig run -O ReleaseFast phase15-microbench.zig -- shadow_apply_threshold
+```
+
 ## Layout
 
 - `build.zig`: benchmark build entry point

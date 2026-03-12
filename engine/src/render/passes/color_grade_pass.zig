@@ -71,5 +71,5 @@ pub fn runPipeline(self: anytype, width: usize, height: usize, comptime noop_job
         &self.color_grade_profile,
     );
     parent_job.complete();
-    parent_job.wait();
+    self.job_system.?.waitFor(&parent_job);
 }

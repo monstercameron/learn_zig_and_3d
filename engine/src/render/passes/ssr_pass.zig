@@ -114,5 +114,5 @@ pub fn runPipeline(self: anytype, projection: anytype, scene_height: usize, comp
     }
 
     parent_job.complete();
-    parent_job.wait();
+    self.job_system.?.waitFor(&parent_job);
 }

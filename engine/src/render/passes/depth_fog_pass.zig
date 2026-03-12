@@ -64,5 +64,5 @@ pub fn runPipeline(self: anytype, width: usize, height: usize, comptime noop_job
 
     CtxType.run(@ptrCast(&self.fog_job_contexts[0]));
     parent_job.complete();
-    parent_job.wait();
+    self.job_system.?.waitFor(&parent_job);
 }

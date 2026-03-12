@@ -5,55 +5,33 @@ const std = @import("std");
 const compute = @import("compute.zig");
 const Vec2u = compute.Vec2u;
 const ComputeContext = compute.ComputeContext;
-const job_system = @import("../../job_system.zig"); // Import the main job system
+const job_system = @import("../../core/job_system.zig");
 
-/// Context for a single group dispatch job.
-/// This struct holds the necessary information for a worker thread to process one group.
 const GroupDispatchJobContext = struct {
-    kernel_type: type, // Store the kernel type for comptime access
-    ctx_base: ComputeContext, // Base context with global resources
-    gx: u32, // Group X ID
-    gy: u32, // Group Y ID
-    allocator: std.mem.Allocator, // Allocator for shared memory
+    ctx_base: ComputeContext,
+    gx: u32,
+    gy: u32,
+    shared: ?[]u8,
 };
 
-/// The function executed by a worker thread for a single group.
-fn groupDispatchJobFn(ctx_ptr: *anyopaque) void {
-    const job_ctx: *GroupDispatchJobContext = @ptrCast(@alignCast(ctx_ptr));
-    defer job_ctx.allocator.destroy(job_ctx);
-    const K = job_ctx.kernel_type; // Get the kernel type from the context
-
+fn runGroup(comptime K: type, job_ctx: *const GroupDispatchJobContext) void {
     const gs = Vec2u{ .x = K.group_size_x, .y = K.group_size_y };
-    var shared: ?[]u8 = null;
-    if (K.SharedSize > 0) {
-        // Allocate shared memory for this group
-        shared = job_ctx.allocator.alloc(u8, K.SharedSize) catch {
-            std.debug.print("ERROR: Failed to allocate shared memory for kernel group!\n", .{});
-            return; // Handle allocation failure
-        };
-        std.mem.set(u8, shared.?, 0);
-    }
-    defer if (shared) |buf| job_ctx.allocator.free(buf);
-
-    var ctx = job_ctx.ctx_base; // Copy the base context
+    var ctx = job_ctx.ctx_base;
     ctx.group_size = gs;
-    ctx.shared_mem = shared;
+    ctx.shared_mem = job_ctx.shared;
     ctx.group_id = .{ .x = job_ctx.gx, .y = job_ctx.gy };
 
-    // Loop through local threads within this group
     var ly: u32 = 0;
     while (ly < gs.y) : (ly += 1) {
         var lx: u32 = 0;
         while (lx < gs.x) : (lx += 1) {
             const px = ctx.group_id.x * gs.x + lx;
             const py = ctx.group_id.y * gs.y + ly;
-
-            // Check bounds against image size
             if (px >= ctx.image_size.x or py >= ctx.image_size.y) continue;
 
             ctx.local_id = .{ .x = lx, .y = ly };
             ctx.global_id = .{ .x = px, .y = py };
-            K.main(&ctx); // Execute the kernel's main function
+            K.main(&ctx);
         }
     }
 }
@@ -74,41 +52,70 @@ pub fn dispatchKernel(comptime K: type, allocator: std.mem.Allocator, job_sys: *
     const gs = Vec2u{ .x = K.group_size_x, .y = K.group_size_y };
     _ = gs;
 
-    // Create a parent job to track completion of all group dispatches
-    var parent_job = try job_system.allocateJob(allocator, noopJob, null, null);
-    defer job_system.freeJob(allocator, parent_job);
+    const group_count: usize = @as(usize, @intCast(ctx_base.num_groups.x)) * @as(usize, @intCast(ctx_base.num_groups.y));
+    if (group_count == 0) return;
+
+    var parent_job = job_system.Job.init(noopJob, @ptrFromInt(1), null);
+    var contexts = try allocator.alloc(GroupDispatchJobContext, group_count);
+    defer allocator.free(contexts);
+    var jobs = try allocator.alloc(job_system.Job, if (group_count > 1) group_count - 1 else 1);
+    defer allocator.free(jobs);
+
+    var shared_pool: ?[]u8 = null;
+    if (K.SharedSize > 0) {
+        shared_pool = try allocator.alloc(u8, K.SharedSize * group_count);
+        @memset(shared_pool.?, 0);
+    }
+    defer if (shared_pool) |pool| allocator.free(pool);
+
     errdefer {
         parent_job.complete();
-        parent_job.wait();
+        job_sys.waitFor(&parent_job);
     }
 
-    // Loop through the grid of groups and submit a job for each
+    const Dispatch = struct {
+        fn run(ctx_ptr: *anyopaque) void {
+            const job_ctx: *const GroupDispatchJobContext = @ptrCast(@alignCast(ctx_ptr));
+            runGroup(K, job_ctx);
+        }
+    };
+
+    var index: usize = 0;
     var gy: u32 = 0;
     while (gy < ctx_base.num_groups.y) : (gy += 1) {
         var gx: u32 = 0;
         while (gx < ctx_base.num_groups.x) : (gx += 1) {
-            // Allocate job context for this group
-            const job_ctx = try allocator.create(GroupDispatchJobContext);
-            job_ctx.* = GroupDispatchJobContext{
-                .kernel_type = K,
+            contexts[index] = .{
                 .ctx_base = ctx_base.*, // Copy the base context
                 .gx = gx,
                 .gy = gy,
-                .allocator = allocator,
+                .shared = if (shared_pool) |pool|
+                    pool[index * K.SharedSize ..][0..K.SharedSize]
+                else
+                    null,
             };
 
-            // Allocate and submit the job
-            const job = try job_system.allocateJob(allocator, groupDispatchJobFn, job_ctx, parent_job);
-            if (!job_sys.submitJobAuto(job)) {
-                // Handle job submission failure (e.g., queue full)
-                job_system.freeJob(allocator, job);
-                allocator.destroy(job_ctx);
-                return error.JobSubmissionFailed;
+            if (index == 0) {
+                index += 1;
+                continue;
             }
+
+            const job_index = index - 1;
+            jobs[job_index] = job_system.Job.init(
+                Dispatch.run,
+                @ptrCast(&contexts[index]),
+                &parent_job,
+            );
+            if (!job_sys.submitJobAuto(&jobs[job_index])) {
+                // Fallback preserves forward progress without failing dispatch.
+                Dispatch.run(@ptrCast(&contexts[index]));
+            }
+
+            index += 1;
         }
     }
 
-    // Wait for all child jobs (group dispatches) to complete
+    Dispatch.run(@ptrCast(&contexts[0]));
     parent_job.complete();
-    parent_job.wait();
+    job_sys.waitFor(&parent_job);
 }

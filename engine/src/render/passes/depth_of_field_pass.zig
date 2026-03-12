@@ -112,7 +112,7 @@ pub fn runPipeline(self: anytype, scene_width: usize, scene_height: usize, compt
         }
         CtxType.run(@ptrCast(&self.dof_job_contexts[0]));
         parent_job.complete();
-        parent_job.wait();
+        self.job_system.?.waitFor(&parent_job);
     }
 
     @memcpy(self.bitmap.pixels, self.dof_scratch.pixels);

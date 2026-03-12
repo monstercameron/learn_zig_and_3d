@@ -96,6 +96,13 @@ pub const ShadingParams = struct {
     roughness: f32,
 };
 
+pub const RasterizePerfStats = struct {
+    triangles_rasterized: usize = 0,
+    covered_pixels: usize = 0,
+    depth_tests_passed: usize = 0,
+    alpha_pixels: usize = 0,
+};
+
 // ========== TILE STRUCTURES ==========
 
 /// Represents a single rectangular tile in the screen grid.
@@ -287,6 +294,8 @@ pub fn drawTileBoundaries(grid: *const TileGrid, bitmap: *Bitmap) void {
 // ========== TILE RASTERIZATION ==========
 
 const max_span_batch_lanes = 8;
+const raster_light_dir = math.Vec3.new(0.40824828, 0.40824828, -0.81649655);
+const raster_light_color = math.Vec3.new(4.0, 4.0, 4.0);
 
 /// Returns runtime span batch lanes.
 /// Keeps runtime span batch lanes as the single implementation point so call-site behavior stays consistent.
@@ -439,6 +448,7 @@ pub fn rasterizeTriangleToTile(
     camera_positions: [3]math.Vec3,
     depths: [3]f32,
     shading: ShadingParams,
+    perf_stats: ?*RasterizePerfStats,
 ) void {
     // 1. Convert vertex coordinates from screen space to tile-local space.
     const v0x = p0_screen.x - @as(f32, @floatFromInt(tile.x));
@@ -489,18 +499,40 @@ pub fn rasterizeTriangleToTile(
     }
 
     const inv_denom = 1.0 / denom;
+    const lambda0_dx = (v1y - v2y) * inv_denom;
+    const lambda0_dy = (v2x - v1x) * inv_denom;
+    const lambda1_dx = (v2y - v0y) * inv_denom;
+    const lambda1_dy = (v0x - v2x) * inv_denom;
+    const lambda2_dx = -lambda0_dx - lambda1_dx;
+    const lambda2_dy = -lambda0_dy - lambda1_dy;
     const inv_depth0 = 1.0 / @max(depths[0], 1e-6);
     const inv_depth1 = 1.0 / @max(depths[1], 1e-6);
     const inv_depth2 = 1.0 / @max(depths[2], 1e-6);
     const batch_lanes = runtimeSpanBatchLanes();
-    const light_dir = math.Vec3.new(0.5, 0.5, -1.0).normalize();
-    const light_color = math.Vec3.new(4.0, 4.0, 4.0);
+    const has_texture = shading.texture != null;
+    const uniform_albedo = lighting.unpackColorLinear(shading.base_color);
+    const triangle_id = shading.triangle_id;
+    const meshlet_id = shading.meshlet_id;
+    const tile_width = tile_buffer.width;
+    const tile_data = tile_buffer.data;
+    const tile_depth = tile_buffer.depth;
+    const count_perf = perf_stats != null;
+    var covered_pixels_local: usize = 0;
+    var depth_tests_passed_local: usize = 0;
+    var alpha_pixels_local: usize = 0;
+    const start_x_center = @as(f32, @floatFromInt(min_x)) + 0.5;
+    const start_y_center = @as(f32, @floatFromInt(min_y)) + 0.5;
+    var lambda0_row = ((v1y - v2y) * (start_x_center - v2x) + (v2x - v1x) * (start_y_center - v2y)) * inv_denom;
+    var lambda1_row = ((v2y - v0y) * (start_x_center - v2x) + (v0x - v2x) * (start_y_center - v2y)) * inv_denom;
+    var lambda2_row = 1.0 - lambda0_row - lambda1_row;
 
     // 4. Iterate over every pixel within the triangle's bounding box.
     var y = min_y;
     while (y <= max_y) : (y += 1) {
-        const py = @as(f32, @floatFromInt(y)) + 0.5;
         var x = min_x;
+        var lambda0_x = lambda0_row;
+        var lambda1_x = lambda1_row;
+        var lambda2_x = lambda2_row;
         while (x <= max_x) {
             const batch_end = @min(max_x + 1, x + @as(i32, @intCast(batch_lanes)));
             var batch_weight0: [max_span_batch_lanes]f32 = undefined;
@@ -510,11 +542,12 @@ pub fn rasterizeTriangleToTile(
             var gather_count: usize = 0;
 
             while (x < batch_end) : (x += 1) {
-                const px = @as(f32, @floatFromInt(x)) + 0.5;
-
-                const lambda0 = ((v1y - v2y) * (px - v2x) + (v2x - v1x) * (py - v2y)) * inv_denom;
-                const lambda1 = ((v2y - v0y) * (px - v2x) + (v0x - v2x) * (py - v2y)) * inv_denom;
-                const lambda2 = 1.0 - lambda0 - lambda1;
+                const lambda0 = lambda0_x;
+                const lambda1 = lambda1_x;
+                const lambda2 = lambda2_x;
+                lambda0_x += lambda0_dx;
+                lambda1_x += lambda1_dx;
+                lambda2_x += lambda2_dx;
                 if (lambda0 < 0 or lambda1 < 0 or lambda2 < 0) continue;
 
                 const persp0 = lambda0 * inv_depth0;
@@ -527,8 +560,9 @@ pub fn rasterizeTriangleToTile(
                 batch_weight0[gather_count] = persp0 * inv_persp_sum;
                 batch_weight1[gather_count] = persp1 * inv_persp_sum;
                 batch_weight2[gather_count] = persp2 * inv_persp_sum;
-                batch_indices[gather_count] = @as(usize, @intCast(y * tile_buffer.width + x));
+                batch_indices[gather_count] = @as(usize, @intCast(y * tile_width + x));
                 gather_count += 1;
+                if (count_perf) covered_pixels_local += 1;
             }
 
             if (gather_count == 0) continue;
@@ -558,14 +592,17 @@ pub fn rasterizeTriangleToTile(
             var active_albedos: [max_span_batch_lanes]math.Vec3 = undefined;
             var active_alpha: [max_span_batch_lanes]u32 = undefined;
             var active_depth: [max_span_batch_lanes]f32 = undefined;
+            var opaque_lanes: [max_span_batch_lanes]usize = undefined;
+            var translucent_lanes: [max_span_batch_lanes]usize = undefined;
+            var opaque_count: usize = 0;
+            var translucent_count: usize = 0;
             var active_count: usize = 0;
 
             for (0..gather_count) |lane| {
                 const idx = batch_indices[lane];
-                if (idx >= tile_buffer.data.len or idx >= tile_buffer.depth.len) continue;
-
                 const depth = batch_camera_pos[lane].z;
-                if (depth >= tile_buffer.depth[idx]) continue;
+                if (depth >= tile_depth[idx]) continue;
+                if (count_perf) depth_tests_passed_local += 1;
 
                 const alpha = (batch_base_color_u32[lane] >> 24) & 0xFF;
                 if (alpha == 0) continue;
@@ -575,9 +612,17 @@ pub fn rasterizeTriangleToTile(
                 active_normals[active_count] = batch_normals[lane];
                 active_surface_bary[active_count] = batch_surface_bary[lane];
                 active_view_inputs[active_count] = math.Vec3.scale(batch_camera_pos[lane], -1.0);
-                active_albedos[active_count] = lighting.unpackColorLinear(batch_base_color_u32[lane]);
+                active_albedos[active_count] = if (has_texture) lighting.unpackColorLinear(batch_base_color_u32[lane]) else uniform_albedo;
                 active_alpha[active_count] = alpha;
                 active_depth[active_count] = depth;
+                if (alpha == 255) {
+                    opaque_lanes[opaque_count] = active_count;
+                    opaque_count += 1;
+                } else {
+                    if (count_perf) alpha_pixels_local += 1;
+                    translucent_lanes[translucent_count] = active_count;
+                    translucent_count += 1;
+                }
                 active_count += 1;
             }
 
@@ -586,28 +631,42 @@ pub fn rasterizeTriangleToTile(
             var active_view_dirs: [max_span_batch_lanes]math.Vec3 = undefined;
             var shaded_colors: [max_span_batch_lanes]math.Vec3 = undefined;
             normalizeVec3Batch(active_view_inputs[0..active_count], active_view_dirs[0..active_count]);
-            lighting.computePBRBatch(active_albedos[0..active_count], active_normals[0..active_count], active_view_dirs[0..active_count], light_dir, light_color, shading.metallic, shading.roughness, shaded_colors[0..active_count]);
+            lighting.computePBRBatch(active_albedos[0..active_count], active_normals[0..active_count], active_view_dirs[0..active_count], raster_light_dir, raster_light_color, shading.metallic, shading.roughness, shaded_colors[0..active_count]);
 
-            for (0..active_count) |lane| {
-                const alpha = active_alpha[lane];
+            for (opaque_lanes[0..opaque_count]) |lane| {
                 const final_color_rgb = shaded_colors[lane];
-                const final_color = math.Vec4.new(final_color_rgb.x, final_color_rgb.y, final_color_rgb.z, @as(f32, @floatFromInt(alpha)) / 255.0);
                 const idx = active_indices[lane];
+                tile_depth[idx] = active_depth[lane];
+                tile_data[idx].camera = active_camera_pos[lane];
+                tile_data[idx].color = math.Vec4.new(final_color_rgb.x, final_color_rgb.y, final_color_rgb.z, 1.0);
+                tile_data[idx].normal = active_normals[lane];
+                tile_data[idx].surface = SurfaceHandle.init(triangle_id, meshlet_id, active_surface_bary[lane]);
+            }
 
-                if (alpha == 255) {
-                    tile_buffer.depth[idx] = active_depth[lane];
-                    tile_buffer.data[idx].camera = active_camera_pos[lane];
-                    tile_buffer.data[idx].color = final_color;
-                    tile_buffer.data[idx].normal = active_normals[lane];
-                    tile_buffer.data[idx].surface = SurfaceHandle.init(shading.triangle_id, shading.meshlet_id, active_surface_bary[lane]);
-                } else {
-                    const dst_c = tile_buffer.data[idx].color;
-                    const alpha_f = final_color.w;
-                    const inv_alpha = 1.0 - alpha_f;
-                    tile_buffer.data[idx].color = math.Vec4.new(final_color.x * alpha_f + dst_c.x * inv_alpha, final_color.y * alpha_f + dst_c.y * inv_alpha, final_color.z * alpha_f + dst_c.z * inv_alpha, 1.0);
-                }
+            for (translucent_lanes[0..translucent_count]) |lane| {
+                const final_color_rgb = shaded_colors[lane];
+                const alpha_f = @as(f32, @floatFromInt(active_alpha[lane])) / 255.0;
+                const inv_alpha = 1.0 - alpha_f;
+                const idx = active_indices[lane];
+                const dst_c = tile_data[idx].color;
+                tile_data[idx].color = math.Vec4.new(
+                    final_color_rgb.x * alpha_f + dst_c.x * inv_alpha,
+                    final_color_rgb.y * alpha_f + dst_c.y * inv_alpha,
+                    final_color_rgb.z * alpha_f + dst_c.z * inv_alpha,
+                    1.0,
+                );
             }
         }
+        lambda0_row += lambda0_dy;
+        lambda1_row += lambda1_dy;
+        lambda2_row += lambda2_dy;
+    }
+
+    if (perf_stats) |stats| {
+        stats.triangles_rasterized += 1;
+        stats.covered_pixels += covered_pixels_local;
+        stats.depth_tests_passed += depth_tests_passed_local;
+        stats.alpha_pixels += alpha_pixels_local;
     }
 }
 

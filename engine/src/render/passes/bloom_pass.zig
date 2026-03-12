@@ -170,7 +170,7 @@ fn dispatchStage(
 
     CtxType.run(@ptrCast(&self.bloom_job_contexts[0]));
     parent_job.complete();
-    parent_job.wait();
+    self.job_system.?.waitFor(&parent_job);
 }
 
 /// runPipeline executes the full Bloom Pass pipeline for the current frame.
