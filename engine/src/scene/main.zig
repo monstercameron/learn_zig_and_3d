@@ -13,6 +13,7 @@ const asset_registry_module = @import("asset_registry.zig");
 const octree_module = @import("octree.zig");
 const residency_module = @import("residency_manager.zig");
 const script_host_module = @import("script_host.zig");
+const script_registry_module = @import("script_registry.zig");
 const render_extraction_module = @import("render_extraction.zig");
 const scene_math = @import("math.zig");
 const loader_module = @import("loader.zig");
@@ -25,6 +26,8 @@ pub const SceneNodeId = handles.SceneNodeId;
 pub const World = world_module.World;
 pub const Commands = world_module.Commands;
 pub const Command = world_module.Command;
+pub const CameraControlMode = world_module.CameraControlMode;
+pub const RendererControlAxis = world_module.RendererControlAxis;
 pub const ComponentStore = components_module.ComponentStore;
 pub const components = components_module;
 pub const TextureSlots = components_module.TextureSlots;
@@ -43,6 +46,7 @@ pub const ResidencyManager = residency_module.ResidencyManager;
 pub const CellState = residency_module.CellState;
 pub const ScriptHost = script_host_module.ScriptHost;
 pub const ScriptEvent = script_host_module.ScriptEvent;
+pub const ScriptInputState = script_host_module.ScriptInputState;
 pub const ScriptModuleVTable = script_host_module.ScriptModuleVTable;
 pub const ScriptCallbackContext = script_host_module.ScriptCallbackContext;
 pub const ScriptHostAbiVersion = script_host_module.abi_version;
@@ -169,6 +173,8 @@ const ExecutionState = struct {
     bindings: std.ArrayList(PhysicsBinding) = .{},
     enter_pressed: bool = false,
     enter_was_down: bool = false,
+    k_pressed: bool = false,
+    k_was_down: bool = false,
     pause_dynamics: bool = false,
 
     fn deinit(self: *ExecutionState, allocator: std.mem.Allocator) void {
@@ -182,13 +188,22 @@ const ExecutionState = struct {
         self.mode = .static;
         self.enter_pressed = false;
         self.enter_was_down = false;
+        self.k_pressed = false;
+        self.k_was_down = false;
         self.pause_dynamics = false;
         self.bindings.clearRetainingCapacity();
     }
 
-    fn setInputs(self: *ExecutionState, enter_pressed: bool, pause_dynamics: bool) void {
+    fn setInputs(self: *ExecutionState, enter_pressed: bool, k_pressed: bool, pause_dynamics: bool) void {
         self.enter_pressed = enter_pressed;
+        self.k_pressed = k_pressed;
         self.pause_dynamics = pause_dynamics;
+    }
+
+    fn consumeKPressedEdge(self: *ExecutionState) bool {
+        const pressed = self.k_pressed and !self.k_was_down;
+        self.k_was_down = self.k_pressed;
+        return pressed;
     }
 
     fn configure(
@@ -290,6 +305,17 @@ const ExecutionState = struct {
         body_interface.setAngularVelocity(binding.body_id, .{ 0.0, 0.0, 0.0 });
         self.syncSingleBindingToTransform(component_store, binding.*);
         renderables_dirty.* = true;
+        return true;
+    }
+
+    fn jumpEntity(self: *ExecutionState, world: *const World, entity: EntityId, upward_velocity: f32) bool {
+        if (!world.isAlive(entity) or !world.isEnabled(entity)) return false;
+        const physics_world = self.physics_world orelse return false;
+        const binding = self.lookupBinding(entity) orelse return false;
+        if (binding.suspended_for_residency) return false;
+        const body_interface = physics_world.system.getBodyInterfaceMut();
+        body_interface.activate(binding.body_id);
+        body_interface.setLinearVelocity(binding.body_id, .{ 0.0, @as(zphysics.Real, @floatCast(upward_velocity)), 0.0 });
         return true;
     }
 
@@ -605,12 +631,14 @@ pub const SceneRuntime = struct {
     authored_entity_lookup: std.StringHashMapUnmanaged(EntityId),
     renderable_entities: std.ArrayList(EntityId),
     execution: ExecutionState,
+    pending_renderer_commands: std.ArrayList(Command),
     started: bool,
     renderables_dirty: bool,
     selected_entity: ?EntityId,
     current_phase: ?FramePhase,
     last_completed_phase: ?FramePhase,
     fixed_step_accumulator: f32,
+    script_input: ScriptInputState,
     stats: RuntimeStats,
 
     /// init initializes Main state and returns the configured value.
@@ -628,12 +656,14 @@ pub const SceneRuntime = struct {
             .authored_entity_lookup = .{},
             .renderable_entities = .{},
             .execution = .{},
+            .pending_renderer_commands = .{},
             .started = false,
             .renderables_dirty = true,
             .selected_entity = null,
             .current_phase = null,
             .last_completed_phase = null,
             .fixed_step_accumulator = 0.0,
+            .script_input = .{},
             .stats = .{},
         };
     }
@@ -641,6 +671,7 @@ pub const SceneRuntime = struct {
     /// deinit releases resources owned by Main.
     pub fn deinit(self: *SceneRuntime) void {
         self.execution.deinit(self.allocator);
+        self.pending_renderer_commands.deinit(self.allocator);
         self.scripts.deinit();
         self.residency.deinit();
         self.assets.deinit();
@@ -675,7 +706,7 @@ pub const SceneRuntime = struct {
             }
         }
         self.unregisterAuthoredEntity(entity);
-        self.scripts.destroyInstancesForEntity(&self.world, &self.commands, entity);
+        self.scripts.destroyInstancesForEntity(&self.world, &self.components, &self.commands, entity);
         self.residency.clearEntity(entity);
         self.dependencies.removeEntity(entity);
         self.hierarchy.clearEntity(&self.world, entity);
@@ -692,13 +723,98 @@ pub const SceneRuntime = struct {
                 .set_enabled => |payload| {
                     self.setEntityEnabledRecursive(payload.entity, payload.enabled);
                 },
+                .jump_entity => |payload| {
+                    _ = self.execution.jumpEntity(&self.world, payload.entity, payload.upward_velocity);
+                },
+                .translate_entity => |payload| {
+                    _ = self.translateEntity(payload.entity, payload.delta);
+                },
+                .set_camera_orientation => |payload| {
+                    _ = self.setCameraOrientation(payload.entity, payload.pitch, payload.yaw);
+                },
+                .adjust_camera_fov,
+                .set_camera_mode,
+                .toggle_scene_item_gizmo,
+                .toggle_light_gizmo,
+                .set_gizmo_axis,
+                .cycle_light_selection,
+                .nudge_active_gizmo,
+                .toggle_render_overlay,
+                .toggle_shadow_debug,
+                .advance_shadow_debug,
+                => self.pending_renderer_commands.append(self.allocator, command) catch {},
             }
         }
         self.commands.clear();
     }
 
+    pub fn rendererCommands(self: *const SceneRuntime) []const Command {
+        return self.pending_renderer_commands.items;
+    }
+
+    pub fn clearRendererCommands(self: *SceneRuntime) void {
+        self.pending_renderer_commands.clearRetainingCapacity();
+    }
+
     pub fn lookupEntityByAuthoredId(self: *const SceneRuntime, authored_id: []const u8) ?EntityId {
         return self.authored_entity_lookup.get(authored_id);
+    }
+
+    pub fn attachScriptToEntity(self: *SceneRuntime, entity: EntityId, module_name: []const u8) !bool {
+        self.assertMutationAllowed();
+        if (!self.world.isAlive(entity)) return error.InvalidEntity;
+        try self.ensureBuiltinScriptModules();
+
+        const module = self.scripts.lookupModuleByName(module_name) orelse return error.UnknownScriptModule;
+        const index: usize = @intCast(entity.index);
+        if (index >= self.components.scripts.items.len) return error.InvalidEntity;
+
+        const previous_component = self.components.scripts.items[index];
+        var component = previous_component orelse components_module.ScriptComponent{};
+        if (findScriptAttachmentSlot(component, module) != null) return false;
+        if (@as(usize, component.count) >= components_module.max_script_attachments) return error.TooManyScriptAttachments;
+
+        component.modules[component.count] = module;
+        component.count += 1;
+        self.components.scripts.items[index] = component;
+        errdefer self.components.scripts.items[index] = previous_component;
+
+        try self.scripts.attachScript(&self.world, &self.components, &self.commands, entity, module);
+        errdefer _ = self.scripts.detachScript(&self.world, &self.components, &self.commands, entity, module);
+
+        try self.dependencies.addEdge(.{
+            .source = entity,
+            .target = .{ .asset = module },
+            .kind = .script,
+            .hard = true,
+        });
+        errdefer _ = self.dependencies.removeAssetEdge(entity, module, .script);
+
+        if (self.started and self.world.isEnabled(entity)) {
+            try self.scripts.queueBeginPlayForEntity(&self.world, entity);
+        }
+
+        return true;
+    }
+
+    pub fn detachScriptFromEntity(self: *SceneRuntime, entity: EntityId, module_name: []const u8) !bool {
+        self.assertMutationAllowed();
+        if (!self.world.isAlive(entity)) return error.InvalidEntity;
+
+        const module = self.scripts.lookupModuleByName(module_name) orelse return false;
+        const index: usize = @intCast(entity.index);
+        if (index >= self.components.scripts.items.len) return error.InvalidEntity;
+
+        var component = self.components.scripts.items[index] orelse return false;
+        const slot = findScriptAttachmentSlot(component, module) orelse return false;
+        removeScriptAttachmentAt(&component, slot);
+        self.components.scripts.items[index] = if (component.count == 0) null else component;
+
+        if (!self.scripts.detachScript(&self.world, &self.components, &self.commands, entity, module)) {
+            return error.ScriptInstanceMissing;
+        }
+        _ = self.dependencies.removeAssetEdge(entity, module, .script);
+        return true;
     }
 
     pub fn renderableEntityAt(self: *const SceneRuntime, index: usize) ?EntityId {
@@ -763,8 +879,9 @@ pub const SceneRuntime = struct {
         return true;
     }
 
-    pub fn setExecutionInputs(self: *SceneRuntime, enter_pressed: bool, pause_dynamics: bool) void {
-        self.execution.setInputs(enter_pressed, pause_dynamics);
+    pub fn setExecutionInputs(self: *SceneRuntime, enter_pressed: bool, pause_dynamics: bool, script_input: ScriptInputState) void {
+        self.script_input = script_input;
+        self.execution.setInputs(enter_pressed, script_input.keyboard.isDown(.k), pause_dynamics);
     }
 
     pub fn takeRenderablesDirty(self: *SceneRuntime) bool {
@@ -974,36 +1091,15 @@ pub const SceneRuntime = struct {
     }
 
     fn ensureBuiltinScriptModules(self: *SceneRuntime) !void {
-        if (self.scripts.lookupModuleByName("builtin.noop") == null) {
-            _ = try self.scripts.registerNativeModule(&self.assets, "builtin.noop", .{
-                .on_event = noopScriptEvent,
-            });
-        }
+        try script_registry_module.registerNativeModules(&self.scripts, &self.assets);
     }
 
     fn attachAuthoredScripts(self: *SceneRuntime, entity: EntityId, scripts: []const BootstrapScriptAttachment) !void {
         if (scripts.len == 0) return;
-        const index: usize = @intCast(entity.index);
-        if (index >= self.components.scripts.items.len) return error.InvalidEntity;
-        var component = self.components.scripts.items[index] orelse components_module.ScriptComponent{};
         for (scripts) |script| {
-            if (@as(usize, component.count) >= components_module.max_script_attachments) return error.TooManyScriptAttachments;
-            const module = self.scripts.lookupModuleByName(script.module_name) orelse return error.UnknownScriptModule;
-            component.modules[component.count] = module;
-            component.count += 1;
-            try self.scripts.attachScript(&self.world, &self.commands, entity, module);
-            try self.dependencies.addEdge(.{
-                .source = entity,
-                .target = .{ .asset = module },
-                .kind = .script,
-                .hard = true,
-            });
+            const attached = try self.attachScriptToEntity(entity, script.module_name);
+            if (!attached) return error.DuplicateScriptAttachment;
         }
-        self.components.scripts.items[index] = component;
-    }
-
-    fn noopScriptEvent(ctx: *script_host_module.ScriptCallbackContext) void {
-        _ = ctx;
     }
 
     /// Updates registry/attachment state for pin frame assets.
@@ -1072,12 +1168,13 @@ pub const SceneRuntime = struct {
             if (maybe_camera) |camera| {
                 if (!camera.active) continue;
                 const entity = EntityId.init(@intCast(index), self.world.generations.items[index]);
-                if (index < self.components.local_transforms.items.len and self.components.local_transforms.items[index] != null) {
+                const renderer_owns_camera = !self.entityHasScripts(entity) or !self.script_input.first_person_active;
+                if (renderer_owns_camera and index < self.components.local_transforms.items.len and self.components.local_transforms.items[index] != null) {
                     self.components.local_transforms.items[index].?.position = camera_position;
                     self.hierarchy.markSubtreeDirty(entity);
+                    self.components.cameras.items[index].?.pitch = camera_pitch;
+                    self.components.cameras.items[index].?.yaw = camera_yaw;
                 }
-                self.components.cameras.items[index].?.pitch = camera_pitch;
-                self.components.cameras.items[index].?.yaw = camera_yaw;
                 break;
             }
         }
@@ -1127,10 +1224,13 @@ pub const SceneRuntime = struct {
         }
 
         self.stats.script_phase_pins = self.pinAssetsForUsage(.script_dispatch);
+        if (self.execution.consumeKPressedEdge()) {
+            try self.scripts.queueKPressedForAll(&self.world);
+        }
         try self.scripts.queueUpdateForAll(&self.world, delta_seconds);
         try self.scripts.queueFixedUpdateForAll(&self.world, fixedStepSeconds, fixed_step_count);
         try self.scripts.queueLateUpdateForAll(&self.world, delta_seconds);
-        self.scripts.dispatchQueued(&self.world, &self.commands);
+        self.scripts.dispatchQueued(&self.world, &self.components, &self.script_input, &self.commands);
         self.unpinAssetsForUsage(.script_dispatch);
         self.applyDeferred();
         self.endPhase(.script_events);
@@ -1226,6 +1326,21 @@ pub const SceneRuntime = struct {
         if (self.components.selectables.items[index]) |*selectable| {
             selectable.selected = selected;
         }
+    }
+
+    fn setCameraOrientation(self: *SceneRuntime, entity: EntityId, pitch: f32, yaw: f32) bool {
+        if (!self.world.isAlive(entity)) return false;
+        const index: usize = @intCast(entity.index);
+        if (index >= self.components.cameras.items.len or self.components.cameras.items[index] == null) return false;
+        self.components.cameras.items[index].?.pitch = pitch;
+        self.components.cameras.items[index].?.yaw = yaw;
+        return true;
+    }
+
+    fn entityHasScripts(self: *const SceneRuntime, entity: EntityId) bool {
+        const index: usize = @intCast(entity.index);
+        if (index >= self.components.scripts.items.len) return false;
+        return scriptComponentHasAttachments(self.components.scripts.items[index]);
     }
 
     fn beginPhase(self: *SceneRuntime, phase: FramePhase) void {
@@ -1327,7 +1442,7 @@ pub const SceneRuntime = struct {
         if (!self.world.isAlive(entity) or !self.world.isEnabled(entity)) return false;
         const index: usize = @intCast(entity.index);
         return switch (usage) {
-            .script_dispatch => index < self.components.scripts.items.len and self.components.scripts.items[index] != null,
+            .script_dispatch => index < self.components.scripts.items.len and scriptComponentHasAttachments(self.components.scripts.items[index]),
             .physics_sync => index < self.components.physics_bodies.items.len and self.components.physics_bodies.items[index] != null,
         };
     }
@@ -1361,6 +1476,29 @@ fn vec3ApproxEq(a: scene_math.Vec3, b: scene_math.Vec3) bool {
 
 fn approxEq(a: f32, b: f32) bool {
     return @abs(a - b) <= 1e-4;
+}
+
+fn scriptComponentHasAttachments(component: ?components_module.ScriptComponent) bool {
+    return component != null and component.?.count != 0;
+}
+
+fn findScriptAttachmentSlot(component: components_module.ScriptComponent, module: AssetHandle) ?u8 {
+    var index: u8 = 0;
+    while (index < component.count) : (index += 1) {
+        if (component.modules[index].eql(module)) return index;
+    }
+    return null;
+}
+
+fn removeScriptAttachmentAt(component: *components_module.ScriptComponent, slot: u8) void {
+    std.debug.assert(slot < component.count);
+    var index: usize = slot;
+    const last_index: usize = component.count - 1;
+    while (index < last_index) : (index += 1) {
+        component.modules[index] = component.modules[index + 1];
+    }
+    component.count -= 1;
+    component.modules[component.count] = AssetHandle.invalid();
 }
 
 fn worldDeltaToLocal(parent: components_module.TransformWorld, world_delta: scene_math.Vec3) scene_math.Vec3 {

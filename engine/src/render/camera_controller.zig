@@ -4,6 +4,7 @@
 const std = @import("std");
 const math = @import("../core/math.zig");
 const config = @import("../core/app_config.zig");
+const input = @import("platform_input");
 
 pub const ControlMode = enum(u8) {
     first_person = 0,
@@ -52,14 +53,6 @@ pub const ProjectionScalars = struct {
     center_y: f32,
     x_scale: f32,
     y_scale: f32,
-};
-
-pub const FpsMoveInput = struct {
-    move_forward: bool = false,
-    move_back: bool = false,
-    move_left: bool = false,
-    move_right: bool = false,
-    jump_down: bool = false,
 };
 
 pub const FpsStepParams = struct {
@@ -222,10 +215,27 @@ pub fn stepFpsBody(
     body: *FpsBodyState,
     camera_position: *math.Vec3,
     basis: ViewBasis,
-    input_state: FpsMoveInput,
+    keyboard: input.KeyboardState,
     params: FpsStepParams,
 ) void {
-    const dt = std.math.clamp(params.dt, 0.0, 1.0 / 20.0);
+    var remaining_dt = std.math.clamp(params.dt, 0.0, 0.25);
+    if (remaining_dt <= 0.0) return;
+
+    while (remaining_dt > 1e-6) {
+        const dt = @min(remaining_dt, fps_body_max_step_s);
+        stepFpsBodySubstep(body, camera_position, basis, keyboard, params, dt);
+        remaining_dt -= dt;
+    }
+}
+
+fn stepFpsBodySubstep(
+    body: *FpsBodyState,
+    camera_position: *math.Vec3,
+    basis: ViewBasis,
+    keyboard: input.KeyboardState,
+    params: FpsStepParams,
+    dt: f32,
+) void {
     if (dt <= 0.0) return;
 
     var forward_flat = math.Vec3.new(basis.forward.x, 0.0, basis.forward.z);
@@ -245,10 +255,10 @@ pub fn stepFpsBody(
     }
 
     var move_dir = math.Vec3.new(0.0, 0.0, 0.0);
-    if (input_state.move_forward) move_dir = math.Vec3.add(move_dir, forward_flat);
-    if (input_state.move_back) move_dir = math.Vec3.sub(move_dir, forward_flat);
-    if (input_state.move_right) move_dir = math.Vec3.add(move_dir, right_flat);
-    if (input_state.move_left) move_dir = math.Vec3.sub(move_dir, right_flat);
+    if (keyboard.isDown(.w)) move_dir = math.Vec3.add(move_dir, forward_flat);
+    if (keyboard.isDown(.s)) move_dir = math.Vec3.sub(move_dir, forward_flat);
+    if (keyboard.isDown(.d)) move_dir = math.Vec3.add(move_dir, right_flat);
+    if (keyboard.isDown(.a)) move_dir = math.Vec3.sub(move_dir, right_flat);
 
     const move_mag = math.Vec3.length(move_dir);
     const desired_flat_velocity = if (move_mag > 0.0001)
@@ -260,8 +270,9 @@ pub fn stepFpsBody(
     body.velocity.x += (desired_flat_velocity.x - body.velocity.x) * accel_blend;
     body.velocity.z += (desired_flat_velocity.z - body.velocity.z) * accel_blend;
 
-    const jump_pressed = input_state.jump_down and !body.jump_was_down;
-    body.jump_was_down = input_state.jump_down;
+    const jump_down = keyboard.isDown(.space);
+    const jump_pressed = jump_down and !body.jump_was_down;
+    body.jump_was_down = jump_down;
     if (body.grounded and jump_pressed) {
         body.velocity.y = params.jump_speed;
         body.grounded = false;
@@ -279,6 +290,8 @@ pub fn stepFpsBody(
         body.grounded = false;
     }
 }
+
+const fps_body_max_step_s: f32 = 1.0 / 120.0;
 
 /// Computes clamp pitch.
 /// Keeps clamp pitch as the single implementation point so call-site behavior stays consistent.

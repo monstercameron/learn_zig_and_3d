@@ -95,6 +95,25 @@ pub const DependencyGraph = struct {
         self.edges.items.len = write_index;
     }
 
+    pub fn removeAssetEdge(self: *DependencyGraph, source: EntityId, target: AssetHandle, kind: DependencyKind) bool {
+        var removed = false;
+        var write_index: usize = 0;
+        for (self.edges.items) |edge| {
+            const matches = edge.source.eql(source) and edge.kind == kind and switch (edge.target) {
+                .asset => |target_asset| target_asset.eql(target),
+                .entity => false,
+            };
+            if (matches) {
+                removed = true;
+                continue;
+            }
+            self.edges.items[write_index] = edge;
+            write_index += 1;
+        }
+        self.edges.items.len = write_index;
+        return removed;
+    }
+
     /// Derives validate acyclic.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn validateAcyclic(self: *const DependencyGraph, world: *const World) !void {

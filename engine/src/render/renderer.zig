@@ -39,7 +39,7 @@ const MeshModule = @import("core/mesh.zig");
 const Mesh = MeshModule.Mesh;
 const Meshlet = MeshModule.Meshlet;
 const config = @import("../core/app_config.zig");
-const input = @import("../platform/input.zig");
+const input = @import("platform_input");
 const skybox_pass = @import("passes/skybox_pass.zig");
 const color_grade_pass = @import("passes/color_grade_pass.zig");
 const chromatic_aberration_pass = @import("passes/chromatic_aberration_pass.zig");
@@ -5210,13 +5210,6 @@ pub const Renderer = struct {
         const forward = frame_view.forward;
         if (self.camera_control_mode == .first_person) {
             if (!self.scene_camera_script_active) {
-                const move_input = camera_controller.FpsMoveInput{
-                    .move_forward = self.keys_pressed.isDown(.w),
-                    .move_back = self.keys_pressed.isDown(.s),
-                    .move_left = self.keys_pressed.isDown(.a),
-                    .move_right = self.keys_pressed.isDown(.d),
-                    .jump_down = self.keys_pressed.isDown(.space),
-                };
                 const basis = camera_controller.ViewBasis{
                     .right = right,
                     .up = up,
@@ -5228,7 +5221,7 @@ pub const Renderer = struct {
                     .floor_y = fps_camera_floor_y,
                     .eye_height = fps_camera_eye_height,
                 };
-                camera_controller.stepFpsBody(&self.fps_body_state, &self.camera_position, basis, move_input, fps_params);
+                camera_controller.stepFpsBody(&self.fps_body_state, &self.camera_position, basis, self.keys_pressed, fps_params);
             }
         } else if (!self.scene_camera_script_active) {
             const world_up = math.Vec3.new(0.0, 1.0, 0.0);
@@ -7733,7 +7726,7 @@ pub const Renderer = struct {
                 }
                 if (interrupted) return error.RenderInterrupted;
             } else {
-                parent_job.wait();
+                job_sys.waitFor(&parent_job);
             }
         } else {
             for (active_indices[0..active_tile_count]) |tile_idx| {
@@ -7821,7 +7814,7 @@ pub const Renderer = struct {
                     }
                     if (interrupted) return error.RenderInterrupted;
                 } else {
-                    parent_job.wait();
+                    job_sys.waitFor(&parent_job);
                 }
             } else {
                 for (shadow_chunk_jobs[0..shadow_job_count]) |*chunk_job| {
@@ -8033,7 +8026,7 @@ pub const Renderer = struct {
                     }
                 }
                 parent_job.complete();
-                parent_job.wait();
+                js.waitFor(&parent_job);
             }
         } else {
             var meshlet_idx: usize = 0;
@@ -8175,7 +8168,7 @@ pub const Renderer = struct {
                 }
             }
             parent_job.complete();
-            parent_job.wait();
+            js.waitFor(&parent_job);
 
             var packed_offset: usize = 0;
             for (meshlet_jobs[0..visible_meshlet_count], 0..) |job_info, idx| {

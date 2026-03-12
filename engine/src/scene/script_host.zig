@@ -2,8 +2,10 @@
 //! Scene-system module for entity data, graph dependencies, extraction, and streaming/residency.
 
 const std = @import("std");
+const platform_input = @import("platform_input");
 const handles = @import("entity.zig");
 const AssetRegistry = @import("asset_registry.zig").AssetRegistry;
+const ComponentStore = @import("components.zig").ComponentStore;
 const World = @import("world.zig").World;
 const Commands = @import("world.zig").Commands;
 
@@ -11,11 +13,34 @@ pub const EntityId = handles.EntityId;
 pub const AssetHandle = handles.AssetHandle;
 pub const abi_version: u32 = 1;
 
+pub const ScriptLookDelta = struct {
+    x: f32 = 0.0,
+    y: f32 = 0.0,
+};
+
+pub const ScriptInputState = struct {
+    first_person_active: bool = false,
+    keyboard: platform_input.KeyboardState = .{},
+    mouse: platform_input.MouseState = .{},
+    look_delta: ScriptLookDelta = .{},
+
+    pub fn setKey(self: *ScriptInputState, key: platform_input.Key, is_down: bool) void {
+        _ = self.keyboard.setKey(key, is_down);
+    }
+
+    pub fn setMouseButton(self: *ScriptInputState, button: platform_input.MouseButton, is_down: bool) void {
+        _ = self.mouse.setButton(button, is_down);
+    }
+};
+
+pub const empty_input_state = ScriptInputState{};
+
 pub const ScriptEvent = union(enum) {
     attach,
     detach,
     enable,
     disable,
+    k_pressed,
     selected,
     deselected,
     begin_play,
@@ -33,10 +58,14 @@ pub const ScriptEvent = union(enum) {
 };
 
 pub const ScriptCallbackContext = struct {
+    allocator: std.mem.Allocator,
     world: *const World,
+    components: *const ComponentStore,
     commands: *Commands,
     entity: EntityId,
     user_data: ?*anyopaque,
+    user_data_slot: *?*anyopaque,
+    input: *const ScriptInputState,
     event: ScriptEvent,
 };
 
@@ -111,40 +140,85 @@ pub const ScriptHost = struct {
 
     /// Updates registry/attachment state for attach script.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
-    pub fn attachScript(self: *ScriptHost, world: *World, commands: *Commands, entity: EntityId, module: AssetHandle) !void {
+    pub fn attachScript(self: *ScriptHost, world: *World, components: *const ComponentStore, commands: *Commands, entity: EntityId, module: AssetHandle) !void {
         try self.instances.append(self.allocator, .{
             .module = module,
             .entity = entity,
         });
+        const instance = &self.instances.items[self.instances.items.len - 1];
         if (self.findModule(module)) |module_record| {
             if (module_record.vtable.on_create) |on_create| {
                 var ctx = ScriptCallbackContext{
+                    .allocator = self.allocator,
                     .world = world,
+                    .components = components,
                     .commands = commands,
                     .entity = entity,
-                    .user_data = null,
+                    .user_data = instance.user_data,
+                    .user_data_slot = &instance.user_data,
+                    .input = &empty_input_state,
                     .event = .attach,
                 };
                 on_create(&ctx);
             }
-            self.dispatchImmediate(module_record, world, commands, entity, null, .attach);
+            self.dispatchImmediate(module_record, world, components, &empty_input_state, commands, entity, &instance.user_data, .attach);
         }
     }
 
+    pub fn detachScript(self: *ScriptHost, world: *World, components: *const ComponentStore, commands: *Commands, entity: EntityId, module: AssetHandle) bool {
+        var removed = false;
+        var write_index: usize = 0;
+        for (self.instances.items) |instance| {
+            const matches = instance.entity.eql(entity) and instance.module.eql(module);
+            if (matches) {
+                removed = true;
+                var user_data = instance.user_data;
+                if (self.findModule(instance.module)) |module_record| {
+                    if (instance.began_play) self.dispatchImmediate(module_record, world, components, &empty_input_state, commands, entity, &user_data, .end_play);
+                    self.dispatchImmediate(module_record, world, components, &empty_input_state, commands, entity, &user_data, .detach);
+                    if (module_record.vtable.on_destroy) |on_destroy| {
+                        var ctx = ScriptCallbackContext{
+                            .allocator = self.allocator,
+                            .world = world,
+                            .components = components,
+                            .commands = commands,
+                            .entity = entity,
+                            .user_data = user_data,
+                            .user_data_slot = &user_data,
+                            .input = &empty_input_state,
+                            .event = .detach,
+                        };
+                        on_destroy(&ctx);
+                    }
+                }
+                continue;
+            }
+            self.instances.items[write_index] = instance;
+            write_index += 1;
+        }
+        self.instances.items.len = write_index;
+        return removed;
+    }
+
     /// destroyInstancesForEntity destroys or reclaims Script Host resources.
-    pub fn destroyInstancesForEntity(self: *ScriptHost, world: *World, commands: *Commands, entity: EntityId) void {
+    pub fn destroyInstancesForEntity(self: *ScriptHost, world: *World, components: *const ComponentStore, commands: *Commands, entity: EntityId) void {
         var write_index: usize = 0;
         for (self.instances.items) |instance| {
             if (instance.entity.eql(entity)) {
+                var user_data = instance.user_data;
                 if (self.findModule(instance.module)) |module_record| {
-                    if (instance.began_play) self.dispatchImmediate(module_record, world, commands, entity, instance.user_data, .end_play);
-                    self.dispatchImmediate(module_record, world, commands, entity, instance.user_data, .detach);
+                    if (instance.began_play) self.dispatchImmediate(module_record, world, components, &empty_input_state, commands, entity, &user_data, .end_play);
+                    self.dispatchImmediate(module_record, world, components, &empty_input_state, commands, entity, &user_data, .detach);
                     if (module_record.vtable.on_destroy) |on_destroy| {
                         var ctx = ScriptCallbackContext{
+                            .allocator = self.allocator,
                             .world = world,
+                            .components = components,
                             .commands = commands,
                             .entity = entity,
-                            .user_data = instance.user_data,
+                            .user_data = user_data,
+                            .user_data_slot = &user_data,
+                            .input = &empty_input_state,
                             .event = .detach,
                         };
                         on_destroy(&ctx);
@@ -165,17 +239,21 @@ pub const ScriptHost = struct {
     }
 
     /// dispatchQueued dispatches Script Host jobs across workers.
-    pub fn dispatchQueued(self: *ScriptHost, world: *World, commands: *Commands) void {
+    pub fn dispatchQueued(self: *ScriptHost, world: *World, components: *const ComponentStore, input: *const ScriptInputState, commands: *Commands) void {
         for (self.queued_events.items) |queued| {
-            for (self.instances.items) |instance| {
+            for (self.instances.items) |*instance| {
                 if (!instance.entity.eql(queued.entity)) continue;
-                if (!shouldDispatchQueuedEvent(instance, queued.event)) continue;
+                if (!shouldDispatchQueuedEvent(instance.*, queued.event)) continue;
                 const module_record = self.findModule(instance.module) orelse continue;
                 var ctx = ScriptCallbackContext{
+                    .allocator = self.allocator,
                     .world = world,
+                    .components = components,
                     .commands = commands,
                     .entity = queued.entity,
                     .user_data = instance.user_data,
+                    .user_data_slot = &instance.user_data,
+                    .input = input,
                     .event = queued.event,
                 };
                 module_record.vtable.on_event(&ctx);
@@ -190,6 +268,14 @@ pub const ScriptHost = struct {
         for (self.instances.items) |*instance| {
             if (instance.began_play or !instance.enabled or !world.isAlive(instance.entity)) continue;
             try self.queueEvent(instance.entity, .begin_play);
+            instance.began_play = true;
+        }
+    }
+
+    pub fn queueBeginPlayForEntity(self: *ScriptHost, world: *const World, entity: EntityId) !void {
+        for (self.instances.items) |*instance| {
+            if (!instance.entity.eql(entity) or instance.began_play or !instance.enabled or !world.isAlive(entity)) continue;
+            try self.queueEvent(entity, .begin_play);
             instance.began_play = true;
         }
     }
@@ -225,6 +311,14 @@ pub const ScriptHost = struct {
         }
     }
 
+    /// Queues a K-key press input event for active script instances.
+    pub fn queueKPressedForAll(self: *ScriptHost, world: *const World) !void {
+        for (self.instances.items) |instance| {
+            if (!instance.enabled or !world.isAlive(instance.entity)) continue;
+            try self.queueEvent(instance.entity, .k_pressed);
+        }
+    }
+
     pub fn setEntityEnabled(self: *ScriptHost, world: *const World, entity: EntityId, enabled: bool) !void {
         for (self.instances.items) |*instance| {
             if (!instance.entity.eql(entity) or instance.enabled == enabled) continue;
@@ -256,17 +350,22 @@ pub const ScriptHost = struct {
         self: *ScriptHost,
         module_record: *const ScriptModuleRecord,
         world: *World,
+        components: *const ComponentStore,
+        input: *const ScriptInputState,
         commands: *Commands,
         entity: EntityId,
-        user_data: ?*anyopaque,
+        user_data_slot: *?*anyopaque,
         event: ScriptEvent,
     ) void {
-        _ = self;
         var ctx = ScriptCallbackContext{
+            .allocator = self.allocator,
             .world = world,
+            .components = components,
             .commands = commands,
             .entity = entity,
-            .user_data = user_data,
+            .user_data = user_data_slot.*,
+            .user_data_slot = user_data_slot,
+            .input = input,
             .event = event,
         };
         module_record.vtable.on_event(&ctx);

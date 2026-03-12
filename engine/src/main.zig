@@ -159,7 +159,7 @@ const texture = @import("assets/texture.zig");
 const mesh_module = @import("render/core/mesh.zig");
 const config = @import("core/app_config.zig");
 const cpu_features = @import("core/cpu_features.zig");
-const input = @import("platform/input.zig");
+const input = @import("platform_input");
 const log = @import("core/log.zig");
 const scene_runtime = @import("scene_main");
 
@@ -207,10 +207,28 @@ const SceneRenderInstance = struct {
 };
 
 fn populateSceneRuntimeBootstrap(runtime: *scene_runtime.SceneRuntime, scene_desc: scene_runtime.LoadedSceneDescription) !void {
-    const bootstrap_camera_scripts = try runtime.allocator.alloc(scene_runtime.BootstrapScriptAttachment, scene_desc.camera_scripts.len);
+    const default_camera_modules = [_][]const u8{
+        "scene.default.camera_controls",
+        "scene.default.renderer_controls",
+    };
+    const bootstrap_camera_scripts = try runtime.allocator.alloc(scene_runtime.BootstrapScriptAttachment, scene_desc.camera_scripts.len + default_camera_modules.len);
     defer runtime.allocator.free(bootstrap_camera_scripts);
-    for (scene_desc.camera_scripts, 0..) |script, index| {
-        bootstrap_camera_scripts[index] = .{ .module_name = script.module_name };
+    var bootstrap_camera_script_count: usize = 0;
+    for (scene_desc.camera_scripts) |script| {
+        bootstrap_camera_scripts[bootstrap_camera_script_count] = .{ .module_name = script.module_name };
+        bootstrap_camera_script_count += 1;
+    }
+    for (default_camera_modules) |module_name| {
+        var already_present = false;
+        for (scene_desc.camera_scripts) |script| {
+            if (std.mem.eql(u8, script.module_name, module_name)) {
+                already_present = true;
+                break;
+            }
+        }
+        if (already_present) continue;
+        bootstrap_camera_scripts[bootstrap_camera_script_count] = .{ .module_name = module_name };
+        bootstrap_camera_script_count += 1;
     }
 
     const bootstrap_lights = try runtime.allocator.alloc(scene_runtime.BootstrapLight, scene_desc.lights.len);
@@ -276,7 +294,7 @@ fn populateSceneRuntimeBootstrap(runtime: *scene_runtime.SceneRuntime, scene_des
         .camera = .{
             .authored_id = scene_desc.camera_authored_id,
             .parent_authored_id = scene_desc.camera_parent_authored_id,
-            .scripts = bootstrap_camera_scripts,
+            .scripts = bootstrap_camera_scripts[0..bootstrap_camera_script_count],
             .position = .{ .x = scene_desc.camera_position.x, .y = scene_desc.camera_position.y, .z = scene_desc.camera_position.z },
             .pitch = scene_desc.camera_orientation_pitch,
             .yaw = scene_desc.camera_orientation_yaw,
@@ -333,6 +351,22 @@ fn syncRendererFromSceneSnapshot(renderer: *Renderer, snapshot: *const scene_run
         renderer.setLightShadowUpdateInterval(index, light.shadow_update_interval_frames);
         try renderer.setLightShadowMapSize(index, light.shadow_map_size);
         renderer.setLightGlow(index, light.glow_radius, light.glow_intensity);
+    }
+}
+
+fn applySceneRendererCommand(renderer: *Renderer, command: scene_runtime.Command) void {
+    switch (command) {
+        .adjust_camera_fov => |payload| renderer.requestCameraFovDelta(payload.delta),
+        .set_camera_mode => |mode| renderer.applyCameraModeCommand(@intFromEnum(mode)),
+        .toggle_scene_item_gizmo => renderer.toggleSceneItemGizmo(),
+        .toggle_light_gizmo => renderer.toggleLightGizmo(),
+        .set_gizmo_axis => |axis| renderer.setActiveGizmoAxis(@intFromEnum(axis)),
+        .cycle_light_selection => renderer.cycleLightGizmoSelection(),
+        .nudge_active_gizmo => |payload| renderer.nudgeActiveGizmo(payload.delta),
+        .toggle_render_overlay => renderer.toggleRenderOverlay(),
+        .toggle_shadow_debug => renderer.toggleHybridShadowDebug(),
+        .advance_shadow_debug => renderer.advanceHybridShadowDebug(),
+        else => {},
     }
 }
 
@@ -717,6 +751,7 @@ pub fn main() !void {
 
     renderer.setCameraPosition(toRenderVec3(scene_desc.camera_position));
     renderer.setCameraOrientation(scene_desc.camera_orientation_pitch, scene_desc.camera_orientation_yaw);
+    renderer.setSceneCameraScriptActive(true);
     var selected_scene_entity_pin: ?scene_runtime.EntityId = null;
     defer if (selected_scene_entity_pin) |entity| phase13_runtime.residency.unpinEntity(entity);
 
@@ -725,7 +760,10 @@ pub fn main() !void {
     app_logger.info("starting main event loop...", .{});
 
     var frame_count: u32 = 0;
+    var last_runtime_update_ns = std.time.nanoTimestamp();
     while (running) {
+        renderer.keys_pressed.beginFrame();
+        renderer.mouse_input.beginFrame();
         if (renderer_ttl_ns) |ttl_ns| {
             if (std.time.nanoTimestamp() - renderer_start_ns >= ttl_ns) {
                 app_logger.info("renderer TTL expired, exiting", .{});
@@ -757,8 +795,27 @@ pub fn main() !void {
             app_logger.warn("phase13 selection sync failed: {}", .{err});
         };
 
-        const enter_is_down = ((renderer.keys_pressed & input.KeyBits.enter) != 0) or isEnterDown();
-        phase13_runtime.setExecutionInputs(enter_is_down, renderer.isSceneItemDragActive());
+        const enter_is_down = renderer.keys_pressed.isDown(.enter) or isEnterDown();
+
+        const now_ns = std.time.nanoTimestamp();
+        const runtime_delta_ns = @max(@as(i128, 0), now_ns - last_runtime_update_ns);
+        last_runtime_update_ns = now_ns;
+        const runtime_delta_seconds = std.math.clamp(
+            @as(f32, @floatFromInt(runtime_delta_ns)) / @as(f32, @floatFromInt(std.time.ns_per_s)),
+            0.0,
+            0.1,
+        );
+        const scene_look_delta = renderer.consumeSceneCameraLookDelta(runtime_delta_seconds);
+        const current_keys_pressed = renderer.keys_pressed;
+        phase13_runtime.setExecutionInputs(enter_is_down, renderer.isSceneItemDragActive(), .{
+            .first_person_active = renderer.isFirstPersonMode(),
+            .keyboard = current_keys_pressed,
+            .mouse = renderer.mouse_input,
+            .look_delta = .{
+                .x = scene_look_delta.x,
+                .y = scene_look_delta.y,
+            },
+        });
 
         var phase13_snapshot = phase13_runtime.updateFrame(
             .{
@@ -771,7 +828,7 @@ pub fn main() !void {
             48.0,
             96.0,
             frame_count,
-            1.0 / 60.0,
+            runtime_delta_seconds,
         ) catch |err| {
             app_logger.warn("phase13 runtime update failed: {}", .{err});
             continue;
@@ -783,6 +840,11 @@ pub fn main() !void {
             app_logger.warn("phase13 renderer bridge failed: {}", .{err});
             continue;
         };
+        for (phase13_runtime.rendererCommands()) |command| {
+            applySceneRendererCommand(&renderer, command);
+        }
+        phase13_runtime.clearRendererCommands();
+        MessagePump.applyCursorFromRenderer(&renderer);
         syncSceneMeshIfDirty(&renderer, &scene_resources, &phase13_runtime);
         if (selected_scene_entity_pin) |pinned_entity| {
             if (current_selected_entity == null or !pinned_entity.eql(current_selected_entity.?)) {

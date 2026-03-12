@@ -44,11 +44,18 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const platform_input_module = b.createModule(.{
+        .root_source_file = b.path("engine/src/platform/input.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     app_module.addImport("engine_main", engine_main_module);
     engine_main_module.addImport("zphysics", zphysics_dep.module("root"));
     engine_main_module.addImport("scene_main", scene_main_module);
+    engine_main_module.addImport("platform_input", platform_input_module);
     scene_main_module.addImport("zphysics", zphysics_dep.module("root"));
     scene_main_module.addImport("physics_utils", physics_utils_module);
+    scene_main_module.addImport("platform_input", platform_input_module);
     physics_utils_module.addImport("zphysics", zphysics_dep.module("root"));
 
     const exe = b.addExecutable(.{

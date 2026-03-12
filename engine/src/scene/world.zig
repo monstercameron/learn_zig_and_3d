@@ -3,8 +3,21 @@
 
 const std = @import("std");
 const handles = @import("entity.zig");
+const math = @import("math.zig");
 
 pub const EntityId = handles.EntityId;
+
+pub const RendererControlAxis = enum(u8) {
+    x,
+    y,
+    z,
+};
+
+pub const CameraControlMode = enum(u8) {
+    editor,
+    first_person,
+    toggle,
+};
 
 pub const Command = union(enum) {
     destroy_entity: EntityId,
@@ -12,6 +25,33 @@ pub const Command = union(enum) {
         entity: EntityId,
         enabled: bool,
     },
+    jump_entity: struct {
+        entity: EntityId,
+        upward_velocity: f32,
+    },
+    translate_entity: struct {
+        entity: EntityId,
+        delta: math.Vec3,
+    },
+    set_camera_orientation: struct {
+        entity: EntityId,
+        pitch: f32,
+        yaw: f32,
+    },
+    adjust_camera_fov: struct {
+        delta: f32,
+    },
+    set_camera_mode: CameraControlMode,
+    toggle_scene_item_gizmo,
+    toggle_light_gizmo,
+    set_gizmo_axis: RendererControlAxis,
+    cycle_light_selection,
+    nudge_active_gizmo: struct {
+        delta: f32,
+    },
+    toggle_render_overlay,
+    toggle_shadow_debug,
+    advance_shadow_debug,
 };
 
 pub const Commands = struct {
@@ -38,6 +78,59 @@ pub const Commands = struct {
     /// It appends a request for deferred processing so mutation happens at a safe sync point.
     pub fn queueSetEnabled(self: *Commands, entity: EntityId, enabled: bool) !void {
         try self.pending.append(self.allocator, .{ .set_enabled = .{ .entity = entity, .enabled = enabled } });
+    }
+
+    /// Queues a jump request for an entity handled by the scene runtime at a safe sync point.
+    pub fn queueJump(self: *Commands, entity: EntityId, upward_velocity: f32) !void {
+        try self.pending.append(self.allocator, .{ .jump_entity = .{ .entity = entity, .upward_velocity = upward_velocity } });
+    }
+
+    pub fn queueTranslate(self: *Commands, entity: EntityId, delta: math.Vec3) !void {
+        try self.pending.append(self.allocator, .{ .translate_entity = .{ .entity = entity, .delta = delta } });
+    }
+
+    pub fn queueSetCameraOrientation(self: *Commands, entity: EntityId, pitch: f32, yaw: f32) !void {
+        try self.pending.append(self.allocator, .{ .set_camera_orientation = .{ .entity = entity, .pitch = pitch, .yaw = yaw } });
+    }
+
+    pub fn queueAdjustCameraFov(self: *Commands, delta: f32) !void {
+        try self.pending.append(self.allocator, .{ .adjust_camera_fov = .{ .delta = delta } });
+    }
+
+    pub fn queueSetCameraMode(self: *Commands, mode: CameraControlMode) !void {
+        try self.pending.append(self.allocator, .{ .set_camera_mode = mode });
+    }
+
+    pub fn queueToggleSceneItemGizmo(self: *Commands) !void {
+        try self.pending.append(self.allocator, .toggle_scene_item_gizmo);
+    }
+
+    pub fn queueToggleLightGizmo(self: *Commands) !void {
+        try self.pending.append(self.allocator, .toggle_light_gizmo);
+    }
+
+    pub fn queueSetGizmoAxis(self: *Commands, axis: RendererControlAxis) !void {
+        try self.pending.append(self.allocator, .{ .set_gizmo_axis = axis });
+    }
+
+    pub fn queueCycleLightSelection(self: *Commands) !void {
+        try self.pending.append(self.allocator, .cycle_light_selection);
+    }
+
+    pub fn queueNudgeActiveGizmo(self: *Commands, delta: f32) !void {
+        try self.pending.append(self.allocator, .{ .nudge_active_gizmo = .{ .delta = delta } });
+    }
+
+    pub fn queueToggleRenderOverlay(self: *Commands) !void {
+        try self.pending.append(self.allocator, .toggle_render_overlay);
+    }
+
+    pub fn queueToggleShadowDebug(self: *Commands) !void {
+        try self.pending.append(self.allocator, .toggle_shadow_debug);
+    }
+
+    pub fn queueAdvanceShadowDebug(self: *Commands) !void {
+        try self.pending.append(self.allocator, .advance_shadow_debug);
     }
 
     /// Resets clear.
@@ -164,6 +257,19 @@ pub const World = struct {
                 .set_enabled => |payload| {
                     _ = self.setEnabled(payload.entity, payload.enabled);
                 },
+                .jump_entity => {},
+                .translate_entity => {},
+                .set_camera_orientation => {},
+                .adjust_camera_fov => {},
+                .set_camera_mode => {},
+                .toggle_scene_item_gizmo => {},
+                .toggle_light_gizmo => {},
+                .set_gizmo_axis => {},
+                .cycle_light_selection => {},
+                .nudge_active_gizmo => {},
+                .toggle_render_overlay => {},
+                .toggle_shadow_debug => {},
+                .advance_shadow_debug => {},
             }
         }
         commands.clear();
