@@ -364,75 +364,75 @@ Goal: add a scene runtime that supports parent/child hierarchy, dependency-aware
 - [ ] Approval gate: confirm renderer remains a consumer of extracted frame data during first rollout.
 
 ### 13.1 Scene Identity and Handles
-- [ ] Add `EntityId` with generation/versioning to avoid stale references after destroy/reuse.
-- [ ] Add `AssetId` / `AssetHandle` with generation/versioning for safe resource reuse.
-- [ ] Add stable `SceneNodeId` or equivalent authoring/runtime mapping for debug and serialization.
-- [ ] Add central name/tag registry for optional lookup by authored id (`camera.main`, `light.key`, etc.).
-- [ ] Add validation that duplicate authored ids are rejected during scene load.
+- [x] Add `EntityId` with generation/versioning to avoid stale references after destroy/reuse.
+- [x] Add `AssetId` / `AssetHandle` with generation/versioning for safe resource reuse.
+- [x] Add stable `SceneNodeId` or equivalent authoring/runtime mapping for debug and serialization.
+- [x] Add central name/tag registry for optional lookup by authored id (`camera.main`, `light.key`, etc.).
+- [x] Add validation that duplicate authored ids are rejected during scene load.
 
 ### 13.2 World Core (ECS Foundation)
-- [ ] Create `engine/src/scene/world.zig`.
-- [ ] Create typed component storage with explicit containers, not string-keyed maps.
-- [ ] Add core lifecycle ops: create entity, destroy entity, enable entity, disable entity.
-- [ ] Add deferred `Commands` buffer for structural edits during update/event processing.
-- [ ] Add post-frame application of deferred commands at a single safe point.
-- [ ] Add world-level destroy queue so runtime code can request deletion without invalidating iterators.
-- [ ] Add world snapshot/debug dump helpers for inspection during migration.
+- [x] Create `engine/src/scene/world.zig`.
+- [x] Create typed component storage with explicit containers, not string-keyed maps.
+- [x] Add core lifecycle ops: create entity, destroy entity, enable entity, disable entity.
+- [x] Add deferred `Commands` buffer for structural edits during update/event processing.
+- [x] Add post-frame application of deferred commands at a single safe point.
+- [x] Add world-level destroy queue so runtime code can request deletion without invalidating iterators.
+- [x] Add world snapshot/debug dump helpers for inspection during migration.
 
 ### 13.3 Scene Graph (Hierarchy)
-- [ ] Create `engine/src/scene/graph.zig`.
-- [ ] Add `Parent` relationship component/storage.
-- [ ] Add child list or first-child/next-sibling representation.
-- [ ] Add `LocalTransform` component.
-- [ ] Add `WorldTransform` cache component.
-- [ ] Add `HierarchyDirty` propagation flagging.
-- [ ] Add reparent operation with cycle rejection.
-- [ ] Add subtree enable/disable propagation semantics.
-- [ ] Add transform propagation pass ordered before physics-to-render extraction.
+- [x] Create `engine/src/scene/graph.zig`.
+- [x] Add `Parent` relationship component/storage.
+- [x] Add child list or first-child/next-sibling representation.
+- [x] Add `LocalTransform` component.
+- [x] Add `WorldTransform` cache component.
+- [x] Add `HierarchyDirty` propagation flagging.
+- [x] Add reparent operation with cycle rejection.
+- [x] Add subtree enable/disable propagation semantics.
+- [x] Add transform propagation pass ordered before physics-to-render extraction.
 - [ ] Add attach-point support for child entities that inherit transforms from parent items.
 
 ### 13.4 Dependency Graph (Non-Transform DAG)
-- [ ] Create `engine/src/scene/dependency_graph.zig`.
-- [ ] Add dependency edge kinds: `asset`, `script`, `activation`, `logic`, `physics`, `render`.
-- [ ] Add load-time DAG validation and cycle detection.
-- [ ] Add topological ordering helper for activation/load/unload sequencing.
-- [ ] Add dependency query helpers for “why is this entity pinned/resident?”.
+- [x] Create `engine/src/scene/dependency_graph.zig`.
+- [x] Add dependency edge kinds: `asset`, `script`, `activation`, `logic`, `physics`, `render`.
+- [x] Add load-time DAG validation and cycle detection.
+- [x] Add topological ordering helper for activation/load/unload sequencing.
+- [x] Add dependency query helpers for “why is this entity pinned/resident?”.
 - [ ] Add policy for soft vs hard dependencies.
 - [ ] Add failure behavior when a hard dependency fails to load.
 
 ### 13.5 Authoring Schema Evolution
 - [ ] Define unified scene schema that can express:
-- [ ] entity id/name.
-- [ ] parent/children.
+- [x] entity id/name.
+- [-] parent/children.
 - [ ] components.
-- [ ] script attachments.
+- [x] script attachments.
 - [ ] dependency edges.
 - [ ] residency hints / stream group / cell assignment overrides.
-- [ ] Add migration path from current `assets/configs/scenes/*.scene.json` model entries.
+- [-] Add migration path from current `assets/configs/scenes/*.scene.json` model entries.
 - [ ] Reuse or absorb useful structure from `assets/levels/default.level.json` (`children`, `scripts`).
 - [ ] Add schema validation with clear diagnostics for invalid ids, cycles, and missing assets.
-- [ ] Add scene loader tests for parent-child + dependency + script declarations.
+- [x] Add scene loader tests for parent-child + dependency + script declarations.
 
 ### 13.6 Asset Registry and Resource Lifetime
-- [ ] Create `engine/src/scene/asset_registry.zig`.
+- [x] Create `engine/src/scene/asset_registry.zig`.
 - [ ] Register mesh assets as distinct resources instead of merging everything up front.
 - [ ] Register texture assets with stable handles.
 - [ ] Register HDRI/environment assets with stable handles.
-- [ ] Register script modules with stable handles.
-- [ ] Add resource states: `unloaded`, `queued`, `loading`, `resident`, `failed`, `evict_pending`, `offloading`.
-- [ ] Add generation counters to all handles so stale references fail safely.
-- [ ] Add ref-count or residency-request tracking separate from transient per-frame pins.
+- [x] Register script modules with stable handles.
+- [x] Add resource states: `unloaded`, `queued`, `loading`, `resident`, `failed`, `evict_pending`, `offloading`.
+- [x] Add generation counters to all handles so stale references fail safely.
+- [x] Add ref-count or residency-request tracking separate from transient per-frame pins.
 - [ ] Add central unload queue processed only at safe points.
 
 ### 13.7 Octree Residency Manager (Spatial Load/Offload)
-- [ ] Create `engine/src/scene/residency_manager.zig`.
-- [ ] Create `engine/src/scene/octree.zig` or equivalent loose-octree module.
+- [x] Create `engine/src/scene/residency_manager.zig`.
+- [x] Create `engine/src/scene/octree.zig` or equivalent loose-octree module.
 - [ ] Define world bounds / root cell policy.
-- [ ] Add support for static entity registration into octree leaves.
-- [ ] Add support for dynamic entity reassignment or loose-octree membership.
-- [ ] Add camera-driven residency request computation.
+- [x] Add support for static entity registration into octree leaves.
+- [x] Add support for dynamic entity reassignment or loose-octree membership.
+- [x] Add camera-driven residency request computation.
 - [ ] Add preload radius / active radius / eviction hysteresis settings.
-- [ ] Add cell states: `cold`, `prefetch`, `requested`, `resident`, `evict_pending`.
+- [x] Add cell states: `cold`, `prefetch`, `requested`, `resident`, `evict_pending`.
 - [ ] Add per-cell debug counters: entity count, asset count, pending loads, pin count.
 - [ ] Add rules for cross-cell parent/child attachments.
 - [ ] Add rules for cross-cell dependency pins so required assets/scripts are not evicted prematurely.
@@ -450,43 +450,44 @@ Goal: add a scene runtime that supports parent/child hierarchy, dependency-aware
 - [ ] Add explicit “safe point” integration where completed loads/offloads become visible to the world.
 
 ### 13.9 Pinning and Safety Model
-- [ ] Add per-phase pins for render extraction, script dispatch, and physics sync.
-- [ ] Prevent unload while any pin is active.
-- [ ] Add temporary frame pins for resources touched by current extraction/update phase.
+- [x] Add per-phase pins for render extraction, script dispatch, and physics sync.
+- [x] Add per-phase pins for render extraction, script dispatch, and physics sync.
+- [x] Prevent unload while any pin is active.
+- [x] Add temporary frame pins for resources touched by current extraction/update phase.
 - [ ] Add `will_offload` / `did_offload` notifications for dependent systems.
 - [ ] Add stale-handle diagnostics in debug builds.
 - [ ] Add policy for unresolved handles returned to scripts (`null object`, error event, or deferred retry).
 
 ### 13.10 Component Set for First Rollout
-- [ ] Add `TransformLocal`.
-- [ ] Add `TransformWorld`.
-- [ ] Add `MeshRef` / `Renderable`.
-- [ ] Add `MaterialRef` / `TextureSlots`.
-- [ ] Add `Camera`.
-- [ ] Add `Light` with current shadow/glow parameters.
-- [ ] Add `PhysicsBody` / motion-type metadata.
-- [ ] Add `Selectable` / gizmo metadata.
-- [ ] Add `ScriptComponent`.
-- [ ] Add `Streamable` / residency policy metadata.
-- [ ] Add `ActivationState` or enabled-mask component.
+- [x] Add `TransformLocal`.
+- [x] Add `TransformWorld`.
+- [x] Add `MeshRef` / `Renderable`.
+- [x] Add `MaterialRef` / `TextureSlots`.
+- [x] Add `Camera`.
+- [x] Add `Light` with current shadow/glow parameters.
+- [x] Add `PhysicsBody` / motion-type metadata.
+- [x] Add `Selectable` / gizmo metadata.
+- [x] Add `ScriptComponent`.
+- [x] Add `Streamable` / residency policy metadata.
+- [x] Add `ActivationState` or enabled-mask component.
 
 ### 13.11 Script Host and Event Model
-- [ ] Create `engine/src/scene/script_host.zig`.
-- [ ] Define first-pass Zig-native script ABI.
-- [ ] Add script instance creation/destruction lifecycle.
-- [ ] Add per-entity script attachment with authored bindings.
-- [ ] Add event set:
-- [ ] `OnAttach`, `OnDetach`.
-- [ ] `OnEnable`, `OnDisable`.
-- [ ] `OnBeginPlay`, `OnEndPlay`.
-- [ ] `OnUpdate`, `OnFixedUpdate`, `OnLateUpdate`.
-- [ ] `OnParentChanged`, `OnTransformChanged`.
-- [ ] `OnAssetReady`, `OnAssetLost`.
-- [ ] `OnZoneEnter`, `OnZoneExit`.
+- [x] Create `engine/src/scene/script_host.zig`.
+- [x] Define first-pass Zig-native script ABI.
+- [x] Add script instance creation/destruction lifecycle.
+- [x] Add per-entity script attachment with authored bindings.
+- [-] Add event set:
+- [x] `OnAttach`, `OnDetach`.
+- [x] `OnEnable`, `OnDisable`.
+- [x] `OnBeginPlay`, `OnEndPlay`.
+- [x] `OnUpdate`, `OnFixedUpdate`, `OnLateUpdate`.
+- [x] `OnParentChanged`, `OnTransformChanged`.
+- [x] `OnAssetReady`, `OnAssetLost`.
+- [x] `OnZoneEnter`, `OnZoneExit`.
 - [ ] `OnCollisionEnter`, `OnCollisionStay`, `OnCollisionExit`.
-- [ ] Require scripts to mutate world state through deferred commands only.
-- [ ] Disallow scripts from persisting raw component pointers across callbacks.
-- [ ] Add host-side version checks for script module ABI compatibility.
+- [x] Require scripts to mutate world state through deferred commands only.
+- [x] Disallow scripts from persisting raw component pointers across callbacks.
+- [x] Add host-side version checks for script module ABI compatibility.
 
 ### 13.12 Script Reload / Persistence Hooks
 - [ ] Reuse ideas from `experiments/hotreload_demo` for module hot-reload.
@@ -496,48 +497,48 @@ Goal: add a scene runtime that supports parent/child hierarchy, dependency-aware
 - [ ] Add event ordering guarantees around reload (`will_reload`, `did_reload`, `reload_failed`).
 
 ### 13.13 World Phase Scheduler
-- [ ] Define explicit frame phases:
-- [ ] input.
-- [ ] residency decisions.
-- [ ] job completion integration.
-- [ ] script events.
-- [ ] fixed-step physics.
-- [ ] transform propagation.
-- [ ] render extraction.
-- [ ] present.
-- [ ] safe offload / deferred destruction.
-- [ ] Add invariant checks so no forbidden mutations occur during extraction or traversal.
+- [x] Define explicit frame phases:
+- [x] input.
+- [x] residency decisions.
+- [x] job completion integration.
+- [x] script events.
+- [x] fixed-step physics.
+- [x] transform propagation.
+- [x] render extraction.
+- [x] present.
+- [x] safe offload / deferred destruction.
+- [x] Add invariant checks so no forbidden mutations occur during extraction or traversal.
 - [ ] Move existing main-loop special cases into phase-owned systems incrementally.
 
 ### 13.14 Physics Integration Refactor
-- [ ] Stop treating physics runtime structs as separate scene-side ownership islands.
-- [ ] Update physics to write entity transform/body state, not raw mesh ownership state.
-- [ ] Add script/selection-safe pause rules for drag interactions.
+- [x] Stop treating physics runtime structs as separate scene-side ownership islands.
+- [x] Update physics to write entity transform/body state, not raw mesh ownership state.
+- [x] Add script/selection-safe pause rules for drag interactions.
 - [ ] Add collision event emission into script event queue.
-- [ ] Add handling for physics entities that become non-resident or offloaded.
+- [x] Add handling for physics entities that become non-resident or offloaded.
 
 ### 13.15 Render Extraction Bridge
-- [ ] Create `engine/src/scene/render_extraction.zig`.
-- [ ] Extract active camera from world to renderer state.
-- [ ] Extract visible/resident lights from world to renderer state.
-- [ ] Extract visible/resident renderables into a frame snapshot.
-- [ ] Preserve current renderer API shape during first migration step.
-- [ ] Add mapping from extracted render item back to `EntityId` for picking/gizmo interactions.
-- [ ] Replace current scene-item binding identity path with entity-backed selection ids.
-- [ ] Gate extraction to resident cells only.
+- [x] Create `engine/src/scene/render_extraction.zig`.
+- [x] Extract active camera from world to renderer state.
+- [x] Extract visible/resident lights from world to renderer state.
+- [x] Extract visible/resident renderables into a frame snapshot.
+- [x] Preserve current renderer API shape during first migration step.
+- [x] Add mapping from extracted render item back to `EntityId` for picking/gizmo interactions.
+- [x] Replace current scene-item binding identity path with entity-backed selection ids.
+- [x] Gate extraction to resident cells only.
 
 ### 13.16 Selection, Gizmos, and Editor-Style Interactions
-- [ ] Rewire scene-item selection to target `EntityId` rather than merged-mesh instance index.
+- [x] Rewire scene-item selection to target `EntityId` rather than merged-mesh instance index.
 - [ ] Keep outline/gizmo logic working when items stream in/out.
-- [ ] Add behavior for selected entity offload attempts (pin selected entity, or clear selection explicitly).
-- [ ] Add parent/child manipulation policy (move child local transform vs move root). 
-- [ ] Add event emission for selection changes into script/event system.
+- [x] Add behavior for selected entity offload attempts (pin selected entity, or clear selection explicitly).
+- [x] Add parent/child manipulation policy (move child local transform vs move root). 
+- [x] Add event emission for selection changes into script/event system.
 
 ### 13.17 Streaming Diagnostics and Tooling
 - [ ] Add octree/cell debug overlay.
 - [ ] Add resident/prefetch/evict-pending counters to debug HUD.
-- [ ] Add dependency graph inspection dump for selected entity.
-- [ ] Add asset pin-count / residency-state diagnostics.
+- [x] Add dependency graph inspection dump for selected entity.
+- [x] Add asset pin-count / residency-state diagnostics.
 - [ ] Add script instance/event trace logging in debug builds.
 - [ ] Add focused validation scene that exercises load, offload, dependency pins, and script callbacks.
 
@@ -550,12 +551,12 @@ Goal: add a scene runtime that supports parent/child hierarchy, dependency-aware
 - [ ] Surface all of the above through logs and optional on-screen debug overlay.
 
 ### 13.19 Incremental Migration Strategy
-- [ ] Stage 1: land `EntityId`, world core, and scene graph without changing renderer behavior.
-- [ ] Stage 2: move scene loading to entity/component creation while keeping current renderer bridge.
-- [ ] Stage 3: add asset registry and stable handles.
-- [ ] Stage 4: add octree residency manager with no script integration yet.
-- [ ] Stage 5: add script host and event dispatch.
-- [ ] Stage 6: move physics and selection to entity-backed state.
+- [x] Stage 1: land `EntityId`, world core, and scene graph without changing renderer behavior.
+- [x] Stage 2: move scene loading to entity/component creation while keeping current renderer bridge.
+- [x] Stage 3: add asset registry and stable handles.
+- [x] Stage 4: add octree residency manager with no script integration yet.
+- [x] Stage 5: add script host and event dispatch.
+- [x] Stage 6: move physics and selection to entity-backed state.
 - [ ] Stage 7: remove remaining special-case runtime structs from `main.zig`.
 
 ### 13.20 Validation and Approval Gates
@@ -565,3 +566,157 @@ Goal: add a scene runtime that supports parent/child hierarchy, dependency-aware
 - [ ] Approval gate: confirm selection/gizmo behavior for streamed entities.
 - [ ] For each migration stage, run `zig build check` and targeted runtime smoke validation.
 - [ ] Add at least one end-to-end streaming fixture scene before enabling offload by default.
+
+## Phase 14 - Kernel SIMD Readiness + CPU Bottleneck Remediation (Granular)
+Goal: remove remaining scalar bottlenecks in hot render paths, improve SIMD utilization, and cut scheduling/memory overhead while preserving image parity.
+
+### 14.0 Baseline and Safety Gates
+- [ ] Capture a locked baseline frame profile for `mixed_shadows_static` (fixed resolution, fixed camera, fixed frame id).
+- [ ] Export baseline `profile.json` and store summarized top zones (`renderTileJob`, `meshletShadowTile`, `meshletShadowTrace`, `meshletShadowApply`).
+- [ ] Record baseline counters: active tiles, shadow queries, meshlet-ray tests, total shadow jobs.
+- [ ] Add a per-change perf log template (`before_us`, `after_us`, `delta_pct`, scene, config).
+- [ ] Add a parity capture checklist: screenshot pair + max per-channel error + pass/fail.
+- [ ] Require one `Debug` and one `ReleaseFast` run for each hotspot optimization ticket.
+
+### 14.1 `compute.zig` Hot Access Path Specialization
+- [x] Add specialized `loadRGBA32F`/`storeRGBA32F` helpers that skip format switching in hot loops.
+- [x] Add specialized `loadRGBA8`/`storeRGBA8` helpers for byte-backed post passes.
+- [x] Add specialized `loadR32F`/`storeR32F` helpers for depth/luminance paths.
+- [ ] Convert hottest kernels to call specialized helpers instead of generic `loadRGBA`/`storeRGBA`.
+- [x] Keep generic helpers only as fallback for non-hot code paths.
+- [x] Benchmark helper-only delta in a microbench (`pixels/s`, `ns/pixel`).
+  Status: migrated `motion_blur_kernel.zig`, `luminance_histogram_kernel.zig`, `deferred_lighting_kernel.zig`, `depth_of_field_kernel.zig`, `tonemap_kernel.zig`, `depth_visualize_kernel.zig`, `normal_visualize_kernel.zig`, and `bloom_extract_kernel.zig`; additional hot kernels pending.
+
+### 14.2 Compute Dispatcher Overhead Reduction
+- [ ] Remove per-group `allocator.create(GroupDispatchJobContext)` in favor of preallocated context arrays.
+- [ ] Remove per-group shared-memory allocations by using fixed scratch arenas per worker.
+- [ ] Add a fast path that executes tiny dispatches inline without job submission.
+- [ ] Add a threshold heuristic for inline path (`num_groups * group_size` based).
+- [ ] Reuse parent job object across passes where safe to reduce allocation churn.
+- [ ] Measure dispatcher-only overhead before/after with a no-op kernel.
+
+### 14.3 `shadow_raster_kernel.zig` Raster Core Rewrite
+- [x] Hoist `inv_area` outside pixel loops.
+- [ ] Replace per-pixel `shadowEdge` recomputation with incremental edge stepping across scanlines.
+- [ ] Precompute `w0/w1/w2` row start values for each y.
+- [ ] Precompute edge x-step deltas and y-step deltas.
+- [ ] Add a 4-wide/8-wide x block path for inside-test + depth interpolation.
+- [ ] Keep scalar fallback for tail pixels and low-width triangles.
+- [ ] Add deterministic parity tests for clockwise/counterclockwise triangles.
+  Status: incremental edge-stepping prototype regressed microbench throughput and was rolled back; revisit with packetized block approach.
+
+### 14.4 Shadow Sampling and Resolve
+- [ ] Add a packetized `sampleOcclusionBatch` path in `shadow_sample_kernel.zig`.
+- [ ] Precompute common shadow-space scales/biases per batch.
+- [ ] Replace per-lane world reconstruction in `shadow_resolve_kernel.zig` with SoA batch transforms.
+- [ ] Avoid invoking occlusion sampling when lane mask is empty.
+- [ ] Add masked writeback to skip untouched lanes without branch-heavy scalar loops.
+- [ ] Validate parity against current scalar resolve for all lane widths (`1/8/16/32`).
+
+### 14.5 Meshlet Shadow Tile Hot Path (`renderer.zig`)
+- [ ] Convert `applyMeshletShadows` pixel gather to strict SoA staging (origins/dirs/skip ids).
+- [ ] Sort or bucket ray packets by coherence key (tile-local direction/depth band).
+- [ ] Reduce per-ray normal/world reconstruction FLOPs via hoisted matrix rows.
+- [ ] Add early reject for clearly backfacing/light-opposed fragments before packet fill.
+- [ ] Replace scalar occlusion apply loop with masked vectorized attenuation writeback.
+- [ ] Add per-tile telemetry fields: packet_count, avg_active_lanes, occluded_ratio.
+- [ ] Tune shadow chunk splitting thresholds from measured worker utilization data.
+
+### 14.6 Meshlet Visibility and Primitive Build Kernels
+- [ ] Add batch culling path in `meshlet_visibility_kernel.zig` using SoA descriptor reads.
+- [ ] Move repeated basis dot products to batched vector operations.
+- [ ] Add cache-friendly triangle index prefetch in `meshlet_primitive_kernel.zig`.
+- [ ] Replace per-triangle branch chain with compact mask pipeline where feasible.
+- [ ] Evaluate splitting primitive emission into two passes: cull pass then emit pass.
+- [ ] Add benchmarks for meshlet cull and primitive build throughput independently.
+
+### 14.7 `ssr_kernel.zig` SIMD-Ready Refactor
+- [ ] Split SSR into phases: normal estimate, ray march, composite.
+- [ ] Cache estimated normals into a temporary buffer to avoid recomputation in march path.
+- [ ] Convert reflection setup to SoA arrays for lane-based batch marching.
+- [ ] Implement fixed-iteration masked ray march loop to reduce divergence.
+- [ ] Add early tile rejection for tiles with invalid camera/depth ranges.
+- [ ] Vectorize final color blend/write path for hit lanes.
+- [ ] Add SSR perf counters: rays_started, rays_hit, avg_steps_per_ray.
+  Status: normal-estimation neighborhood fetch now reuses clamped row starts to reduce repeated pointer math in the hot path.
+
+### 14.8 `ssgi_kernel.zig` SIMD-Ready Refactor
+- [ ] Replace per-pixel PRNG init with deterministic tile-seeded random streams.
+- [ ] Precompute rotated sample kernels per tile/frame instead of per pixel.
+- [ ] Convert sample accumulation buffers to SoA (`accum_r/g/b`, `weight_sum`).
+- [ ] Use fixed sample-count masked loops to reduce branch divergence.
+- [ ] Add optional half-resolution mode gate for heavy scenes.
+- [ ] Vectorize composite stage after scalar/packet sample phase.
+- [ ] Add counters: valid_samples, rejected_samples, avg_weight.
+  Status: normal-estimation neighborhood fetch now reuses clamped row starts to reduce repeated pointer math in the hot path.
+
+### 14.9 SSAO Row Backend (`ssao_rows.zig`)
+- [ ] Replace lane loops inside `blurHorizontalBlock` with true vector math for tap weights.
+- [ ] Replace lane loops inside `blurVerticalBlock` with true vector math for tap weights.
+- [ ] Add gather-lite strategy for depth threshold checks (mask then blend).
+- [ ] Vectorize `sampleVisibility` call sites in composite block where address pattern allows.
+- [ ] Keep scalar fallback for depth-discontinuous regions and tails.
+- [ ] Verify AO blur parity against current implementation with strict diff thresholds.
+
+### 14.10 Bloom Row Backend (`bloom_rows.zig`)
+- [ ] Add vectorized horizontal blur block for contiguous pixel windows.
+- [ ] Add vertical blur cache optimization via tile transpose or strip-mined working set.
+- [ ] Evaluate temporary transposed bloom buffer for vertical pass locality.
+- [ ] Vectorize composite LUT apply path end-to-end (load, add, clamp, pack).
+- [ ] Add microbench for bloom horizontal vs vertical bandwidth.
+- [ ] Validate bloom parity across thresholds/intensity presets.
+
+### 14.11 TAA Kernel (`taa_kernel.zig`)
+- [ ] Replace `resolvePixelBatch` lane loop with true pixel-lane SIMD unpack/blend/pack.
+- [ ] Add SIMD path for `8/16/32` lane widths with scalar fallback.
+- [ ] Add optional clipping neighborhood stage hooks for ghosting control.
+- [ ] Add perf counters: history_rejected, history_accepted, blended_pixels.
+- [ ] Add parity test cases for edge depths and high-contrast motion.
+
+### 14.12 God Rays and Lens Flare (Hybrid -> More SIMD)
+- [ ] Convert sample accumulation in `god_rays_kernel.zig` from per-lane scalar loops to packetized masked batches.
+- [ ] Convert sample accumulation in `lens_flare_kernel.zig` from per-lane scalar loops to packetized masked batches.
+- [ ] Keep current SIMD composite/write stage and extend it to masked accumulation outputs.
+- [ ] Add quality guardrails to ensure no regression in halo/ghost falloff.
+- [ ] Add scene-based perf captures with effect enabled and disabled.
+
+### 14.13 Other Scalar Post Kernels
+- [x] Add vectorized row paths for `chromatic_aberration_kernel.zig`.
+- [ ] Add vectorized row paths for `motion_blur_kernel.zig` tail-safe batches.
+- [x] Add vectorized row paths for `mipmap_kernel.zig` 2x2 gather/average.
+- [x] Add vectorized row paths for `luminance_histogram_kernel.zig` luminance conversion.
+- [ ] Defer low-impact kernels (`invert`, `grayscale`, `normal_visualize`) unless profiling shows impact.
+  Status: SIMD block path (8-lane) now exists in `chromatic_aberration_kernel.zig` plus channel-SIMD upgrades landed for `mipmap_kernel.zig` and `luminance_histogram_kernel.zig`; current chromatic SIMD path is functionally correct but microbench-regressed and needs a faster gather strategy.
+
+### 14.14 Data Layout and Memory Locality
+- [ ] Audit hot buffers for alignment suitable for `@Vector` loads/stores.
+- [ ] Add explicit alignment assertions where SIMD block casts are used.
+- [ ] Expand SoA adoption in per-light/per-ray loops that still read AoS fields in hot code.
+- [ ] Remove avoidable pointer-chasing from per-pixel inner loops.
+- [ ] Add cache-miss-focused profiling notes per optimized hotspot.
+  Status: removed avoidable pointer-chasing/row-base recomputation in `depth_of_field_kernel.zig`, `ssr_kernel.zig`, `ssgi_kernel.zig`, `chromatic_aberration_kernel.zig`, and `skybox_kernel.zig`; attempted row-slice rewrite for `lens_flare_kernel.zig` regressed microbench throughput and was rolled back.
+
+### 14.15 Verification and Regression Gates
+- [ ] Add scalar-vs-SIMD parity captures for core scenes (`cornell`, `mixed_shadows_static`, `gun_physics`).
+- [ ] Add deterministic test harness for lane widths (`1/8/16/32`) for each optimized kernel.
+- [ ] Add tolerance policy per pass (`exact` for integer-only, `epsilon` for float blends).
+- [ ] Add automated perf threshold checks for key zones in CI (non-failing report first).
+- [ ] Document rollback switches for each new SIMD path.
+
+### 14.16 Exit Criteria
+- [ ] Reduce combined `meshletShadowTile + meshletShadowTrace + meshletShadowApply` frame cost by >= 25% in baseline scene.
+- [ ] Reduce `renderTileJob` total by >= 15% in baseline scene.
+- [ ] Land true SIMD (not lane-loop wrappers) in at least 5 currently scalar/hybrid hotspots.
+- [ ] Keep image parity within agreed thresholds across all validation scenes.
+- [ ] Update SIMD status table and profiling docs with final before/after data.
+
+### 14.17 High-IPC + Cache + SIMD Follow-ups (Non-Duplicate)
+- [ ] In `shadow_resolve_kernel.zig`, compact active lanes (non-zero occlusion candidates) into dense mini-packets before calling occlusion sampling; avoid scalar-per-lane gather work when masks are sparse.
+- [ ] In `shadow_resolve_kernel.zig`, remove per-iteration fixed `[32]` scratch initialization in the hot loop; reuse worker-owned scratch buffers sized to active lane width to cut stack writes and improve IPC.
+- [ ] In `shadow_sample_kernel.zig`, replace looped 5-tap PCF with an unrolled, branch-light path using preclamped tap coordinates and fixed weights to reduce branch pressure.
+- [ ] In `shadow_sample_kernel.zig`, precompute row base + tap x offsets for center/tap neighbors so per-tap address generation does not redo multiply/add chains.
+- [ ] In `ssr_kernel.zig`, replace scalar `pow`-based Fresnel with a polynomial approximation path that is vector-friendly and benchmark parity/quality impact.
+- [ ] Add a dedicated microbench for `shadow_resolve` active-lane occupancy cases (`0%`, `25%`, `50%`, `100%`) and track `ns/pixel` vs lane utilization.
+- [ ] Add a SIMD row path for `skybox_kernel.zig` direction reconstruction + tone/gamma stage (`8/16/32` lanes) with scalar tail fallback.
+- [ ] In `skybox_kernel.zig`, add depth-mask span skipping (contiguous non-sky runs) to avoid per-pixel math on rows where most pixels are already filled.
+- [ ] In `chromatic_aberration_kernel.zig`, replace current regressed SIMD gather path with a tile-local offset-table strategy and require recovery to >= scalar baseline before keeping SIMD path enabled.

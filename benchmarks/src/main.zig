@@ -1,9 +1,13 @@
+//! Primary entry point for benchmark selection and execution.
+//! Benchmark harness module used to measure CPU/scalar/SIMD performance characteristics.
+
 const std = @import("std");
 const bench_cache = @import("bench_cache.zig");
 const bench_meshlet = @import("bench_meshlet.zig");
 const lighting = @import("lighting.zig");
 const lighting_simd = @import("lighting_simd.zig");
 const render_job_bench = @import("render_job_bench.zig");
+const section14_micro = @import("section14_micro.zig");
 
 fn lcgNext(state: *u64) u32 {
     state.* = state.* *% 6364136223846793005 +% 1;
@@ -15,6 +19,8 @@ fn lcgFloat(state: *u64) f32 {
     return @as(f32, @floatFromInt(value)) / 4294967295.0;
 }
 
+/// Module entry point used by the runtime/bootstrap path.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -369,6 +375,8 @@ pub fn main() !void {
             meshlet_result.meshlet_stage_speedup,
         },
     );
+
+    try section14_micro.run(allocator);
 
     std.debug.print("\nBenchmarks complete.\n", .{});
 }

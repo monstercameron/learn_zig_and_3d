@@ -1,3 +1,5 @@
+//! Implements the SSGI kernel logic used in renderer jobs.
+//! CPU pixel/compute kernel used by the software renderer post-processing and shading stack.
 const std = @import("std");
 const math = @import("../../core/math.zig");
 const config = @import("../../core/app_config.zig");
@@ -12,17 +14,25 @@ fn validSceneCameraSample(camera_pos: math.Vec3) bool {
         camera_pos.z > near_clip;
 }
 
-fn sampleSceneCameraClamped(scene_camera: []const math.Vec3, width: usize, height: usize, x: i32, y: i32) math.Vec3 {
-    const clamped_x: usize = @intCast(@min(@as(i32, @intCast(width - 1)), @max(0, x)));
-    const clamped_y: usize = @intCast(@min(@as(i32, @intCast(height - 1)), @max(0, y)));
-    return scene_camera[clamped_y * width + clamped_x];
-}
-
+/// Estimates scene normal.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 fn estimateSceneNormal(scene_camera: []const math.Vec3, width: usize, height: usize, center: math.Vec3, x: i32, y: i32, step: i32) math.Vec3 {
-    const left = sampleSceneCameraClamped(scene_camera, width, height, x - step, y);
-    const right = sampleSceneCameraClamped(scene_camera, width, height, x + step, y);
-    const up = sampleSceneCameraClamped(scene_camera, width, height, x, y - step);
-    const down = sampleSceneCameraClamped(scene_camera, width, height, x, y + step);
+    const max_x = @as(i32, @intCast(width - 1));
+    const max_y = @as(i32, @intCast(height - 1));
+    const center_x = std.math.clamp(x, 0, max_x);
+    const center_y = std.math.clamp(y, 0, max_y);
+    const left_x = std.math.clamp(x - step, 0, max_x);
+    const right_x = std.math.clamp(x + step, 0, max_x);
+    const up_y = std.math.clamp(y - step, 0, max_y);
+    const down_y = std.math.clamp(y + step, 0, max_y);
+
+    const center_row_start = @as(usize, @intCast(center_y)) * width;
+    const up_row_start = @as(usize, @intCast(up_y)) * width;
+    const down_row_start = @as(usize, @intCast(down_y)) * width;
+    const left = scene_camera[center_row_start + @as(usize, @intCast(left_x))];
+    const right = scene_camera[center_row_start + @as(usize, @intCast(right_x))];
+    const up = scene_camera[up_row_start + @as(usize, @intCast(center_x))];
+    const down = scene_camera[down_row_start + @as(usize, @intCast(center_x))];
 
     const tangent_x = if (validSceneCameraSample(left) and validSceneCameraSample(right))
         math.Vec3.sub(right, left)
@@ -55,6 +65,8 @@ fn estimateSceneNormal(scene_camera: []const math.Vec3, width: usize, height: us
     return normal;
 }
 
+/// Runs this kernel over a `[start_row, end_row)` span.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 pub fn runRows(
     pixels: []const u32,
     out_pixels: []u32,
@@ -70,9 +82,10 @@ pub fn runRows(
 
     var y: usize = start_row;
     while (y < end_row) : (y += 1) {
+        const row_start = y * width;
         var x: usize = 0;
         while (x < width) : (x += 1) {
-            const idx = y * width + x;
+            const idx = row_start + x;
             const pos = camera[idx];
 
             if (!validSceneCameraSample(pos)) {

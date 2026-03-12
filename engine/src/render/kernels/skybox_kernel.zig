@@ -1,6 +1,11 @@
+//! Implements the Skybox kernel logic used in renderer jobs.
+//! CPU pixel/compute kernel used by the software renderer post-processing and shading stack.
+
 const std = @import("std");
 const math = @import("../../core/math.zig");
 
+/// Applies this effect over a `[start_row, end_row)` span.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 pub fn applyRows(
     pixels: []u32,
     scene_depth: []const f32,
@@ -18,13 +23,14 @@ pub fn applyRows(
 
     var y: usize = start_row;
     while (y < end_row) : (y += 1) {
+        const row_start = y * width;
         const py_f = @as(f32, @floatFromInt(y));
         const ndc_y = (center_y - py_f) / center_y;
         const camera_y = ndc_y / projection.y_scale;
 
         var x: usize = 0;
         while (x < width) : (x += 1) {
-            const idx = y * width + x;
+            const idx = row_start + x;
             if (scene_depth[idx] < std.math.inf(f32)) continue;
 
             const px_f = @as(f32, @floatFromInt(x));
