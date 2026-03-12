@@ -1,5 +1,4 @@
 const std = @import("std");
-const windows = std.os.windows;
 const math = @import("../core/math.zig");
 const config = @import("../core/app_config.zig");
 
@@ -12,9 +11,6 @@ pub const MouseState = struct {
     sensitivity: f32 = 0.0075,
     pending_delta: math.Vec2 = math.Vec2.new(0.0, 0.0),
     smoothed_delta: math.Vec2 = math.Vec2.new(0.0, 0.0),
-    initialized: bool = false,
-    last_pos: windows.POINT = .{ .x = 0, .y = 0 },
-    ignore_next_move: bool = false,
 };
 
 pub const FpsBodyState = struct {
@@ -23,12 +19,17 @@ pub const FpsBodyState = struct {
     jump_was_down: bool = false,
 };
 
-const fps_right_click_zoom_steps: f32 = 8.0;
+const fps_hold_zoom_steps: f32 = 24.0;
 const fps_zoom_in_duration_s: f32 = 0.250;
 const fps_zoom_out_duration_s: f32 = 0.100;
 
+pub const ZoomHoldSource = enum(u8) {
+    left_button = 1,
+    right_button = 2,
+};
+
 pub const FpsZoomState = struct {
-    hold_active: bool = false,
+    hold_mask: u8 = 0,
     base_fov_deg: f32 = 60.0,
     anim_active: bool = false,
     anim_from_fov: f32 = 0.0,
@@ -69,17 +70,9 @@ pub const FpsStepParams = struct {
     eye_height: f32 = 1.6,
 };
 
-pub fn noteMouseWarp(state: *MouseState, client_x: i32, client_y: i32) void {
-    state.last_pos = .{ .x = client_x, .y = client_y };
-    state.initialized = true;
-    state.ignore_next_move = true;
-}
-
 pub fn resetForModeToggle(state: *MouseState) void {
     state.pending_delta = math.Vec2.new(0.0, 0.0);
     state.smoothed_delta = math.Vec2.new(0.0, 0.0);
-    state.initialized = false;
-    state.ignore_next_move = false;
 }
 
 pub fn resetFpsBody(state: *FpsBodyState, camera_position: math.Vec3, floor_y: f32, eye_height: f32) void {
@@ -108,29 +101,38 @@ pub fn onEnterFirstPerson(state: *FpsZoomState, current_fov_deg: f32) void {
     state.base_fov_deg = current_fov_deg;
 }
 
-pub fn beginRightClickZoom(state: *FpsZoomState, current_fov_deg: f32) void {
-    if (state.hold_active) return;
-    state.hold_active = true;
+fn zoomHoldMask(source: ZoomHoldSource) u8 {
+    return @intFromEnum(source);
+}
+
+pub fn beginHoldZoom(state: *FpsZoomState, current_fov_deg: f32, source: ZoomHoldSource) void {
+    const mask = zoomHoldMask(source);
+    if ((state.hold_mask & mask) != 0) return;
+    const was_active = state.hold_mask != 0;
+    state.hold_mask |= mask;
+    if (was_active) return;
     state.base_fov_deg = current_fov_deg;
-    const zoom_delta = config.CAMERA_FOV_STEP * fps_right_click_zoom_steps;
+    const zoom_delta = config.CAMERA_FOV_STEP * fps_hold_zoom_steps;
     startZoomAnimation(state, current_fov_deg, state.base_fov_deg - zoom_delta, fps_zoom_in_duration_s);
 }
 
-pub fn endRightClickZoom(state: *FpsZoomState, current_fov_deg: f32) void {
-    if (!state.hold_active) return;
-    state.hold_active = false;
+pub fn endHoldZoom(state: *FpsZoomState, current_fov_deg: f32, source: ZoomHoldSource) void {
+    const mask = zoomHoldMask(source);
+    if ((state.hold_mask & mask) == 0) return;
+    state.hold_mask &= ~mask;
+    if (state.hold_mask != 0) return;
     startZoomAnimation(state, current_fov_deg, state.base_fov_deg, fps_zoom_out_duration_s);
 }
 
-pub fn cancelRightClickZoom(state: *FpsZoomState, camera_fov_deg: *f32, restore_fov: bool) void {
-    state.hold_active = false;
+pub fn cancelHoldZoom(state: *FpsZoomState, camera_fov_deg: *f32, restore_fov: bool) void {
+    state.hold_mask = 0;
     state.anim_active = false;
     if (restore_fov) {
         camera_fov_deg.* = clampFov(state.base_fov_deg);
     }
 }
 
-pub fn updateRightClickZoom(state: *FpsZoomState, camera_fov_deg: *f32, dt_s: f32) void {
+pub fn updateHoldZoom(state: *FpsZoomState, camera_fov_deg: *f32, dt_s: f32) void {
     if (!state.anim_active) return;
     if (dt_s <= 0.0) return;
     state.anim_elapsed_s += dt_s;
@@ -141,37 +143,14 @@ pub fn updateRightClickZoom(state: *FpsZoomState, camera_fov_deg: *f32, dt_s: f3
     if (t >= 1.0) state.anim_active = false;
 }
 
-pub fn isRightClickZoomHeld(state: *const FpsZoomState) bool {
-    return state.hold_active;
-}
-
-pub fn nextRawDelta(state: *MouseState, x: i32, y: i32) ?math.Vec2 {
-    const current = windows.POINT{ .x = x, .y = y };
-    if (!state.initialized) {
-        state.last_pos = current;
-        state.initialized = true;
-        return null;
-    }
-    if (state.ignore_next_move) {
-        state.last_pos = current;
-        state.ignore_next_move = false;
-        return null;
-    }
-
-    const dx = @as(f32, @floatFromInt(current.x - state.last_pos.x));
-    const dy = @as(f32, @floatFromInt(current.y - state.last_pos.y));
-    state.last_pos = current;
-    // Drop obvious cursor-warp artifacts that occasionally leak through recenter ignore.
-    if (@abs(dx) > 200.0 or @abs(dy) > 200.0) return null;
-    return math.Vec2.new(dx, dy);
+pub fn isHoldZoomHeld(state: *const FpsZoomState) bool {
+    return state.hold_mask != 0;
 }
 
 pub fn accumulateFirstPersonDelta(state: *MouseState, raw_delta: math.Vec2) void {
-    const clamped_dx = std.math.clamp(raw_delta.x, -128.0, 128.0);
-    const clamped_dy = std.math.clamp(raw_delta.y, -128.0, 128.0);
     state.pending_delta = math.Vec2.new(
-        state.pending_delta.x + clamped_dx,
-        state.pending_delta.y + clamped_dy,
+        state.pending_delta.x + raw_delta.x,
+        state.pending_delta.y + raw_delta.y,
     );
 }
 
@@ -191,17 +170,16 @@ pub fn consumeLookDelta(state: *MouseState, mode: ControlMode, frame_dt_seconds:
 
     // Integrate a filtered pixel-velocity so look motion stays smooth as frame/input cadence changes.
     const dt = std.math.clamp(frame_dt_seconds, 1.0 / 240.0, 1.0 / 15.0);
-    const response_hz = 8.0 + (1.0 - smoothing_60hz) * 72.0;
-    const blend = 1.0 - @exp(-response_hz * dt);
-    const target_vel = math.Vec2.new(delta.x / dt, delta.y / dt);
+    const frame_ratio = std.math.clamp(dt * 60.0, 0.25, 4.0);
+    const retention = std.math.pow(f32, smoothing_60hz, frame_ratio);
+    const blend = 1.0 - retention;
     state.smoothed_delta = math.Vec2.new(
-        state.smoothed_delta.x + (target_vel.x - state.smoothed_delta.x) * blend,
-        state.smoothed_delta.y + (target_vel.y - state.smoothed_delta.y) * blend,
+        state.smoothed_delta.x + (delta.x - state.smoothed_delta.x) * blend,
+        state.smoothed_delta.y + (delta.y - state.smoothed_delta.y) * blend,
     );
-    const out = math.Vec2.new(state.smoothed_delta.x * dt, state.smoothed_delta.y * dt);
-    if (@abs(delta.x) < 1e-4 and @abs(state.smoothed_delta.x) < 0.05) state.smoothed_delta.x = 0.0;
-    if (@abs(delta.y) < 1e-4 and @abs(state.smoothed_delta.y) < 0.05) state.smoothed_delta.y = 0.0;
-    return out;
+    if (@abs(delta.x) < 1e-4 and @abs(state.smoothed_delta.x) < 0.01) state.smoothed_delta.x = 0.0;
+    if (@abs(delta.y) < 1e-4 and @abs(state.smoothed_delta.y) < 0.01) state.smoothed_delta.y = 0.0;
+    return state.smoothed_delta;
 }
 
 pub fn effectiveSensitivity(state: *const MouseState) f32 {

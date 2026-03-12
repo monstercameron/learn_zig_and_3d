@@ -351,3 +351,217 @@ Goal: evolve from fixed-size light/shadow assumptions into a data-driven CPU ren
 - [ ] Next: land tile-light culling and verify frame-time scaling with increasing light counts.
   Status: in progress - directional-light tile rejection and local shadow dispatch wiring landed; remaining work is screen/depth broad-phase + scaling sweeps.
 - [ ] Next: integrate unified shadow mode dispatch with per-light backends.
+
+## Phase 13 - Hierarchical Scene Runtime + Streaming Residency + Script Host (Approval-Gated)
+Goal: add a scene runtime that supports parent/child hierarchy, dependency-aware on-demand loading/offloading, item-attached scripts with events, and a safe bridge into the existing renderer.
+
+### 13.0 Architecture Gates
+- [ ] Approval gate: confirm the three-layer model before code lands:
+- [ ] `SceneGraph` for parent/child transform hierarchy.
+- [ ] `DependencyGraph` for non-transform dependencies.
+- [ ] `ResidencyManager` for octree-driven load/offload policy.
+- [ ] Approval gate: confirm scripts are Zig-native host modules first, not a separate embedded language.
+- [ ] Approval gate: confirm renderer remains a consumer of extracted frame data during first rollout.
+
+### 13.1 Scene Identity and Handles
+- [ ] Add `EntityId` with generation/versioning to avoid stale references after destroy/reuse.
+- [ ] Add `AssetId` / `AssetHandle` with generation/versioning for safe resource reuse.
+- [ ] Add stable `SceneNodeId` or equivalent authoring/runtime mapping for debug and serialization.
+- [ ] Add central name/tag registry for optional lookup by authored id (`camera.main`, `light.key`, etc.).
+- [ ] Add validation that duplicate authored ids are rejected during scene load.
+
+### 13.2 World Core (ECS Foundation)
+- [ ] Create `engine/src/scene/world.zig`.
+- [ ] Create typed component storage with explicit containers, not string-keyed maps.
+- [ ] Add core lifecycle ops: create entity, destroy entity, enable entity, disable entity.
+- [ ] Add deferred `Commands` buffer for structural edits during update/event processing.
+- [ ] Add post-frame application of deferred commands at a single safe point.
+- [ ] Add world-level destroy queue so runtime code can request deletion without invalidating iterators.
+- [ ] Add world snapshot/debug dump helpers for inspection during migration.
+
+### 13.3 Scene Graph (Hierarchy)
+- [ ] Create `engine/src/scene/graph.zig`.
+- [ ] Add `Parent` relationship component/storage.
+- [ ] Add child list or first-child/next-sibling representation.
+- [ ] Add `LocalTransform` component.
+- [ ] Add `WorldTransform` cache component.
+- [ ] Add `HierarchyDirty` propagation flagging.
+- [ ] Add reparent operation with cycle rejection.
+- [ ] Add subtree enable/disable propagation semantics.
+- [ ] Add transform propagation pass ordered before physics-to-render extraction.
+- [ ] Add attach-point support for child entities that inherit transforms from parent items.
+
+### 13.4 Dependency Graph (Non-Transform DAG)
+- [ ] Create `engine/src/scene/dependency_graph.zig`.
+- [ ] Add dependency edge kinds: `asset`, `script`, `activation`, `logic`, `physics`, `render`.
+- [ ] Add load-time DAG validation and cycle detection.
+- [ ] Add topological ordering helper for activation/load/unload sequencing.
+- [ ] Add dependency query helpers for “why is this entity pinned/resident?”.
+- [ ] Add policy for soft vs hard dependencies.
+- [ ] Add failure behavior when a hard dependency fails to load.
+
+### 13.5 Authoring Schema Evolution
+- [ ] Define unified scene schema that can express:
+- [ ] entity id/name.
+- [ ] parent/children.
+- [ ] components.
+- [ ] script attachments.
+- [ ] dependency edges.
+- [ ] residency hints / stream group / cell assignment overrides.
+- [ ] Add migration path from current `assets/configs/scenes/*.scene.json` model entries.
+- [ ] Reuse or absorb useful structure from `assets/levels/default.level.json` (`children`, `scripts`).
+- [ ] Add schema validation with clear diagnostics for invalid ids, cycles, and missing assets.
+- [ ] Add scene loader tests for parent-child + dependency + script declarations.
+
+### 13.6 Asset Registry and Resource Lifetime
+- [ ] Create `engine/src/scene/asset_registry.zig`.
+- [ ] Register mesh assets as distinct resources instead of merging everything up front.
+- [ ] Register texture assets with stable handles.
+- [ ] Register HDRI/environment assets with stable handles.
+- [ ] Register script modules with stable handles.
+- [ ] Add resource states: `unloaded`, `queued`, `loading`, `resident`, `failed`, `evict_pending`, `offloading`.
+- [ ] Add generation counters to all handles so stale references fail safely.
+- [ ] Add ref-count or residency-request tracking separate from transient per-frame pins.
+- [ ] Add central unload queue processed only at safe points.
+
+### 13.7 Octree Residency Manager (Spatial Load/Offload)
+- [ ] Create `engine/src/scene/residency_manager.zig`.
+- [ ] Create `engine/src/scene/octree.zig` or equivalent loose-octree module.
+- [ ] Define world bounds / root cell policy.
+- [ ] Add support for static entity registration into octree leaves.
+- [ ] Add support for dynamic entity reassignment or loose-octree membership.
+- [ ] Add camera-driven residency request computation.
+- [ ] Add preload radius / active radius / eviction hysteresis settings.
+- [ ] Add cell states: `cold`, `prefetch`, `requested`, `resident`, `evict_pending`.
+- [ ] Add per-cell debug counters: entity count, asset count, pending loads, pin count.
+- [ ] Add rules for cross-cell parent/child attachments.
+- [ ] Add rules for cross-cell dependency pins so required assets/scripts are not evicted prematurely.
+- [ ] Add safe offload delay to avoid thrashing when camera hovers near boundaries.
+
+### 13.8 Loader / Offloader Execution
+- [ ] Create async/staged load tasks on top of existing job system.
+- [ ] Add staged mesh load pipeline: file read -> decode -> upload/register -> resident transition.
+- [ ] Add staged texture load pipeline with same state transitions.
+- [ ] Add staged script module load/reload pipeline.
+- [ ] Add unload pipeline: unbind -> mark evict pending -> wait for pins -> destroy -> bump generation.
+- [ ] Add cancellation behavior when camera movement makes queued loads obsolete.
+- [ ] Add retry/backoff policy for transient load failures.
+- [ ] Add loading-overlay integration for long-running scene or cell residency operations.
+- [ ] Add explicit “safe point” integration where completed loads/offloads become visible to the world.
+
+### 13.9 Pinning and Safety Model
+- [ ] Add per-phase pins for render extraction, script dispatch, and physics sync.
+- [ ] Prevent unload while any pin is active.
+- [ ] Add temporary frame pins for resources touched by current extraction/update phase.
+- [ ] Add `will_offload` / `did_offload` notifications for dependent systems.
+- [ ] Add stale-handle diagnostics in debug builds.
+- [ ] Add policy for unresolved handles returned to scripts (`null object`, error event, or deferred retry).
+
+### 13.10 Component Set for First Rollout
+- [ ] Add `TransformLocal`.
+- [ ] Add `TransformWorld`.
+- [ ] Add `MeshRef` / `Renderable`.
+- [ ] Add `MaterialRef` / `TextureSlots`.
+- [ ] Add `Camera`.
+- [ ] Add `Light` with current shadow/glow parameters.
+- [ ] Add `PhysicsBody` / motion-type metadata.
+- [ ] Add `Selectable` / gizmo metadata.
+- [ ] Add `ScriptComponent`.
+- [ ] Add `Streamable` / residency policy metadata.
+- [ ] Add `ActivationState` or enabled-mask component.
+
+### 13.11 Script Host and Event Model
+- [ ] Create `engine/src/scene/script_host.zig`.
+- [ ] Define first-pass Zig-native script ABI.
+- [ ] Add script instance creation/destruction lifecycle.
+- [ ] Add per-entity script attachment with authored bindings.
+- [ ] Add event set:
+- [ ] `OnAttach`, `OnDetach`.
+- [ ] `OnEnable`, `OnDisable`.
+- [ ] `OnBeginPlay`, `OnEndPlay`.
+- [ ] `OnUpdate`, `OnFixedUpdate`, `OnLateUpdate`.
+- [ ] `OnParentChanged`, `OnTransformChanged`.
+- [ ] `OnAssetReady`, `OnAssetLost`.
+- [ ] `OnZoneEnter`, `OnZoneExit`.
+- [ ] `OnCollisionEnter`, `OnCollisionStay`, `OnCollisionExit`.
+- [ ] Require scripts to mutate world state through deferred commands only.
+- [ ] Disallow scripts from persisting raw component pointers across callbacks.
+- [ ] Add host-side version checks for script module ABI compatibility.
+
+### 13.12 Script Reload / Persistence Hooks
+- [ ] Reuse ideas from `experiments/hotreload_demo` for module hot-reload.
+- [ ] Add script module `create` / `destroy` / `on_event` entrypoints.
+- [ ] Add optional script state serialize/deserialize hooks for reload/offload.
+- [ ] Add graceful fallback when module reload fails (keep prior instance or disable script explicitly).
+- [ ] Add event ordering guarantees around reload (`will_reload`, `did_reload`, `reload_failed`).
+
+### 13.13 World Phase Scheduler
+- [ ] Define explicit frame phases:
+- [ ] input.
+- [ ] residency decisions.
+- [ ] job completion integration.
+- [ ] script events.
+- [ ] fixed-step physics.
+- [ ] transform propagation.
+- [ ] render extraction.
+- [ ] present.
+- [ ] safe offload / deferred destruction.
+- [ ] Add invariant checks so no forbidden mutations occur during extraction or traversal.
+- [ ] Move existing main-loop special cases into phase-owned systems incrementally.
+
+### 13.14 Physics Integration Refactor
+- [ ] Stop treating physics runtime structs as separate scene-side ownership islands.
+- [ ] Update physics to write entity transform/body state, not raw mesh ownership state.
+- [ ] Add script/selection-safe pause rules for drag interactions.
+- [ ] Add collision event emission into script event queue.
+- [ ] Add handling for physics entities that become non-resident or offloaded.
+
+### 13.15 Render Extraction Bridge
+- [ ] Create `engine/src/scene/render_extraction.zig`.
+- [ ] Extract active camera from world to renderer state.
+- [ ] Extract visible/resident lights from world to renderer state.
+- [ ] Extract visible/resident renderables into a frame snapshot.
+- [ ] Preserve current renderer API shape during first migration step.
+- [ ] Add mapping from extracted render item back to `EntityId` for picking/gizmo interactions.
+- [ ] Replace current scene-item binding identity path with entity-backed selection ids.
+- [ ] Gate extraction to resident cells only.
+
+### 13.16 Selection, Gizmos, and Editor-Style Interactions
+- [ ] Rewire scene-item selection to target `EntityId` rather than merged-mesh instance index.
+- [ ] Keep outline/gizmo logic working when items stream in/out.
+- [ ] Add behavior for selected entity offload attempts (pin selected entity, or clear selection explicitly).
+- [ ] Add parent/child manipulation policy (move child local transform vs move root). 
+- [ ] Add event emission for selection changes into script/event system.
+
+### 13.17 Streaming Diagnostics and Tooling
+- [ ] Add octree/cell debug overlay.
+- [ ] Add resident/prefetch/evict-pending counters to debug HUD.
+- [ ] Add dependency graph inspection dump for selected entity.
+- [ ] Add asset pin-count / residency-state diagnostics.
+- [ ] Add script instance/event trace logging in debug builds.
+- [ ] Add focused validation scene that exercises load, offload, dependency pins, and script callbacks.
+
+### 13.18 Failure and Recovery Policy
+- [ ] Define behavior when a required asset fails to load.
+- [ ] Define behavior when an optional asset fails to load.
+- [ ] Define behavior when a script module fails to load or reload.
+- [ ] Define behavior when dependency cycle validation fails.
+- [ ] Define behavior when offload is requested but denied due to active pins.
+- [ ] Surface all of the above through logs and optional on-screen debug overlay.
+
+### 13.19 Incremental Migration Strategy
+- [ ] Stage 1: land `EntityId`, world core, and scene graph without changing renderer behavior.
+- [ ] Stage 2: move scene loading to entity/component creation while keeping current renderer bridge.
+- [ ] Stage 3: add asset registry and stable handles.
+- [ ] Stage 4: add octree residency manager with no script integration yet.
+- [ ] Stage 5: add script host and event dispatch.
+- [ ] Stage 6: move physics and selection to entity-backed state.
+- [ ] Stage 7: remove remaining special-case runtime structs from `main.zig`.
+
+### 13.20 Validation and Approval Gates
+- [ ] Approval gate: review scene schema before loader migration starts.
+- [ ] Approval gate: review first-pass script ABI before `script_host.zig` lands.
+- [ ] Approval gate: review octree residency policy before automatic eviction is enabled.
+- [ ] Approval gate: confirm selection/gizmo behavior for streamed entities.
+- [ ] For each migration stage, run `zig build check` and targeted runtime smoke validation.
+- [ ] Add at least one end-to-end streaming fixture scene before enabling offload by default.

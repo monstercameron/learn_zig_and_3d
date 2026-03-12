@@ -3857,20 +3857,12 @@ pub const Renderer = struct {
         return self.camera_control_mode == .first_person;
     }
 
-    pub fn noteMouseWarp(self: *Renderer, client_x: i32, client_y: i32) void {
-        camera_controller.noteMouseWarp(&self.mouse_state, client_x, client_y);
-    }
-
     pub fn isSceneItemDragActive(self: *const Renderer) bool {
         return self.scene_item_gizmo.isDragging();
     }
 
     pub fn handleMouseMove(self: *Renderer, x: i32, y: i32) void {
-        const raw_delta = camera_controller.nextRawDelta(&self.mouse_state, x, y) orelse return;
-        if (self.camera_control_mode == .first_person) {
-            camera_controller.accumulateFirstPersonDelta(&self.mouse_state, raw_delta);
-            return;
-        }
+        if (self.camera_control_mode == .first_person) return;
 
         const pointer_view = self.computePointerViewState();
         var pointer_ctx = SceneItemGizmoDrawContext{
@@ -3905,8 +3897,22 @@ pub const Renderer = struct {
         );
     }
 
+    pub fn handleRawMouseDelta(self: *Renderer, delta_x: i32, delta_y: i32) void {
+        if (self.camera_control_mode != .first_person) return;
+        camera_controller.accumulateFirstPersonDelta(
+            &self.mouse_state,
+            math.Vec2.new(
+                @as(f32, @floatFromInt(delta_x)),
+                @as(f32, @floatFromInt(delta_y)),
+            ),
+        );
+    }
+
     pub fn handleMouseLeftClick(self: *Renderer, x: i32, y: i32) void {
-        if (self.camera_control_mode == .first_person) return;
+        if (self.camera_control_mode == .first_person) {
+            camera_controller.beginHoldZoom(&self.fps_zoom_state, self.camera_fov_deg, .left_button);
+            return;
+        }
         const pointer_view = self.computePointerViewState();
         if (self.beginLightGizmoDrag(x, y, pointer_view)) return;
         var pointer_ctx = SceneItemGizmoDrawContext{
@@ -3932,6 +3938,10 @@ pub const Renderer = struct {
     pub fn handleMouseLeftRelease(self: *Renderer, x: i32, y: i32) void {
         _ = x;
         _ = y;
+        if (self.camera_control_mode == .first_person) {
+            camera_controller.endHoldZoom(&self.fps_zoom_state, self.camera_fov_deg, .left_button);
+            return;
+        }
         self.scene_item_gizmo.handlePointerUp();
         self.clearLightGizmoInteraction();
     }
@@ -3940,13 +3950,27 @@ pub const Renderer = struct {
         _ = x;
         _ = y;
         if (self.camera_control_mode != .first_person) return;
-        camera_controller.beginRightClickZoom(&self.fps_zoom_state, self.camera_fov_deg);
+        camera_controller.beginHoldZoom(&self.fps_zoom_state, self.camera_fov_deg, .right_button);
     }
 
     pub fn handleMouseRightRelease(self: *Renderer, x: i32, y: i32) void {
         _ = x;
         _ = y;
-        camera_controller.endRightClickZoom(&self.fps_zoom_state, self.camera_fov_deg);
+        camera_controller.endHoldZoom(&self.fps_zoom_state, self.camera_fov_deg, .right_button);
+    }
+
+    pub fn handleFocusLost(self: *Renderer) void {
+        self.keys_pressed = 0;
+        self.scene_item_gizmo.handlePointerUp();
+        self.clearLightGizmoInteraction();
+        camera_controller.cancelHoldZoom(&self.fps_zoom_state, &self.camera_fov_deg, true);
+        self.last_reported_fov_deg = self.camera_fov_deg;
+        camera_controller.setJumpHeldState(&self.fps_body_state, false);
+        camera_controller.resetForModeToggle(&self.mouse_state);
+    }
+
+    pub fn handleFocusGained(self: *Renderer) void {
+        camera_controller.resetForModeToggle(&self.mouse_state);
     }
 
     pub fn desiredCursorStyle(self: *const Renderer) CursorStyle {
@@ -4395,10 +4419,10 @@ pub const Renderer = struct {
     pub fn handleCharInput(self: *Renderer, char_code: u32) void {
         switch (char_code) {
             'q', 'Q' => {
-                if (!camera_controller.isRightClickZoomHeld(&self.fps_zoom_state)) self.pending_fov_delta -= config.CAMERA_FOV_STEP;
+                if (!camera_controller.isHoldZoomHeld(&self.fps_zoom_state)) self.pending_fov_delta -= config.CAMERA_FOV_STEP;
             },
             'e', 'E' => {
-                if (!camera_controller.isRightClickZoomHeld(&self.fps_zoom_state)) self.pending_fov_delta += config.CAMERA_FOV_STEP;
+                if (!camera_controller.isHoldZoomHeld(&self.fps_zoom_state)) self.pending_fov_delta += config.CAMERA_FOV_STEP;
             },
             'v', 'V' => {
                 self.camera_control_mode = if (self.camera_control_mode == .first_person) .editor else .first_person;
@@ -4410,7 +4434,7 @@ pub const Renderer = struct {
                     camera_controller.setJumpHeldState(&self.fps_body_state, jump_down);
                     camera_controller.onEnterFirstPerson(&self.fps_zoom_state, self.camera_fov_deg);
                 } else {
-                    camera_controller.cancelRightClickZoom(&self.fps_zoom_state, &self.camera_fov_deg, true);
+                    camera_controller.cancelHoldZoom(&self.fps_zoom_state, &self.camera_fov_deg, true);
                     self.last_reported_fov_deg = self.camera_fov_deg;
                 }
                 camera_controller.resetForModeToggle(&self.mouse_state);
@@ -4764,7 +4788,7 @@ pub const Renderer = struct {
 
         const fov_delta = self.consumePendingFovDelta();
         if (fov_delta != 0.0) self.adjustCameraFov(fov_delta);
-        camera_controller.updateRightClickZoom(&self.fps_zoom_state, &self.camera_fov_deg, delta_seconds);
+        camera_controller.updateHoldZoom(&self.fps_zoom_state, &self.camera_fov_deg, delta_seconds);
         self.last_reported_fov_deg = self.camera_fov_deg;
 
         const sweep_half_angle = std.math.pi / 2.0;

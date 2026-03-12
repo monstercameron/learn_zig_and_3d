@@ -52,11 +52,50 @@ const WM_SYSKEYDOWN = 0x0104;
 const WM_SYSKEYUP = 0x0105;
 const WM_CHAR = 0x0102;
 const WM_QUIT = 0x12;
+const WM_SETFOCUS = 0x0007;
+const WM_KILLFOCUS = 0x0008;
+const WM_INPUT = 0x00FF;
 const WM_MOUSEMOVE = 0x0200;
 const WM_LBUTTONDOWN = 0x0201;
 const WM_LBUTTONUP = 0x0202;
 const WM_RBUTTONDOWN = 0x0204;
 const WM_RBUTTONUP = 0x0205;
+
+const RAWINPUTDEVICE = extern struct {
+    usUsagePage: u16,
+    usUsage: u16,
+    dwFlags: u32,
+    hwndTarget: ?windows.HWND,
+};
+
+const RAWINPUTHEADER = extern struct {
+    dwType: u32,
+    dwSize: u32,
+    hDevice: ?windows.HANDLE,
+    wParam: windows.WPARAM,
+};
+
+const RAWMOUSE_BUTTONS = extern union {
+    ulButtons: u32,
+    buttons: extern struct {
+        usButtonFlags: u16,
+        usButtonData: u16,
+    },
+};
+
+const RAWMOUSE = extern struct {
+    usFlags: u16,
+    buttons: RAWMOUSE_BUTTONS,
+    ulRawButtons: u32,
+    lLastX: i32,
+    lLastY: i32,
+    ulExtraInformation: u32,
+};
+
+const RAWINPUTMOUSE = extern struct {
+    header: RAWINPUTHEADER,
+    mouse: RAWMOUSE,
+};
 
 // Declarations for Windows API functions.
 // JS Analogy: These are low-level functions to interact with the OS event queue.
@@ -81,7 +120,11 @@ extern "user32" fn TranslateMessage(lpMsg: *const MSG) bool;
 
 extern "user32" fn DispatchMessageW(lpMsg: *const MSG) windows.LRESULT;
 extern "user32" fn GetAsyncKeyState(vKey: i32) i16;
+extern "user32" fn RegisterRawInputDevices(pRawInputDevices: [*]const RAWINPUTDEVICE, uiNumDevices: u32, cbSize: u32) windows.BOOL;
+extern "user32" fn GetRawInputData(hRawInput: ?windows.HANDLE, uiCommand: u32, pData: ?*anyopaque, pcbSize: *u32, cbSizeHeader: u32) u32;
 extern "user32" fn LoadCursorW(hInstance: ?windows.HINSTANCE, lpCursorName: [*:0]align(1) const u16) ?windows.HCURSOR;
+extern "user32" fn SetCapture(hWnd: windows.HWND) ?windows.HWND;
+extern "user32" fn ReleaseCapture() windows.BOOL;
 extern "user32" fn SetCursor(hCursor: ?windows.HCURSOR) ?windows.HCURSOR;
 extern "user32" fn GetClientRect(hWnd: windows.HWND, lpRect: *windows.RECT) windows.BOOL;
 extern "user32" fn ClientToScreen(hWnd: windows.HWND, lpPoint: *windows.POINT) windows.BOOL;
@@ -95,6 +138,11 @@ const MK_RBUTTON: usize = 0x0002;
 const IDC_ARROW_ID: usize = 32512;
 const IDC_SIZEALL_ID: usize = 32646;
 const IDC_HAND_ID: usize = 32649;
+const RID_INPUT: u32 = 0x10000003;
+const RIM_TYPEMOUSE: u32 = 0;
+const MOUSE_MOVE_ABSOLUTE: u16 = 0x0001;
+const HID_USAGE_PAGE_GENERIC: u16 = 0x01;
+const HID_USAGE_GENERIC_MOUSE: u16 = 0x02;
 
 // Import other modules from our project.
 // JS Analogy: `const Window = require('./window.js');`
@@ -319,6 +367,18 @@ fn advanceSceneLoadingProgress(progress: ?*SceneLoadingProgress, phase: []const 
     }
 }
 
+fn registerRawMouseInput(hwnd: windows.HWND) !void {
+    const device = RAWINPUTDEVICE{
+        .usUsagePage = HID_USAGE_PAGE_GENERIC,
+        .usUsage = HID_USAGE_GENERIC_MOUSE,
+        .dwFlags = 0,
+        .hwndTarget = hwnd,
+    };
+    if (RegisterRawInputDevices(@ptrCast(&device), 1, @sizeOf(RAWINPUTDEVICE)) == 0) {
+        return error.RawInputRegistrationFailed;
+    }
+}
+
 /// # Application Entry Point
 /// This `main` function is where the program execution begins.
 /// JS Analogy: Think of this as an `async function main() { ... }` that is called
@@ -406,6 +466,7 @@ pub fn main() !void {
     const initial_height = @as(i32, @intCast(config.WINDOW_HEIGHT));
     var window = try Window.init(config.WINDOW_TITLE, initial_width, initial_height);
     defer window.deinit(); // Guarantees the window is destroyed on exit.
+    try registerRawMouseInput(window.hwnd);
     app_logger.infoSub("bootstrap", "window created {d}x{d}", .{ initial_width, initial_height });
 
     // Safely enforce a minimum size to prevent 0-dimension crashes
@@ -445,24 +506,19 @@ pub fn main() !void {
             }
         }
 
-        fn recenterFirstPersonCursor(r: *Renderer, current_client: windows.POINT) void {
-            if (!r.isFirstPersonMode()) return;
-            var client_rect: windows.RECT = undefined;
-            if (GetClientRect(r.hwnd, &client_rect) == 0) return;
-            const width = client_rect.right - client_rect.left;
-            const height = client_rect.bottom - client_rect.top;
-            if (width <= 0 or height <= 0) return;
-
-            const center_x = @divTrunc(width, 2);
-            const center_y = @divTrunc(height, 2);
-            if (current_client.x == center_x and current_client.y == center_y) return;
-            var screen_center = windows.POINT{
-                .x = center_x,
-                .y = center_y,
+        fn decodeRawMouseDelta(lParam: windows.LPARAM) ?windows.POINT {
+            var raw_input: RAWINPUTMOUSE = undefined;
+            var size: u32 = @sizeOf(RAWINPUTMOUSE);
+            const handle: ?windows.HANDLE = @ptrFromInt(@as(usize, @bitCast(lParam)));
+            const copied = GetRawInputData(handle, RID_INPUT, @ptrCast(&raw_input), &size, @sizeOf(RAWINPUTHEADER));
+            if (copied == std.math.maxInt(u32) or copied < @sizeOf(RAWINPUTHEADER)) return null;
+            if (raw_input.header.dwType != RIM_TYPEMOUSE) return null;
+            if ((raw_input.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) != 0) return null;
+            if (raw_input.mouse.lLastX == 0 and raw_input.mouse.lLastY == 0) return null;
+            return windows.POINT{
+                .x = raw_input.mouse.lLastX,
+                .y = raw_input.mouse.lLastY,
             };
-            if (ClientToScreen(r.hwnd, &screen_center) == 0) return;
-            _ = SetCursorPos(screen_center.x, screen_center.y);
-            r.noteMouseWarp(center_x, center_y);
         }
 
         fn decodeMouseCoords(lParam: windows.LPARAM) windows.POINT {
@@ -494,25 +550,39 @@ pub fn main() !void {
                     const char_code: u32 = @intCast(m.wParam);
                     r.handleCharInput(char_code);
                     applyCursorFromRenderer(r);
+                } else if (m.message == WM_SETFOCUS) {
+                    r.handleFocusGained();
+                    applyCursorFromRenderer(r);
+                } else if (m.message == WM_KILLFOCUS) {
+                    _ = ReleaseCapture();
+                    r.handleFocusLost();
+                    applyCursorFromRenderer(r);
+                } else if (m.message == WM_INPUT) {
+                    if (decodeRawMouseDelta(m.lParam)) |delta| {
+                        r.handleRawMouseDelta(delta.x, delta.y);
+                    }
                 } else if (m.message == WM_MOUSEMOVE) {
                     const coords = decodeMouseCoords(m.lParam);
-                    const button_mask: usize = @intCast(m.wParam);
-                    if ((button_mask & MK_LBUTTON) == 0) {
-                        r.handleMouseLeftRelease(coords.x, coords.y);
-                    }
-                    if ((button_mask & MK_RBUTTON) == 0) {
-                        r.handleMouseRightRelease(coords.x, coords.y);
+                    if (!r.isFirstPersonMode()) {
+                        const button_mask: usize = @intCast(m.wParam);
+                        if ((button_mask & MK_LBUTTON) == 0) {
+                            r.handleMouseLeftRelease(coords.x, coords.y);
+                        }
+                        if ((button_mask & MK_RBUTTON) == 0) {
+                            r.handleMouseRightRelease(coords.x, coords.y);
+                        }
                     }
                     r.handleMouseMove(coords.x, coords.y);
-                    recenterFirstPersonCursor(r, coords);
                     applyCursorFromRenderer(r);
                 } else if (m.message == WM_LBUTTONDOWN) {
                     const coords = decodeMouseCoords(m.lParam);
+                    if (r.isFirstPersonMode()) _ = SetCapture(r.hwnd);
                     r.handleMouseLeftClick(coords.x, coords.y);
                     applyCursorFromRenderer(r);
                 } else if (m.message == WM_LBUTTONUP) {
                     const coords = decodeMouseCoords(m.lParam);
                     r.handleMouseLeftRelease(coords.x, coords.y);
+                    if (r.isFirstPersonMode()) _ = ReleaseCapture();
                     applyCursorFromRenderer(r);
                 } else if (m.message == WM_RBUTTONDOWN) {
                     const coords = decodeMouseCoords(m.lParam);
