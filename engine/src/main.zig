@@ -166,6 +166,7 @@ const scene_runtime = @import("scene_main");
 
 const app_logger = log.get("app.main");
 const scenes_index_path = "assets/configs/scenes/index.json";
+const max_scene_texture_slots: usize = 32;
 
 const SceneModelType = scene_runtime.LoadedSceneModelType;
 const SceneAssetConfigEntry = scene_runtime.SceneAssetConfigEntry;
@@ -726,11 +727,11 @@ pub fn main() !void {
         }
     }
 
-    var scene_textures = [_]?texture.Texture{ null, null, null };
+    var scene_textures = [_]?texture.Texture{null} ** max_scene_texture_slots;
     defer for (&scene_textures) |*tex| {
         if (tex.*) |*loaded| loaded.deinit();
     };
-    var material_textures = [_]?*const texture.Texture{ null, null, null };
+    var material_textures = [_]?*const texture.Texture{null} ** max_scene_texture_slots;
 
     try zphysics.init(allocator, .{});
     defer zphysics.deinit();
@@ -1279,8 +1280,8 @@ fn loadSceneMeshResourcesWithProgress(
 fn loadSceneTextures(
     allocator: std.mem.Allocator,
     assets: []const LoadedSceneAsset,
-    loaded_slots: *[3]?texture.Texture,
-    material_textures: *[3]?*const texture.Texture,
+    loaded_slots: *[max_scene_texture_slots]?texture.Texture,
+    material_textures: *[max_scene_texture_slots]?*const texture.Texture,
 ) !void {
     return loadSceneTexturesWithProgress(allocator, assets, loaded_slots, material_textures, null);
 }
@@ -1290,8 +1291,8 @@ fn loadSceneTextures(
 fn loadSceneTexturesWithProgress(
     allocator: std.mem.Allocator,
     assets: []const LoadedSceneAsset,
-    loaded_slots: *[3]?texture.Texture,
-    material_textures: *[3]?*const texture.Texture,
+    loaded_slots: *[max_scene_texture_slots]?texture.Texture,
+    material_textures: *[max_scene_texture_slots]?*const texture.Texture,
     progress: ?*SceneLoadingProgress,
 ) !void {
     var texture_total: usize = 0;

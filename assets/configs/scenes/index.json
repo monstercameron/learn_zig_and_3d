@@ -3,11 +3,13 @@
   "loadingScene": "loading_neutral",
   "loadingFrames": 45,
   "scenes": [
+    { "key": "acura_nsx", "file": "assets/configs/scenes/acura_nsx.scene.json" },
     { "key": "gun_physics", "file": "assets/configs/scenes/gun_physics.scene.json" },
     { "key": "cornell", "file": "assets/configs/scenes/cornell.scene.json" },
     { "key": "loading_neutral", "file": "assets/configs/scenes/loading_neutral.scene.json" },
     { "key": "mixed_shadows", "file": "assets/configs/scenes/mixed_shadows.scene.json" },
     { "key": "mixed_shadows_static", "file": "assets/configs/scenes/mixed_shadows_static.scene.json" },
+    { "key": "monkey_two_lights", "file": "assets/configs/scenes/monkey_two_lights.scene.json" },
     { "key": "shadow_tuning", "file": "assets/configs/scenes/shadow_tuning.scene.json" },
     { "key": "shadow_single_model", "file": "assets/configs/scenes/shadow_single_model.scene.json" }
   ]

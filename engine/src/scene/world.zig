@@ -33,6 +33,14 @@ pub const Command = union(enum) {
         entity: EntityId,
         delta: math.Vec3,
     },
+    set_local_rotation_deg: struct {
+        entity: EntityId,
+        rotation_deg: math.Vec3,
+    },
+    set_local_scale: struct {
+        entity: EntityId,
+        scale: math.Vec3,
+    },
     set_camera_orientation: struct {
         entity: EntityId,
         pitch: f32,
@@ -87,6 +95,14 @@ pub const Commands = struct {
 
     pub fn queueTranslate(self: *Commands, entity: EntityId, delta: math.Vec3) !void {
         try self.pending.append(self.allocator, .{ .translate_entity = .{ .entity = entity, .delta = delta } });
+    }
+
+    pub fn queueSetLocalRotationDeg(self: *Commands, entity: EntityId, rotation_deg: math.Vec3) !void {
+        try self.pending.append(self.allocator, .{ .set_local_rotation_deg = .{ .entity = entity, .rotation_deg = rotation_deg } });
+    }
+
+    pub fn queueSetLocalScale(self: *Commands, entity: EntityId, scale: math.Vec3) !void {
+        try self.pending.append(self.allocator, .{ .set_local_scale = .{ .entity = entity, .scale = scale } });
     }
 
     pub fn queueSetCameraOrientation(self: *Commands, entity: EntityId, pitch: f32, yaw: f32) !void {
@@ -259,6 +275,8 @@ pub const World = struct {
                 },
                 .jump_entity => {},
                 .translate_entity => {},
+                .set_local_rotation_deg => {},
+                .set_local_scale => {},
                 .set_camera_orientation => {},
                 .adjust_camera_fov => {},
                 .set_camera_mode => {},

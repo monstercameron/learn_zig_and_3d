@@ -1,0 +1,64 @@
+{
+  "key": "acura_nsx",
+  "assets": [
+    {
+      "type": "camera",
+      "cameraName": "acura_nsx_showcase_cam",
+      "cameraPosition": [0.0, 1.9, -9.0],
+      "cameraOrientation": [-0.08, 0.0]
+    },
+    {
+      "type": "runtime",
+      "runtimeName": "scene_physics"
+    },
+    {
+      "type": "hdri",
+      "path": "assets/hdri/envmap.raw"
+    },
+    {
+      "type": "light",
+      "position": [3.2, 3.0, -1.4],
+      "lightColor": [1.0, 0.96, 0.9],
+      "lightDistance": 6.0,
+      "lightShadowMode": "meshlet_ray",
+      "lightShadowUpdateInterval": 1,
+      "glowRadius": 26.0,
+      "glowIntensity": 0.75
+    },
+    {
+      "type": "light",
+      "position": [-3.2, 2.6, -0.8],
+      "lightColor": [0.72, 0.82, 1.0],
+      "lightDistance": 5.8,
+      "lightShadowMode": "meshlet_ray",
+      "lightShadowUpdateInterval": 1,
+      "glowRadius": 24.0,
+      "glowIntensity": 0.65
+    },
+    {
+      "type": "model",
+      "modelType": "obj",
+      "modelPath": "assets/models/box.obj",
+      "position": [0.0, -0.08, 0.0],
+      "rotationDeg": [0.0, 0.0, 0.0],
+      "scale": [14.0, 0.16, 14.0],
+      "physicsMotion": "static",
+      "textures": []
+    },
+    {
+      "type": "model",
+      "id": "acura_nsx_car",
+      "modelType": "gltf",
+      "modelPath": "assets/models/acura_nsx/uploads_files_6780228_Acura+NSX.glb",
+      "position": [0.0, 0.25, 0.0],
+      "rotationDeg": [0.0, 180.0, 0.0],
+      "scale": [1.0, 1.0, 1.0],
+      "physicsMotion": "static",
+      "textures": [
+        { "slot": 9, "path": "assets/models/acura_nsx/textures/brakedisk.bmp" },
+        { "slot": 14, "path": "assets/models/acura_nsx/textures/holes_opacity.bmp" },
+        { "slot": 16, "path": "assets/models/acura_nsx/textures/engine.bmp" }
+      ]
+    }
+  ]
+}

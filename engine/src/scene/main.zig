@@ -729,6 +729,12 @@ pub const SceneRuntime = struct {
                 .translate_entity => |payload| {
                     _ = self.translateEntity(payload.entity, payload.delta);
                 },
+                .set_local_rotation_deg => |payload| {
+                    _ = self.setEntityLocalRotationDeg(payload.entity, payload.rotation_deg);
+                },
+                .set_local_scale => |payload| {
+                    _ = self.setEntityLocalScale(payload.entity, payload.scale);
+                },
                 .set_camera_orientation => |payload| {
                     _ = self.setCameraOrientation(payload.entity, payload.pitch, payload.yaw);
                 },
@@ -924,6 +930,40 @@ pub const SceneRuntime = struct {
             self.renderables_dirty = true;
         }
         return changed;
+    }
+
+    pub fn setEntityLocalRotationDeg(self: *SceneRuntime, entity: EntityId, rotation_deg: scene_math.Vec3) bool {
+        self.assertMutationAllowed();
+        if (!self.world.isAlive(entity)) return false;
+        const index: usize = @intCast(entity.index);
+        if (index >= self.components.local_transforms.items.len) return false;
+        if (self.components.local_transforms.items[index] == null) return false;
+        if (vec3ApproxEq(self.components.local_transforms.items[index].?.rotation_deg, rotation_deg)) return false;
+        self.components.local_transforms.items[index].?.rotation_deg = rotation_deg;
+        self.hierarchy.markSubtreeDirty(entity);
+        self.propagateWorldTransforms() catch {};
+        if (index < self.components.world_transforms.items.len and self.components.world_transforms.items[index] != null) {
+            _ = self.residency.updateEntityPosition(entity, self.components.world_transforms.items[index].?.position) catch {};
+        }
+        self.renderables_dirty = true;
+        return true;
+    }
+
+    pub fn setEntityLocalScale(self: *SceneRuntime, entity: EntityId, scale: scene_math.Vec3) bool {
+        self.assertMutationAllowed();
+        if (!self.world.isAlive(entity)) return false;
+        const index: usize = @intCast(entity.index);
+        if (index >= self.components.local_transforms.items.len) return false;
+        if (self.components.local_transforms.items[index] == null) return false;
+        if (vec3ApproxEq(self.components.local_transforms.items[index].?.scale, scale)) return false;
+        self.components.local_transforms.items[index].?.scale = scale;
+        self.hierarchy.markSubtreeDirty(entity);
+        self.propagateWorldTransforms() catch {};
+        if (index < self.components.world_transforms.items.len and self.components.world_transforms.items[index] != null) {
+            _ = self.residency.updateEntityPosition(entity, self.components.world_transforms.items[index].?.position) catch {};
+        }
+        self.renderables_dirty = true;
+        return true;
     }
 
     pub fn attachEntity(self: *SceneRuntime, parent: EntityId, child: EntityId) !void {

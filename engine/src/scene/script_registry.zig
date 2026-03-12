@@ -4,6 +4,7 @@ const asset_registry = @import("asset_registry.zig");
 const script_host = @import("script_host.zig");
 const default_camera_controls_script = @import("scripts/default_camera_controls.zig");
 const default_renderer_controls_script = @import("scripts/default_renderer_controls.zig");
+const monkey_breathe_rotate_script = @import("scripts/monkey_breathe_rotate.zig");
 const shadow_single_model_jump_box_script = @import("scripts/shadow_single_model_jump_box.zig");
 const shadow_single_model_player_camera_script = @import("scripts/shadow_single_model_player_camera.zig");
 
@@ -24,6 +25,10 @@ const native_modules = [_]NativeScriptModule{
     .{
         .name = default_renderer_controls_script.module_name,
         .vtable = default_renderer_controls_script.vtable,
+    },
+    .{
+        .name = monkey_breathe_rotate_script.module_name,
+        .vtable = monkey_breathe_rotate_script.vtable,
     },
     .{
         .name = shadow_single_model_jump_box_script.module_name,

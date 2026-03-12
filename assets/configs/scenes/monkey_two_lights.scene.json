@@ -1,0 +1,61 @@
+{
+  "key": "monkey_two_lights",
+  "assets": [
+    {
+      "type": "camera",
+      "cameraName": "monkey_two_lights_cam",
+      "cameraPosition": [0.0, 1.35, -4.2],
+      "cameraOrientation": [0.0, 0.0]
+    },
+    {
+      "type": "runtime",
+      "runtimeName": "scene_physics"
+    },
+    {
+      "type": "light",
+      "position": [-2.2, 2.0, -0.8],
+      "lightColor": [1.0, 0.94, 0.88],
+      "lightDistance": 5.2,
+      "lightShadowMode": "meshlet_ray",
+      "lightShadowUpdateInterval": 1,
+      "glowRadius": 20.0,
+      "glowIntensity": 0.55
+    },
+    {
+      "type": "light",
+      "position": [2.2, 2.0, -0.8],
+      "lightColor": [0.78, 0.88, 1.0],
+      "lightDistance": 5.2,
+      "lightShadowMode": "meshlet_ray",
+      "lightShadowUpdateInterval": 1,
+      "glowRadius": 20.0,
+      "glowIntensity": 0.55
+    },
+    {
+      "type": "model",
+      "modelType": "obj",
+      "modelPath": "assets/models/box.obj",
+      "position": [0.0, -0.08, 0.0],
+      "rotationDeg": [0.0, 0.0, 0.0],
+      "scale": [10.0, 0.16, 10.0],
+      "physicsMotion": "static",
+      "textures": []
+    },
+    {
+      "type": "model",
+      "id": "monkey_head",
+      "modelType": "obj",
+      "modelPath": "assets/models/suzanne.obj",
+      "position": [0.0, 1.0, 0.0],
+      "rotationDeg": [0.0, 0.0, 0.0],
+      "scale": [1.25, 1.25, 1.25],
+      "physicsMotion": "static",
+      "scripts": [
+        {
+          "module": "scene.monkey_two_lights.monkey_breathe_rotate"
+        }
+      ],
+      "textures": []
+    }
+  ]
+}
