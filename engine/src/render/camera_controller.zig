@@ -23,6 +23,20 @@ pub const FpsBodyState = struct {
     jump_was_down: bool = false,
 };
 
+const fps_right_click_zoom_steps: f32 = 8.0;
+const fps_zoom_in_duration_s: f32 = 0.250;
+const fps_zoom_out_duration_s: f32 = 0.100;
+
+pub const FpsZoomState = struct {
+    hold_active: bool = false,
+    base_fov_deg: f32 = 60.0,
+    anim_active: bool = false,
+    anim_from_fov: f32 = 0.0,
+    anim_to_fov: f32 = 0.0,
+    anim_elapsed_s: f32 = 0.0,
+    anim_duration_s: f32 = 0.0,
+};
+
 pub const ViewBasis = struct {
     right: math.Vec3,
     up: math.Vec3,
@@ -76,6 +90,59 @@ pub fn resetFpsBody(state: *FpsBodyState, camera_position: math.Vec3, floor_y: f
 
 pub fn setJumpHeldState(state: *FpsBodyState, jump_down: bool) void {
     state.jump_was_down = jump_down;
+}
+
+fn clampFov(fov_deg: f32) f32 {
+    return std.math.clamp(fov_deg, config.CAMERA_FOV_MIN, config.CAMERA_FOV_MAX);
+}
+
+fn startZoomAnimation(state: *FpsZoomState, current_fov_deg: f32, target_fov_deg: f32, duration_s: f32) void {
+    state.anim_from_fov = current_fov_deg;
+    state.anim_to_fov = clampFov(target_fov_deg);
+    state.anim_elapsed_s = 0.0;
+    state.anim_duration_s = @max(duration_s, 0.001);
+    state.anim_active = true;
+}
+
+pub fn onEnterFirstPerson(state: *FpsZoomState, current_fov_deg: f32) void {
+    state.base_fov_deg = current_fov_deg;
+}
+
+pub fn beginRightClickZoom(state: *FpsZoomState, current_fov_deg: f32) void {
+    if (state.hold_active) return;
+    state.hold_active = true;
+    state.base_fov_deg = current_fov_deg;
+    const zoom_delta = config.CAMERA_FOV_STEP * fps_right_click_zoom_steps;
+    startZoomAnimation(state, current_fov_deg, state.base_fov_deg - zoom_delta, fps_zoom_in_duration_s);
+}
+
+pub fn endRightClickZoom(state: *FpsZoomState, current_fov_deg: f32) void {
+    if (!state.hold_active) return;
+    state.hold_active = false;
+    startZoomAnimation(state, current_fov_deg, state.base_fov_deg, fps_zoom_out_duration_s);
+}
+
+pub fn cancelRightClickZoom(state: *FpsZoomState, camera_fov_deg: *f32, restore_fov: bool) void {
+    state.hold_active = false;
+    state.anim_active = false;
+    if (restore_fov) {
+        camera_fov_deg.* = clampFov(state.base_fov_deg);
+    }
+}
+
+pub fn updateRightClickZoom(state: *FpsZoomState, camera_fov_deg: *f32, dt_s: f32) void {
+    if (!state.anim_active) return;
+    if (dt_s <= 0.0) return;
+    state.anim_elapsed_s += dt_s;
+    const t = std.math.clamp(state.anim_elapsed_s / state.anim_duration_s, 0.0, 1.0);
+    const ease = t * t * (3.0 - 2.0 * t); // smoothstep
+    const fov = state.anim_from_fov + (state.anim_to_fov - state.anim_from_fov) * ease;
+    camera_fov_deg.* = clampFov(fov);
+    if (t >= 1.0) state.anim_active = false;
+}
+
+pub fn isRightClickZoomHeld(state: *const FpsZoomState) bool {
+    return state.hold_active;
 }
 
 pub fn nextRawDelta(state: *MouseState, x: i32, y: i32) ?math.Vec2 {

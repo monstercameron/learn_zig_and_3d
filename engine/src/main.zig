@@ -55,6 +55,8 @@ const WM_QUIT = 0x12;
 const WM_MOUSEMOVE = 0x0200;
 const WM_LBUTTONDOWN = 0x0201;
 const WM_LBUTTONUP = 0x0202;
+const WM_RBUTTONDOWN = 0x0204;
+const WM_RBUTTONUP = 0x0205;
 
 // Declarations for Windows API functions.
 // JS Analogy: These are low-level functions to interact with the OS event queue.
@@ -89,6 +91,7 @@ extern "user32" fn SetCursorPos(X: i32, Y: i32) windows.BOOL;
 const PM_REMOVE = 1;
 const VK_RETURN = 0x0D;
 const MK_LBUTTON: usize = 0x0001;
+const MK_RBUTTON: usize = 0x0002;
 const IDC_ARROW_ID: usize = 32512;
 const IDC_SIZEALL_ID: usize = 32646;
 const IDC_HAND_ID: usize = 32649;
@@ -465,6 +468,9 @@ pub fn main() !void {
                     if ((button_mask & MK_LBUTTON) == 0) {
                         r.handleMouseLeftRelease(coords.x, coords.y);
                     }
+                    if ((button_mask & MK_RBUTTON) == 0) {
+                        r.handleMouseRightRelease(coords.x, coords.y);
+                    }
                     r.handleMouseMove(coords.x, coords.y);
                     recenterFirstPersonCursor(r, coords);
                     applyCursorFromRenderer(r);
@@ -475,6 +481,14 @@ pub fn main() !void {
                 } else if (m.message == WM_LBUTTONUP) {
                     const coords = decodeMouseCoords(m.lParam);
                     r.handleMouseLeftRelease(coords.x, coords.y);
+                    applyCursorFromRenderer(r);
+                } else if (m.message == WM_RBUTTONDOWN) {
+                    const coords = decodeMouseCoords(m.lParam);
+                    r.handleMouseRightClick(coords.x, coords.y);
+                    applyCursorFromRenderer(r);
+                } else if (m.message == WM_RBUTTONUP) {
+                    const coords = decodeMouseCoords(m.lParam);
+                    r.handleMouseRightRelease(coords.x, coords.y);
                     applyCursorFromRenderer(r);
                 }
                 _ = TranslateMessage(&m);

@@ -66,6 +66,7 @@ const pass_graph = @import("pipeline/pass_graph.zig");
 const render_utils = @import("core/utils.zig");
 const scene_item_gizmo = @import("scene_item_gizmo.zig");
 const camera_controller = @import("camera_controller.zig");
+const frame_pacing_hud = @import("frame_pacing_hud.zig");
 const shadow_raster_kernel = @import("kernels/shadow_raster_kernel.zig");
 const shadow_sample_kernel = @import("kernels/shadow_sample_kernel.zig");
 const hybrid_shadow_cache_kernel = @import("kernels/hybrid_shadow_cache_kernel.zig");
@@ -1276,6 +1277,8 @@ pub const Renderer = struct {
     next_frame_time: i128,
     current_fps: u32,
     target_frame_time_ns: i128,
+    frame_pacing: frame_pacing_hud.Tracker = .{},
+    fps_zoom_state: camera_controller.FpsZoomState = .{},
     pending_fov_delta: f32,
     camera_control_mode: CameraControlMode = .editor,
     profile_capture_frame: u64,
@@ -3857,6 +3860,19 @@ pub const Renderer = struct {
         self.clearLightGizmoInteraction();
     }
 
+    pub fn handleMouseRightClick(self: *Renderer, x: i32, y: i32) void {
+        _ = x;
+        _ = y;
+        if (self.camera_control_mode != .first_person) return;
+        camera_controller.beginRightClickZoom(&self.fps_zoom_state, self.camera_fov_deg);
+    }
+
+    pub fn handleMouseRightRelease(self: *Renderer, x: i32, y: i32) void {
+        _ = x;
+        _ = y;
+        camera_controller.endRightClickZoom(&self.fps_zoom_state, self.camera_fov_deg);
+    }
+
     pub fn desiredCursorStyle(self: *const Renderer) CursorStyle {
         if (self.camera_control_mode == .first_person) return .hidden;
         const item_hint = self.scene_item_gizmo.cursorHint();
@@ -4155,10 +4171,36 @@ pub const Renderer = struct {
         }
     }
 
+    fn advanceFrameDeadline(self: *Renderer, now_ns: i128) void {
+        if (self.target_frame_time_ns <= 0) {
+            self.next_frame_time = now_ns;
+            return;
+        }
+
+        // Advance from the previous deadline to keep cadence steady instead of
+        // adding target dt to frame-end time (which drifts and causes uneven pacing).
+        if (self.next_frame_time <= 0) {
+            self.next_frame_time = now_ns + self.target_frame_time_ns;
+            return;
+        }
+        self.next_frame_time += self.target_frame_time_ns;
+
+        // If we fell behind, fast-forward by whole-frame quanta so we re-lock.
+        if (self.next_frame_time <= now_ns) {
+            const overdue = now_ns - self.next_frame_time;
+            const skip_frames = @divTrunc(overdue, self.target_frame_time_ns) + 1;
+            self.next_frame_time += skip_frames * self.target_frame_time_ns;
+        }
+    }
+
     pub fn handleCharInput(self: *Renderer, char_code: u32) void {
         switch (char_code) {
-            'q', 'Q' => self.pending_fov_delta -= config.CAMERA_FOV_STEP,
-            'e', 'E' => self.pending_fov_delta += config.CAMERA_FOV_STEP,
+            'q', 'Q' => {
+                if (!camera_controller.isRightClickZoomHeld(&self.fps_zoom_state)) self.pending_fov_delta -= config.CAMERA_FOV_STEP;
+            },
+            'e', 'E' => {
+                if (!camera_controller.isRightClickZoomHeld(&self.fps_zoom_state)) self.pending_fov_delta += config.CAMERA_FOV_STEP;
+            },
             'v', 'V' => {
                 self.camera_control_mode = if (self.camera_control_mode == .first_person) .editor else .first_person;
                 if (self.camera_control_mode == .first_person) {
@@ -4167,6 +4209,10 @@ pub const Renderer = struct {
                     camera_controller.resetFpsBody(&self.fps_body_state, self.camera_position, fps_camera_floor_y, fps_camera_eye_height);
                     const jump_down = (self.keys_pressed & input.KeyBits.space) != 0;
                     camera_controller.setJumpHeldState(&self.fps_body_state, jump_down);
+                    camera_controller.onEnterFirstPerson(&self.fps_zoom_state, self.camera_fov_deg);
+                } else {
+                    camera_controller.cancelRightClickZoom(&self.fps_zoom_state, &self.camera_fov_deg, true);
+                    self.last_reported_fov_deg = self.camera_fov_deg;
                 }
                 camera_controller.resetForModeToggle(&self.mouse_state);
                 renderer_logger.infoSub(
@@ -4519,6 +4565,8 @@ pub const Renderer = struct {
 
         const fov_delta = self.consumePendingFovDelta();
         if (fov_delta != 0.0) self.adjustCameraFov(fov_delta);
+        camera_controller.updateRightClickZoom(&self.fps_zoom_state, &self.camera_fov_deg, delta_seconds);
+        self.last_reported_fov_deg = self.camera_fov_deg;
 
         const sweep_half_angle = std.math.pi / 2.0;
         for (self.lights.items) |*light| {
@@ -4861,6 +4909,7 @@ pub const Renderer = struct {
         if (is_editor_mode and self.scene_item_gizmo.isActive()) {
             self.drawSceneItemGizmo(self.camera_position, right, up, forward, cache_projection);
         }
+        self.frame_pacing.recordSample(delta_seconds * 1000.0, self.target_frame_time_ns);
         const present_start = std.time.nanoTimestamp();
         self.drawBitmap();
         self.recordRenderPassTiming("present", present_start);
@@ -4871,9 +4920,7 @@ pub const Renderer = struct {
         self.maybeEmitSingleFrameProfile();
         const current_time = std.time.nanoTimestamp();
         self.finalizeFrame(current_time);
-        if (self.target_frame_time_ns > 0) {
-            self.next_frame_time = current_time + self.target_frame_time_ns;
-        }
+        self.advanceFrameDeadline(current_time);
 
         renderer_logger.debugSub(
             "frame",
@@ -6184,8 +6231,66 @@ pub const Renderer = struct {
         }
     }
 
+    const FramePacingDrawContext = struct {
+        renderer: *Renderer,
+        hdc_mem: windows.HDC,
+    };
+
+    fn fillRectSolid(self: *Renderer, x: i32, y: i32, w: i32, h: i32, color: u32) void {
+        if (w <= 0 or h <= 0) return;
+        const min_x = std.math.clamp(x, 0, self.bitmap.width);
+        const min_y = std.math.clamp(y, 0, self.bitmap.height);
+        const max_x = std.math.clamp(x + w, 0, self.bitmap.width);
+        const max_y = std.math.clamp(y + h, 0, self.bitmap.height);
+        if (max_x <= min_x or max_y <= min_y) return;
+
+        var py = min_y;
+        while (py < max_y) : (py += 1) {
+            const row_start = @as(usize, @intCast(py)) * @as(usize, @intCast(self.bitmap.width));
+            var px = min_x;
+            while (px < max_x) : (px += 1) {
+                const idx = row_start + @as(usize, @intCast(px));
+                if (idx < self.bitmap.pixels.len) self.bitmap.pixels[idx] = color;
+            }
+        }
+    }
+
+    fn framePacingFillRect(ctx_ptr: *anyopaque, x: i32, y: i32, w: i32, h: i32, color: u32) void {
+        const ctx: *FramePacingDrawContext = @ptrCast(@alignCast(ctx_ptr));
+        ctx.renderer.fillRectSolid(x, y, w, h, color);
+    }
+
+    fn framePacingDrawLine(ctx_ptr: *anyopaque, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) void {
+        const ctx: *FramePacingDrawContext = @ptrCast(@alignCast(ctx_ptr));
+        ctx.renderer.drawLineColored(x0, y0, x1, y1, color);
+    }
+
+    fn framePacingDrawText(ctx_ptr: *anyopaque, x: i32, y: i32, text: []const u8) void {
+        const ctx: *FramePacingDrawContext = @ptrCast(@alignCast(ctx_ptr));
+        ctx.renderer.drawOverlayTextLine(ctx.hdc_mem, x, y, text);
+    }
+
+    fn drawFramePacingPanel(self: *Renderer, hdc_mem: windows.HDC) void {
+        var draw_ctx = FramePacingDrawContext{
+            .renderer = self,
+            .hdc_mem = hdc_mem,
+        };
+        frame_pacing_hud.drawPanel(&self.frame_pacing, .{
+            .bitmap_width = self.bitmap.width,
+            .bitmap_height = self.bitmap.height,
+            .vsync_enabled = config.WINDOW_VSYNC,
+            .show_overlay = self.show_render_overlay,
+            .draw_ctx = @ptrCast(&draw_ctx),
+            .fns = .{
+                .fillRectSolid = framePacingFillRect,
+                .drawLineColored = framePacingDrawLine,
+                .drawTextLine = framePacingDrawText,
+            },
+        });
+    }
+
     fn drawRenderPassOverlay(self: *Renderer, hdc_mem: windows.HDC) void {
-        if (self.render_pass_count == 0 and !self.hybrid_shadow_debug.enabled and self.hybrid_shadow_stats.job_count == 0 and !self.light_gizmo.enabled and !self.scene_item_gizmo.enabled) return;
+        if (self.render_pass_count == 0 and !self.hybrid_shadow_debug.enabled and self.hybrid_shadow_stats.job_count == 0 and !self.light_gizmo.enabled and !self.scene_item_gizmo.enabled and !self.show_render_overlay) return;
 
         _ = SetBkMode(hdc_mem, TRANSPARENT);
 
@@ -6347,6 +6452,8 @@ pub const Renderer = struct {
                 if (mouse_line.len != 0) self.drawOverlayTextLine(hdc_mem, 12, y, mouse_line);
             }
         }
+
+        self.drawFramePacingPanel(hdc_mem);
     }
 
     fn drawOverlayTextLine(self: *Renderer, hdc_mem: windows.HDC, x: i32, y: i32, text: []const u8) void {

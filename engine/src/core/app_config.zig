@@ -195,6 +195,7 @@ pub var POST_COLOR_BRIGHTNESS_BIAS: i32 = 4;
 pub var POST_COLOR_CONTRAST_PERCENT: i32 = 112;
 
 pub fn targetFrameTimeNs() i128 {
+    if (TARGET_FPS == 0) return 0;
     const numerator: i128 = 1_000_000_000;
     return @divTrunc(numerator, @as(i128, @intCast(TARGET_FPS)));
 }
@@ -531,6 +532,10 @@ pub fn loadEngineIni(allocator: std.mem.Allocator, filepath: []const u8) !void {
             if (std.mem.eql(u8, key, "enabled")) POST_SSGI_ENABLED = parseBool(val, POST_SSGI_ENABLED);
             if (std.mem.eql(u8, key, "samples")) POST_SSGI_SAMPLES = parseI32(val, POST_SSGI_SAMPLES);
             if (std.mem.eql(u8, key, "intensity")) POST_SSGI_INTENSITY = parseF32(val, POST_SSGI_INTENSITY);
+        } else if (std.mem.eql(u8, section, "window")) {
+            if (std.mem.eql(u8, key, "vsync")) WINDOW_VSYNC = parseBool(val, WINDOW_VSYNC);
+        } else if (std.mem.eql(u8, section, "rendering")) {
+            if (std.mem.eql(u8, key, "fps_limit")) TARGET_FPS = parseU32(val, TARGET_FPS);
         } else if (std.mem.eql(u8, section, "camera")) {
             if (std.mem.eql(u8, key, "mouse_sensitivity")) CAMERA_MOUSE_SENSITIVITY = std.math.clamp(parseF32(val, CAMERA_MOUSE_SENSITIVITY), 0.0001, 0.05);
             if (std.mem.eql(u8, key, "mouse_dpi_scale")) CAMERA_MOUSE_DPI_SCALE = std.math.clamp(parseF32(val, CAMERA_MOUSE_DPI_SCALE), 0.1, 8.0);
