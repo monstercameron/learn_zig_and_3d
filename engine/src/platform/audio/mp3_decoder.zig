@@ -1,3 +1,6 @@
+//! Mp3 Decoder module.
+//! Low-level audio backend/runtime support for playback, decoding, and buffering.
+
 const std = @import("std");
 
 /// A pure Zig port of the bitstream reader from dr_mp3.

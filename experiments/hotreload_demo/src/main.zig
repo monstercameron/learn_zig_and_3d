@@ -1,3 +1,6 @@
+//! Primary entry point for the hot-reload demo runtime.
+//! Hot-reload demo runtime entry point and control loop.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const iface = @import("iface");
@@ -8,6 +11,7 @@ const PluginHandle = struct {
     api: iface.PluginAPI,
     ctx: *anyopaque,
 
+    /// deinit releases resources owned by Main.
     fn deinit(self: *PluginHandle) void {
         self.api.shutdown(self.ctx);
         self.lib.close();
@@ -125,6 +129,8 @@ fn hostPrint(ctx: ?*anyopaque, message_ptr: [*]const u8, message_len: usize) cal
     std.debug.print("{s}\n", .{message});
 }
 
+/// Loads l oa dp lu gi n from external or cached data sources.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn loadPlugin(
     allocator: std.mem.Allocator,
     path: []const u8,
@@ -151,6 +157,8 @@ fn loadPlugin(
     };
 }
 
+/// Module entry point used by the runtime/bootstrap path.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();

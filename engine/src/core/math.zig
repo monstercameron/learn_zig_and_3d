@@ -30,18 +30,26 @@ pub const Vec2 = struct {
     x: f32,
     y: f32,
 
+    /// Constructs and returns a new value initialized from the provided fields.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn new(x: f32, y: f32) Vec2 {
         return Vec2{ .x = x, .y = y };
     }
 
+    /// Returns the component-wise sum of the provided inputs.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn add(a: Vec2, b: Vec2) Vec2 {
         return Vec2.new(a.x + b.x, a.y + b.y);
     }
 
+    /// Returns the component-wise difference of the provided inputs.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn sub(a: Vec2, b: Vec2) Vec2 {
         return Vec2.new(a.x - b.x, a.y - b.y);
     }
 
+    /// Scales the input by the provided scalar factor and returns the result.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn scale(v: Vec2, s: f32) Vec2 {
         return Vec2.new(v.x * s, v.y * s);
     }
@@ -54,6 +62,8 @@ pub const Vec3 = struct {
     y: f32,
     z: f32,
 
+    /// Constructs and returns a new value initialized from the provided fields.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn new(x: f32, y: f32, z: f32) Vec3 {
         return Vec3{ .x = x, .y = y, .z = z };
     }
@@ -73,7 +83,7 @@ pub const Vec3 = struct {
         return Vec3.new(v.x * s, v.y * s, v.z * s);
     }
 
-    /// Calculates the dot product of two vectors (a · b).
+    /// Calculates the dot product of two vectors (a ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· b).
     /// The result indicates how much the two vectors point in the same direction.
     /// > 0: Same general direction.
     ///   0: Perpendicular.
@@ -83,7 +93,7 @@ pub const Vec3 = struct {
         return a.x * b.x + a.y * b.y + a.z * b.z;
     }
 
-    /// Calculates the cross product of two vectors (a × b).
+    /// Calculates the cross product of two vectors (a ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â b).
     /// The result is a new vector that is perpendicular to both input vectors.
     /// This is essential for calculating surface normals.
     // TODO(SIMD): The cross product can be vectorized using shuffle and multiply-subtract operations.
@@ -95,6 +105,8 @@ pub const Vec3 = struct {
         );
     }
 
+    /// Returns the component-wise minimum of the provided inputs.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn min(a: Vec3, b: Vec3) Vec3 {
         return Vec3.new(
             @min(a.x, b.x),
@@ -103,6 +115,8 @@ pub const Vec3 = struct {
         );
     }
 
+    /// Returns the component-wise maximum of the provided inputs.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn max(a: Vec3, b: Vec3) Vec3 {
         return Vec3.new(
             @max(a.x, b.x),
@@ -134,6 +148,8 @@ pub const Vec4 = struct {
     z: f32,
     w: f32,
 
+    /// Constructs and returns a new value initialized from the provided fields.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn new(x: f32, y: f32, z: f32, w: f32) Vec4 {
         return Vec4{ .x = x, .y = y, .z = z, .w = w };
     }

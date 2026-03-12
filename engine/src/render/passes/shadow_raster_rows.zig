@@ -1,6 +1,13 @@
+//! Row-level shadow-map rasterization helpers used by shadow_map_pass.
+//! Transforms meshlet primitives into light space and rasterizes depth over assigned rows.
+//! Keeps raster hot paths isolated for reuse and easier tuning.
+
+
 const math = @import("../../core/math.zig");
 const shadow_raster_kernel = @import("../kernels/shadow_raster_kernel.zig");
 
+/// Rasterizes r as te ri ze sh ad ow me sh ra ng e.
+/// Operates on the `[start_row, end_row)` stripe so worker jobs can run in parallel without overlap.
 pub fn rasterizeShadowMeshRange(mesh: anytype, shadow: anytype, start_row: usize, end_row: usize, light_dir_world: math.Vec3, max_shadow_meshlet_vertices: usize) void {
     if (!shadow.active) return;
 

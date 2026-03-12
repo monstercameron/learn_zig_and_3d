@@ -1,9 +1,16 @@
+//! Builds and resolves classic shadow-map lighting for lights in shadow-map mode.
+//! Computes light-space bounds, rasterizes meshlets to depth, then resolves occlusion into color.
+//! Splits raster and resolve into job stripes so shadow work scales with core count.
+
+
 const std = @import("std");
 const math = @import("../../core/math.zig");
 const shadow_raster_rows = @import("shadow_raster_rows.zig");
 
 const max_shadow_meshlet_vertices: usize = 64;
 
+/// Builds the raster job-context wrapper used by shadow/raster workers.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn RasterJobContext(comptime MeshType: type, comptime ShadowMapType: type) type {
     return struct {
         mesh: *const MeshType,
@@ -12,6 +19,8 @@ pub fn RasterJobContext(comptime MeshType: type, comptime ShadowMapType: type) t
         end_row: usize,
         light_dir_world: math.Vec3,
 
+        /// Runs this module step with the currently bound configuration.
+        /// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
         pub fn run(ctx_ptr: *anyopaque) void {
             const ctx: *@This() = @ptrCast(@alignCast(ctx_ptr));
             shadow_raster_rows.rasterizeShadowMeshRange(
@@ -24,6 +33,8 @@ pub fn RasterJobContext(comptime MeshType: type, comptime ShadowMapType: type) t
             );
         }
 
+        /// Runs rows direct.
+        /// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
         pub fn runRowsDirect(
             mesh: *const MeshType,
             shadow: *ShadowMapType,
@@ -43,6 +54,8 @@ pub fn RasterJobContext(comptime MeshType: type, comptime ShadowMapType: type) t
     };
 }
 
+/// Runs build.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn runBuild(
     self: anytype,
     mesh: anytype,
@@ -157,6 +170,8 @@ pub fn runBuild(
     return std.time.nanoTimestamp() - pass_start;
 }
 
+/// Runs per light.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn runPerLight(
     light_count: usize,
     ctx: anytype,
@@ -169,6 +184,7 @@ pub fn runPerLight(
 
 const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 
+/// runPipeline executes the full Shadow Map Pass pipeline for the current frame.
 pub fn runPipeline(
     self: anytype,
     width: usize,

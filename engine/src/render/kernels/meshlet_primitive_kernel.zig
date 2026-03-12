@@ -1,3 +1,6 @@
+//! Implements the Meshlet Primitive kernel logic used in renderer jobs.
+//! CPU pixel/compute kernel used by the software renderer post-processing and shading stack.
+
 const std = @import("std");
 const compute = @import("compute.zig");
 const math = @import("../../math.zig");
@@ -33,6 +36,8 @@ const TransformResult = struct {
     front: bool,
 };
 
+/// Loads l oa dp us hc on st an ts from external or cached data sources.
+/// Reads bound inputs from `ctx`, processes the current dispatch work, and writes results to the configured outputs.
 fn loadPushConstants(ctx: *const compute.ComputeContext) ?*const MeshletPrimitivePC {
     const raw = ctx.push_constants orelse return null;
     if (raw.len < @sizeOf(MeshletPrimitivePC)) return null;
@@ -66,6 +71,8 @@ fn transformVertex(pc: *const MeshletPrimitivePC, world_pos: math.Vec3) Transfor
     return TransformResult{ .camera = camera, .screen = screen, .front = front };
 }
 
+/// Computes normal camera.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 fn computeNormalCamera(pc: *const MeshletPrimitivePC, normals: []const math.Vec3, triangle_index: usize, camera_positions: [3]math.Vec3) math.Vec3 {
     if (triangle_index < normals.len) {
         const n = normals[triangle_index];
@@ -82,6 +89,8 @@ fn computeNormalCamera(pc: *const MeshletPrimitivePC, normals: []const math.Vec3
     return math.Vec3.normalize(math.Vec3.cross(edge0, edge1));
 }
 
+/// Returns whether i sb ac kf ac e.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 fn isBackface(normal_cam: math.Vec3, positions: [3]math.Vec3) bool {
     var centroid = math.Vec3.new(0.0, 0.0, 0.0);
     inline for (positions) |p| {
@@ -103,6 +112,8 @@ pub const MeshletPrimitiveKernel = struct {
     pub const group_size_y: u32 = 1;
     pub const SharedSize: usize = 0;
 
+    /// Kernel entry point executed by the compute dispatcher for this pass.
+    /// Reads bound inputs from `ctx`, processes the current dispatch work, and writes results to the configured outputs.
     pub fn main(ctx: *compute.ComputeContext) void {
         const pc = loadPushConstants(ctx) orelse return;
         const meshlet_index = ctx.global_id.x;

@@ -1,6 +1,12 @@
+//! Runs screen-space global illumination approximation as a post lighting pass.
+//! Samples nearby screen-space radiance/depth to estimate indirect bounce contribution.
+//! Processes rows in parallel and writes indirect-lit output for later composition.
+
 const ssgi_kernel = @import("../kernels/ssgi_kernel.zig");
 const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 
+/// Runs this pass over a `[start_row, end_row)` span.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn runRows(
     pixels: []const u32,
     out_pixels: []u32,
@@ -13,6 +19,7 @@ pub fn runRows(
     ssgi_kernel.runRows(pixels, out_pixels, camera, width, height, start_row, end_row);
 }
 
+/// runPipeline executes the full SSGI Pass pipeline for the current frame.
 pub fn runPipeline(self: anytype, height: usize, comptime noop_job_fn: fn (*anyopaque) void) void {
     if (height == 0) return;
     const min_rows_per_parallel_job: usize = 16;

@@ -1,3 +1,8 @@
+//! Orchestrates the hybrid shadow pipeline for meshlet-era CPU shadows.
+//! Builds receiver bounds and candidate casters, then dispatches adaptive tile work/ray checks.
+//! Outputs shadow coverage that is consumed by adaptive shadow resolve/composite stages.
+
+
 const std = @import("std");
 const math = @import("../../core/math.zig");
 const config = @import("../../core/app_config.zig");
@@ -17,6 +22,8 @@ const ReceiverBounds = struct {
     min_depth: f32,
 };
 
+/// Runs this module step with the currently bound configuration.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn run(
     ctx: anytype,
     comptime run_fn: fn (@TypeOf(ctx)) void,
@@ -24,6 +31,8 @@ pub fn run(
     run_fn(ctx);
 }
 
+/// Ensures e ns ur es cr at ch and grows backing storage/state when needed.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn ensureScratch(self: anytype, caster_capacity: usize, tile_candidate_capacity: usize, grid_candidate_capacity: usize) !void {
     if (caster_capacity > self.hybrid_shadow_caster_indices.len) {
         self.hybrid_shadow_caster_indices = if (self.hybrid_shadow_caster_indices.len == 0)
@@ -131,6 +140,7 @@ fn collectTileCandidates(self: anytype, receiver_bounds: anytype, candidate_writ
     return stats;
 }
 
+/// buildReceiverBounds builds data structures used by Hybrid Shadow Pass.
 fn buildReceiverBounds(self: anytype, tile: anytype, camera_to_light: anytype) ?ReceiverBounds {
     const tile_min_x = std.math.clamp(tile.x, 0, self.bitmap.width - 1);
     const tile_min_y = std.math.clamp(tile.y, 0, self.bitmap.height - 1);
@@ -182,6 +192,7 @@ fn buildReceiverBounds(self: anytype, tile: anytype, camera_to_light: anytype) ?
     };
 }
 
+/// buildGrid builds data structures used by Hybrid Shadow Pass.
 fn buildGrid(self: anytype, caster_count: usize, light_basis_right: math.Vec3, light_basis_up: math.Vec3) void {
     if (caster_count == 0) {
         self.hybrid_shadow_grid.active = false;
@@ -264,6 +275,7 @@ fn buildGrid(self: anytype, caster_count: usize, light_basis_right: math.Vec3, l
     }
 }
 
+/// runPipeline executes the full Hybrid Shadow Pass pipeline for the current frame.
 pub fn runPipeline(
     self: anytype,
     mesh: anytype,

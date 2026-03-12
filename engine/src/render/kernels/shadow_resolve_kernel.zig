@@ -1,12 +1,19 @@
+//! Implements the Shadow Resolve kernel logic used in renderer jobs.
+//! CPU pixel/compute kernel used by the software renderer post-processing and shading stack.
+
 const std = @import("std");
 const math = @import("../../core/math.zig");
 const cpu_features = @import("../../core/cpu_features.zig");
 const shadow_sample_kernel = @import("shadow_sample_kernel.zig");
 
+/// Clamps a scalar channel value to the byte range `[0, 255]`.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 fn clampByte(value: i32) u8 {
     return @intCast(std.math.clamp(value, 0, 255));
 }
 
+/// Returns the SIMD lane count selected for the current runtime target.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 fn runtimeLanes() usize {
     return switch (cpu_features.detect().preferredVectorBackend()) {
         .avx512 => 32,
@@ -16,6 +23,8 @@ fn runtimeLanes() usize {
     };
 }
 
+/// Applies shadow scale batch simd.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 fn applyShadowScaleBatchSimd(comptime lanes: usize, pixels: *const [lanes]u32, scales: *const [lanes]f32) [lanes]u32 {
     const FloatVec = @Vector(lanes, f32);
     const IntVec = @Vector(lanes, i32);
@@ -53,6 +62,8 @@ fn applyShadowScaleBatchSimd(comptime lanes: usize, pixels: *const [lanes]u32, s
     return result;
 }
 
+/// Runs this kernel over a `[start_row, end_row)` span.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 pub fn runRows(
     pixels: []u32,
     camera_buffer: []const math.Vec3,
@@ -73,6 +84,7 @@ pub fn runRows(
 
         var idx = row_start;
         while (idx + lanes <= row_end and lanes > 1) : (idx += lanes) {
+            // Fixed-size scratch keeps the hot loop stack layout stable across AVX512/AVX2/SSE widths.
             var scales: [32]f32 = [_]f32{1.0} ** 32;
             var pixels_in: [32]u32 = [_]u32{0} ** 32;
             var active_count: usize = 0;
@@ -100,6 +112,7 @@ pub fn runRows(
                 active_count += 1;
             }
 
+            // Skip SIMD writeback entirely when no lane receives shadow attenuation.
             if (active_count == 0) continue;
             switch (lanes) {
                 8 => {
@@ -118,6 +131,7 @@ pub fn runRows(
             }
         }
 
+        // Scalar cleanup handles tail pixels when width is not a multiple of the active SIMD lane width.
         while (idx < row_end) : (idx += 1) {
             const camera_pos = camera_buffer[idx];
             if (!std.math.isFinite(camera_pos.z) or camera_pos.z <= config_value.near_plane) continue;

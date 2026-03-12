@@ -1,7 +1,13 @@
+//! Runs screen-space reflections over the current frame.
+//! Ray-marches reflected directions in screen/depth space and blends valid hits.
+//! Uses row-striped execution to keep reflection cost scalable across CPU workers.
+
 const config = @import("../../core/app_config.zig");
 const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 const ssr_kernel = @import("../kernels/ssr_kernel.zig");
 
+/// Runs this pass over a `[start_row, end_row)` span.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn runRows(
     scene_pixels: []const u32,
     scratch_pixels: []u32,
@@ -36,6 +42,7 @@ pub fn runRows(
     );
 }
 
+/// runPipeline executes the full SSR Pass pipeline for the current frame.
 pub fn runPipeline(self: anytype, projection: anytype, scene_height: usize, comptime noop_job_fn: fn (*anyopaque) void) void {
     if (scene_height == 0) return;
     const min_rows_per_parallel_job: usize = 16;

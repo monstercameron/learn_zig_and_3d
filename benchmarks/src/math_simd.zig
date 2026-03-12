@@ -1,3 +1,5 @@
+//! Math SIMD module.
+//! Benchmark harness module used to measure CPU/scalar/SIMD performance characteristics.
 const std = @import("std");
 const ssimd = @import("ssimd.zig");
 const Vec4f = ssimd.Vec4f;
@@ -11,15 +13,21 @@ pub const Vec2 = struct {
     x: f32,
     y: f32,
 
+    /// Constructs and returns a new value initialized from the provided fields.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn new(x: f32, y: f32) Vec2 {
         return Vec2{ .x = x, .y = y };
     }
 
+    /// Returns the component-wise sum of the provided inputs.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn add(a: Vec2, b: Vec2) Vec2 {
         const sum = Vec2f{ a.x, a.y } + Vec2f{ b.x, b.y };
         return Vec2.new(sum[0], sum[1]);
     }
 
+    /// Returns a fused add-multiply style result used by math/lighting hot paths.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn add_mul(a: Vec2, b: Vec2, c: Vec2) Vec2 {
         const va = Vec2f{ a.x, a.y };
         const vb = Vec2f{ b.x, b.y };
@@ -31,11 +39,15 @@ pub const Vec2 = struct {
         return Vec2.new(fused[0], fused[1]);
     }
 
+    /// Returns the component-wise difference of the provided inputs.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn sub(a: Vec2, b: Vec2) Vec2 {
         const diff = Vec2f{ a.x, a.y } - Vec2f{ b.x, b.y };
         return Vec2.new(diff[0], diff[1]);
     }
 
+    /// Scales the input by the provided scalar factor and returns the result.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn scale(v: Vec2, s: f32) Vec2 {
         const scaled = Vec2f{ v.x, v.y } * Vec2f{ s, s };
         return Vec2.new(scaled[0], scaled[1]);
@@ -50,24 +62,32 @@ pub const Vec3 = struct {
     z: f32,
     _pad: f32 = 0.0,
 
+    /// Constructs and returns a new value initialized from the provided fields.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn new(x: f32, y: f32, z: f32) Vec3 {
         return Vec3{ .x = x, .y = y, .z = z, ._pad = 0.0 };
     }
 
+    /// Returns the component-wise sum of the provided inputs.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn add(a: Vec3, b: Vec3) Vec3 {
         return storeSelf(loadSelf(a) + loadSelf(b));
     }
 
+    /// Returns the component-wise difference of the provided inputs.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn sub(a: Vec3, b: Vec3) Vec3 {
         return storeSelf(loadSelf(a) - loadSelf(b));
     }
 
+    /// Scales the input by the provided scalar factor and returns the result.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn scale(v: Vec3, s: f32) Vec3 {
         const scalar = Vec4f{ s, s, s, s };
         return storeSelf(loadSelf(v) * scalar);
     }
 
-    /// Calculates the dot product of two vectors (a · b).
+    /// Calculates the dot product of two vectors (a ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· b).
     /// The result indicates how much the two vectors point in the same direction.
     /// > 0: Same general direction.
     ///   0: Perpendicular.
@@ -76,7 +96,7 @@ pub const Vec3 = struct {
         return ssimd.dotVec3(loadSelf(a), loadSelf(b));
     }
 
-    /// Calculates the cross product of two vectors (a × b).
+    /// Calculates the cross product of two vectors (a ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â b).
     /// The result is a new vector that is perpendicular to both input vectors.
     /// This is essential for calculating surface normals.
     pub fn cross(a: Vec3, b: Vec3) Vec3 {
@@ -102,6 +122,8 @@ pub const Vec3 = struct {
         return Vec3.scale(v, 1.0 / len);
     }
 
+    /// Loads l oa ds el f from external or cached data sources.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     inline fn loadSelf(v: Vec3) Vec4f {
         return ssimd.loadVec3(Vec3, v);
     }
@@ -125,14 +147,20 @@ pub const Vec4 = struct {
     z: f32,
     w: f32,
 
+    /// Constructs and returns a new value initialized from the provided fields.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn new(x: f32, y: f32, z: f32, w: f32) Vec4 {
         return Vec4{ .x = x, .y = y, .z = z, .w = w };
     }
 
+    /// Returns the component-wise sum of the provided inputs.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn add(a: Vec4, b: Vec4) Vec4 {
         return storeVec(loadVec(a) + loadVec(b));
     }
 
+    /// Returns a fused add-multiply style result used by math/lighting hot paths.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn add_mul(a: Vec4, b: Vec4, c: Vec4) Vec4 {
         const va = loadVec(a);
         const vb = loadVec(b);
@@ -144,23 +172,33 @@ pub const Vec4 = struct {
         return storeVec(fused);
     }
 
+    /// Returns the component-wise difference of the provided inputs.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn sub(a: Vec4, b: Vec4) Vec4 {
         return storeVec(loadVec(a) - loadVec(b));
     }
 
+    /// Scales the input by the provided scalar factor and returns the result.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn scale(v: Vec4, s: f32) Vec4 {
         const scalar = Vec4f{ s, s, s, s };
         return storeVec(loadVec(v) * scalar);
     }
 
+    /// Computes and returns the dot product of the input vectors.
+    /// It provides deterministic utility math used by multiple rendering and simulation call-sites.
     pub fn dot(a: Vec4, b: Vec4) f32 {
         return ssimd.dot4(loadVec(a), loadVec(b));
     }
 
+    /// Computes and returns vector magnitude.
+    /// It provides deterministic utility math used by multiple rendering and simulation call-sites.
     pub fn length(v: Vec4) f32 {
         return @sqrt(Vec4.dot(v, v));
     }
 
+    /// Returns a normalized vector with unit length (or zero when length is zero).
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn normalize(v: Vec4) Vec4 {
         const len = v.length();
         if (len == 0) return Vec4.new(0, 0, 0, 0);
@@ -178,6 +216,8 @@ pub const Vec4 = struct {
         return Vec3.new(v.x / v.w, v.y / v.w, v.z / v.w);
     }
 
+    /// Loads l oa dv ec from external or cached data sources.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     inline fn loadVec(v: Vec4) Vec4f {
         return Vec4f{ v.x, v.y, v.z, v.w };
     }

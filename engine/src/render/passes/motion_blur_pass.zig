@@ -1,3 +1,8 @@
+//! Applies camera/object motion blur by reprojecting and accumulating along motion direction.
+//! Uses depth/camera history signals to stabilize sampling and reduce obvious ghosting.
+//! Executed as striped row jobs so sample-heavy blur remains parallel on CPU.
+
+
 const std = @import("std");
 const math = @import("../../core/math.zig");
 const config = @import("../../core/app_config.zig");
@@ -32,6 +37,7 @@ fn cameraToWorldPosition(
     );
 }
 
+/// projectCameraPositionFloat projects coordinates for Motion Blur Pass calculations.
 fn projectCameraPositionFloat(position: math.Vec3, projection: anytype) math.Vec2 {
     const clamped_z = if (position.z < projection.near_plane + near_epsilon)
         projection.near_plane + near_epsilon
@@ -46,6 +52,8 @@ fn projectCameraPositionFloat(position: math.Vec3, projection: anytype) math.Vec
     };
 }
 
+/// Runs this pass over a `[start_row, end_row)` span.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn runRows(
     src_pixels: []const u32,
     dst_pixels: []u32,
@@ -132,6 +140,7 @@ pub fn runRows(
     }
 }
 
+/// runPipeline executes the full Motion Blur Pass pipeline for the current frame.
 pub fn runPipeline(self: anytype, current_view: anytype, height: usize, width: usize, comptime noop_job_fn: fn (*anyopaque) void) void {
     if (height == 0) return;
     const min_rows_per_parallel_job: usize = 16;

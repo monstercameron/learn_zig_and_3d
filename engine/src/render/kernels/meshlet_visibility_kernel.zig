@@ -1,3 +1,6 @@
+//! Implements the Meshlet Visibility kernel logic used in renderer jobs.
+//! CPU pixel/compute kernel used by the software renderer post-processing and shading stack.
+
 const std = @import("std");
 const compute = @import("compute.zig");
 const math = @import("../../math.zig");
@@ -22,6 +25,8 @@ const MeshletCullPC = extern struct {
     _pad4: f32 = 0.0,
 };
 
+/// Loads l oa dp us hc on st an ts from external or cached data sources.
+/// Reads bound inputs from `ctx`, processes the current dispatch work, and writes results to the configured outputs.
 fn loadPushConstants(ctx: *const compute.ComputeContext) ?*const MeshletCullPC {
     const raw = ctx.push_constants orelse return null;
     if (raw.len < @sizeOf(MeshletCullPC)) return null;
@@ -61,6 +66,8 @@ pub const MeshletVisibilityKernel = struct {
     pub const group_size_y: u32 = 1;
     pub const SharedSize: usize = 0;
 
+    /// Kernel entry point executed by the compute dispatcher for this pass.
+    /// Reads bound inputs from `ctx`, processes the current dispatch work, and writes results to the configured outputs.
     pub fn main(ctx: *compute.ComputeContext) void {
         const pc = loadPushConstants(ctx) orelse return;
         const meshlet_index = ctx.global_id.x;

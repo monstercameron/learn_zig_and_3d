@@ -1,3 +1,7 @@
+//! Helper utilities for Temporal AA history sampling, validation, and blending.
+//! Contains surface-tag logic, neighborhood clamps, and SIMD-friendly color blend helpers.
+//! Used by TAA passes/kernels to keep reprojection and history rules consistent.
+
 const std = @import("std");
 const math = @import("../../core/math.zig");
 const TileRenderer = @import("../core/tile_renderer.zig");
@@ -10,10 +14,13 @@ pub const HistoryNearestSample = struct {
     tag: u64,
 };
 
+/// Clamps a scalar channel value to the byte range `[0, 255]`.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 fn clampByte(value: i32) u8 {
     return @intCast(@max(0, @min(255, value)));
 }
 
+/// sampleHistoryColor samples values used by TAA Helpers.
 pub fn sampleHistoryColor(history: []const u32, width: usize, height: usize, screen: math.Vec2) ?[3]f32 {
     const w_f = @as(f32, @floatFromInt(width));
     const h_f = @as(f32, @floatFromInt(height));
@@ -53,6 +60,7 @@ pub fn sampleHistoryColor(history: []const u32, width: usize, height: usize, scr
     };
 }
 
+/// sampleHistoryColorNearest samples values used by TAA Helpers.
 pub fn sampleHistoryColorNearest(history: []const u32, width: usize, height: usize, screen: math.Vec2) ?[3]f32 {
     const x = @as(i32, @intFromFloat(@floor(screen.x)));
     const y = @as(i32, @intFromFloat(@floor(screen.y)));
@@ -65,6 +73,7 @@ pub fn sampleHistoryColorNearest(history: []const u32, width: usize, height: usi
     };
 }
 
+/// sampleHistoryNearest samples values used by TAA Helpers.
 pub fn sampleHistoryNearest(history_pixels: []const u32, history_depth: []const f32, history_surface_tags: []const u64, width: usize, height: usize, screen: math.Vec2) ?HistoryNearestSample {
     const x = @as(i32, @intFromFloat(@floor(screen.x)));
     const y = @as(i32, @intFromFloat(@floor(screen.y)));
@@ -87,6 +96,8 @@ pub fn sampleHistoryNearest(history_pixels: []const u32, history_depth: []const 
     };
 }
 
+/// Packs p ac kh is to ry no rm al into a compact representation.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn packHistoryNormal(normal: math.Vec3) u32 {
     const nx = clampByte(@as(i32, @intFromFloat((std.math.clamp(normal.x, -1.0, 1.0) * 0.5 + 0.5) * 255.0 + 0.5)));
     const ny = clampByte(@as(i32, @intFromFloat((std.math.clamp(normal.y, -1.0, 1.0) * 0.5 + 0.5) * 255.0 + 0.5)));
@@ -94,6 +105,8 @@ pub fn packHistoryNormal(normal: math.Vec3) u32 {
     return (@as(u32, nx) << 16) | (@as(u32, ny) << 8) | @as(u32, nz);
 }
 
+/// Unpacks u np ac kh is to ry no rm al from its packed representation.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 fn unpackHistoryNormal(packed_normal: u32) math.Vec3 {
     const nx = (@as(f32, @floatFromInt((packed_normal >> 16) & 0xFF)) / 255.0) * 2.0 - 1.0;
     const ny = (@as(f32, @floatFromInt((packed_normal >> 8) & 0xFF)) / 255.0) * 2.0 - 1.0;
@@ -101,6 +114,7 @@ fn unpackHistoryNormal(packed_normal: u32) math.Vec3 {
     return math.Vec3.normalize(math.Vec3.new(nx, ny, nz));
 }
 
+/// sampleHistoryNormalNearest samples values used by TAA Helpers.
 pub fn sampleHistoryNormalNearest(history_normals: []const u32, width: usize, height: usize, screen: math.Vec2) ?math.Vec3 {
     const x = @as(i32, @intFromFloat(@floor(screen.x)));
     const y = @as(i32, @intFromFloat(@floor(screen.y)));
@@ -108,15 +122,21 @@ pub fn sampleHistoryNormalNearest(history_normals: []const u32, width: usize, he
     return unpackHistoryNormal(history_normals[@as(usize, @intCast(y)) * width + @as(usize, @intCast(x))]);
 }
 
+/// Performs surface tag for handle.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn surfaceTagForHandle(handle: TileRenderer.SurfaceHandle) u64 {
     if (!handle.isValid()) return invalid_surface_tag;
     return (@as(u64, handle.meshlet_id) << 32) | @as(u64, handle.triangle_id);
 }
 
+/// Performs surface tag meshlet id.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn surfaceTagMeshletId(tag: u64) u32 {
     return @intCast(tag >> 32);
 }
 
+/// Clamps history to surface neighborhood to the valid domain used by downstream code.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn clampHistoryToSurfaceNeighborhood(
     pixels: []const u32,
     surface_handles: []const TileRenderer.SurfaceHandle,
@@ -172,6 +192,8 @@ pub fn clampHistoryToSurfaceNeighborhood(
     };
 }
 
+/// Performs surface history edge factor.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 pub fn surfaceHistoryEdgeFactor(surface_handles: []const TileRenderer.SurfaceHandle, width: usize, height: usize, x: usize, y: usize) f32 {
     const center = surface_handles[y * width + x];
     if (!center.isValid()) return 0.6;
@@ -194,6 +216,8 @@ pub fn surfaceHistoryEdgeFactor(surface_handles: []const TileRenderer.SurfaceHan
     return 0.5;
 }
 
+/// Clamps history to neighborhood to the valid domain used by downstream code.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn clampHistoryToNeighborhood(pixels: []const u32, width: usize, height: usize, x: usize, y: usize, history_color: [3]f32) [3]f32 {
     var mu = [3]f32{ 0.0, 0.0, 0.0 };
     var m2 = [3]f32{ 0.0, 0.0, 0.0 };
@@ -227,6 +251,7 @@ pub fn clampHistoryToNeighborhood(pixels: []const u32, width: usize, height: usi
     };
 }
 
+/// blendTemporalColor blends intermediate values for TAA Helpers.
 pub fn blendTemporalColor(current_pixel: u32, history_color: [3]f32, history_weight: f32) u32 {
     const alpha = current_pixel & 0xFF000000;
     const current_weight = 1.0 - history_weight;
@@ -239,6 +264,7 @@ pub fn blendTemporalColor(current_pixel: u32, history_color: [3]f32, history_wei
     return alpha | (@as(u32, clampByte(out_r)) << 16) | (@as(u32, clampByte(out_g)) << 8) | @as(u32, clampByte(out_b));
 }
 
+/// blendTemporalColorBatchSimd blends intermediate values for TAA Helpers.
 fn blendTemporalColorBatchSimd(comptime lanes: usize, current_pixels: *const [lanes]u32, history_colors: *const [lanes][3]f32, history_weights: *const [lanes]f32) [lanes]u32 {
     const FloatVec = @Vector(lanes, f32);
     const IntVec = @Vector(lanes, i32);
@@ -277,6 +303,7 @@ fn blendTemporalColorBatchSimd(comptime lanes: usize, current_pixels: *const [la
     return result;
 }
 
+/// blendTemporalColorBatch blends intermediate values for TAA Helpers.
 pub fn blendTemporalColorBatch(current_pixels: []const u32, history_colors: []const [3]f32, history_weights: []const f32, output: []u32) void {
     std.debug.assert(current_pixels.len == history_colors.len);
     std.debug.assert(current_pixels.len == history_weights.len);
@@ -303,6 +330,8 @@ pub fn blendTemporalColorBatch(current_pixels: []const u32, history_colors: []co
     }
 }
 
+/// Performs pixel luma.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn pixelLuma(pixel: u32) f32 {
     const r = @as(f32, @floatFromInt((pixel >> 16) & 0xFF));
     const g = @as(f32, @floatFromInt((pixel >> 8) & 0xFF));
@@ -310,6 +339,8 @@ pub fn pixelLuma(pixel: u32) f32 {
     return (r * 0.299) + (g * 0.587) + (b * 0.114);
 }
 
+/// Performs color luma.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn colorLuma(color: [3]f32) f32 {
     return (color[0] * 0.299) + (color[1] * 0.587) + (color[2] * 0.114);
 }

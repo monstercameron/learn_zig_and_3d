@@ -32,6 +32,8 @@ pub const SurfaceHandle = packed struct {
     bary_u: u16,
     bary_v: u16,
 
+    /// Returns the invalid sentinel value for this handle/id type.
+    /// Keeps invalid as the single implementation point so call-site behavior stays consistent.
     pub fn invalid() SurfaceHandle {
         return .{
             .triangle_id = invalid_surface_id,
@@ -41,6 +43,7 @@ pub const SurfaceHandle = packed struct {
         };
     }
 
+    /// init initializes Tile Renderer state and returns the configured value.
     pub fn init(triangle_id: usize, meshlet_id: usize, bary: math.Vec3) SurfaceHandle {
         const u = std.math.clamp(bary.x, 0.0, 1.0);
         const v = std.math.clamp(bary.y, 0.0, 1.0 - u);
@@ -52,10 +55,14 @@ pub const SurfaceHandle = packed struct {
         };
     }
 
+    /// Returns whether i sv al id.
+    /// The check is side-effect free so callers can gate expensive follow-up work cheaply.
     pub fn isValid(self: SurfaceHandle) bool {
         return self.triangle_id != invalid_surface_id and self.meshlet_id != invalid_surface_id;
     }
 
+    /// Performs barycentrics.
+    /// Keeps barycentrics as the single implementation point so call-site behavior stays consistent.
     pub fn barycentrics(self: SurfaceHandle) math.Vec3 {
         const u = @as(f32, @floatFromInt(self.bary_u)) / 65535.0;
         const v = @as(f32, @floatFromInt(self.bary_v)) / 65535.0;
@@ -99,14 +106,19 @@ pub const Tile = struct {
     height: i32, // The height of the tile.
     index: usize, // The unique index of this tile within the grid.
 
+    /// init initializes Tile Renderer state and returns the configured value.
     pub fn init(x: i32, y: i32, width: i32, height: i32, index: usize) Tile {
         return Tile{ .x = x, .y = y, .width = width, .height = height, .index = index };
     }
 
+    /// Performs right.
+    /// Keeps right as the single implementation point so call-site behavior stays consistent.
     pub fn right(self: Tile) i32 {
         return self.x + self.width;
     }
 
+    /// Performs bottom.
+    /// Keeps bottom as the single implementation point so call-site behavior stays consistent.
     pub fn bottom(self: Tile) i32 {
         return self.y + self.height;
     }
@@ -128,6 +140,7 @@ pub const TileBuffer = struct {
     height: i32,
     allocator: std.mem.Allocator,
 
+    /// init initializes Tile Renderer state and returns the configured value.
     pub fn init(width: i32, height: i32, allocator: std.mem.Allocator) !TileBuffer {
         const pixel_count = @as(usize, @intCast(width * height));
         const data = try allocator.alloc(PixelData, pixel_count);
@@ -148,6 +161,7 @@ pub const TileBuffer = struct {
         @memset(self.depth, std.math.inf(f32));
     }
 
+    /// deinit releases resources owned by Tile Renderer.
     pub fn deinit(self: *TileBuffer) void {
         self.allocator.free(self.data);
         self.allocator.free(self.depth);
@@ -187,6 +201,7 @@ pub const TileGrid = struct {
         return TileGrid{ .tiles = tiles, .cols = cols, .rows = rows, .screen_width = screen_width, .screen_height = screen_height, .allocator = allocator };
     }
 
+    /// deinit releases resources owned by Tile Renderer.
     pub fn deinit(self: *TileGrid) void {
         self.allocator.free(self.tiles);
     }
@@ -273,6 +288,8 @@ pub fn drawTileBoundaries(grid: *const TileGrid, bitmap: *Bitmap) void {
 
 const max_span_batch_lanes = 8;
 
+/// Returns runtime span batch lanes.
+/// Keeps runtime span batch lanes as the single implementation point so call-site behavior stays consistent.
 fn runtimeSpanBatchLanes() usize {
     return switch (cpu_features.detect().preferredVectorBackend()) {
         .avx512, .avx2 => 8,

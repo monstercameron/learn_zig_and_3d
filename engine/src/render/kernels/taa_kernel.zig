@@ -1,9 +1,13 @@
+//! Implements the TAA kernel logic used in renderer jobs.
+//! CPU pixel/compute kernel used by the software renderer post-processing and shading stack.
 const std = @import("std");
 
 pub const TemporalResolveParams = struct {
     history_weight: f32,
 };
 
+/// Resolves r es ol ve pi xe l into a final normalized result.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 pub fn resolvePixel(current_pixel: u32, history_pixel: u32, params: TemporalResolveParams) u32 {
     const w = std.math.clamp(params.history_weight, 0.0, 1.0);
     const cw = 1.0 - w;
@@ -28,6 +32,8 @@ pub fn resolvePixel(current_pixel: u32, history_pixel: u32, params: TemporalReso
     return 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b;
 }
 
+/// Resolves r es ol ve pi xe lb at ch into a final normalized result.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 pub fn resolvePixelBatch(current_pixels: []const u32, history_pixels: []const u32, params: TemporalResolveParams, out_pixels: []u32) void {
     const len = @min(current_pixels.len, @min(history_pixels.len, out_pixels.len));
     var i: usize = 0;

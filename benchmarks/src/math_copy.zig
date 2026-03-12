@@ -1,3 +1,6 @@
+//! Math Copy module.
+//! Benchmark harness module used to measure CPU/scalar/SIMD performance characteristics.
+
 const std = @import("std");
 const ssimd = @import("ssimd.zig");
 
@@ -16,6 +19,8 @@ else
     0;
 const supports_vec4_batches = vec4_batch != 0;
 
+/// Loads l oa dv ec3 from external or cached data sources.
+/// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
 inline fn loadVec3(v: Vec3) Vec4f {
     return ssimd.loadVec3(Vec3, v);
 }
@@ -24,6 +29,8 @@ inline fn storeVec3(vec: Vec4f) Vec3 {
     return ssimd.storeVec3(Vec3, vec);
 }
 
+/// Loads l oa dv ec4 from external or cached data sources.
+/// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
 inline fn loadVec4(v: Vec4) Vec4f {
     return Vec4f{ v.x, v.y, v.z, v.w };
 }
@@ -40,15 +47,21 @@ pub const Vec2 = struct {
     x: f32,
     y: f32,
 
+    /// Constructs and returns a new value initialized from the provided fields.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn new(x: f32, y: f32) Vec2 {
         return Vec2{ .x = x, .y = y };
     }
 
+    /// Returns the component-wise sum of the provided inputs.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn add(a: Vec2, b: Vec2) Vec2 {
         const sum = Vec2f{ a.x, a.y } + Vec2f{ b.x, b.y };
         return Vec2.new(sum[0], sum[1]);
     }
 
+    /// Returns a fused add-multiply style result used by math/lighting hot paths.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn add_mul(a: Vec2, b: Vec2, c: Vec2) Vec2 {
         const va = Vec2f{ a.x, a.y };
         const vb = Vec2f{ b.x, b.y };
@@ -60,17 +73,23 @@ pub const Vec2 = struct {
         return Vec2.new(fused[0], fused[1]);
     }
 
+    /// Returns the component-wise difference of the provided inputs.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn sub(a: Vec2, b: Vec2) Vec2 {
         const diff = Vec2f{ a.x, a.y } - Vec2f{ b.x, b.y };
         return Vec2.new(diff[0], diff[1]);
     }
 
+    /// Scales the input by the provided scalar factor and returns the result.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn scale(v: Vec2, s: f32) Vec2 {
         const scaled = Vec2f{ v.x, v.y } * Vec2f{ s, s };
         return Vec2.new(scaled[0], scaled[1]);
     }
 };
 
+/// Runs a dd sl ic ev ec2.
+/// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
 pub fn addSliceVec2(result: []Vec2, lhs: []const Vec2, rhs: []const Vec2) void {
     std.debug.assert(result.len == lhs.len and lhs.len == rhs.len);
     if (supports_vec2_batches and result.len >= vec2_batch and vec2_batch != 0) {
@@ -83,6 +102,8 @@ pub fn addSliceVec2(result: []Vec2, lhs: []const Vec2, rhs: []const Vec2) void {
     }
 }
 
+/// Runs a dd mu ls li ce ve c2.
+/// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
 pub fn addMulSliceVec2(
     result: []Vec2,
     acc: []const Vec2,
@@ -100,6 +121,8 @@ pub fn addMulSliceVec2(
     }
 }
 
+/// Runs a dd sl ic ev ec4.
+/// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
 pub fn addSliceVec4(result: []Vec4, lhs: []const Vec4, rhs: []const Vec4) void {
     std.debug.assert(result.len == lhs.len and lhs.len == rhs.len);
     if (supports_vec4_batches and result.len >= vec4_batch and vec4_batch != 0) {
@@ -112,6 +135,8 @@ pub fn addSliceVec4(result: []Vec4, lhs: []const Vec4, rhs: []const Vec4) void {
     }
 }
 
+/// Runs a dd mu ls li ce ve c4.
+/// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
 pub fn addMulSliceVec4(
     result: []Vec4,
     acc: []const Vec4,
@@ -138,15 +163,21 @@ pub const Vec3 = struct {
     z: f32,
     _pad: f32 = 0.0,
 
+    /// Constructs and returns a new value initialized from the provided fields.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn new(x: f32, y: f32, z: f32) Vec3 {
         return Vec3{ .x = x, .y = y, .z = z, ._pad = 0.0 };
     }
 
+    /// Returns the component-wise sum of the provided inputs.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn add(a: Vec3, b: Vec3) Vec3 {
         const sum = loadVec3(a) + loadVec3(b);
         return storeVec3(sum);
     }
 
+    /// Returns a fused add-multiply style result used by math/lighting hot paths.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn add_mul(a: Vec3, b: Vec3, c: Vec3) Vec3 {
         const va = loadVec3(a);
         const vb = loadVec3(b);
@@ -154,11 +185,15 @@ pub const Vec3 = struct {
         return storeVec3(ssimd.fmaddVec3(va, vb, vc));
     }
 
+    /// Returns the component-wise difference of the provided inputs.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn sub(a: Vec3, b: Vec3) Vec3 {
         const diff = loadVec3(a) - loadVec3(b);
         return storeVec3(diff);
     }
 
+    /// Scales the input by the provided scalar factor and returns the result.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn scale(v: Vec3, s: f32) Vec3 {
         const scalar = Vec4f{ s, s, s, s };
         return storeVec3(loadVec3(v) * scalar);
@@ -202,14 +237,20 @@ pub const Vec4 = struct {
     z: f32,
     w: f32,
 
+    /// Constructs and returns a new value initialized from the provided fields.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn new(x: f32, y: f32, z: f32, w: f32) Vec4 {
         return Vec4{ .x = x, .y = y, .z = z, .w = w };
     }
 
+    /// Returns the component-wise sum of the provided inputs.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn add(a: Vec4, b: Vec4) Vec4 {
         return storeVec4(loadVec4(a) + loadVec4(b));
     }
 
+    /// Returns a fused add-multiply style result used by math/lighting hot paths.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn add_mul(a: Vec4, b: Vec4, c: Vec4) Vec4 {
         const va = loadVec4(a);
         const vb = loadVec4(b);
@@ -217,23 +258,33 @@ pub const Vec4 = struct {
         return storeVec4(ssimd.fmaddVec4(va, vb, vc));
     }
 
+    /// Returns the component-wise difference of the provided inputs.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn sub(a: Vec4, b: Vec4) Vec4 {
         return storeVec4(loadVec4(a) - loadVec4(b));
     }
 
+    /// Scales the input by the provided scalar factor and returns the result.
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn scale(v: Vec4, s: f32) Vec4 {
         const scalar = Vec4f{ s, s, s, s };
         return storeVec4(loadVec4(v) * scalar);
     }
 
+    /// Computes and returns the dot product of the input vectors.
+    /// It provides deterministic utility math used by multiple rendering and simulation call-sites.
     pub fn dot(a: Vec4, b: Vec4) f32 {
         return ssimd.dot4(loadVec4(a), loadVec4(b));
     }
 
+    /// Computes and returns vector magnitude.
+    /// It provides deterministic utility math used by multiple rendering and simulation call-sites.
     pub fn length(v: Vec4) f32 {
         return @sqrt(Vec4.dot(v, v));
     }
 
+    /// Returns a normalized vector with unit length (or zero when length is zero).
+    /// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
     pub fn normalize(v: Vec4) Vec4 {
         const len = v.length();
         if (len == 0) return Vec4.new(0, 0, 0, 0);
@@ -516,6 +567,8 @@ fn addSliceAvx2(result: []Vec3, lhs: []const Vec3, rhs: []const Vec3) void {
     }
 }
 
+/// Computes add mul slice.
+/// Implemented with straightforward arithmetic/SIMD-friendly operations suitable for high-frequency call sites.
 pub fn addMulSlice(
     result: []Vec3,
     acc: []const Vec3,

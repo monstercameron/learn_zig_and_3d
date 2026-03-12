@@ -34,10 +34,14 @@ inline fn readU16le(bytes: []const u8) u16 {
     return (@as(u16, bytes[0])) | (@as(u16, bytes[1]) << 8);
 }
 
+/// Reads u32le.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 inline fn readU32le(bytes: []const u8) u32 {
     return (@as(u32, bytes[0])) | (@as(u32, bytes[1]) << 8) | (@as(u32, bytes[2]) << 16) | (@as(u32, bytes[3]) << 24);
 }
 
+/// Reads i32le.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 inline fn readI32le(bytes: []const u8) i32 {
     return @bitCast(readU32le(bytes));
 }
@@ -50,6 +54,7 @@ pub const Texture = struct {
     mip_levels: std.ArrayList([]u32), // Precomputed mipmaps
     allocator: std.mem.Allocator,
 
+    /// deinit releases resources owned by Texture.
     pub fn deinit(self: *Texture) void {
         for (self.mip_levels.items) |mip| {
             self.allocator.free(mip);
@@ -65,6 +70,7 @@ pub const Texture = struct {
         return self.sampleLod(uv, 0.0);
     }
 
+    /// sampleLod samples values used by Texture.
     pub fn sampleLod(self: *const Texture, uv: math.Vec2, lod: f32) u32 {
         if (self.width == 0 or self.height == 0) return 0xFF000000;
 
@@ -87,6 +93,7 @@ pub const Texture = struct {
         }
     }
 
+    /// sampleLodBatch samples values used by Texture.
     pub fn sampleLodBatch(self: *const Texture, uvs: []const math.Vec2, lod: f32, out: []u32) void {
         std.debug.assert(uvs.len == out.len);
         if (uvs.len == 0) return;
@@ -138,6 +145,7 @@ pub const Texture = struct {
         }
     }
 
+    /// sampleNearestImpl samples values used by Texture.
     fn sampleNearestImpl(pixels: []const u32, w: usize, h: usize, uv: math.Vec2) u32 {
         const u = std.math.clamp(uv.x, 0.0, 1.0);
         const v = std.math.clamp(uv.y, 0.0, 1.0);
@@ -153,6 +161,7 @@ pub const Texture = struct {
         return pixels[y * w + x];
     }
 
+    /// sampleBilinearImpl samples values used by Texture.
     fn sampleBilinearImpl(pixels: []const u32, w: usize, h: usize, uv: math.Vec2) u32 {
         const u = std.math.clamp(uv.x, 0.0, 1.0);
         const v = std.math.clamp(uv.y, 0.0, 1.0);
@@ -204,6 +213,8 @@ pub const Texture = struct {
     }
 };
 
+/// Returns runtime texture batch lanes.
+/// Keeps runtime texture batch lanes as the single implementation point so call-site behavior stays consistent.
 fn runtimeTextureBatchLanes() usize {
     return switch (cpu_features.detect().preferredVectorBackend()) {
         .avx512 => 16,
@@ -213,6 +224,7 @@ fn runtimeTextureBatchLanes() usize {
     };
 }
 
+/// sampleBilinearBatchImpl samples values used by Texture.
 fn sampleBilinearBatchImpl(comptime lanes: usize, pixels: []const u32, w: usize, h: usize, uvs: *const [lanes]math.Vec2) [lanes]u32 {
     const FloatVec = @Vector(lanes, f32);
     const U32Vec = @Vector(lanes, u32);
@@ -415,6 +427,7 @@ pub const HdrTexture = struct {
     pixels: []math.Vec3, // Array of RGB floats
     allocator: std.mem.Allocator,
 
+    /// deinit releases resources owned by Texture.
     pub fn deinit(self: *HdrTexture) void {
         self.allocator.free(self.pixels);
     }
@@ -453,6 +466,7 @@ pub const HdrTexture = struct {
         // Nearest neighbor for speed! Bilinear on a 4K texture is too much bandwidth
         return self.pixels[y0 * self.width + x0];
     }
+    /// sampleEquirectangular samples values used by Texture.
     pub fn sampleEquirectangular(self: *const HdrTexture, dir: math.Vec3) math.Vec3 {
         if (self.width == 0 or self.height == 0) return math.Vec3.new(0, 0, 0);
 
@@ -501,6 +515,8 @@ pub const HdrTexture = struct {
     }
 };
 
+/// Loads l oa dh dr ra w from external or cached data sources.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 pub fn loadHdrRaw(allocator: std.mem.Allocator, path: []const u8) !HdrTexture {
     var file = try std.fs.cwd().openFile(path, .{});
     defer file.close();

@@ -1,3 +1,7 @@
+//! Orchestrates SSAO as a multi-stage pass: generate, blur horizontal, blur vertical, composite.
+//! Generation estimates local occlusion from depth/normal neighborhood sampling.
+//! Blur/composite stages denoise and apply AO to scene color using parallel row dispatch.
+
 const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 const ssao_sample_kernel = @import("../kernels/ssao_sample_kernel.zig");
 const ssao_blur_kernel = @import("../kernels/ssao_blur_kernel.zig");
@@ -9,6 +13,8 @@ pub const Stage = enum {
     composite,
 };
 
+/// Builds the typed job-context wrapper used by this pass/kernel dispatch.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn JobContext(
     comptime RendererType: type,
     comptime generate_fn: anytype,
@@ -24,6 +30,8 @@ pub fn JobContext(
         start_row: usize,
         end_row: usize,
 
+        /// Runs this module step with the currently bound configuration.
+        /// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
         pub fn run(ctx_ptr: *anyopaque) void {
             const ctx: *@This() = @ptrCast(@alignCast(ctx_ptr));
             switch (ctx.stage) {
@@ -65,6 +73,8 @@ pub fn JobContext(
     };
 }
 
+/// Runs stage range.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 fn runStageRange(
     self: anytype,
     stage: Stage,
@@ -85,6 +95,7 @@ fn runStageRange(
     }
 }
 
+/// dispatchStage dispatches SSAO Pass jobs across workers.
 fn dispatchStage(
     self: anytype,
     stage: Stage,
@@ -153,6 +164,7 @@ fn dispatchStage(
     parent_job.wait();
 }
 
+/// runPipeline executes the full SSAO Pass pipeline for the current frame.
 pub fn runPipeline(
     self: anytype,
     scene_width: usize,

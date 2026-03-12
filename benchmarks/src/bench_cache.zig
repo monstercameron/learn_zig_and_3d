@@ -1,3 +1,6 @@
+//! Microbenchmark focused on Cache behavior and performance.
+//! Benchmark harness module used to measure CPU/scalar/SIMD performance characteristics.
+
 const std = @import("std");
 const math_ssimd = @import("math_copy.zig");
 const math_scalar = @import("math_scalar.zig");
@@ -233,58 +236,86 @@ fn benchmarkVec4ArrayAddMulImpl(comptime Math: type, allocator: std.mem.Allocato
     return timer.read();
 }
 
+/// Performs benchmark vec3 array add scalar.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 pub fn benchmarkVec3ArrayAddScalar(allocator: std.mem.Allocator) !u64 {
     return benchmarkVec3ArrayAddImpl(math_scalar, allocator);
 }
 
+/// Performs benchmark vec3 array add optimized.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 pub fn benchmarkVec3ArrayAddOptimized(allocator: std.mem.Allocator) !u64 {
     return benchmarkVec3ArrayAddImpl(math_ssimd, allocator);
 }
 
+/// Performs benchmark vec3 array add mul scalar.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 pub fn benchmarkVec3ArrayAddMulScalar(allocator: std.mem.Allocator) !u64 {
     return benchmarkVec3ArrayAddMulImpl(math_scalar, allocator);
 }
 
+/// Performs benchmark vec3 array add mul optimized.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 pub fn benchmarkVec3ArrayAddMulOptimized(allocator: std.mem.Allocator) !u64 {
     return benchmarkVec3ArrayAddMulImpl(math_ssimd, allocator);
 }
 
+/// Performs benchmark vec2 array add scalar.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 pub fn benchmarkVec2ArrayAddScalar(allocator: std.mem.Allocator) !u64 {
     return benchmarkVec2ArrayAddImpl(math_scalar, allocator);
 }
 
+/// Performs benchmark vec2 array add optimized.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 pub fn benchmarkVec2ArrayAddOptimized(allocator: std.mem.Allocator) !u64 {
     return benchmarkVec2ArrayAddImpl(math_ssimd, allocator);
 }
 
+/// Performs benchmark vec2 array add mul scalar.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 pub fn benchmarkVec2ArrayAddMulScalar(allocator: std.mem.Allocator) !u64 {
     return benchmarkVec2ArrayAddMulImpl(math_scalar, allocator);
 }
 
+/// Performs benchmark vec2 array add mul optimized.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 pub fn benchmarkVec2ArrayAddMulOptimized(allocator: std.mem.Allocator) !u64 {
     return benchmarkVec2ArrayAddMulImpl(math_ssimd, allocator);
 }
 
+/// Performs benchmark vec4 array add scalar.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 pub fn benchmarkVec4ArrayAddScalar(allocator: std.mem.Allocator) !u64 {
     return benchmarkVec4ArrayAddImpl(math_scalar, allocator);
 }
 
+/// Performs benchmark vec4 array add optimized.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 pub fn benchmarkVec4ArrayAddOptimized(allocator: std.mem.Allocator) !u64 {
     return benchmarkVec4ArrayAddImpl(math_ssimd, allocator);
 }
 
+/// Performs benchmark vec4 array add mul scalar.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 pub fn benchmarkVec4ArrayAddMulScalar(allocator: std.mem.Allocator) !u64 {
     return benchmarkVec4ArrayAddMulImpl(math_scalar, allocator);
 }
 
+/// Performs benchmark vec4 array add mul optimized.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 pub fn benchmarkVec4ArrayAddMulOptimized(allocator: std.mem.Allocator) !u64 {
     return benchmarkVec4ArrayAddMulImpl(math_ssimd, allocator);
 }
 
+/// Performs benchmark vec3 array add.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 pub fn benchmarkVec3ArrayAdd(allocator: std.mem.Allocator) !u64 {
     return benchmarkVec3ArrayAddOptimized(allocator);
 }
 
+/// Performs benchmark vec3 array add mul.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 pub fn benchmarkVec3ArrayAddMul(allocator: std.mem.Allocator) !u64 {
     return benchmarkVec3ArrayAddMulOptimized(allocator);
 }

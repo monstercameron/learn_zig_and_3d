@@ -1,3 +1,7 @@
+//! Row-kernel implementations for SSAO generation, bilateral blur, and final composite.
+//! Picks runtime SIMD lanes and keeps loops contiguous for CPU cache efficiency.
+//! Called by SSAO orchestration stages to process exact row ranges.
+
 const std = @import("std");
 const math = @import("../../core/math.zig");
 const cpu_features = @import("../../core/cpu_features.zig");
@@ -9,6 +13,8 @@ const ao_sample_offsets = [_][2]i32{
     .{ 1, 1 }, .{ -1, 1 }, .{ 1, -1 }, .{ -1, -1 },
 };
 
+/// Returns the SIMD lane count selected for the current runtime target.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 fn runtimeLanes() usize {
     return switch (cpu_features.detect().preferredVectorBackend()) {
         .avx512 => 32,
@@ -18,6 +24,7 @@ fn runtimeLanes() usize {
     };
 }
 
+/// renderRows renders SSAO Rows output.
 pub fn renderRows(scene_camera: []const math.Vec3, scene_width: usize, scene_height: usize, ao: anytype, config_value: anytype, start_row: usize, end_row: usize) void {
     const radius_sq = config_value.radius * config_value.radius;
     const sample_step = @as(i32, @intCast(@max(1, config_value.downsample)));
@@ -76,6 +83,8 @@ pub fn renderRows(scene_camera: []const math.Vec3, scene_width: usize, scene_hei
     }
 }
 
+/// Processes blur horizontal rows.
+/// Operates on the `[start_row, end_row)` stripe so worker jobs can run in parallel without overlap.
 pub fn blurHorizontalRows(ao: anytype, depth_threshold: f32, start_row: usize, end_row: usize) void {
     const weights = [_]u32{ 1, 2, 3, 2, 1 };
     const lanes = runtimeLanes();
@@ -113,6 +122,8 @@ pub fn blurHorizontalRows(ao: anytype, depth_threshold: f32, start_row: usize, e
     }
 }
 
+/// Blurs vertical rows using the configured radius/weights for this pass.
+/// Operates on the `[start_row, end_row)` stripe so worker jobs can run in parallel without overlap.
 pub fn blurVerticalRows(ao: anytype, depth_threshold: f32, start_row: usize, end_row: usize) void {
     const weights = [_]u32{ 1, 2, 3, 2, 1 };
     const lanes = runtimeLanes();
@@ -213,6 +224,7 @@ fn blurVerticalBlock(
     }
 }
 
+/// sampleVisibility samples values used by SSAO Rows.
 fn sampleVisibility(ao: anytype, scene_width: usize, scene_height: usize, x: usize, y: usize) f32 {
     const u = ((@as(f32, @floatFromInt(x)) + 0.5) * @as(f32, @floatFromInt(ao.width))) / @as(f32, @floatFromInt(scene_width)) - 0.5;
     const v = ((@as(f32, @floatFromInt(y)) + 0.5) * @as(f32, @floatFromInt(ao.height))) / @as(f32, @floatFromInt(scene_height)) - 0.5;
@@ -233,6 +245,8 @@ fn sampleVisibility(ao: anytype, scene_width: usize, scene_height: usize, x: usi
     return (s00 + (s10 - s00) * frac_x) + ((s01 + (s11 - s01) * frac_x) - (s00 + (s10 - s00) * frac_x)) * frac_y;
 }
 
+/// Composites c om po si te ro ws into the destination buffer.
+/// Operates on the `[start_row, end_row)` stripe so worker jobs can run in parallel without overlap.
 pub fn compositeRows(dst: []u32, scene_camera: []const math.Vec3, dst_width: usize, dst_height: usize, ao: anytype, start_row: usize, end_row: usize) void {
     const lanes = runtimeLanes();
     var y = start_row;

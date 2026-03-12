@@ -1,3 +1,5 @@
+//! dr_mp3 module.
+//! Low-level audio backend/runtime support for playback, decoding, and buffering.
 pub const __builtin_bswap16 = @import("std").zig.c_builtins.__builtin_bswap16;
 pub const __builtin_bswap32 = @import("std").zig.c_builtins.__builtin_bswap32;
 pub const __builtin_bswap64 = @import("std").zig.c_builtins.__builtin_bswap64;
@@ -416,6 +418,8 @@ pub const __INT8_TYPE__ = i8;
 pub const __INT8_FMTd__ = "hhd";
 pub const __INT8_FMTi__ = "hhi";
 pub const __INT8_C_SUFFIX__ = "";
+/// Runs i nt8 c.
+/// Acts as a thin compatibility helper used by the generated dr_mp3 binding surface.
 pub inline fn __INT8_C(c: anytype) @TypeOf(c) {
     _ = &c;
     return c;
@@ -424,6 +428,8 @@ pub const __INT16_TYPE__ = c_short;
 pub const __INT16_FMTd__ = "hd";
 pub const __INT16_FMTi__ = "hi";
 pub const __INT16_C_SUFFIX__ = "";
+/// Runs i nt16 c.
+/// Acts as a thin compatibility helper used by the generated dr_mp3 binding surface.
 pub inline fn __INT16_C(c: anytype) @TypeOf(c) {
     _ = &c;
     return c;
@@ -432,6 +438,8 @@ pub const __INT32_TYPE__ = c_int;
 pub const __INT32_FMTd__ = "d";
 pub const __INT32_FMTi__ = "i";
 pub const __INT32_C_SUFFIX__ = "";
+/// Runs i nt32 c.
+/// Acts as a thin compatibility helper used by the generated dr_mp3 binding surface.
 pub inline fn __INT32_C(c: anytype) @TypeOf(c) {
     _ = &c;
     return c;
@@ -448,6 +456,8 @@ pub const __UINT8_FMTu__ = "hhu";
 pub const __UINT8_FMTx__ = "hhx";
 pub const __UINT8_FMTX__ = "hhX";
 pub const __UINT8_C_SUFFIX__ = "";
+/// Runs u in t8 c.
+/// Acts as a thin compatibility helper used by the generated dr_mp3 binding surface.
 pub inline fn __UINT8_C(c: anytype) @TypeOf(c) {
     _ = &c;
     return c;
@@ -460,6 +470,8 @@ pub const __UINT16_FMTu__ = "hu";
 pub const __UINT16_FMTx__ = "hx";
 pub const __UINT16_FMTX__ = "hX";
 pub const __UINT16_C_SUFFIX__ = "";
+/// Runs u in t16 c.
+/// Acts as a thin compatibility helper used by the generated dr_mp3 binding surface.
 pub inline fn __UINT16_C(c: anytype) @TypeOf(c) {
     _ = &c;
     return c;

@@ -1,7 +1,14 @@
+//! Combines film-grain noise and vignette darkening in one post pass.
+//! Uses runtime SIMD lane width to batch pixel operations while preserving deterministic output.
+//! Executed near the end of post so it stylizes the fully composed image.
+
+
 const film_grain_kernel = @import("../kernels/film_grain_kernel.zig");
 const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 const cpu_features = @import("../../core/cpu_features.zig");
 
+/// Returns the SIMD lane count selected for the current runtime target.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 fn runtimeLanes() usize {
     return switch (cpu_features.detect().preferredVectorBackend()) {
         .avx512 => 32,
@@ -11,6 +18,8 @@ fn runtimeLanes() usize {
     };
 }
 
+/// Runs this pass over a `[start_row, end_row)` span.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn runRows(
     pixels: []u32,
     start_row: usize,
@@ -56,6 +65,8 @@ pub fn runRows(
     }
 }
 
+/// Applies this effect to a single block/tile region.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 fn applyBlock(
     comptime lanes: usize,
     pixels: []u32,
@@ -108,6 +119,7 @@ fn applyBlock(
     }
 }
 
+/// runPipeline executes the full Film Grain Vignette Pass pipeline for the current frame.
 pub fn runPipeline(
     self: anytype,
     width: usize,

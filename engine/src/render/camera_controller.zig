@@ -1,3 +1,6 @@
+//! Camera Controller module.
+//! Renderer subsystem module for camera/input integration, overlays, or scene interaction.
+
 const std = @import("std");
 const math = @import("../core/math.zig");
 const config = @import("../core/app_config.zig");
@@ -70,21 +73,29 @@ pub const FpsStepParams = struct {
     eye_height: f32 = 1.6,
 };
 
+/// Resets reset for mode toggle.
+/// Keeps reset for mode toggle as the single implementation point so call-site behavior stays consistent.
 pub fn resetForModeToggle(state: *MouseState) void {
     state.pending_delta = math.Vec2.new(0.0, 0.0);
     state.smoothed_delta = math.Vec2.new(0.0, 0.0);
 }
 
+/// Resets reset fps body.
+/// Keeps reset fps body as the single implementation point so call-site behavior stays consistent.
 pub fn resetFpsBody(state: *FpsBodyState, camera_position: math.Vec3, floor_y: f32, eye_height: f32) void {
     state.velocity = math.Vec3.new(0.0, 0.0, 0.0);
     state.grounded = camera_position.y <= floor_y + eye_height + 1e-4;
     state.jump_was_down = false;
 }
 
+/// Sets s et ju mp he ld st at e.
+/// Mutates owned state and keeps dependent cached values coherent for downstream systems.
 pub fn setJumpHeldState(state: *FpsBodyState, jump_down: bool) void {
     state.jump_was_down = jump_down;
 }
 
+/// Computes clamp fov.
+/// Keeps clamp fov as the single implementation point so call-site behavior stays consistent.
 fn clampFov(fov_deg: f32) f32 {
     return std.math.clamp(fov_deg, config.CAMERA_FOV_MIN, config.CAMERA_FOV_MAX);
 }
@@ -97,6 +108,8 @@ fn startZoomAnimation(state: *FpsZoomState, current_fov_deg: f32, target_fov_deg
     state.anim_active = true;
 }
 
+/// Performs on enter first person.
+/// Keeps on enter first person as the single implementation point so call-site behavior stays consistent.
 pub fn onEnterFirstPerson(state: *FpsZoomState, current_fov_deg: f32) void {
     state.base_fov_deg = current_fov_deg;
 }
@@ -105,6 +118,8 @@ fn zoomHoldMask(source: ZoomHoldSource) u8 {
     return @intFromEnum(source);
 }
 
+/// Begins an operation and captures temporary context used until completion.
+/// It marks the start of an operation and prepares transient state used until completion.
 pub fn beginHoldZoom(state: *FpsZoomState, current_fov_deg: f32, source: ZoomHoldSource) void {
     const mask = zoomHoldMask(source);
     if ((state.hold_mask & mask) != 0) return;
@@ -116,6 +131,8 @@ pub fn beginHoldZoom(state: *FpsZoomState, current_fov_deg: f32, source: ZoomHol
     startZoomAnimation(state, current_fov_deg, state.base_fov_deg - zoom_delta, fps_zoom_in_duration_s);
 }
 
+/// Finalizes the current operation and commits or clears temporary state.
+/// It finalizes an in-flight operation and commits/clears temporary state.
 pub fn endHoldZoom(state: *FpsZoomState, current_fov_deg: f32, source: ZoomHoldSource) void {
     const mask = zoomHoldMask(source);
     if ((state.hold_mask & mask) == 0) return;
@@ -124,6 +141,8 @@ pub fn endHoldZoom(state: *FpsZoomState, current_fov_deg: f32, source: ZoomHoldS
     startZoomAnimation(state, current_fov_deg, state.base_fov_deg, fps_zoom_out_duration_s);
 }
 
+/// Returns whether c an ce lh ol dz oo m.
+/// The check is side-effect free so callers can gate expensive follow-up work cheaply.
 pub fn cancelHoldZoom(state: *FpsZoomState, camera_fov_deg: *f32, restore_fov: bool) void {
     state.hold_mask = 0;
     state.anim_active = false;
@@ -132,6 +151,7 @@ pub fn cancelHoldZoom(state: *FpsZoomState, camera_fov_deg: *f32, restore_fov: b
     }
 }
 
+/// updateHoldZoom updates Camera Controller state for the current tick/frame.
 pub fn updateHoldZoom(state: *FpsZoomState, camera_fov_deg: *f32, dt_s: f32) void {
     if (!state.anim_active) return;
     if (dt_s <= 0.0) return;
@@ -143,10 +163,14 @@ pub fn updateHoldZoom(state: *FpsZoomState, camera_fov_deg: *f32, dt_s: f32) voi
     if (t >= 1.0) state.anim_active = false;
 }
 
+/// Returns whether i sh ol dz oo mh el d.
+/// The check is side-effect free so callers can gate expensive follow-up work cheaply.
 pub fn isHoldZoomHeld(state: *const FpsZoomState) bool {
     return state.hold_mask != 0;
 }
 
+/// Performs accumulate first person delta.
+/// Keeps accumulate first person delta as the single implementation point so call-site behavior stays consistent.
 pub fn accumulateFirstPersonDelta(state: *MouseState, raw_delta: math.Vec2) void {
     state.pending_delta = math.Vec2.new(
         state.pending_delta.x + raw_delta.x,
@@ -154,6 +178,8 @@ pub fn accumulateFirstPersonDelta(state: *MouseState, raw_delta: math.Vec2) void
     );
 }
 
+/// Returns pending data and advances internal cursors/flags to avoid reprocessing.
+/// It returns pending data and clears or advances the underlying queue/state.
 pub fn consumeLookDelta(state: *MouseState, mode: ControlMode, frame_dt_seconds: f32) math.Vec2 {
     const delta = state.pending_delta;
     state.pending_delta = math.Vec2.new(0.0, 0.0);
@@ -182,12 +208,16 @@ pub fn consumeLookDelta(state: *MouseState, mode: ControlMode, frame_dt_seconds:
     return state.smoothed_delta;
 }
 
+/// Performs effective sensitivity.
+/// Keeps effective sensitivity as the single implementation point so call-site behavior stays consistent.
 pub fn effectiveSensitivity(state: *const MouseState) f32 {
     const base = std.math.clamp(state.sensitivity, 0.0001, 0.05);
     const dpi_scale = std.math.clamp(config.CAMERA_MOUSE_DPI_SCALE, 0.1, 8.0);
     return base * dpi_scale;
 }
 
+/// Performs step fps body.
+/// Keeps step fps body as the single implementation point so call-site behavior stays consistent.
 pub fn stepFpsBody(
     body: *FpsBodyState,
     camera_position: *math.Vec3,
@@ -250,16 +280,22 @@ pub fn stepFpsBody(
     }
 }
 
+/// Computes clamp pitch.
+/// Keeps clamp pitch as the single implementation point so call-site behavior stays consistent.
 pub fn clampPitch(pitch: f32) f32 {
     return std.math.clamp(pitch, -1.5, 1.5);
 }
 
+/// Applies first person look.
+/// Mutates owned state and keeps dependent cached values coherent for downstream systems.
 pub fn applyFirstPersonLook(yaw: *f32, pitch: *f32, look_delta: math.Vec2, sensitivity: f32) void {
     yaw.* += look_delta.x * sensitivity;
     pitch.* -= look_delta.y * sensitivity;
     pitch.* = clampPitch(pitch.*);
 }
 
+/// Computes view basis.
+/// Keeps compute view basis as the single implementation point so call-site behavior stays consistent.
 pub fn computeViewBasis(yaw: f32, pitch: f32) ViewBasis {
     const cos_pitch = @cos(pitch);
     const sin_pitch = @sin(pitch);
@@ -288,6 +324,8 @@ pub fn computeViewBasis(yaw: f32, pitch: f32) ViewBasis {
     };
 }
 
+/// Computes projection scalars.
+/// Keeps compute projection scalars as the single implementation point so call-site behavior stays consistent.
 pub fn computeProjectionScalars(bitmap_width: i32, bitmap_height: i32, fov_deg: f32) ProjectionScalars {
     const width_f = @as(f32, @floatFromInt(bitmap_width));
     const height_f = @as(f32, @floatFromInt(bitmap_height));

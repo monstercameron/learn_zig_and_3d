@@ -1,6 +1,13 @@
+//! Applies depth-based fog attenuation to scene color.
+//! Converts depth into fog factor, then blends toward configured fog color/intensity.
+//! Processes rows in stripes so fog stays parallel and cache-local on CPU.
+
+
 const depth_fog_kernel = @import("../kernels/depth_fog_kernel.zig");
 const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 
+/// Runs this pass over a `[start_row, end_row)` span.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn runRows(
     pixels: []u32,
     depth_buffer: []const f32,
@@ -12,6 +19,7 @@ pub fn runRows(
     depth_fog_kernel.applyDepthFogRows(pixels, depth_buffer, width, start_row, end_row, fog);
 }
 
+/// runPipeline executes the full Depth Fog Pass pipeline for the current frame.
 pub fn runPipeline(self: anytype, width: usize, height: usize, comptime noop_job_fn: fn (*anyopaque) void) void {
     if (height == 0) return;
     const min_rows_per_parallel_job: usize = 16;

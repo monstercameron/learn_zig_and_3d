@@ -1,3 +1,6 @@
+//! Shadow System module.
+//! Shared renderer core types/utilities used across passes, kernels, and frame setup.
+
 const std = @import("std");
 const cpu_features = @import("../../core/cpu_features.zig");
 const math = @import("../../core/math.zig");
@@ -7,6 +10,7 @@ pub const AABB = struct {
     min: math.Vec3,
     max: math.Vec3,
 
+    /// init initializes Shadow System state and returns the configured value.
     pub fn init() AABB {
         return .{
             .min = math.Vec3.new(std.math.inf(f32), std.math.inf(f32), std.math.inf(f32)),
@@ -14,16 +18,22 @@ pub const AABB = struct {
         };
     }
 
+    /// Performs expand pattern.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn expandPattern(self: *AABB, p: math.Vec3) void {
         self.min = math.Vec3.min(self.min, p);
         self.max = math.Vec3.max(self.max, p);
     }
 
+    /// Performs expand aabb.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn expandAABB(self: *AABB, other: AABB) void {
         self.min = math.Vec3.min(self.min, other.min);
         self.max = math.Vec3.max(self.max, other.max);
     }
 
+    /// Performs centroid.
+    /// Keeps centroid as the single implementation point so call-site behavior stays consistent.
     pub fn centroid(self: AABB) math.Vec3 {
         return math.Vec3.scale(math.Vec3.add(self.min, self.max), 0.5);
     }
@@ -92,6 +102,8 @@ const TraversalStackEntry = struct {
     ray_mask: u64,
 };
 
+/// Returns runtime trace packet lanes.
+/// Keeps runtime trace packet lanes as the single implementation point so call-site behavior stays consistent.
 fn runtimeTracePacketLanes() usize {
     return switch (cpu_features.detect().preferredVectorBackend()) {
         .avx512 => 16,
@@ -106,6 +118,8 @@ fn chunkBitMask(start: usize, count: usize) u64 {
     return ((@as(u64, 1) << @intCast(count)) - 1) << @intCast(start);
 }
 
+/// Loads l oa df lo at ch un k from external or cached data sources.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn loadFloatChunk(comptime lanes: usize, source: *const [64]f32, start: usize) @Vector(lanes, f32) {
     var arr: [lanes]f32 = undefined;
     inline for (0..lanes) |lane| {
@@ -274,6 +288,7 @@ pub const ShadowSystem = struct {
     blas_valid: bool,
     tlas_valid: bool,
 
+    /// init initializes Shadow System state and returns the configured value.
     pub fn init(allocator: std.mem.Allocator) ShadowSystem {
         return .{
             .allocator = allocator,
@@ -291,6 +306,7 @@ pub const ShadowSystem = struct {
         };
     }
 
+    /// deinit releases resources owned by Shadow System.
     pub fn deinit(self: *ShadowSystem) void {
         self.tlas_nodes.deinit(self.allocator);
         self.blas_nodes.deinit(self.allocator);
@@ -299,10 +315,14 @@ pub const ShadowSystem = struct {
         self.shadow_triangle_packets.deinit(self.allocator);
     }
 
+    /// Resets reset.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn reset(self: *ShadowSystem) void {
         self.invalidateBLAS();
     }
 
+    /// Marks cached/derived data stale so it is recomputed on the next usage.
+    /// It marks cached/derived data stale so dependent work is recomputed on next use.
     pub fn invalidateTLAS(self: *ShadowSystem) void {
         self.tlas_nodes.clearRetainingCapacity();
         self.cached_tlas_fingerprint = 0;
@@ -310,6 +330,8 @@ pub const ShadowSystem = struct {
         self.tlas_valid = false;
     }
 
+    /// Marks cached/derived data stale so it is recomputed on the next usage.
+    /// It marks cached/derived data stale so dependent work is recomputed on next use.
     pub fn invalidateBLAS(self: *ShadowSystem) void {
         self.shadow_meshlets.clearRetainingCapacity();
         self.shadow_triangles.clearRetainingCapacity();
@@ -321,6 +343,8 @@ pub const ShadowSystem = struct {
         self.invalidateTLAS();
     }
 
+    /// Ensures ensure blas.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn ensureBLAS(self: *ShadowSystem, mesh_ptr: *const mesh.Mesh) !u32 {
         if (self.blas_valid and self.cached_mesh == mesh_ptr) {
             return self.cached_blas_root;
@@ -334,6 +358,8 @@ pub const ShadowSystem = struct {
         return root;
     }
 
+    /// Ensures ensure tlas.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn ensureTLAS(self: *ShadowSystem, instances: []const math.Mat4) !void {
         std.debug.assert(self.blas_valid);
 
@@ -349,6 +375,7 @@ pub const ShadowSystem = struct {
         self.tlas_valid = self.tlas_nodes.items.len != 0;
     }
 
+    /// initTrianglePacket initializes Shadow System state and returns the configured value.
     fn initTrianglePacket() ShadowTrianglePacket {
         return .{
             .v0x = @splat(0.0),
@@ -371,6 +398,7 @@ pub const ShadowSystem = struct {
         meshlet_offset: u32,
     };
 
+    /// updateNodeBounds updates Shadow System state for the current tick/frame.
     fn updateNodeBounds(nodes: []BLASNode, node_idx: u32) void {
         const node = &nodes[node_idx];
         if (node.is_leaf) return;
@@ -380,6 +408,7 @@ pub const ShadowSystem = struct {
         node.aabb.expandAABB(right.aabb);
     }
 
+    /// buildBLAS builds data structures used by Shadow System.
     pub fn buildBLAS(self: *ShadowSystem, mesh_ptr: *const mesh.Mesh) !u32 {
         const meshlets = mesh_ptr.meshlets;
         if (meshlets.len == 0) return std.math.maxInt(u32);
@@ -459,6 +488,7 @@ pub const ShadowSystem = struct {
         return root_node_idx;
     }
 
+    /// buildBLASRecursive builds data structures used by Shadow System.
     fn buildBLASRecursive(self: *ShadowSystem, entries: []BLASBuildEntry) !u32 {
         const node_idx = @as(u32, @intCast(self.blas_nodes.items.len));
         const node = BLASNode{
@@ -493,6 +523,8 @@ pub const ShadowSystem = struct {
 
         const Context = struct {
             ax: u3,
+            /// Performs less than.
+            /// Keeps less than as the single implementation point so call-site behavior stays consistent.
             pub fn lessThan(ctx: @This(), a: BLASBuildEntry, b: BLASBuildEntry) bool {
                 if (ctx.ax == 0) return a.centroid.x < b.centroid.x;
                 if (ctx.ax == 1) return a.centroid.y < b.centroid.y;
@@ -514,6 +546,7 @@ pub const ShadowSystem = struct {
         return node_idx;
     }
 
+    /// buildTLAS builds data structures used by Shadow System.
     pub fn buildTLAS(self: *ShadowSystem, instances: []const math.Mat4) !void {
         self.tlas_nodes.clearRetainingCapacity();
         if (instances.len == 0 or self.blas_nodes.items.len == 0) return;
@@ -715,6 +748,7 @@ pub const ShadowSystem = struct {
             while (triangle_lane < 8) : (triangle_lane += 1) {
                 if (!triangle_packet.active_mask[triangle_lane]) continue;
 
+                // Early-out once every candidate ray is already occluded by previously tested triangles.
                 const pending_mask = candidate_mask & ~occluded_mask;
                 if (pending_mask == 0) return occluded_mask;
 
@@ -749,11 +783,14 @@ pub const ShadowSystem = struct {
         return occluded_mask;
     }
 
+    /// Processes trace packet any hit.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn tracePacketAnyHit(self: *ShadowSystem, packet: *RayPacket) void {
         const remaining_mask = packet.active_mask & ~packet.occluded_mask;
         if (remaining_mask == 0) return;
         if (self.tlas_nodes.items.len == 0 or self.blas_nodes.items.len == 0) return;
 
+        // Reject packets against the TLAS root first so traversal only pays for rays that can touch scene bounds.
         const root_tlas = &self.tlas_nodes.items[0];
         var root_mask: u64 = 0;
         const lane_width = runtimeTracePacketLanes();
@@ -774,6 +811,7 @@ pub const ShadowSystem = struct {
         stack[stack_ptr] = .{ .node_idx = 0, .ray_mask = root_mask };
         stack_ptr += 1;
 
+        // Masked DFS traversal: each stack entry carries only rays still alive for that subtree.
         while (stack_ptr > 0) {
             stack_ptr -= 1;
             const entry = stack[stack_ptr];
@@ -806,6 +844,7 @@ pub const ShadowSystem = struct {
                 };
             }
 
+            // Push both children; each child gets its own surviving ray mask to keep divergence bounded.
             if (left_mask != 0) {
                 stack[stack_ptr] = .{ .node_idx = node.left_child_or_meshlet, .ray_mask = left_mask };
                 stack_ptr += 1;

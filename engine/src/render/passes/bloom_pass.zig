@@ -1,3 +1,8 @@
+//! Orchestrates bloom as staged post-processing: extract bright regions, blur horizontally/vertically, then composite.
+//! Each stage is row-striped across workers so wide screens stay cache-friendly on CPU.
+//! The pass writes bloom contribution back into the frame buffer in the final composite stage.
+
+
 const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 const render_utils = @import("../core/utils.zig");
 
@@ -8,6 +13,7 @@ pub const Stage = enum {
     composite,
 };
 
+/// buildThresholdCurve builds data structures used by Bloom Pass.
 pub fn buildThresholdCurve(threshold: i32) [256]u8 {
     var lut: [256]u8 = undefined;
     for (0..lut.len) |idx| {
@@ -21,6 +27,7 @@ pub fn buildThresholdCurve(threshold: i32) [256]u8 {
     return lut;
 }
 
+/// buildIntensityLut builds data structures used by Bloom Pass.
 pub fn buildIntensityLut(intensity_percent: i32) [256]u8 {
     var lut: [256]u8 = undefined;
     for (0..lut.len) |idx| {
@@ -29,6 +36,8 @@ pub fn buildIntensityLut(intensity_percent: i32) [256]u8 {
     return lut;
 }
 
+/// Builds the typed job-context wrapper used by this pass/kernel dispatch.
+/// Uses comptime parameters to specialize code paths at compile time instead of branching at runtime.
 pub fn JobContext(comptime BloomScratchType: type) type {
     return struct {
         stage: Stage,
@@ -41,6 +50,8 @@ pub fn JobContext(comptime BloomScratchType: type) type {
         start_row: usize,
         end_row: usize,
 
+        /// Runs this module step with the currently bound configuration.
+        /// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
         pub fn run(ctx_ptr: *anyopaque) void {
             const ctx: *@This() = @ptrCast(@alignCast(ctx_ptr));
             const bloom_rows = @import("bloom_rows.zig");
@@ -69,6 +80,8 @@ pub fn JobContext(comptime BloomScratchType: type) type {
     };
 }
 
+/// Runs stage range.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 fn runStageRange(
     self: anytype,
     stage: Stage,
@@ -97,6 +110,7 @@ fn runStageRange(
     }
 }
 
+/// dispatchStage dispatches Bloom Pass jobs across workers.
 fn dispatchStage(
     self: anytype,
     stage: Stage,
@@ -159,6 +173,7 @@ fn dispatchStage(
     parent_job.wait();
 }
 
+/// runPipeline executes the full Bloom Pass pipeline for the current frame.
 pub fn runPipeline(
     self: anytype,
     scene_width: usize,

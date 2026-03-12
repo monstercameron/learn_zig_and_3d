@@ -63,6 +63,8 @@ pub fn applyIntensity(color: u32, intensity: f32) u32 {
     return (255 << 24) | (@as(u32, @intFromFloat(r_val)) << 16) | (@as(u32, @intFromFloat(g_val)) << 8) | @as(u32, @intFromFloat(b_val));
 }
 
+/// Returns runtime intensity batch lanes.
+/// Keeps runtime intensity batch lanes as the single implementation point so call-site behavior stays consistent.
 fn runtimeIntensityBatchLanes() usize {
     return switch (cpu_features.detect().preferredVectorBackend()) {
         .avx512, .avx2 => 8,
@@ -71,6 +73,8 @@ fn runtimeIntensityBatchLanes() usize {
     };
 }
 
+/// Applies intensity batch simd.
+/// Mutates owned state and keeps dependent cached values coherent for downstream systems.
 fn applyIntensityBatchSimd(comptime lanes: usize, colors: *const [lanes]u32, intensities: *const [lanes]f32) [lanes]u32 {
     const VecF32 = @Vector(lanes, f32);
     const VecU32 = @Vector(lanes, u32);
@@ -104,6 +108,8 @@ fn applyIntensityBatchSimd(comptime lanes: usize, colors: *const [lanes]u32, int
     return @bitCast(@as(VecU32, @splat(0xFF000000)) | r_packed | g_packed | b_packed);
 }
 
+/// Applies intensity batch.
+/// Mutates owned state and keeps dependent cached values coherent for downstream systems.
 pub fn applyIntensityBatch(colors: []const u32, intensities: []const f32, out: []u32) void {
     std.debug.assert(colors.len == intensities.len and colors.len == out.len);
 
@@ -179,6 +185,8 @@ pub fn geometrySchlickGGX(NdotV: f32, roughness: f32) f32 {
     return num / denom;
 }
 
+/// Performs geometry smith.
+/// Keeps geometry smith as the single implementation point so call-site behavior stays consistent.
 pub fn geometrySmith(normal: math.Vec3, view_dir: math.Vec3, light_dir: math.Vec3, roughness: f32) f32 {
     const NdotV = @max(math.Vec3.dot(normal, view_dir), 0.0);
     const NdotL = @max(math.Vec3.dot(normal, light_dir), 0.0);
@@ -267,6 +275,8 @@ pub fn computePBR(
     return math.Vec3.add(direct, ambient);
 }
 
+/// Returns runtime pbr batch lanes.
+/// Keeps runtime pbr batch lanes as the single implementation point so call-site behavior stays consistent.
 fn runtimePbrBatchLanes() usize {
     return switch (cpu_features.detect().preferredVectorBackend()) {
         .avx512, .avx2 => 8,
@@ -275,6 +285,8 @@ fn runtimePbrBatchLanes() usize {
     };
 }
 
+/// Computes pbr batch simd.
+/// Keeps compute pbr batch simd as the single implementation point so call-site behavior stays consistent.
 fn computePBRBatchSimd(
     comptime lanes: usize,
     albedos: *const [lanes]math.Vec3,
@@ -403,6 +415,8 @@ fn computePBRBatchSimd(
     return out;
 }
 
+/// Computes pbr batch.
+/// Keeps compute pbr batch as the single implementation point so call-site behavior stays consistent.
 pub fn computePBRBatch(
     albedos: []const math.Vec3,
     normals: []const math.Vec3,

@@ -1,12 +1,19 @@
+//! Implements the Color Grade kernel logic used in renderer jobs.
+//! CPU pixel/compute kernel used by the software renderer post-processing and shading stack.
+
 const std = @import("std");
 const cpu_features = @import("../../core/cpu_features.zig");
 
+/// Clamps a scalar channel value to the byte range `[0, 255]`.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 fn clampByte(value: i32) u8 {
     if (value <= 0) return 0;
     if (value >= 255) return 255;
     return @intCast(value);
 }
 
+/// Returns the SIMD lane count selected for the current runtime target.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 fn runtimeLanes() usize {
     return switch (cpu_features.detect().preferredVectorBackend()) {
         .avx512 => 32,
@@ -16,6 +23,8 @@ fn runtimeLanes() usize {
     };
 }
 
+/// Applies batch simd.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 fn applyBatchSimd(comptime lanes: usize, pixels: *[lanes]u32, grade: anytype) void {
     const I16Vec = @Vector(lanes, i16);
     const zero: I16Vec = @splat(0);
@@ -78,6 +87,8 @@ fn applyBatchSimd(comptime lanes: usize, pixels: *[lanes]u32, grade: anytype) vo
     }
 }
 
+/// Applies range.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 pub fn applyRange(
     pixels: []u32,
     start_index: usize,

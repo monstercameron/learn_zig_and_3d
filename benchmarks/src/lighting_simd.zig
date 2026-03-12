@@ -1,9 +1,13 @@
+//! Lighting SIMD module.
+//! Benchmark harness module used to measure CPU/scalar/SIMD performance characteristics.
 const std = @import("std");
 const AMBIENT_LIGHT: f32 = 0.25;
 
 const VecF32 = @Vector(4, f32);
 const VecU32 = @Vector(4, u32);
 
+/// Applies intensity batch.
+/// Mutates owned state and keeps dependent cached values coherent for downstream systems.
 pub fn applyIntensityBatch(
     colors: []const u32,
     intensities: []const f32,
@@ -67,6 +71,8 @@ pub fn applyIntensityBatch(
     }
 }
 
+/// Applies intensity scalar.
+/// Mutates owned state and keeps dependent cached values coherent for downstream systems.
 pub fn applyIntensityScalar(color: u32, intensity: f32) u32 {
     const clamped_intensity = std.math.clamp(intensity, AMBIENT_LIGHT, 1.0);
     const r = @as(f32, @floatFromInt((color >> 16) & 0xFF));

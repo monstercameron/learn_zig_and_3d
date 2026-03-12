@@ -1,3 +1,6 @@
+//! Pass Graph module.
+//! Render pipeline graph/registry/dispatch definitions for pass execution order and toggles.
+
 const std = @import("std");
 
 pub const RenderPassId = enum {
@@ -70,6 +73,8 @@ pub const default_post_pass_order = [_]PassNode{
 
 pub const post_pass_count: usize = default_post_pass_order.len;
 
+/// Returns pass index.
+/// Keeps pass index as the single implementation point so call-site behavior stays consistent.
 pub fn passIndex(id: RenderPassId) ?usize {
     for (default_post_pass_order, 0..) |node, idx| {
         if (node.id == id) return idx;
@@ -77,11 +82,15 @@ pub fn passIndex(id: RenderPassId) ?usize {
     return null;
 }
 
+/// Performs pass bit.
+/// Keeps pass bit as the single implementation point so call-site behavior stays consistent.
 pub fn passBit(id: RenderPassId) u64 {
     const idx = passIndex(id) orelse return 0;
     return @as(u64, 1) << @as(u6, @intCast(idx));
 }
 
+/// Performs pass node.
+/// Keeps pass node as the single implementation point so call-site behavior stays consistent.
 pub fn passNode(id: RenderPassId) ?PassNode {
     for (default_post_pass_order) |node| {
         if (node.id == id) return node;
@@ -89,12 +98,16 @@ pub fn passNode(id: RenderPassId) ?PassNode {
     return null;
 }
 
+/// Returns all pass mask.
+/// Keeps all pass mask as the single implementation point so call-site behavior stays consistent.
 pub fn allPassMask() u64 {
     if (post_pass_count == 0) return 0;
     if (post_pass_count >= 64) return std.math.maxInt(u64);
     return (@as(u64, 1) << @as(u6, @intCast(post_pass_count))) - 1;
 }
 
+/// Returns whether contains pass.
+/// Keeps contains pass as the single implementation point so call-site behavior stays consistent.
 pub fn containsPass(id: RenderPassId) bool {
     for (default_post_pass_order) |node| {
         if (node.id == id) return true;

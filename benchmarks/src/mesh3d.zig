@@ -76,6 +76,8 @@ pub const Triangle = struct {
     pub const default_color: u32 = 0xFF7F7F7F;
     pub const no_texture_index: u16 = std.math.maxInt(u16);
 
+    /// Constructs and returns a new value initialized from the provided fields.
+    /// Keeps new as the single implementation point so call-site behavior stays consistent.
     pub fn new(v0: usize, v1: usize, v2: usize) Triangle {
         return Triangle{
             .v0 = v0,
@@ -87,6 +89,8 @@ pub const Triangle = struct {
         };
     }
 
+    /// Constructs and returns new with culling.
+    /// Keeps new with culling as the single implementation point so call-site behavior stays consistent.
     pub fn newWithCulling(v0: usize, v1: usize, v2: usize, cull_fill: bool, cull_wireframe: bool) Triangle {
         return Triangle{
             .v0 = v0,
@@ -98,6 +102,8 @@ pub const Triangle = struct {
         };
     }
 
+    /// Constructs and returns new with color.
+    /// Keeps new with color as the single implementation point so call-site behavior stays consistent.
     pub fn newWithColor(v0: usize, v1: usize, v2: usize, color: u32) Triangle {
         return Triangle{
             .v0 = v0,
@@ -109,6 +115,8 @@ pub const Triangle = struct {
         };
     }
 
+    /// Constructs and returns new with culling and color.
+    /// Keeps new with culling and color as the single implementation point so call-site behavior stays consistent.
     pub fn newWithCullingAndColor(v0: usize, v1: usize, v2: usize, cull_fill: bool, cull_wireframe: bool, color: u32) Triangle {
         return Triangle{
             .v0 = v0,
@@ -142,6 +150,7 @@ pub const Mesh = struct {
     /// The allocator used to manage the memory for the mesh data.
     allocator: std.mem.Allocator,
 
+    /// init initializes Mesh3d state and returns the configured value.
     pub fn init(allocator: std.mem.Allocator) !Mesh {
         return Mesh{
             .vertices = &[_]Vec3{},
@@ -268,18 +277,26 @@ pub const Mesh = struct {
         self.meshlet_primitives = &[_]MeshletPrimitive{};
     }
 
+    /// Performs meshlet vertex slice.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn meshletVertexSlice(self: *const Mesh, meshlet: *const Meshlet) []const usize {
         return self.meshlet_vertices[meshlet.vertex_offset .. meshlet.vertex_offset + meshlet.vertex_count];
     }
 
+    /// Performs meshlet primitive slice.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn meshletPrimitiveSlice(self: *const Mesh, meshlet: *const Meshlet) []const MeshletPrimitive {
         return self.meshlet_primitives[meshlet.primitive_offset .. meshlet.primitive_offset + meshlet.primitive_count];
     }
 
+    /// Returns meshlet global vertex index.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn meshletGlobalVertexIndex(self: *const Mesh, meshlet: *const Meshlet, local_index: u16) usize {
         return self.meshlet_vertices[meshlet.vertex_offset + @as(usize, @intCast(local_index))];
     }
 
+    /// Processes refresh meshlets.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn refreshMeshlets(self: *Mesh) void {
         if (self.meshlets.len == 0) return;
 
@@ -371,6 +388,8 @@ pub const Mesh = struct {
         self.clearMeshlets();
     }
 
+    /// Processes generate meshlets.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn generateMeshlets(self: *Mesh, max_vertices: usize, max_triangles: usize) !void {
         const safe_vertex_limit = if (max_vertices < 3) 3 else max_vertices;
         const safe_triangle_limit = if (max_triangles < 1) 1 else max_triangles;

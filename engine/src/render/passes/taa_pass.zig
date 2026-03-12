@@ -1,8 +1,14 @@
+//! Orchestrates Temporal AA for the frame: reproject, validate, clamp, blend, then update history.
+//! Prefers stable surface-based reprojection and falls back to camera-depth reprojection when needed.
+//! Dispatches row stripes for parallel CPU execution and writes resolved history for next frame.
+
 const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 const std = @import("std");
 const math = @import("../../core/math.zig");
 const taa_helpers = @import("taa_helpers.zig");
 
+/// Builds bootstrap history.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn bootstrapHistory(
     pixels: []const u32,
     scene_depth: []const f32,
@@ -23,6 +29,7 @@ pub fn bootstrapHistory(
     }
 }
 
+/// runPipeline executes the full TAA Pass pipeline for the current frame.
 pub fn runPipeline(
     self: anytype,
     mesh: anytype,
@@ -114,6 +121,8 @@ pub fn runPipeline(
     self.captureTemporalMeshState(mesh);
 }
 
+/// Performs finalize history.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn finalizeHistory(
     pixels: []u32,
     resolve_pixels: []const u32,
@@ -136,6 +145,8 @@ pub fn finalizeHistory(
     }
 }
 
+/// Runs this pass over a `[start_row, end_row)` span.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn runRows(
     self: anytype,
     mesh: anytype,
@@ -156,6 +167,7 @@ pub fn runRows(
         const row_start = y * width;
         var x: usize = 0;
         while (x < width) : (x += 1) {
+            // Fast path: process contiguous meshlet-identical spans in SIMD batches before per-pixel fallback.
             if (try_meshlet_batch_fn(self, mesh, current_view, previous_view, row_start, x, y, width, height)) {
                 x += 7;
                 continue;
@@ -174,6 +186,7 @@ pub fn runRows(
             if (current_surface.isValid() and self.taa_previous_mesh_valid and current_surface.triangle_id < mesh.triangles.len and self.taa_previous_mesh_triangle_count == mesh.triangles.len) {
                 const tri = mesh.triangles[current_surface.triangle_id];
                 if (tri.v0 < self.taa_previous_mesh_vertex_count and tri.v1 < self.taa_previous_mesh_vertex_count and tri.v2 < self.taa_previous_mesh_vertex_count) {
+                    // Surface reprojection is preferred when triangle identity is stable across frames.
                     const bary = current_surface.barycentrics();
                     const prev_v0 = self.taa_previous_mesh_vertices[tri.v0];
                     const prev_v1 = self.taa_previous_mesh_vertices[tri.v1];
@@ -200,6 +213,7 @@ pub fn runRows(
             }
 
             if (reprojection == null) {
+                // Fallback reprojection from camera-space depth keeps TAA alive when surface IDs are unstable.
                 const world_pos = camera_to_world_fn(
                     current_view.camera_position,
                     current_view.basis_right,
@@ -266,6 +280,7 @@ pub fn runRows(
             else
                 self.temporal_aa_config.history_weight * 0.015 * depth_factor * edge_factor;
 
+            // Clamp history inside local neighborhood bounds to suppress ghost trails and disocclusion smearing.
             const clamped_history = if (current_surface.isValid() or previous_tag != taa_helpers.invalid_surface_tag)
                 taa_helpers.clampHistoryToSurfaceNeighborhood(self.bitmap.pixels, self.scene_surface, self.scene_normal, width, height, x, y, color_sample)
             else

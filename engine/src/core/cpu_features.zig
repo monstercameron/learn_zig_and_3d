@@ -1,3 +1,5 @@
+//! CPU Features module.
+//! Core runtime infrastructure shared engine-wide (config, logging, jobs, profiling, math).
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -26,6 +28,8 @@ pub const InstructionSetSupport = struct {
     amx_int8: bool = false,
     amx_bf16: bool = false,
 
+    /// Performs preferred vector backend.
+    /// Keeps preferred vector backend as the single implementation point so call-site behavior stays consistent.
     pub fn preferredVectorBackend(self: InstructionSetSupport) VectorBackend {
         if (self.avx512f and self.os_avx512_state) return .avx512;
         if (self.avx2 and self.os_avx_state) return .avx2;
@@ -44,6 +48,8 @@ const CpuidRegs = struct {
 
 var cached_support: ?InstructionSetSupport = null;
 
+/// Derives detect.
+/// Keeps detect as the single implementation point so call-site behavior stays consistent.
 pub fn detect() InstructionSetSupport {
     if (cached_support) |support| return support;
     const support = detectUncached();
@@ -107,6 +113,8 @@ fn detectX86() InstructionSetSupport {
     return support;
 }
 
+/// Returns whether h as bi t.
+/// The check is side-effect free so callers can gate expensive follow-up work cheaply.
 fn hasBit(value: u32, bit_index: u5) bool {
     return (value & (@as(u32, 1) << bit_index)) != 0;
 }

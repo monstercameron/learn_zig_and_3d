@@ -1,3 +1,6 @@
+//! Dispatcher module.
+//! CPU pixel/compute kernel used by the software renderer post-processing and shading stack.
+
 const std = @import("std");
 const compute = @import("compute.zig");
 const Vec2u = compute.Vec2u;

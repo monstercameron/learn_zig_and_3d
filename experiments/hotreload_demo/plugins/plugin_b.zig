@@ -1,3 +1,6 @@
+//! Plugin B module.
+//! Hot-reload demo plugin implementation used by the experiment harness.
+
 const std = @import("std");
 const iface = @import("iface");
 
@@ -8,6 +11,8 @@ const State = struct {
 var g_host: *const iface.HostAPI = undefined;
 var g_state = State{};
 
+/// Runs this module step with the currently bound configuration.
+/// Keeps run as the single implementation point so call-site behavior stays consistent.
 fn run(ctx: *anyopaque) callconv(.c) void {
     _ = ctx;
     g_state.accumulated += 0.5;

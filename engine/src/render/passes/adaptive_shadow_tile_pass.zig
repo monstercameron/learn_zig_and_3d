@@ -1,3 +1,8 @@
+//! Adaptive hybrid-shadow resolver that recursively classifies receiver blocks as lit/shadowed/mixed.
+//! Uses coarse and edge caches to avoid full per-pixel ray cost, only refining mixed regions.
+//! Mixed blocks fall back to exact sampling; fully shadowed blocks are darkened as spans.
+
+
 const std = @import("std");
 const math = @import("../../core/math.zig");
 const config = @import("../../core/app_config.zig");
@@ -18,6 +23,8 @@ const BlockClassification = struct {
     shadowed: bool,
 };
 
+/// Runs this module step with the currently bound configuration.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn run(ctx: anytype) void {
     if (ctx.candidate_count == 0 or ctx.valid_max_x < ctx.valid_min_x or ctx.valid_max_y < ctx.valid_min_y) return;
     const width = ctx.valid_max_x - ctx.valid_min_x + 1;
@@ -29,6 +36,7 @@ pub fn run(ctx: anytype) void {
 fn processBlock(ctx: anytype, x: i32, y: i32, width: i32, height: i32, depth: u32) void {
     if (width <= 0 or height <= 0) return;
 
+    // Recursive quadtree-style refinement: keep splitting only blocks that mix lit/shadowed samples.
     const classification = classifyBlock(ctx, x, y, width, height);
     if (!classification.mixed) {
         if (classification.shadowed) darkenBlock(ctx, x, y, width, height);
@@ -147,6 +155,7 @@ fn evaluateShadowCellAtScale(ctx: anytype, cache_x: usize, cache_y: usize, shado
     return .{ .valid = true, .coverage = 0.5 };
 }
 
+/// sampleShadowCache samples values used by Adaptive Shadow Tile Pass.
 fn sampleShadowCache(ctx: anytype, cache: []u8, cache_width: usize, cache_height: usize, shadow_scale: i32, screen_x: i32, screen_y: i32) ShadowSample {
     if (screen_x < 0 or screen_y < 0 or screen_x >= ctx.renderer.bitmap.width or screen_y >= ctx.renderer.bitmap.height) {
         return .{ .valid = false, .coverage = 0.0 };
@@ -174,6 +183,7 @@ fn sampleShadowCache(ctx: anytype, cache: []u8, cache_width: usize, cache_height
         const cache_idx = @as(usize, @intCast(coord[1])) * cache_width + @as(usize, @intCast(coord[0]));
         var cached = cache[cache_idx];
         if (cached == hybrid_shadow_cache_unknown) {
+            // Cache is filled lazily; coverage is quantized to 0..253 so unknown/invalid can keep sentinel values.
             const evaluated = evaluateShadowCellAtScale(ctx, @intCast(coord[0]), @intCast(coord[1]), shadow_scale);
             cached = if (!evaluated.valid)
                 hybrid_shadow_cache_invalid
@@ -207,6 +217,7 @@ fn sampleShadowCache(ctx: anytype, cache: []u8, cache_width: usize, cache_height
     return .{ .valid = true, .coverage = coverage_sum / weight_sum };
 }
 
+/// sampleShadowCacheNearest samples values used by Adaptive Shadow Tile Pass.
 fn sampleShadowCacheNearest(ctx: anytype, cache: []u8, cache_width: usize, cache_height: usize, shadow_scale: i32, screen_x: i32, screen_y: i32) ShadowSample {
     if (screen_x < 0 or screen_y < 0 or screen_x >= ctx.renderer.bitmap.width or screen_y >= ctx.renderer.bitmap.height) {
         return .{ .valid = false, .coverage = 0.0 };
@@ -229,6 +240,7 @@ fn sampleShadowCacheNearest(ctx: anytype, cache: []u8, cache_width: usize, cache
     return .{ .valid = true, .coverage = @as(f32, @floatFromInt(cached)) / 253.0 };
 }
 
+/// sampleShadowCoarse samples values used by Adaptive Shadow Tile Pass.
 fn sampleShadowCoarse(ctx: anytype, screen_x: i32, screen_y: i32) ShadowSample {
     return sampleShadowCacheNearest(
         ctx,
@@ -241,6 +253,7 @@ fn sampleShadowCoarse(ctx: anytype, screen_x: i32, screen_y: i32) ShadowSample {
     );
 }
 
+/// sampleShadowRefined samples values used by Adaptive Shadow Tile Pass.
 fn sampleShadowRefined(ctx: anytype, screen_x: i32, screen_y: i32) ShadowSample {
     const coarse = sampleShadowCoarse(ctx, screen_x, screen_y);
     if (!coarse.valid) return coarse;
@@ -274,10 +287,13 @@ fn sampleShadowRefined(ctx: anytype, screen_x: i32, screen_y: i32) ShadowSample 
     return .{ .valid = true, .coverage = hybrid_shadow_resolve_kernel.blendCoverage(coarse.coverage, avg_coverage, blend) };
 }
 
+/// sampleShadow samples values used by Adaptive Shadow Tile Pass.
 fn sampleShadow(ctx: anytype, screen_x: i32, screen_y: i32) ShadowSample {
     return sampleShadowCoarse(ctx, screen_x, screen_y);
 }
 
+/// Returns whether i sp oi nt sh ad ow ed.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 fn isPointShadowed(ctx: anytype, camera_pos: math.Vec3, light_sample: anytype) bool {
     if (ctx.candidate_count == 0) return false;
 
@@ -297,6 +313,7 @@ fn isPointShadowed(ctx: anytype, camera_pos: math.Vec3, light_sample: anytype) b
         }
 
         const meshlet = &ctx.mesh.meshlets[caster.meshlet_index];
+        // Broad-phase sphere reject avoids touching triangle data for clearly non-intersecting meshlets.
         if (!rayIntersectsSphere(ray_origin, ctx.light_dir_world, meshlet.bounds_center, meshlet.bounds_radius)) continue;
         const primitives = ctx.mesh.meshletPrimitiveSlice(meshlet);
         var prim_i: usize = 0;
@@ -308,6 +325,7 @@ fn isPointShadowed(ctx: anytype, camera_pos: math.Vec3, light_sample: anytype) b
         const orig_z: @Vector(8, f32) = @splat(ray_origin.z);
 
         while (prim_i < primitives.len) : (prim_i += 8) {
+            // Pack up to 8 triangles into SoA vectors to evaluate one ray against multiple triangles per iteration.
             var v0x: @Vector(8, f32) = @splat(0);
             var v0y: @Vector(8, f32) = @splat(0);
             var v0z: @Vector(8, f32) = @splat(0);
@@ -342,6 +360,8 @@ fn isPointShadowed(ctx: anytype, camera_pos: math.Vec3, light_sample: anytype) b
     return false;
 }
 
+/// Resolves r es ol ve bl oc ke xa ct into a final normalized result.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 fn resolveBlockExact(ctx: anytype, x: i32, y: i32, width: i32, height: i32) void {
     const sample_stride = @max(1, config.POST_HYBRID_SHADOW_EDGE_DOWNSAMPLE);
     const max_x = x + width;
@@ -467,6 +487,7 @@ fn rayIntersectsTriangle8(
     const t = (edge2_x * qvec_x + edge2_y * qvec_y + edge2_z * qvec_z) * inv_det;
     const valid_t = t > eps;
 
+    // Apply the Moller-Trumbore validity predicates lane-by-lane and reduce to a single packet hit result.
     var hit = active_mask;
     hit = @select(bool, hit, valid_det, @as(@Vector(8, bool), @splat(false)));
     hit = @select(bool, hit, valid_u_min, @as(@Vector(8, bool), @splat(false)));

@@ -1,5 +1,10 @@
+//! Implements the God Rays kernel logic used in renderer jobs.
+//! CPU pixel/compute kernel used by the software renderer post-processing and shading stack.
+
 const cpu_features = @import("../../core/cpu_features.zig");
 
+/// Returns the SIMD lane count selected for the current runtime target.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 fn runtimeLanes() usize {
     return switch (cpu_features.detect().preferredVectorBackend()) {
         .avx512 => 32,
@@ -9,6 +14,8 @@ fn runtimeLanes() usize {
     };
 }
 
+/// Applies this effect over a `[start_row, end_row)` span.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 pub fn applyRows(
     src_pixels: []const u32,
     dst_pixels: []u32,
@@ -89,6 +96,8 @@ pub fn applyRows(
     }
 }
 
+/// Applies this effect to a single block/tile region.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 fn applyBlock(
     comptime lanes: usize,
     src_pixels: []const u32,

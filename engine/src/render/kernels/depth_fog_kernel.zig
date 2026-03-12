@@ -1,10 +1,17 @@
+//! Implements the Depth Fog kernel logic used in renderer jobs.
+//! CPU pixel/compute kernel used by the software renderer post-processing and shading stack.
+
 const std = @import("std");
 const cpu_features = @import("../../core/cpu_features.zig");
 
+/// Clamps a scalar channel value to the byte range `[0, 255]`.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 fn clampByte(v: i32) u8 {
     return @intCast(@max(0, @min(255, v)));
 }
 
+/// Returns the SIMD lane count selected for the current runtime target.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 fn runtimeLanes() usize {
     return switch (cpu_features.detect().preferredVectorBackend()) {
         .avx512 => 32,
@@ -14,6 +21,8 @@ fn runtimeLanes() usize {
     };
 }
 
+/// Applies depth fog rows.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 pub fn applyDepthFogRows(
     pixels: []u32,
     depth_buffer: []const f32,
@@ -62,6 +71,7 @@ pub fn applyDepthFogRows(
     }
 }
 
+/// blendFogBlock blends intermediate values for Depth Fog Kernel.
 fn blendFogBlock(
     comptime lanes: usize,
     pixels: []u32,

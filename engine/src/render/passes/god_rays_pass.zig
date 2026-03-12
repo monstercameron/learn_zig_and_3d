@@ -1,6 +1,13 @@
+//! Computes light shafts by sampling/accumulating along projected light directions.
+//! Builds a softened scattering contribution and blends it onto scene color.
+//! Runs per-row dispatch to keep work balanced across worker threads.
+
+
 const god_rays_kernel = @import("../kernels/god_rays_kernel.zig");
 const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 
+/// Runs this pass over a `[start_row, end_row)` span.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn runRows(
     src_pixels: []const u32,
     dst_pixels: []u32,
@@ -33,6 +40,7 @@ pub fn runRows(
     );
 }
 
+/// runPipeline executes the full God Rays Pass pipeline for the current frame.
 pub fn runPipeline(
     self: anytype,
     width: usize,

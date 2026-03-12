@@ -76,10 +76,14 @@ pub const Job = struct {
         }
     }
 
+    /// Updates registry/attachment state for register child.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn registerChild(self: *Job) void {
         _ = self.unfinished_jobs.fetchAdd(1, .acq_rel);
     }
 
+    /// Updates registry/attachment state for unregister child.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     fn unregisterChild(self: *Job) void {
         _ = self.unfinished_jobs.fetchSub(1, .acq_rel);
     }
@@ -124,6 +128,7 @@ pub const JobQueue = struct {
     mutex: std.Thread.Mutex, // A lock to ensure only one thread can modify the queue at a time.
     allocator: std.mem.Allocator,
 
+    /// init initializes Job System state and returns the configured value.
     pub fn init(capacity: u32, allocator: std.mem.Allocator) !JobQueue {
         if (capacity == 0) return error.InvalidCapacity;
         const jobs = try allocator.alloc(?*Job, capacity);
@@ -139,6 +144,7 @@ pub const JobQueue = struct {
         };
     }
 
+    /// deinit releases resources owned by Job System.
     pub fn deinit(self: *JobQueue) void {
         self.allocator.free(self.jobs);
     }
@@ -178,6 +184,8 @@ pub const JobQueue = struct {
         return job;
     }
 
+    /// Returns count.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn count(self: *const JobQueue) u32 {
         const queue = @constCast(self);
         queue.mutex.lock();
@@ -333,6 +341,8 @@ pub const JobSystem = struct {
         return null;
     }
 
+    /// Performs pending jobs.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn pendingJobs(self: *const JobSystem) u32 {
         var total: u32 = 0;
         for (self.workers) |*worker| {

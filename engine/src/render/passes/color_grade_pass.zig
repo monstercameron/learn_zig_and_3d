@@ -1,6 +1,13 @@
+//! Applies final color-grade transforms over the frame buffer.
+//! Runs profile-driven color adjustments in contiguous ranges for SIMD/vector efficiency.
+//! Used late in post-processing so grading sees near-final HDR/LDR color composition.
+
+
 const color_grade_kernel = @import("../kernels/color_grade_kernel.zig");
 const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 
+/// Runs range.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn runRange(
     pixels: []u32,
     start_index: usize,
@@ -10,6 +17,7 @@ pub fn runRange(
     color_grade_kernel.applyRange(pixels, start_index, end_index, grade);
 }
 
+/// runPipeline executes the full Color Grade Pass pipeline for the current frame.
 pub fn runPipeline(self: anytype, width: usize, height: usize, comptime noop_job_fn: fn (*anyopaque) void) void {
     if (height == 0) return;
     const min_rows_per_parallel_job: usize = 16;

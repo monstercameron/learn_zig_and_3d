@@ -1,7 +1,14 @@
+//! Renders sky/background contribution for visible pixels.
+//! Projects view directions into sky texture/HDRI space and writes sky color.
+//! Executed in row stripes so sky fill remains bandwidth-friendly on CPU.
+
+
 const math = @import("../../core/math.zig");
 const skybox_kernel = @import("../kernels/skybox_kernel.zig");
 const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 
+/// Builds the typed job-context wrapper used by this pass/kernel dispatch.
+/// Uses comptime parameters to specialize code paths at compile time instead of branching at runtime.
 pub fn JobContext(comptime RendererType: type, comptime ProjectionType: type, comptime HdriMapType: type) type {
     return struct {
         renderer: *RendererType,
@@ -15,6 +22,8 @@ pub fn JobContext(comptime RendererType: type, comptime ProjectionType: type, co
     };
 }
 
+/// Runs job wrapper.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn runJobWrapper(comptime CtxType: type) fn (*anyopaque) void {
     return struct {
         fn call(ctx_ptr: *anyopaque) void {
@@ -36,6 +45,8 @@ pub fn runJobWrapper(comptime CtxType: type) fn (*anyopaque) void {
     }.call;
 }
 
+/// Runs this pass over a `[start_row, end_row)` span.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn runRows(
     pixels: []u32,
     scene_depth: []const f32,
@@ -62,6 +73,7 @@ pub fn runRows(
     );
 }
 
+/// runPipeline executes the full Skybox Pass pipeline for the current frame.
 pub fn runPipeline(
     self: anytype,
     right: math.Vec3,

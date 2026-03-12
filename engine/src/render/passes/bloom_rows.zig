@@ -1,3 +1,8 @@
+//! Row-kernel utilities for bloom extraction, blur, and compositing operations.
+//! Implements cache-friendly row traversal and SIMD-friendly arithmetic where available.
+//! Used by bloom orchestration to process row stripes without duplicating kernel logic.
+
+
 const math = @import("../../core/math.zig");
 const cpu_features = @import("../../core/cpu_features.zig");
 const render_utils = @import("../core/utils.zig");
@@ -6,6 +11,8 @@ fn averageBlur5(sum: i32) u8 {
     return @intCast(@divTrunc(sum + 2, 5));
 }
 
+/// Returns the SIMD lane count selected for the current runtime target.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 fn runtimeLanes() usize {
     return switch (cpu_features.detect().preferredVectorBackend()) {
         .avx512 => 32,
@@ -15,6 +22,8 @@ fn runtimeLanes() usize {
     };
 }
 
+/// Processes extract downsample rows.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn extractDownsampleRows(
     src: []u32,
     src_width: usize,
@@ -71,6 +80,8 @@ pub fn extractDownsampleRows(
     }
 }
 
+/// Processes blur horizontal rows.
+/// Operates on the `[start_row, end_row)` stripe so worker jobs can run in parallel without overlap.
 pub fn blurHorizontalRows(bloom: anytype, start_row: usize, end_row: usize) void {
     var y = start_row;
     while (y < end_row) : (y += 1) {
@@ -101,6 +112,8 @@ pub fn blurHorizontalRows(bloom: anytype, start_row: usize, end_row: usize) void
     }
 }
 
+/// Blurs vertical rows using the configured radius/weights for this pass.
+/// Operates on the `[start_row, end_row)` stripe so worker jobs can run in parallel without overlap.
 pub fn blurVerticalRows(bloom: anytype, start_row: usize, end_row: usize) void {
     var x: usize = 0;
     while (x < bloom.width) : (x += 1) {
@@ -131,6 +144,8 @@ pub fn blurVerticalRows(bloom: anytype, start_row: usize, end_row: usize) void {
     }
 }
 
+/// Composites c om po si te ro ws into the destination buffer.
+/// Operates on the `[start_row, end_row)` stripe so worker jobs can run in parallel without overlap.
 pub fn compositeRows(dst: []u32, dst_width: usize, bloom: anytype, intensity_lut: *const [256]u8, start_row: usize, end_row: usize) void {
     const lanes = runtimeLanes();
     var y = start_row;

@@ -1,3 +1,6 @@
+//! Microbenchmark focused on Meshlet behavior and performance.
+//! Benchmark harness module used to measure CPU/scalar/SIMD performance characteristics.
+
 const std = @import("std");
 const math = @import("math3d");
 const MeshModule = @import("mesh3d.zig");
@@ -41,6 +44,8 @@ pub const MeshletBenchResult = struct {
     frames: usize,
 };
 
+/// Runs meshlet bench.
+/// Uses the passed allocator/lifetime contract directly so ownership remains explicit at the call boundary.
 pub fn runMeshletBench(allocator: std.mem.Allocator, grid_resolution: usize, frame_samples: usize) !MeshletBenchResult {
     std.debug.assert(frame_samples > 0);
 
@@ -138,6 +143,8 @@ pub fn runMeshletBench(allocator: std.mem.Allocator, grid_resolution: usize, fra
     };
 }
 
+/// Computes projection.
+/// Keeps compute projection as the single implementation point so call-site behavior stays consistent.
 fn computeProjection(width: i32, height: i32, fov_deg: f32) ProjectionParams {
     const width_f = @as(f32, @floatFromInt(width));
     const height_f = @as(f32, @floatFromInt(height));
@@ -157,6 +164,8 @@ fn computeProjection(width: i32, height: i32, fov_deg: f32) ProjectionParams {
     };
 }
 
+/// Computes camera basis.
+/// Keeps compute camera basis as the single implementation point so call-site behavior stays consistent.
 fn computeCameraBasis(yaw: f32, pitch: f32) CameraBasis {
     const cos_pitch = @cos(pitch);
     const sin_pitch = @sin(pitch);
@@ -298,6 +307,7 @@ fn triangleVisible(
     return true;
 }
 
+/// buildGridMesh builds data structures used by Bench Meshlet.
 fn buildGridMesh(allocator: std.mem.Allocator, resolution: usize) !Mesh {
     // Ensure we have at least a 1x1 grid.
     const safe_resolution: usize = if (resolution < 1) 1 else resolution;

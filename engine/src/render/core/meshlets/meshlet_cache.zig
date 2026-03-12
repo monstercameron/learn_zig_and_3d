@@ -27,6 +27,8 @@ const CacheReader = struct {
     data: []const u8,
     index: usize = 0,
 
+    /// Reads bytes.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     fn readBytes(self: *CacheReader, len: usize) CacheError![]const u8 {
         if (self.index + len > self.data.len) return error.InvalidCacheData;
         const slice = self.data[self.index .. self.index + len];
@@ -34,6 +36,8 @@ const CacheReader = struct {
         return slice;
     }
 
+    /// Reads u32.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     fn readU32(self: *CacheReader) CacheError!u32 {
         const bytes = try self.readBytes(4);
         return (@as(u32, @intCast(bytes[0]))) |
@@ -42,12 +46,16 @@ const CacheReader = struct {
             (@as(u32, @intCast(bytes[3])) << 24);
     }
 
+    /// Reads f32.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     fn readF32(self: *CacheReader) CacheError!f32 {
         const bits = try self.readU32();
         const fb = FloatBits{ .bits = bits };
         return fb.value;
     }
 
+    /// Reads u64.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     fn readU64(self: *CacheReader) CacheError!u64 {
         const lo = try self.readU32();
         const hi = try self.readU32();
@@ -80,10 +88,12 @@ fn appendU64(list: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, va
     try appendU32(list, allocator, @as(u32, @intCast(value >> 32)));
 }
 
+/// updateU64 updates Meshlet Cache state for the current tick/frame.
 fn updateU64(hasher: *std.hash.Wyhash, value: u64) void {
     hasher.update(std.mem.asBytes(&value));
 }
 
+/// updateF32 updates Meshlet Cache state for the current tick/frame.
 fn updateF32(hasher: *std.hash.Wyhash, value: f32) void {
     const fb = FloatBits{ .value = value };
     const bits = fb.bits;
@@ -123,6 +133,8 @@ fn cacheFilePath(source_path: []const u8, buffer: []u8) ![]u8 {
     return std.fs.path.join(fba.allocator(), &[_][]const u8{ "cache", file_name });
 }
 
+/// Loads l oa dc ac he dm es hl et s from external or cached data sources.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 pub fn loadCachedMeshlets(allocator: std.mem.Allocator, mesh: *Mesh, source_path: []const u8) !bool {
     return loadInternal(allocator, mesh, source_path) catch |err| switch (err) {
         error.FileNotFound => false,
@@ -136,6 +148,8 @@ pub fn loadCachedMeshlets(allocator: std.mem.Allocator, mesh: *Mesh, source_path
     };
 }
 
+/// Loads l oa di nt er na l from external or cached data sources.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn loadInternal(allocator: std.mem.Allocator, mesh: *Mesh, source_path: []const u8) !bool {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cache_path = try cacheFilePath(source_path, path_buf[0..]);
@@ -274,6 +288,8 @@ fn loadInternal(allocator: std.mem.Allocator, mesh: *Mesh, source_path: []const 
     return true;
 }
 
+/// Moves data for store meshlets.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 pub fn storeMeshlets(mesh: *const Mesh, source_path: []const u8) !void {
     if (mesh.meshlets.len == 0) return;
 

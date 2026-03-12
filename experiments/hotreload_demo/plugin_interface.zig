@@ -1,3 +1,6 @@
+//! Plugin Interface module.
+//! Build and shared interfaces for the hot-reload experiment.
+
 const std = @import("std");
 
 pub const VERSION: u32 = 1;
@@ -24,6 +27,8 @@ pub const PluginAPI = struct {
 /// The required entry point signature that every plugin must export as `plugin_entry`.
 pub const PluginEntry = *const fn (out_api: *PluginAPI, host_api: *const HostAPI) callconv(.c) ?*anyopaque;
 
+/// Performs version string.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 pub fn versionString() []const u8 {
     return "hotreload_demo_plugin_v1";
 }

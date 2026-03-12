@@ -1,7 +1,14 @@
+//! Applies depth-of-field blur based on focus distance/range and per-pixel scene depth.
+//! Pixels farther from focus plane receive larger blur radius up to configured cap.
+//! Runs in row stripes and writes into scratch/output buffers used by later post passes.
+
+
 const depth_of_field_kernel = @import("../kernels/depth_of_field_kernel.zig");
 const config = @import("../../core/app_config.zig");
 const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 
+/// Runs this pass over a `[start_row, end_row)` span.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn runRows(
     scene_pixels: []const u32,
     scratch_pixels: []u32,
@@ -28,6 +35,7 @@ pub fn runRows(
     );
 }
 
+/// runPipeline executes the full Depth Of Field Pass pipeline for the current frame.
 pub fn runPipeline(self: anytype, scene_width: usize, scene_height: usize, comptime noop_job_fn: fn (*anyopaque) void) void {
     const center_x = scene_width / 2;
     const center_y = scene_height / 2;

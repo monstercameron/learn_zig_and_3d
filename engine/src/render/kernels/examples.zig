@@ -1,9 +1,14 @@
+//! Examples module.
+//! CPU pixel/compute kernel used by the software renderer post-processing and shading stack.
+
 const std = @import("std");
 const compute = @import("compute.zig");
 const dispatcher = @import("dispatcher.zig");
 const job_system = @import("../../job_system.zig");
 const InvertKernel = @import("invert_kernel.zig").InvertKernel;
 
+/// Runs invert example.
+/// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
 pub fn runInvertExample(
     allocator: std.mem.Allocator,
     src_rgba8: *const compute.Texture2D,

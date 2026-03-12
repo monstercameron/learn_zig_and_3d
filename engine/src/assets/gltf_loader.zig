@@ -1,3 +1,6 @@
+//! Gltf Loader module.
+//! Asset loading/parsing utilities for textures and model formats.
+
 const std = @import("std");
 const math = @import("../core/math.zig");
 const MeshModule = @import("../render/core/mesh.zig");
@@ -91,12 +94,15 @@ const ParsedAsset = struct {
     parsed: std.json.Parsed(Document),
     buffers: [][]u8,
 
+    /// deinit releases resources owned by Gltf Loader.
     fn deinit(self: *ParsedAsset, allocator: std.mem.Allocator) void {
         self.parsed.deinit();
         freeBuffers(allocator, self.buffers);
     }
 };
 
+/// Loads data into runtime state using the configured source path/input.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
     var file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
@@ -154,6 +160,8 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
     return mesh;
 }
 
+/// Parses p ar se as se t into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseAsset(allocator: std.mem.Allocator, path: []const u8, contents: []const u8) !ParsedAsset {
     if (contents.len >= 12 and readU32le(contents[0..4]) == glb_magic) {
         return parseGlbAsset(allocator, path, contents);
@@ -161,6 +169,8 @@ fn parseAsset(allocator: std.mem.Allocator, path: []const u8, contents: []const 
     return parseGltfAsset(allocator, path, contents);
 }
 
+/// Parses p ar se gl tf as se t into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseGltfAsset(allocator: std.mem.Allocator, path: []const u8, json_bytes: []const u8) !ParsedAsset {
     const parsed = try std.json.parseFromSlice(Document, allocator, json_bytes, .{
         .ignore_unknown_fields = true,
@@ -175,6 +185,8 @@ fn parseGltfAsset(allocator: std.mem.Allocator, path: []const u8, json_bytes: []
     };
 }
 
+/// Parses p ar se gl ba ss et into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseGlbAsset(allocator: std.mem.Allocator, path: []const u8, contents: []const u8) !ParsedAsset {
     if (contents.len < 20) return error.InvalidGlbHeader;
     if (readU32le(contents[4..8]) != glb_version) return error.UnsupportedGlbVersion;
@@ -239,6 +251,8 @@ fn parseGlbAsset(allocator: std.mem.Allocator, path: []const u8, contents: []con
     };
 }
 
+/// Loads l oa de xt er na lb uf fe rs from external or cached data sources.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn loadExternalBuffers(allocator: std.mem.Allocator, gltf_path: []const u8, buffer_defs: []const Buffer) ![][]u8 {
     const buffers = try allocator.alloc([]u8, buffer_defs.len);
     errdefer allocator.free(buffers);
@@ -550,6 +564,8 @@ fn materialInfoForPrimitive(document: Document, primitive: Primitive) MaterialIn
     };
 }
 
+/// Processes pack color factor.
+/// Keeps pack color factor as the single implementation point so call-site behavior stays consistent.
 fn packColorFactor(factor: [4]f32) u32 {
     const r = channelFromFactor(factor[0]);
     const g = channelFromFactor(factor[1]);
@@ -563,6 +579,8 @@ fn channelFromFactor(value: f32) u8 {
     return @intFromFloat(clamped * 255.0 + 0.5);
 }
 
+/// Reads index.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 fn readIndex(buffer: []const u8, offset: usize, component_type: u32) !usize {
     return switch (component_type) {
         5121 => @intCast(buffer[offset]),
@@ -572,24 +590,31 @@ fn readIndex(buffer: []const u8, offset: usize, component_type: u32) !usize {
     };
 }
 
+/// Reads f32.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 fn readF32(bytes: []const u8) f32 {
     return @bitCast(std.mem.readInt(u32, @ptrCast(bytes.ptr), .little));
 }
 
+/// Reads u32le.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 fn readU32le(bytes: []const u8) u32 {
     return std.mem.readInt(u32, @ptrCast(bytes.ptr), .little);
 }
 
+/// getAccessor returns state derived from Gltf Loader.
 fn getAccessor(document: Document, accessor_index: usize) Accessor {
     if (accessor_index >= document.accessors.len) @panic("invalid gltf accessor index");
     return document.accessors[accessor_index];
 }
 
+/// getBufferView returns state derived from Gltf Loader.
 fn getBufferView(document: Document, buffer_view_index: usize) BufferView {
     if (buffer_view_index >= document.bufferViews.len) @panic("invalid gltf bufferView index");
     return document.bufferViews[buffer_view_index];
 }
 
+/// getBuffer returns state derived from Gltf Loader.
 fn getBuffer(buffers: [][]u8, buffer_index: usize) []const u8 {
     if (buffer_index >= buffers.len) @panic("invalid gltf buffer index");
     return buffers[buffer_index];

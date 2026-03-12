@@ -1,3 +1,6 @@
+//! Mesh Work Types module.
+//! Shared renderer core types/utilities used across passes, kernels, and frame setup.
+
 const math = @import("../../core/math.zig");
 
 pub const TriangleFlags = packed struct(u8) {

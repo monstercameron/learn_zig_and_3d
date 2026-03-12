@@ -1,7 +1,13 @@
+//! SIMD fast-path helpers for TAA on contiguous pixels sharing meshlet/surface identity.
+//! Builds batched history samples and applies vectorized temporal blends when coherence is high.
+//! Falls back to scalar TAA path when identity/depth conditions are not met.
+
 const std = @import("std");
 const math = @import("../../core/math.zig");
 const taa_helpers = @import("taa_helpers.zig");
 
+/// Performs try apply.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn tryApply(
     self: anytype,
     mesh: anytype,

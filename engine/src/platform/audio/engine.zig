@@ -1,3 +1,6 @@
+//! Engine module.
+//! Low-level audio backend/runtime support for playback, decoding, and buffering.
+
 const std = @import("std");
 const wasapi = @import("wasapi.zig");
 const windows = std.os.windows;
@@ -59,6 +62,7 @@ pub const AudioEngine = struct {
     // Command queue
     command_queue: SpscQueue(AudioCommand, COMMAND_QUEUE_SIZE) = .{},
 
+    /// init initializes Engine state and returns the configured value.
     pub fn init(allocator: std.mem.Allocator) !AudioEngine {
         var self: AudioEngine = undefined;
         self.allocator = allocator;
@@ -148,6 +152,7 @@ pub const AudioEngine = struct {
         return self;
     }
 
+    /// deinit releases resources owned by Engine.
     pub fn deinit(self: *AudioEngine) void {
         self.stop_flag.store(true, .release);
         if (self.audio_thread) |thread| {
@@ -165,6 +170,8 @@ pub const AudioEngine = struct {
         wasapi.CoUninitialize();
     }
 
+    /// Loads l oa dw av from external or cached data sources.
+    /// Validates inputs and applies fallback/default rules before exposing results to callers.
     pub fn loadWav(self: *AudioEngine, file_path: []const u8) !*audio_api.Sound {
         var file = try std.fs.cwd().openFile(file_path, .{});
         defer file.close();
@@ -214,11 +221,15 @@ pub const AudioEngine = struct {
         return sound;
     }
 
+    /// Moves data for unload.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn unload(self: *AudioEngine, sound: *audio_api.Sound) void {
         self.allocator.free(sound.samples);
         self.allocator.destroy(sound);
     }
 
+    /// Loads l oa dm p3 from external or cached data sources.
+    /// Validates inputs and applies fallback/default rules before exposing results to callers.
     pub fn loadMp3(self: *AudioEngine, file_path: []const u8) !*audio_api.Sound {
         var mp3: drmp3.drmp3 = undefined;
         if (drmp3.drmp3_init_file(&mp3, file_path.ptr, null) == 0) {
@@ -244,6 +255,8 @@ pub const AudioEngine = struct {
         return sound;
     }
 
+    /// Controls playback/state through start.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn start(self: *AudioEngine) !void {
         if (self.audio_thread != null) return; // Already started
 
@@ -338,6 +351,8 @@ pub const AudioEngine = struct {
         if (hr != windows.S_OK) return error.ReleaseBufferFailed;
     }
 
+    /// Controls playback/state through play.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn play(self: *AudioEngine, sound: *const audio_api.Sound, params: audio_api.PlaybackParams) !audio_api.PlaybackHandle {
         self.voice_mutex.lock();
         const id = self.next_playback_id;
@@ -350,30 +365,44 @@ pub const AudioEngine = struct {
         return audio_api.PlaybackHandle{ .id = id };
     }
 
+    /// Controls playback/state through stop.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn stop(self: *AudioEngine, handle: audio_api.PlaybackHandle) void {
         _ = self.command_queue.enqueue(.{ .stop = .{ .id = handle.id } });
     }
 
+    /// Controls playback/state through pause.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn pause(self: *AudioEngine, handle: audio_api.PlaybackHandle) void {
         _ = self.command_queue.enqueue(.{ .pause = .{ .id = handle.id } });
     }
 
+    /// Controls playback/state through resume playback.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn resumePlayback(self: *AudioEngine, handle: audio_api.PlaybackHandle) void {
         _ = self.command_queue.enqueue(.{ .resume_playback = .{ .id = handle.id } });
     }
 
+    /// Sets s et vo lu me.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setVolume(self: *AudioEngine, handle: audio_api.PlaybackHandle, volume: f32) void {
         _ = self.command_queue.enqueue(.{ .set_volume = .{ .id = handle.id, .volume = volume } });
     }
 
+    /// Sets s et pi tc h.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setPitch(self: *AudioEngine, handle: audio_api.PlaybackHandle, pitch: f32) void {
         _ = self.command_queue.enqueue(.{ .set_pitch = .{ .id = handle.id, .pitch = pitch } });
     }
 
+    /// Sets s et sp ee d.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setSpeed(self: *AudioEngine, handle: audio_api.PlaybackHandle, speed: f32) void {
         _ = self.command_queue.enqueue(.{ .set_speed = .{ .id = handle.id, .speed = speed } });
     }
 
+    /// Sets s et ma st er vo lu me.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setMasterVolume(self: *AudioEngine, volume: f32) void {
         _ = self.command_queue.enqueue(.{ .set_master_volume = .{ .volume = volume } });
     }

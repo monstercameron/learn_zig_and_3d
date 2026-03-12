@@ -1,6 +1,13 @@
+//! Applies a radial RGB channel offset to simulate lens chromatic aberration.
+//! Reads source color, computes per-channel sample offsets from screen center, and writes to destination.
+//! Dispatched in row stripes for predictable memory access and parallelism.
+
+
 const chromatic_aberration_kernel = @import("../kernels/chromatic_aberration_kernel.zig");
 const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 
+/// Runs this pass over a `[start_row, end_row)` span.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn runRows(
     src_pixels: []const u32,
     dst_pixels: []u32,
@@ -21,6 +28,7 @@ pub fn runRows(
     );
 }
 
+/// runPipeline executes the full Chromatic Aberration Pass pipeline for the current frame.
 pub fn runPipeline(
     self: anytype,
     width: usize,

@@ -1,3 +1,6 @@
+//! Frame Pacing Hud module.
+//! Renderer subsystem module for camera/input integration, overlays, or scene interaction.
+
 const std = @import("std");
 
 pub const history_len: usize = 512;
@@ -13,6 +16,8 @@ pub const Mode = enum {
     software,
     compositor,
 
+    /// Performs label.
+    /// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
     pub fn label(self: Mode) []const u8 {
         return switch (self) {
             .uncapped => "uncapped",
@@ -61,6 +66,7 @@ pub const Tracker = struct {
     head: usize = 0,
     stats: Stats = .{},
 
+    /// sampleOrdered samples values used by Frame Pacing Hud.
     fn sampleOrdered(history: []const f32, count: usize, head: usize, ordered_index: usize) f32 {
         if (count == 0 or ordered_index >= count) return 0.0;
         const base = if (count == history_len) head else 0;
@@ -171,6 +177,8 @@ pub const Tracker = struct {
         }
     }
 
+    /// Records telemetry/sample data and updates aggregate counters/statistics.
+    /// It appends telemetry/sample data and updates aggregate counters/statistics.
     pub fn recordSample(self: *Tracker, sample: Sample, target_frame_time_ns: i128) void {
         if (!std.math.isFinite(sample.total_ms) or sample.total_ms <= 0.0) return;
 
@@ -227,6 +235,8 @@ fn frameTimeMsToYOffset(graph_h: i32, frame_ms: f32, graph_max_ms: f32) i32 {
     return @as(i32, @intFromFloat(norm * @as(f32, @floatFromInt(graph_h - 1))));
 }
 
+/// Performs panel rect.
+/// Keeps panel rect as the single implementation point so call-site behavior stays consistent.
 pub fn panelRect(bitmap_width: i32, bitmap_height: i32) ?PanelRect {
     if (bitmap_width < 160 or bitmap_height < 120) return null;
     const margin_x: i32 = 14;
@@ -244,6 +254,8 @@ pub fn panelRect(bitmap_width: i32, bitmap_height: i32) ?PanelRect {
     };
 }
 
+/// Produces visual output from current state and target buffers.
+/// It emits frame output by transforming current state into rasterized/presentable results.
 pub fn drawPanel(tracker: *const Tracker, params: DrawParams) void {
     if (!params.show_overlay) return;
     const panel = panelRect(params.bitmap_width, params.bitmap_height) orelse return;

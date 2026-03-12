@@ -1,5 +1,10 @@
+//! Render Job Bench module.
+//! Benchmark harness module used to measure CPU/scalar/SIMD performance characteristics.
+
 const std = @import("std");
 
+/// Performs baseline pass.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 pub fn baselinePass(allocator: std.mem.Allocator, meshlet_count: usize) !u32 {
     if (meshlet_count == 0) return 0;
 
@@ -29,12 +34,15 @@ pub const JobCache = struct {
     jobs: []u8 = &[_]u8{},
     completion: []bool = &[_]bool{},
 
+    /// init initializes Render Job Bench state and returns the configured value.
     pub fn init(allocator: std.mem.Allocator) JobCache {
         return JobCache{
             .allocator = allocator,
         };
     }
 
+    /// Ensures ensure capacity.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn ensureCapacity(self: *JobCache, count: usize) !void {
         if (count == 0) return;
 
@@ -52,6 +60,7 @@ pub const JobCache = struct {
         }
     }
 
+    /// deinit releases resources owned by Render Job Bench.
     pub fn deinit(self: *JobCache) void {
         if (self.visibility.len != 0) self.allocator.free(self.visibility);
         if (self.jobs.len != 0) self.allocator.free(self.jobs);
@@ -61,6 +70,8 @@ pub const JobCache = struct {
         self.completion = &[_]bool{};
     }
 
+    /// Performs cached pass.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn cachedPass(self: *JobCache, meshlet_count: usize) !u32 {
         if (meshlet_count == 0) return 0;
         try self.ensureCapacity(meshlet_count);

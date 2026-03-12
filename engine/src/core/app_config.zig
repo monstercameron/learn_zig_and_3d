@@ -1,3 +1,6 @@
+//! App Config module.
+//! Core runtime infrastructure shared engine-wide (config, logging, jobs, profiling, math).
+
 const std = @import("std");
 
 // --- Window & Display Settings ---
@@ -194,6 +197,8 @@ pub var POST_COLOR_BRIGHTNESS_BIAS: i32 = 4;
 /// Percentile adjustment of color contrast stretching values relative to midpoint.
 pub var POST_COLOR_CONTRAST_PERCENT: i32 = 112;
 
+/// Performs target frame time ns.
+/// Keeps target frame time ns as the single implementation point so call-site behavior stays consistent.
 pub fn targetFrameTimeNs() i128 {
     if (TARGET_FPS == 0) return 0;
     const numerator: i128 = 1_000_000_000;
@@ -301,6 +306,8 @@ const RenderPassConfigFile = struct {
 // Global arena just for the config so parsed strings stay alive
 var config_arena: ?std.heap.ArenaAllocator = null;
 
+/// Loads data into runtime state using the configured source path/input.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 pub fn load(allocator: std.mem.Allocator, filepath: []const u8) !void {
     if (config_arena == null) {
         config_arena = std.heap.ArenaAllocator.init(allocator);
@@ -395,6 +402,8 @@ pub fn load(allocator: std.mem.Allocator, filepath: []const u8) !void {
     if (c.postProcessing.colorContrastPercent) |v| POST_COLOR_CONTRAST_PERCENT = v;
 }
 
+/// Loads l oa dr en de rp as se s from external or cached data sources.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 pub fn loadRenderPasses(allocator: std.mem.Allocator, filepath: []const u8) !void {
     // JSON-level pass toggles. This is intentionally separate from default.settings.json
     // so pass experiments can be switched quickly without touching base app config.
@@ -432,6 +441,8 @@ pub fn loadRenderPasses(allocator: std.mem.Allocator, filepath: []const u8) !voi
     if (p.godRays) |v| POST_GOD_RAYS_ENABLED = v;
 }
 
+/// Loads l oa de ng in ei ni from external or cached data sources.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 pub fn loadEngineIni(allocator: std.mem.Allocator, filepath: []const u8) !void {
     // Highest-priority runtime overrides for pass toggles and key pass parameters.
     // Keep this in sync with README "Render Pass Config Files" for agent discoverability.
@@ -544,28 +555,39 @@ pub fn loadEngineIni(allocator: std.mem.Allocator, filepath: []const u8) !void {
     }
 }
 
+/// Parses p ar se bo ol into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseBool(value: []const u8, fallback: bool) bool {
     if (std.ascii.eqlIgnoreCase(value, "true") or std.ascii.eqlIgnoreCase(value, "1") or std.ascii.eqlIgnoreCase(value, "on")) return true;
     if (std.ascii.eqlIgnoreCase(value, "false") or std.ascii.eqlIgnoreCase(value, "0") or std.ascii.eqlIgnoreCase(value, "off")) return false;
     return fallback;
 }
 
+/// Parses p ar se i32 into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseI32(value: []const u8, fallback: i32) i32 {
     return std.fmt.parseInt(i32, value, 10) catch fallback;
 }
 
+/// Parses p ar se f32 into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseF32(value: []const u8, fallback: f32) f32 {
     return std.fmt.parseFloat(f32, value) catch fallback;
 }
 
+/// Parses p ar se u32 into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseU32(value: []const u8, fallback: u32) u32 {
     return std.fmt.parseInt(u32, value, 10) catch fallback;
 }
 
+/// Parses p ar se us iz e into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseUsize(value: []const u8, fallback: usize) usize {
     return std.fmt.parseInt(usize, value, 10) catch fallback;
 }
 
+/// deinit releases resources owned by App Config.
 pub fn deinit() void {
     if (config_arena) |*arena| {
         arena.deinit();

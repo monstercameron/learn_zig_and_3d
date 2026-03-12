@@ -1,3 +1,5 @@
+//! SPSC Queue module.
+//! Low-level audio backend/runtime support for playback, decoding, and buffering.
 const std = @import("std");
 
 /// A lock-free, single-producer, single-consumer (SPSC) queue.
@@ -9,6 +11,8 @@ pub fn SpscQueue(comptime T: type, comptime size: usize) type {
         read_idx: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
         write_idx: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 
+        /// Performs enqueue.
+        /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
         pub fn enqueue(self: *Self, item: T) bool {
             const write_index = self.write_idx.load(.monotonic);
             const next_write_index = (write_index + 1) % size;
@@ -22,6 +26,8 @@ pub fn SpscQueue(comptime T: type, comptime size: usize) type {
             return true;
         }
 
+        /// Performs dequeue.
+        /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
         pub fn dequeue(self: *Self) ?T {
             const read_index = self.read_idx.load(.monotonic);
             if (read_index == self.write_idx.load(.acquire)) {

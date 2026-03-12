@@ -1,18 +1,27 @@
+//! Utils module.
+//! Shared renderer core types/utilities used across passes, kernels, and frame setup.
+
 const std = @import("std");
 const cpu_features = @import("../../core/cpu_features.zig");
 const math = @import("../../core/math.zig");
 
+/// Computes clamp byte.
+/// Keeps clamp byte as the single implementation point so call-site behavior stays consistent.
 pub fn clampByte(value: i32) u8 {
     if (value <= 0) return 0;
     if (value >= 255) return 255;
     return @intCast(value);
 }
 
+/// Performs fast scale255.
+/// Keeps fast scale255 as the single implementation point so call-site behavior stays consistent.
 pub fn fastScale255(value: u32, factor: u32) u8 {
     const scaled = ((value * factor) + 128) * 257;
     return @intCast(@min(scaled >> 16, 255));
 }
 
+/// Returns runtime color grade simd lanes.
+/// Keeps runtime color grade simd lanes as the single implementation point so call-site behavior stays consistent.
 pub fn runtimeColorGradeSimdLanes() usize {
     return switch (cpu_features.detect().preferredVectorBackend()) {
         .avx512 => 32,
@@ -22,10 +31,14 @@ pub fn runtimeColorGradeSimdLanes() usize {
     };
 }
 
+/// Performs nanoseconds to ms.
+/// Keeps nanoseconds to ms as the single implementation point so call-site behavior stays consistent.
 pub fn nanosecondsToMs(elapsed_ns: i128) f32 {
     return @as(f32, @floatFromInt(elapsed_ns)) / 1_000_000.0;
 }
 
+/// Performs valid scene camera sample.
+/// Keeps valid scene camera sample as the single implementation point so call-site behavior stays consistent.
 pub fn validSceneCameraSample(camera_pos: math.Vec3, near_clip: f32) bool {
     return std.math.isFinite(camera_pos.x) and
         std.math.isFinite(camera_pos.y) and
@@ -33,12 +46,15 @@ pub fn validSceneCameraSample(camera_pos: math.Vec3, near_clip: f32) bool {
         camera_pos.z > near_clip;
 }
 
+/// sampleSceneCameraClamped samples values used by Utils.
 pub fn sampleSceneCameraClamped(scene_camera: []const math.Vec3, width: usize, height: usize, x: i32, y: i32) math.Vec3 {
     const sx = @as(usize, @intCast(@max(0, @min(@as(i32, @intCast(width)) - 1, x))));
     const sy = @as(usize, @intCast(@max(0, @min(@as(i32, @intCast(height)) - 1, y))));
     return scene_camera[sy * width + sx];
 }
 
+/// Estimates scene normal.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 pub fn estimateSceneNormal(scene_camera: []const math.Vec3, width: usize, height: usize, center: math.Vec3, x: i32, y: i32, step: i32, near_clip: f32) math.Vec3 {
     const left = sampleSceneCameraClamped(scene_camera, width, height, x - step, y);
     const right = sampleSceneCameraClamped(scene_camera, width, height, x + step, y);
@@ -76,6 +92,8 @@ pub fn estimateSceneNormal(scene_camera: []const math.Vec3, width: usize, height
     return normal;
 }
 
+/// Derives choose shadow basis.
+/// Keeps choose shadow basis as the single implementation point so call-site behavior stays consistent.
 pub fn chooseShadowBasis(light_dir_world: math.Vec3) struct { right: math.Vec3, up: math.Vec3, forward: math.Vec3 } {
     const forward = math.Vec3.normalize(math.Vec3.scale(light_dir_world, -1.0));
     const world_up = if (@abs(forward.y) > 0.98)
@@ -87,6 +105,8 @@ pub fn chooseShadowBasis(light_dir_world: math.Vec3) struct { right: math.Vec3, 
     return .{ .right = right, .up = up, .forward = forward };
 }
 
+/// Performs camera to world position.
+/// Keeps camera to world position as the single implementation point so call-site behavior stays consistent.
 pub fn cameraToWorldPosition(
     camera_position: math.Vec3,
     basis_right: math.Vec3,
@@ -106,6 +126,7 @@ pub fn cameraToWorldPosition(
     );
 }
 
+/// projectCameraPositionFloat projects coordinates for Utils calculations.
 pub fn projectCameraPositionFloat(position: math.Vec3, projection: anytype, near_epsilon: f32) math.Vec2 {
     const clamped_z = if (position.z < projection.near_plane + near_epsilon)
         projection.near_plane + near_epsilon
@@ -120,6 +141,8 @@ pub fn projectCameraPositionFloat(position: math.Vec3, projection: anytype, near
     };
 }
 
+/// Performs darken packed color.
+/// Keeps darken packed color as the single implementation point so call-site behavior stays consistent.
 pub fn darkenPackedColor(pixel: u32, scale: f32) u32 {
     const alpha = pixel & 0xFF000000;
     const r = @as(i32, @intFromFloat(@as(f32, @floatFromInt((pixel >> 16) & 0xFF)) * scale));
@@ -131,6 +154,8 @@ pub fn darkenPackedColor(pixel: u32, scale: f32) u32 {
         @as(u32, clampByte(b));
 }
 
+/// Performs darken pixel span.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 pub fn darkenPixelSpan(pixels: []u32, start_index: usize, end_index: usize, scale: f32) void {
     for (start_index..end_index) |idx| {
         pixels[idx] = darkenPackedColor(pixels[idx], scale);

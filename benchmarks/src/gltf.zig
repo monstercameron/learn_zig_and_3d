@@ -1,3 +1,6 @@
+//! Gltf module.
+//! Benchmark harness module used to measure CPU/scalar/SIMD performance characteristics.
+
 const std = @import("std");
 const math = @import("math3d");
 
@@ -171,6 +174,7 @@ pub const Gltf = struct {
     scenes: []Scene,
     scene: ?u32,
 
+    /// deinit releases resources owned by Gltf.
     pub fn deinit(self: *Gltf) void {
         const allocator = self.allocator;
         for (self.buffers) |buffer| allocator.free(buffer.data);
@@ -215,6 +219,8 @@ pub const Gltf = struct {
     }
 };
 
+/// Loads data into runtime state using the configured source path/input.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 pub fn load(allocator: std.mem.Allocator, path: []const u8) !Gltf {
     const ext = std.fs.path.extension(path);
     const file = try std.fs.cwd().openFile(path, .{});
@@ -235,6 +241,8 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Gltf {
     return result;
 }
 
+/// Parses p ar se gl b into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseGlb(allocator: std.mem.Allocator, data: []u8) !Gltf {
     if (data.len < 12) return error.InvalidGlb;
     const magic = std.mem.bytesToValue(u32, data[0..4]);
@@ -261,10 +269,14 @@ fn parseGlb(allocator: std.mem.Allocator, data: []u8) !Gltf {
     return parseDocument(allocator, json_chunk, bin_chunk, null);
 }
 
+/// Parses p ar se gl tf js on into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseGltfJson(allocator: std.mem.Allocator, json_bytes: []u8, base_dir: []const u8) !Gltf {
     return parseDocument(allocator, json_bytes, null, base_dir);
 }
 
+/// Parses p ar se do cu me nt into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseDocument(
     allocator: std.mem.Allocator,
     json_bytes: []const u8,
@@ -360,6 +372,8 @@ fn parseDocument(
     };
 }
 
+/// Parses p ar se bu ff er s into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseBuffers(
     allocator: std.mem.Allocator,
     root: std.json.Object,
@@ -400,6 +414,8 @@ fn parseBuffers(
     return result;
 }
 
+/// Parses p ar se bu ff er vi ew s into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseBufferViews(allocator: std.mem.Allocator, root: std.json.Object) ![]BufferView {
     const views_value = root.get("bufferViews") orelse return allocator.alloc(BufferView, 0);
     const views_array = try expectArray(views_value);
@@ -423,6 +439,8 @@ fn parseBufferViews(allocator: std.mem.Allocator, root: std.json.Object) ![]Buff
     return result;
 }
 
+/// Parses p ar se ac ce ss or s into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseAccessors(allocator: std.mem.Allocator, root: std.json.Object, buffer_view_count: usize) ![]Accessor {
     const accessors_value = root.get("accessors") orelse return allocator.alloc(Accessor, 0);
     const accessors_array = try expectArray(accessors_value);
@@ -466,6 +484,8 @@ fn parseAccessors(allocator: std.mem.Allocator, root: std.json.Object, buffer_vi
     return result;
 }
 
+/// Parses p ar se me sh es into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseMeshes(allocator: std.mem.Allocator, root: std.json.Object) ![]Mesh {
     const meshes_value = root.get("meshes") orelse return allocator.alloc(Mesh, 0);
     const meshes_array = try expectArray(meshes_value);
@@ -510,6 +530,8 @@ fn parseMeshes(allocator: std.mem.Allocator, root: std.json.Object) ![]Mesh {
     return result;
 }
 
+/// Parses p ar se no de s into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseNodes(allocator: std.mem.Allocator, root: std.json.Object) ![]Node {
     const nodes_value = root.get("nodes") orelse return allocator.alloc(Node, 0);
     const nodes_array = try expectArray(nodes_value);
@@ -595,6 +617,8 @@ fn parseNodes(allocator: std.mem.Allocator, root: std.json.Object) ![]Node {
     return nodes;
 }
 
+/// Sets s et no de pa re nt s.
+/// Mutates owned state and keeps dependent cached values coherent for downstream systems.
 fn setNodeParents(nodes: []Node) void {
     for (nodes, 0..) |node, index| {
         for (node.children) |child_index| {
@@ -603,6 +627,8 @@ fn setNodeParents(nodes: []Node) void {
     }
 }
 
+/// Parses p ar se sk in s into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseSkins(allocator: std.mem.Allocator, root: std.json.Object) ![]Skin {
     const skins_value = root.get("skins") orelse return allocator.alloc(Skin, 0);
     const skins_array = try expectArray(skins_value);
@@ -631,6 +657,8 @@ fn parseSkins(allocator: std.mem.Allocator, root: std.json.Object) ![]Skin {
     return skins;
 }
 
+/// Parses p ar se an im at io ns into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseAnimations(allocator: std.mem.Allocator, root: std.json.Object) ![]Animation {
     const animations_value = root.get("animations") orelse return allocator.alloc(Animation, 0);
     const animations_array = try expectArray(animations_value);
@@ -674,6 +702,8 @@ fn parseAnimations(allocator: std.mem.Allocator, root: std.json.Object) ![]Anima
     return animations;
 }
 
+/// Parses p ar se sc en es into typed runtime values.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn parseScenes(allocator: std.mem.Allocator, root: std.json.Object) ![]Scene {
     const scenes_value = root.get("scenes") orelse return allocator.alloc(Scene, 0);
     const scenes_array = try expectArray(scenes_value);
@@ -864,6 +894,7 @@ fn matrixToTrs(m: math.Mat4) !TrsDecomposition {
     };
 }
 
+/// getAccessorView returns state derived from Gltf.
 fn getAccessorView(gltf: *const Gltf, accessor_index: usize) !AccessorView {
     if (accessor_index >= gltf.accessors.len) return error.AccessorOutOfRange;
     const accessor = gltf.accessors[accessor_index];
@@ -921,6 +952,7 @@ fn accessorAsVec4Slice(gltf: *const Gltf, accessor_index: usize) ![]Quat {
     return result;
 }
 
+/// initNodePoses initializes Gltf state and returns the configured value.
 pub fn initNodePoses(gltf: *const Gltf, poses: []NodePose) !void {
     if (poses.len != gltf.nodes.len) return error.MismatchedPoseBuffer;
     for (gltf.nodes, 0..) |node, idx| {
@@ -932,6 +964,7 @@ pub fn initNodePoses(gltf: *const Gltf, poses: []NodePose) !void {
     }
 }
 
+/// sampleAnimation samples values used by Gltf.
 pub fn sampleAnimation(gltf: *const Gltf, animation_index: usize, time: f32, poses: []NodePose) !void {
     if (poses.len != gltf.nodes.len) return error.MismatchedPoseBuffer;
     if (animation_index >= gltf.animations.len) return error.AnimationOutOfRange;
@@ -957,6 +990,7 @@ pub fn sampleAnimation(gltf: *const Gltf, animation_index: usize, time: f32, pos
     }
 }
 
+/// sampleVec3 samples values used by Gltf.
 fn sampleVec3(gltf: *const Gltf, sampler: AnimationSampler, time: f32) !math.Vec3 {
     const inputs = try accessorAsFloatSlice(gltf, sampler.input);
     const outputs = try accessorAsVec3Slice(gltf, sampler.output);
@@ -967,6 +1001,7 @@ fn sampleVec3(gltf: *const Gltf, sampler: AnimationSampler, time: f32) !math.Vec
     };
 }
 
+/// sampleQuat samples values used by Gltf.
 fn sampleQuat(gltf: *const Gltf, sampler: AnimationSampler, time: f32) !Quat {
     const inputs = try accessorAsFloatSlice(gltf, sampler.input);
     const outputs = try accessorAsVec4Slice(gltf, sampler.output);
@@ -988,6 +1023,7 @@ fn findKeyframe(times: []const f32, time: f32) usize {
     return times.len - 1;
 }
 
+/// sampleVec3Linear samples values used by Gltf.
 fn sampleVec3Linear(times: []const f32, values: []const math.Vec3, time: f32) math.Vec3 {
     if (times.len == 0 or values.len == 0) return math.Vec3.new(0, 0, 0);
     if (times.len == 1 or time <= times[0]) return values[0];
@@ -1006,12 +1042,14 @@ fn sampleVec3Linear(times: []const f32, values: []const math.Vec3, time: f32) ma
     );
 }
 
+/// sampleVec3Step samples values used by Gltf.
 fn sampleVec3Step(times: []const f32, values: []const math.Vec3, time: f32) math.Vec3 {
     if (times.len == 0 or values.len == 0) return math.Vec3.new(0, 0, 0);
     const index = findKeyframe(times, time);
     return values[std.math.min(index, values.len - 1)];
 }
 
+/// sampleQuatLinear samples values used by Gltf.
 fn sampleQuatLinear(times: []const f32, values: []const Quat, time: f32) Quat {
     if (times.len == 0 or values.len == 0) return Quat{ .x = 0, .y = 0, .z = 0, .w = 1 };
     if (times.len == 1 or time <= times[0]) return values[0];
@@ -1024,12 +1062,14 @@ fn sampleQuatLinear(times: []const f32, values: []const Quat, time: f32) Quat {
     return quatSlerp(values[index], values[index + 1], factor);
 }
 
+/// sampleQuatStep samples values used by Gltf.
 fn sampleQuatStep(times: []const f32, values: []const Quat, time: f32) Quat {
     if (times.len == 0 or values.len == 0) return Quat{ .x = 0, .y = 0, .z = 0, .w = 1 };
     const index = findKeyframe(times, time);
     return values[std.math.min(index, values.len - 1)];
 }
 
+/// buildLocalMatrices builds data structures used by Gltf.
 pub fn buildLocalMatrices(poses: []const NodePose, out_local: []math.Mat4) void {
     std.debug.assert(poses.len == out_local.len);
     for (poses, 0..) |pose, idx| {
@@ -1037,6 +1077,8 @@ pub fn buildLocalMatrices(poses: []const NodePose, out_local: []math.Mat4) void 
     }
 }
 
+/// Computes world matrices.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 pub fn computeWorldMatrices(gltf: *const Gltf, scene_index: usize, local: []const math.Mat4, out_world: []math.Mat4) !void {
     if (local.len != gltf.nodes.len or out_world.len != gltf.nodes.len) return error.MismatchedPoseBuffer;
     if (scene_index >= gltf.scenes.len) return error.SceneOutOfRange;
@@ -1058,6 +1100,8 @@ pub fn computeWorldMatrices(gltf: *const Gltf, scene_index: usize, local: []cons
     }
 }
 
+/// Computes skin matrices.
+/// Keeps compute skin matrices as the single implementation point so call-site behavior stays consistent.
 pub fn computeSkinMatrices(
     gltf: *const Gltf,
     skin_index: usize,

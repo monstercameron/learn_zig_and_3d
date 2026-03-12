@@ -1,3 +1,6 @@
+//! Meshlet Primitives module.
+//! CPU pixel/compute kernel used by the software renderer post-processing and shading stack.
+
 const math = @import("../../math.zig");
 
 pub const MeshletDescriptor = extern struct {

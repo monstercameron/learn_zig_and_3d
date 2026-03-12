@@ -23,6 +23,8 @@ pub const IUnknown = extern struct {
         release: *const fn (self: *const IUnknown) callconv(.Stdcall) u32,
     };
 
+    /// Performs release.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn release(self: *const IUnknown) u32 {
         return self.vtable.release(self);
     }
@@ -39,12 +41,16 @@ pub const IMMDevice = extern struct {
         // ... other methods we don't need yet
     };
 
+    /// Performs activate.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn activate(self: *const IMMDevice, iid: *const GUID, ppInterface: *?*anyopaque) windows.HRESULT {
         // CLSCTX_ALL indicates we want an in-process server
         const CLSCTX_ALL = 0x1 | 0x2 | 0x4 | 0x10;
         return self.vtable.activate(self, iid, CLSCTX_ALL, null, ppInterface);
     }
 
+    /// Performs release.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn release(self: *const IMMDevice) u32 {
         return self.vtable.base.release(@ptrCast(self));
     }
@@ -60,10 +66,13 @@ pub const IMMDeviceEnumerator = extern struct {
         // ... other methods
     };
 
+    /// getDefaultAudioEndpoint returns state derived from Wasapi.
     pub fn getDefaultAudioEndpoint(self: *const IMMDeviceEnumerator, dataFlow: i32, role: i32, ppEndpoint: *?*IMMDevice) windows.HRESULT {
         return self.vtable.getDefaultAudioEndpoint(self, dataFlow, role, ppEndpoint);
     }
 
+    /// Performs release.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn release(self: *const IMMDeviceEnumerator) u32 {
         return self.vtable.base.release(@ptrCast(self));
     }
@@ -87,30 +96,40 @@ pub const IAudioClient = extern struct {
         // ... other methods
     };
 
+    /// getService returns state derived from Wasapi.
     pub fn getService(self: *const IAudioClient, iid: *const GUID, ppv: *?*anyopaque) windows.HRESULT {
         return self.vtable.getService(self, iid, ppv);
     }
 
+    /// getMixFormat returns state derived from Wasapi.
     pub fn getMixFormat(self: *const IAudioClient, pp_device_format: *?*WAVEFORMATEX) windows.HRESULT {
         return self.vtable.getMixFormat(self, pp_device_format);
     }
 
+     /// initialize initializes Wasapi state and returns the configured value.
      pub fn initialize(self: *const IAudioClient, share_mode: i32, stream_flags: u32, hns_buffer_duration: i64, hns_periodicity: i64, p_format: *const WAVEFORMATEX) windows.HRESULT {
         return self.vtable.initialize(self, share_mode, stream_flags, hns_buffer_duration, hns_periodicity, p_format, null);
     }
 
+    /// getBufferSize returns state derived from Wasapi.
     pub fn getBufferSize(self: *const IAudioClient, p_num_buffer_frames: *u32) windows.HRESULT {
         return self.vtable.getBufferSize(self, p_num_buffer_frames);
     }
 
+    /// Controls playback/state through start.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn start(self: *const IAudioClient) windows.HRESULT {
         return self.vtable.start(self);
     }
 
+    /// Controls playback/state through stop.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn stop(self: *const IAudioClient) windows.HRESULT {
         return self.vtable.stop(self);
     }
 
+    /// Performs release.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn release(self: *const IAudioClient) u32 {
         return self.vtable.base.release(@ptrCast(self));
     }
@@ -125,14 +144,19 @@ pub const IAudioRenderClient = extern struct {
         releaseBuffer: *const fn(self: *const IAudioRenderClient, num_frames_written: u32, dw_flags: u32) callconv(.Stdcall) windows.HRESULT,
     };
 
+    /// getBuffer returns state derived from Wasapi.
     pub fn getBuffer(self: *const IAudioRenderClient, num_frames_requested: u32, pp_data: *?*u8) windows.HRESULT {
         return self.vtable.getBuffer(self, num_frames_requested, pp_data);
     }
 
+    /// Performs release buffer.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn releaseBuffer(self: *const IAudioRenderClient, num_frames_written: u32, flags: u32) windows.HRESULT {
         return self.vtable.releaseBuffer(self, num_frames_written, flags);
     }
 
+    /// Performs release.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn release(self: *const IAudioRenderClient) u32 {
         return self.vtable.base.release(@ptrCast(self));
     }

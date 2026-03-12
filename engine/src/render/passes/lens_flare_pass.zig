@@ -1,6 +1,13 @@
+//! Applies screen-space lens flare artifacts from bright/light-facing regions.
+//! Builds flare contribution (ghosts/streaks/glow) and blends into destination color.
+//! Row-striped execution keeps sampling work parallel and cache-friendly.
+
+
 const lens_flare_kernel = @import("../kernels/lens_flare_kernel.zig");
 const pass_dispatch = @import("../pipeline/pass_dispatch.zig");
 
+/// Runs this pass over a `[start_row, end_row)` span.
+/// Used by frame-pass orchestration where deterministic ordering and cache-friendly iteration matter for pacing.
 pub fn runRows(
     src_pixels: []const u32,
     dst_pixels: []u32,
@@ -13,6 +20,7 @@ pub fn runRows(
     lens_flare_kernel.applyRows(src_pixels, dst_pixels, start_row, end_row, width, threshold, intensity);
 }
 
+/// runPipeline executes the full Lens Flare Pass pipeline for the current frame.
 pub fn runPipeline(
     self: anytype,
     width: usize,
