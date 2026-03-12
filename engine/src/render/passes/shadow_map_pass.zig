@@ -175,10 +175,8 @@ pub fn runPipeline(
     height: usize,
     resolve_config: anytype,
     target_shadow_map: anytype,
-    pass_index: usize,
-    build_elapsed_ns: i128,
     comptime noop_job_fn: fn (*anyopaque) void,
-) void {
+) i128 {
     const min_rows_per_parallel_job: usize = 16;
     const max_stripes = self.shadow_resolve_job_contexts.len;
     const stripe_count = @max(@as(usize, 1), @min(max_stripes, (height + min_rows_per_parallel_job - 1) / min_rows_per_parallel_job));
@@ -188,8 +186,7 @@ pub fn runPipeline(
 
     if (stripe_count <= 1 or self.job_system == null) {
         CtxType.runRowsDirect(self.bitmap.pixels, self.scene_camera, width, 0, height, resolve_config, target_shadow_map);
-        self.recordRenderPassDuration(if (pass_index == 0) "shadow_pass_0" else "shadow_pass_1", build_elapsed_ns + (std.time.nanoTimestamp() - pass_start));
-        return;
+        return std.time.nanoTimestamp() - pass_start;
     }
 
     const JobType = @TypeOf(self.color_grade_jobs[0]);
@@ -224,5 +221,5 @@ pub fn runPipeline(
     CtxType.run(@ptrCast(&self.shadow_resolve_job_contexts[0]));
     parent_job.complete();
     parent_job.wait();
-    self.recordRenderPassDuration(if (pass_index == 0) "shadow_pass_0" else "shadow_pass_1", build_elapsed_ns + (std.time.nanoTimestamp() - pass_start));
+    return std.time.nanoTimestamp() - pass_start;
 }

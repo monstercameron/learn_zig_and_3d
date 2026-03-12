@@ -53,6 +53,21 @@ At a high level, each frame does this:
 
 The detailed pass order lives in `rendering-pipeline.md`.
 
+## Default Performance Targets
+
+These are default review targets for CPU-first development when profiling `ReleaseFast` builds on representative desktop hardware.
+
+- 720p (`1280x720`): target frame time `<= 8.33 ms` (120 FPS), with shadow-map rebuild budget `<= 2.08 ms` (25% of frame budget).
+- 1080p (`1920x1080`): target frame time `<= 16.67 ms` (60 FPS), with shadow-map rebuild budget `<= 4.17 ms` (25% of frame budget).
+
+Runtime budget is controlled by:
+
+- `rendering.fpsLimit` (`TARGET_FPS`) for total frame-time budget.
+- `postProcessing.shadowBudgetPercent` / `[shadows] budget_percent` for shadow rebuild share.
+- Adaptive controls in `postProcessing` / `[shadows]`: `shadowAdaptiveResolutionEnabled`, `shadowAdaptiveMinMapSize`, `shadowAdaptivePressureFrames`, `shadowAdaptiveRecoveryFrames`, `shadowAdaptiveRecoveryBudgetPercent`, and `shadowAdaptiveMaxIntervalScale`.
+
+When a frame exceeds budget, shadow-map updates should degrade first (reuse active maps and reduce update frequency) before quality-visible changes in other passes.
+
 ## Configuration And Assets
 
 The main runtime configuration file is `assets/configs/default.settings.json`.

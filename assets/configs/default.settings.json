@@ -9,7 +9,9 @@
     "rendering": {
         "renderResolutionScalePercent": 100,
         "fpsLimit": 120,
-        "textureFilteringBilinear": true
+        "textureFilteringBilinear": true,
+        "lightCountMin": 1,
+        "lightCountMax": 16
     },
     "camera": {
         "initialFovDegrees": 60.0,
@@ -29,6 +31,13 @@
         "shadowMapSize": 2048,
         "shadowStrengthPercent": 38,
         "shadowDepthBias": 0.05,
+        "shadowBudgetPercent": 25,
+        "shadowAdaptiveResolutionEnabled": true,
+        "shadowAdaptiveMinMapSize": 256,
+        "shadowAdaptivePressureFrames": 3,
+        "shadowAdaptiveRecoveryFrames": 120,
+        "shadowAdaptiveRecoveryBudgetPercent": 60,
+        "shadowAdaptiveMaxIntervalScale": 8,
         "hybridShadowEnabled": false,
         "hybridShadowMinBlockSize": 24,
         "hybridShadowMaxDepth": 4,

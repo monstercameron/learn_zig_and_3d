@@ -1,9 +1,9 @@
 {
-  "key": "cornell",
+  "key": "mixed_shadows",
   "assets": [
     {
       "type": "camera",
-      "cameraName": "main_showcase",
+      "cameraName": "mixed_shadow_debug",
       "cameraPosition": [0.0, 2.0, -6.5],
       "cameraOrientation": [0.0, 0.0]
     },
@@ -13,13 +13,23 @@
     },
     {
       "type": "light",
-      "position": [2.8, 0.9, -2.0],
+      "position": [0.0, 3.8, 0.0],
       "lightColor": [1.0, 0.98, 0.92],
-      "lightDistance": 4.2,
+      "lightDistance": 3.8,
+      "lightShadowMode": "shadow_map",
+      "lightShadowUpdateInterval": 2,
+      "lightShadowMapSize": 1024,
+      "glowRadius": 36.0,
+      "glowIntensity": 1.2
+    },
+    {
+      "type": "light",
+      "position": [-1.4, 2.8, -0.8],
+      "lightColor": [0.62, 0.72, 1.0],
+      "lightDistance": 3.2,
       "lightShadowMode": "meshlet_ray",
-      "lightShadowUpdateInterval": 1,
-      "glowRadius": 42.0,
-      "glowIntensity": 1.4
+      "glowRadius": 28.0,
+      "glowIntensity": 0.8
     },
     {
       "type": "model",

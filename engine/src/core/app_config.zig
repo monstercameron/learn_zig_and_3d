@@ -27,6 +27,10 @@ pub var CAMERA_FOV_MIN: f32 = 20.0;
 pub var CAMERA_FOV_MAX: f32 = 120.0;
 /// The initial distance of the light source from the camera/center.
 pub var LIGHT_DISTANCE_INITIAL: f32 = 3.0;
+/// Minimum number of active renderer lights allocated at runtime.
+pub var LIGHT_COUNT_MIN: usize = 1;
+/// Maximum number of active renderer lights allocated at runtime.
+pub var LIGHT_COUNT_MAX: usize = 16;
 
 // --- Debug & Development Information ---
 /// Renders a visible border around rasterization screen tiles to help debug tile logic.
@@ -59,6 +63,20 @@ pub var POST_SHADOW_MAP_SIZE: usize = 2048;
 pub var POST_SHADOW_STRENGTH_PERCENT: i32 = 38;
 /// A depth offset to prevent shadow acne artifacts on lit surfaces.
 pub var POST_SHADOW_DEPTH_BIAS: f32 = 0.05;
+/// Frame-time budget share (0-100) available for shadow-map rebuild work.
+pub var POST_SHADOW_BUDGET_PERCENT: i32 = 25;
+/// Enables adaptive shadow-map resolution scaling when budget pressure persists.
+pub var POST_SHADOW_ADAPTIVE_RESOLUTION_ENABLED: bool = true;
+/// Floor for adaptive shadow-map downscale.
+pub var POST_SHADOW_ADAPTIVE_MIN_MAP_SIZE: usize = 256;
+/// Consecutive pressure frames required before one shadow map downscale.
+pub var POST_SHADOW_ADAPTIVE_PRESSURE_FRAMES: u32 = 3;
+/// Consecutive relief frames required before one shadow map upscale.
+pub var POST_SHADOW_ADAPTIVE_RECOVERY_FRAMES: u32 = 120;
+/// Build-time threshold (as % of budget) required to consider upscaling.
+pub var POST_SHADOW_ADAPTIVE_RECOVERY_BUDGET_PERCENT: i32 = 60;
+/// Maximum multiplier applied to per-light shadow update interval under pressure.
+pub var POST_SHADOW_ADAPTIVE_MAX_INTERVAL_SCALE: u32 = 8;
 /// Enables the advanced hybrid ray-traced shadow pass for high fidelity shadows.
 pub var POST_HYBRID_SHADOW_ENABLED: bool = false;
 /// Tile dimension constraint used during hybrid shadow evaluation.
@@ -187,6 +205,8 @@ const ConfigFile = struct {
         renderResolutionScalePercent: ?u32 = null,
         fpsLimit: ?u32 = null,
         textureFilteringBilinear: ?bool = null,
+        lightCountMin: ?usize = null,
+        lightCountMax: ?usize = null,
     } = .{},
     camera: struct {
         initialFovDegrees: ?f32 = null,
@@ -207,6 +227,13 @@ const ConfigFile = struct {
         shadowMapSize: ?usize = null,
         shadowStrengthPercent: ?i32 = null,
         shadowDepthBias: ?f32 = null,
+        shadowBudgetPercent: ?i32 = null,
+        shadowAdaptiveResolutionEnabled: ?bool = null,
+        shadowAdaptiveMinMapSize: ?usize = null,
+        shadowAdaptivePressureFrames: ?u32 = null,
+        shadowAdaptiveRecoveryFrames: ?u32 = null,
+        shadowAdaptiveRecoveryBudgetPercent: ?i32 = null,
+        shadowAdaptiveMaxIntervalScale: ?u32 = null,
         hybridShadowEnabled: ?bool = null,
         hybridShadowMinBlockSize: ?i32 = null,
         hybridShadowMaxDepth: ?u32 = null,
@@ -291,6 +318,8 @@ pub fn load(allocator: std.mem.Allocator, filepath: []const u8) !void {
     if (c.rendering.renderResolutionScalePercent) |v| RENDER_RESOLUTION_SCALE_PERCENT = v;
     if (c.rendering.fpsLimit) |v| TARGET_FPS = v;
     if (c.rendering.textureFilteringBilinear) |v| TEXTURE_FILTERING_BILINEAR = v;
+    if (c.rendering.lightCountMin) |v| LIGHT_COUNT_MIN = @max(@as(usize, 1), v);
+    if (c.rendering.lightCountMax) |v| LIGHT_COUNT_MAX = @max(LIGHT_COUNT_MIN, v);
 
     if (c.camera.initialFovDegrees) |v| CAMERA_FOV_INITIAL = v;
     if (c.camera.fovStep) |v| CAMERA_FOV_STEP = v;
@@ -308,6 +337,13 @@ pub fn load(allocator: std.mem.Allocator, filepath: []const u8) !void {
     if (c.postProcessing.shadowMapSize) |v| POST_SHADOW_MAP_SIZE = v;
     if (c.postProcessing.shadowStrengthPercent) |v| POST_SHADOW_STRENGTH_PERCENT = v;
     if (c.postProcessing.shadowDepthBias) |v| POST_SHADOW_DEPTH_BIAS = v;
+    if (c.postProcessing.shadowBudgetPercent) |v| POST_SHADOW_BUDGET_PERCENT = std.math.clamp(v, 0, 100);
+    if (c.postProcessing.shadowAdaptiveResolutionEnabled) |v| POST_SHADOW_ADAPTIVE_RESOLUTION_ENABLED = v;
+    if (c.postProcessing.shadowAdaptiveMinMapSize) |v| POST_SHADOW_ADAPTIVE_MIN_MAP_SIZE = std.math.clamp(v, @as(usize, 64), @as(usize, 4096));
+    if (c.postProcessing.shadowAdaptivePressureFrames) |v| POST_SHADOW_ADAPTIVE_PRESSURE_FRAMES = @max(@as(u32, 1), v);
+    if (c.postProcessing.shadowAdaptiveRecoveryFrames) |v| POST_SHADOW_ADAPTIVE_RECOVERY_FRAMES = @max(@as(u32, 1), v);
+    if (c.postProcessing.shadowAdaptiveRecoveryBudgetPercent) |v| POST_SHADOW_ADAPTIVE_RECOVERY_BUDGET_PERCENT = std.math.clamp(v, 1, 100);
+    if (c.postProcessing.shadowAdaptiveMaxIntervalScale) |v| POST_SHADOW_ADAPTIVE_MAX_INTERVAL_SCALE = @max(@as(u32, 1), v);
 
     if (c.postProcessing.hybridShadowEnabled) |v| POST_HYBRID_SHADOW_ENABLED = v;
     if (c.postProcessing.hybridShadowMinBlockSize) |v| POST_HYBRID_SHADOW_MIN_BLOCK_SIZE = v;
@@ -433,6 +469,13 @@ pub fn loadEngineIni(allocator: std.mem.Allocator, filepath: []const u8) !void {
             if (std.mem.eql(u8, key, "enabled")) POST_SHADOW_ENABLED = parseBool(val, POST_SHADOW_ENABLED);
             if (std.mem.eql(u8, key, "strength_percent")) POST_SHADOW_STRENGTH_PERCENT = parseI32(val, POST_SHADOW_STRENGTH_PERCENT);
             if (std.mem.eql(u8, key, "depth_bias")) POST_SHADOW_DEPTH_BIAS = parseF32(val, POST_SHADOW_DEPTH_BIAS);
+            if (std.mem.eql(u8, key, "budget_percent")) POST_SHADOW_BUDGET_PERCENT = std.math.clamp(parseI32(val, POST_SHADOW_BUDGET_PERCENT), 0, 100);
+            if (std.mem.eql(u8, key, "adaptive_resolution")) POST_SHADOW_ADAPTIVE_RESOLUTION_ENABLED = parseBool(val, POST_SHADOW_ADAPTIVE_RESOLUTION_ENABLED);
+            if (std.mem.eql(u8, key, "adaptive_min_map_size")) POST_SHADOW_ADAPTIVE_MIN_MAP_SIZE = std.math.clamp(parseUsize(val, POST_SHADOW_ADAPTIVE_MIN_MAP_SIZE), @as(usize, 64), @as(usize, 4096));
+            if (std.mem.eql(u8, key, "adaptive_pressure_frames")) POST_SHADOW_ADAPTIVE_PRESSURE_FRAMES = @max(@as(u32, 1), parseU32(val, POST_SHADOW_ADAPTIVE_PRESSURE_FRAMES));
+            if (std.mem.eql(u8, key, "adaptive_recovery_frames")) POST_SHADOW_ADAPTIVE_RECOVERY_FRAMES = @max(@as(u32, 1), parseU32(val, POST_SHADOW_ADAPTIVE_RECOVERY_FRAMES));
+            if (std.mem.eql(u8, key, "adaptive_recovery_budget_percent")) POST_SHADOW_ADAPTIVE_RECOVERY_BUDGET_PERCENT = std.math.clamp(parseI32(val, POST_SHADOW_ADAPTIVE_RECOVERY_BUDGET_PERCENT), 1, 100);
+            if (std.mem.eql(u8, key, "adaptive_max_interval_scale")) POST_SHADOW_ADAPTIVE_MAX_INTERVAL_SCALE = @max(@as(u32, 1), parseU32(val, POST_SHADOW_ADAPTIVE_MAX_INTERVAL_SCALE));
         } else if (std.mem.eql(u8, section, "ssao")) {
             if (std.mem.eql(u8, key, "enabled")) POST_SSAO_ENABLED = parseBool(val, POST_SSAO_ENABLED);
             if (std.mem.eql(u8, key, "radius")) POST_SSAO_RADIUS = parseF32(val, POST_SSAO_RADIUS);
@@ -493,6 +536,15 @@ fn parseI32(value: []const u8, fallback: i32) i32 {
 fn parseF32(value: []const u8, fallback: f32) f32 {
     return std.fmt.parseFloat(f32, value) catch fallback;
 }
+
+fn parseU32(value: []const u8, fallback: u32) u32 {
+    return std.fmt.parseInt(u32, value, 10) catch fallback;
+}
+
+fn parseUsize(value: []const u8, fallback: usize) usize {
+    return std.fmt.parseInt(usize, value, 10) catch fallback;
+}
+
 pub fn deinit() void {
     if (config_arena) |*arena| {
         arena.deinit();

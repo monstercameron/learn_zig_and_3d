@@ -4,6 +4,8 @@
   "loadingFrames": 45,
   "scenes": [
     { "key": "gun_physics", "file": "assets/configs/scenes/gun_physics.scene.json" },
-    { "key": "cornell", "file": "assets/configs/scenes/cornell.scene.json" }
+    { "key": "cornell", "file": "assets/configs/scenes/cornell.scene.json" },
+    { "key": "mixed_shadows", "file": "assets/configs/scenes/mixed_shadows.scene.json" },
+    { "key": "mixed_shadows_static", "file": "assets/configs/scenes/mixed_shadows_static.scene.json" }
   ]
 }

@@ -119,7 +119,18 @@ Example interpretation:
 - If `hybrid_shadow candidate` is small but `execute` is huge, the problem is per-sample shadow work, not setup.
 - If `meshlet_tiled` rises, inspect raster, interpolation, overdraw, and tile binning.
 
-## 5. Recommended Review Routine
+## 5. Pass Throughput Notes (Cache / Branch / SIMD)
+
+Use these tags when reviewing `frame_profile` output so optimization work stays focused on the right CPU bottleneck.
+
+- `meshlet_tiled`: mixed. Triangle setup/raster loops are SIMD-hot; tile handoff and coverage checks are branch-heavy.
+- `shadow_map_build_total`: cache/memory-write sensitive. Depth target clears and raster writes can become L2/L3 pressure points at larger shadow map sizes.
+- `shadow_map_resolve_total`: SIMD-friendly contiguous row traversal. Usually throughput-bound by camera/depth/shadow buffer reads.
+- `meshlet_shadows` / `hybrid_shadow`: branch-heavy traversal/candidate filtering; watch divergence and early-out effectiveness before trying wider SIMD.
+- `ssao`, `taa`, `depth_fog`, `color_grade`: mostly streaming contiguous buffers; prioritize vector lanes, alignment, and avoiding extra passes over the same memory.
+- `present`: typically OS/compositor-bound; optimize only after render passes are under target.
+
+## 6. Recommended Review Routine
 
 For any serious performance review:
 
@@ -129,11 +140,11 @@ For any serious performance review:
 4. Re-run the same frame and same sampler duration.
 5. Record before/after numbers for the exact pass you changed.
 
-## 6. Visual Validation
+## 7. Visual Validation
 
 If a change affects image quality, capture a screenshot before and after profiling. Performance-only changes are not enough if they break shadow edges, SSAO, textures, or model loading.
 
-## 7. Chrome Trace Capture
+## 8. Chrome Trace Capture
 
 The engine also has a built-in Chrome trace-compatible profiler. It writes `profile.json`, which you can open in `chrome://tracing` or [Perfetto](https://ui.perfetto.dev/).
 
@@ -148,7 +159,7 @@ This capture starts just before the requested frame and writes `profile.json` in
 
 Use `profiler.zone("YourFunctionName")` around specific functions or blocks when you need finer-grained trace visibility.
 
-## 8. Flame Graphs From `profile.json`
+## 9. Flame Graphs From `profile.json`
 
 You can generate folded stacks (and optionally an SVG flame graph) directly from the trace file:
 

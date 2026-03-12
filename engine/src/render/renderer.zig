@@ -216,6 +216,28 @@ const MeshletTelemetry = struct {
     touched_tiles: usize = 0,
 };
 
+const LightWorkStats = struct {
+    active_lights: usize = 0,
+    shadow_map_lights: usize = 0,
+    meshlet_shadow_lights: usize = 0,
+    shadow_map_reused_lights: usize = 0,
+    shadow_budget_skipped_lights: usize = 0,
+    shadow_map_downscaled_lights: usize = 0,
+    shadow_map_upscaled_lights: usize = 0,
+    shadow_cadence_increased_lights: usize = 0,
+    shadow_cadence_decreased_lights: usize = 0,
+    shadow_queries: usize = 0,
+    meshlet_ray_tests: usize = 0,
+    shadow_budget_ns: i128 = 0,
+    shadow_build_ns: i128 = 0,
+    shadow_resolve_ns: i128 = 0,
+    active_tiles: usize = 0,
+    tile_light_candidates: usize = 0,
+    tile_light_final: usize = 0,
+    tile_light_rejected: usize = 0,
+    tile_light_overflow_tiles: usize = 0,
+};
+
 const max_render_passes = 32;
 
 const RenderPassTiming = struct {
@@ -1024,7 +1046,7 @@ const ShadowLightDispatchContext = struct {
     basis_up: math.Vec3,
     basis_forward: math.Vec3,
     projection: ProjectionParams,
-    shadow_elapsed_ns: i128,
+    shadow_build_elapsed_ns: []const i128,
 };
 
 const HybridShadowDispatchContext = struct {
@@ -1068,7 +1090,7 @@ const PostPassExecutionContext = struct {
     current_view: TemporalAAViewState,
     projection: ProjectionParams,
     light_dir_world: math.Vec3,
-    shadow_elapsed_ns: i128,
+    shadow_build_elapsed_ns: []const i128,
     plan: CompositionPlan,
 };
 
@@ -1143,6 +1165,12 @@ const clampByte = render_utils.clampByte;
 /// The `Renderer` struct holds the entire state of the rendering engine.
 /// It manages the window connection, the pixel buffer, the rendering pipeline, and application state.
 pub const LightInfo = struct {
+    pub const ShadowMode = enum(u8) {
+        none = 0,
+        shadow_map = 1,
+        meshlet_ray = 2,
+    };
+
     orbit_x: f32,
     orbit_speed: f32,
     distance: f32,
@@ -1152,7 +1180,29 @@ pub const LightInfo = struct {
     manual_direction: bool = false,
     glow_radius: f32 = 0.0,
     glow_intensity: f32 = 0.0,
+    shadow_mode: ShadowMode = .meshlet_ray,
+    shadow_update_interval_frames: u32 = 1,
+    shadow_dynamic_interval_scale: u32 = 1,
+    shadow_last_build_frame: u64 = 0,
+    shadow_last_build_ns: i128 = 0,
+    shadow_map_target_size: usize,
     shadow_map: ShadowMap,
+};
+
+const LightSoA = struct {
+    dir_x: []f32,
+    dir_y: []f32,
+    dir_z: []f32,
+    dir_cam_x: []f32,
+    dir_cam_y: []f32,
+    dir_cam_z: []f32,
+    distance: []f32,
+    shadow_mode: []u8,
+};
+
+const TileLightRange = struct {
+    offset: usize = 0,
+    count: usize = 0,
 };
 
 pub const Renderer = struct {
@@ -1176,6 +1226,9 @@ pub const Renderer = struct {
 
     // Light state
     lights: std.ArrayList(LightInfo),
+    light_soa: LightSoA,
+    shadow_build_elapsed_ns: []i128,
+    shadow_resolve_elapsed_ns: []i128,
     sys_shadows: shadow_system.ShadowSystem,
 
     // Input and timing state
@@ -1191,6 +1244,8 @@ pub const Renderer = struct {
     pending_fov_delta: f32,
     profile_capture_frame: u64,
     profile_capture_emitted: bool,
+    shadow_budget_pressure_frames: u32 = 0,
+    shadow_budget_relief_frames: u32 = 0,
 
     // Tiled rendering resources
     tile_grid: ?TileGrid, // The grid layout of tiles on the screen.
@@ -1205,6 +1260,8 @@ pub const Renderer = struct {
     tile_triangle_lists: ?[]BinningStage.TileTriangleList,
     active_tile_flags: ?[]bool,
     active_tile_indices: ?[]usize,
+    tile_light_ranges: []TileLightRange,
+    tile_light_indices: []usize,
     mesh_work_cache: MeshWorkCache = MeshWorkCache.init(),
     frame_view_cache: FrameViewCache = .{},
 
@@ -1260,6 +1317,8 @@ pub const Renderer = struct {
     hybrid_shadow_cached_meshlet_vertex_count: usize,
     hybrid_shadow_cached_meshlet_primitive_count: usize,
     hybrid_shadow_stats: HybridShadowStats = .{},
+    light_work_stats: LightWorkStats = .{},
+    meshlet_ray_tests_counter: std.atomic.Value(usize),
     hybrid_shadow_debug: HybridShadowDebugState = .{},
     ao_scratch: AOScratch,
     bloom_scratch: BloomScratch,
@@ -1300,6 +1359,260 @@ pub const Renderer = struct {
 
     /// Initializes the renderer, creating all necessary resources.
     /// JS Analogy: The `constructor` for our main rendering class.
+    fn defaultLightColor(light_idx: usize) math.Vec3 {
+        return if ((light_idx & 1) == 0)
+            math.Vec3.new(1.0, 0.9, 0.8)
+        else
+            math.Vec3.new(0.5, 0.6, 1.0);
+    }
+
+    fn defaultLightShadowMode() LightInfo.ShadowMode {
+        if (config.MESHLET_SHADOWS_ENABLED) return .meshlet_ray;
+        if (config.POST_SHADOW_ENABLED) return .shadow_map;
+        return .none;
+    }
+
+    fn initLightInfo(allocator: std.mem.Allocator, light_idx: usize) !LightInfo {
+        const sm_depth = try allocator.alloc(f32, config.POST_SHADOW_MAP_SIZE * config.POST_SHADOW_MAP_SIZE);
+        return LightInfo{
+            .orbit_x = @as(f32, @floatFromInt(light_idx)) * 3.14159,
+            .orbit_speed = 0.0,
+            .distance = config.LIGHT_DISTANCE_INITIAL,
+            .elevation = 0.65,
+            .color = defaultLightColor(light_idx),
+            .shadow_mode = defaultLightShadowMode(),
+            .shadow_map_target_size = config.POST_SHADOW_MAP_SIZE,
+            .shadow_map = .{
+                .width = config.POST_SHADOW_MAP_SIZE,
+                .height = config.POST_SHADOW_MAP_SIZE,
+                .depth = sm_depth,
+                .basis_right = math.Vec3.new(1.0, 0.0, 0.0),
+                .basis_up = math.Vec3.new(0.0, 1.0, 0.0),
+                .basis_forward = math.Vec3.new(0.0, 0.0, 1.0),
+                .min_x = -1.0,
+                .max_x = 1.0,
+                .min_y = -1.0,
+                .max_y = 1.0,
+                .min_z = -1.0,
+                .max_z = 1.0,
+                .inv_extent_x = 1.0,
+                .inv_extent_y = 1.0,
+                .depth_bias = config.POST_SHADOW_DEPTH_BIAS,
+                .texel_bias = 0.0,
+                .active = false,
+            },
+        };
+    }
+
+    fn syncLightSoA(self: *Renderer) void {
+        for (self.lights.items, 0..) |light, i| {
+            self.light_soa.dir_x[i] = light.direction.x;
+            self.light_soa.dir_y[i] = light.direction.y;
+            self.light_soa.dir_z[i] = light.direction.z;
+            self.light_soa.distance[i] = light.distance;
+            self.light_soa.shadow_mode[i] = @intFromEnum(light.shadow_mode);
+        }
+    }
+
+    fn syncLightCameraSoA(self: *Renderer, basis_right: math.Vec3, basis_up: math.Vec3, basis_forward: math.Vec3) void {
+        for (self.lights.items, 0..) |_, i| {
+            const dir_x = self.light_soa.dir_x[i];
+            const dir_y = self.light_soa.dir_y[i];
+            const dir_z = self.light_soa.dir_z[i];
+            self.light_soa.dir_cam_x[i] = dir_x * basis_right.x + dir_y * basis_right.y + dir_z * basis_right.z;
+            self.light_soa.dir_cam_y[i] = dir_x * basis_up.x + dir_y * basis_up.y + dir_z * basis_up.z;
+            self.light_soa.dir_cam_z[i] = dir_x * basis_forward.x + dir_y * basis_forward.y + dir_z * basis_forward.z;
+        }
+    }
+
+    fn countLightsWithShadowMode(self: *const Renderer, mode: LightInfo.ShadowMode) usize {
+        var count: usize = 0;
+        for (self.lights.items) |light| {
+            if (light.shadow_mode == mode) count += 1;
+        }
+        return count;
+    }
+
+    fn totalShadowMapBytes(self: *const Renderer) usize {
+        var total_bytes: usize = 0;
+        for (self.lights.items) |light| {
+            total_bytes += light.shadow_map.width * light.shadow_map.height * @sizeOf(f32);
+        }
+        return total_bytes;
+    }
+
+    fn computeShadowBuildBudgetNs(self: *const Renderer) i128 {
+        if (self.target_frame_time_ns <= 0) return -1;
+        const budget_percent = std.math.clamp(config.POST_SHADOW_BUDGET_PERCENT, 0, 100);
+        if (budget_percent <= 0) return 0;
+        if (budget_percent >= 100) return self.target_frame_time_ns;
+        return @divTrunc(self.target_frame_time_ns * @as(i128, @intCast(budget_percent)), 100);
+    }
+
+    fn estimateShadowBuildCostNs(light: *const LightInfo) i128 {
+        if (light.shadow_last_build_ns > 0) return light.shadow_last_build_ns;
+        const shadow_texel_count = light.shadow_map.width * light.shadow_map.height;
+        const texel_estimate_ns: i128 = @intCast(shadow_texel_count);
+        return @max(@as(i128, 100_000), texel_estimate_ns);
+    }
+
+    fn resizeLightShadowMap(
+        self: *Renderer,
+        index: usize,
+        shadow_map_size: usize,
+        update_target_size: bool,
+        reason: []const u8,
+    ) !bool {
+        if (index >= self.lights.items.len) return false;
+        const clamped_size = std.math.clamp(shadow_map_size, @as(usize, 64), @as(usize, 4096));
+        const light = &self.lights.items[index];
+        if (update_target_size) {
+            light.shadow_map_target_size = clamped_size;
+        }
+        if (light.shadow_map.width == clamped_size and light.shadow_map.height == clamped_size) return false;
+
+        const prev_width = light.shadow_map.width;
+        const prev_height = light.shadow_map.height;
+        light.shadow_map.depth = try self.allocator.realloc(light.shadow_map.depth, clamped_size * clamped_size);
+        light.shadow_map.width = clamped_size;
+        light.shadow_map.height = clamped_size;
+        light.shadow_map.active = false;
+        light.shadow_last_build_frame = 0;
+        light.shadow_last_build_ns = 0;
+        renderer_logger.infoSub(
+            "lights",
+            "light {} shadow_map resized {}x{} -> {}x{} ({s})",
+            .{ index, prev_width, prev_height, clamped_size, clamped_size, reason },
+        );
+        return true;
+    }
+
+    fn tryDownscaleOneShadowMapLight(self: *Renderer) !bool {
+        var candidate_index: ?usize = null;
+        var candidate_size: usize = 0;
+        const min_size = @max(@as(usize, 64), config.POST_SHADOW_ADAPTIVE_MIN_MAP_SIZE);
+        for (self.lights.items, 0..) |light, light_index| {
+            if (light.shadow_mode != .shadow_map) continue;
+            if (light.shadow_map.width <= min_size) continue;
+            if (light.shadow_map.width > candidate_size) {
+                candidate_size = light.shadow_map.width;
+                candidate_index = light_index;
+            }
+        }
+        if (candidate_index == null) return false;
+        const idx = candidate_index.?;
+        const current_size = self.lights.items[idx].shadow_map.width;
+        const next_size = @max(min_size, current_size / 2);
+        if (next_size >= current_size) return false;
+        return self.resizeLightShadowMap(idx, next_size, false, "budget_downscale");
+    }
+
+    fn tryUpscaleOneShadowMapLight(self: *Renderer) !bool {
+        var candidate_index: ?usize = null;
+        var candidate_size: usize = std.math.maxInt(usize);
+        for (self.lights.items, 0..) |light, light_index| {
+            if (light.shadow_mode != .shadow_map) continue;
+            if (light.shadow_map.width >= light.shadow_map_target_size) continue;
+            if (light.shadow_map.width < candidate_size) {
+                candidate_size = light.shadow_map.width;
+                candidate_index = light_index;
+            }
+        }
+        if (candidate_index == null) return false;
+        const idx = candidate_index.?;
+        const current_size = self.lights.items[idx].shadow_map.width;
+        const target_size = self.lights.items[idx].shadow_map_target_size;
+        const next_size = @min(target_size, current_size * 2);
+        if (next_size <= current_size) return false;
+        return self.resizeLightShadowMap(idx, next_size, false, "budget_upscale");
+    }
+
+    fn tryIncreaseShadowCadenceScale(self: *Renderer) bool {
+        var candidate_index: ?usize = null;
+        var candidate_cost_ns: i128 = 0;
+        for (self.lights.items, 0..) |light, light_index| {
+            if (light.shadow_mode != .shadow_map) continue;
+            if (light.shadow_dynamic_interval_scale >= config.POST_SHADOW_ADAPTIVE_MAX_INTERVAL_SCALE) continue;
+            const est_ns = estimateShadowBuildCostNs(&light);
+            if (est_ns > candidate_cost_ns) {
+                candidate_cost_ns = est_ns;
+                candidate_index = light_index;
+            }
+        }
+        if (candidate_index == null) return false;
+        const idx = candidate_index.?;
+        const light = &self.lights.items[idx];
+        light.shadow_dynamic_interval_scale = @min(config.POST_SHADOW_ADAPTIVE_MAX_INTERVAL_SCALE, light.shadow_dynamic_interval_scale * 2);
+        renderer_logger.infoSub(
+            "lights",
+            "light {} shadow cadence scale increased to {}x",
+            .{ idx, light.shadow_dynamic_interval_scale },
+        );
+        return true;
+    }
+
+    fn tryDecreaseShadowCadenceScale(self: *Renderer) bool {
+        var candidate_index: ?usize = null;
+        var candidate_scale: u32 = 1;
+        for (self.lights.items, 0..) |light, light_index| {
+            if (light.shadow_mode != .shadow_map) continue;
+            if (light.shadow_dynamic_interval_scale <= 1) continue;
+            if (light.shadow_dynamic_interval_scale > candidate_scale) {
+                candidate_scale = light.shadow_dynamic_interval_scale;
+                candidate_index = light_index;
+            }
+        }
+        if (candidate_index == null) return false;
+        const idx = candidate_index.?;
+        const light = &self.lights.items[idx];
+        light.shadow_dynamic_interval_scale = @max(@as(u32, 1), light.shadow_dynamic_interval_scale / 2);
+        renderer_logger.infoSub(
+            "lights",
+            "light {} shadow cadence scale decreased to {}x",
+            .{ idx, light.shadow_dynamic_interval_scale },
+        );
+        return true;
+    }
+
+    fn applyAdaptiveShadowBudgetPolicy(self: *Renderer) !void {
+        if (!config.POST_SHADOW_ENABLED) return;
+        if (!config.POST_SHADOW_ADAPTIVE_RESOLUTION_ENABLED) return;
+        if (self.light_work_stats.shadow_map_lights == 0) return;
+        const shadow_budget_ns = self.light_work_stats.shadow_budget_ns;
+        if (shadow_budget_ns <= 0) return;
+
+        if (self.light_work_stats.shadow_budget_skipped_lights > 0) {
+            self.shadow_budget_pressure_frames += 1;
+            self.shadow_budget_relief_frames = 0;
+            if (self.shadow_budget_pressure_frames >= config.POST_SHADOW_ADAPTIVE_PRESSURE_FRAMES) {
+                if (try self.tryDownscaleOneShadowMapLight()) {
+                    self.light_work_stats.shadow_map_downscaled_lights += 1;
+                } else if (self.tryIncreaseShadowCadenceScale()) {
+                    self.light_work_stats.shadow_cadence_increased_lights += 1;
+                }
+                self.shadow_budget_pressure_frames = 0;
+            }
+            return;
+        }
+
+        const recovery_budget_percent = std.math.clamp(config.POST_SHADOW_ADAPTIVE_RECOVERY_BUDGET_PERCENT, 1, 100);
+        const within_recovery_budget = (self.light_work_stats.shadow_build_ns * 100) <=
+            (shadow_budget_ns * @as(i128, @intCast(recovery_budget_percent)));
+        if (!within_recovery_budget) {
+            self.shadow_budget_relief_frames = 0;
+            return;
+        }
+
+        self.shadow_budget_relief_frames += 1;
+        if (self.shadow_budget_relief_frames < config.POST_SHADOW_ADAPTIVE_RECOVERY_FRAMES) return;
+        if (try self.tryUpscaleOneShadowMapLight()) {
+            self.light_work_stats.shadow_map_upscaled_lights += 1;
+        } else if (self.tryDecreaseShadowCadenceScale()) {
+            self.light_work_stats.shadow_cadence_decreased_lights += 1;
+        }
+        self.shadow_budget_relief_frames = 0;
+    }
+
     pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allocator) !Renderer {
         const hdc = GetDC(hwnd) orelse return error.DCNotFound;
         const hdc_mem = CreateCompatibleDC(hdc) orelse {
@@ -1342,6 +1655,9 @@ pub const Renderer = struct {
         @memset(active_tile_flags, false);
         const active_tile_indices = try allocator.alloc(usize, tile_count);
         errdefer allocator.free(active_tile_indices);
+        const tile_light_ranges = try allocator.alloc(TileLightRange, tile_count);
+        errdefer allocator.free(tile_light_ranges);
+        @memset(tile_light_ranges, .{});
 
         const job_system = try JobSystem.init(allocator);
         const color_grade_job_count = @max(@as(usize, 1), @as(usize, @intCast(job_system.worker_count * 2)));
@@ -1426,28 +1742,43 @@ pub const Renderer = struct {
         errdefer allocator.free(hybrid_shadow_edge_cache);
         var lights = std.ArrayList(LightInfo){};
         for (0..2) |light_idx| {
-            const sm_depth = try allocator.alloc(f32, config.POST_SHADOW_MAP_SIZE * config.POST_SHADOW_MAP_SIZE);
-            errdefer allocator.free(sm_depth);
-            try lights.append(allocator, LightInfo{ .orbit_x = @as(f32, @floatFromInt(light_idx)) * 3.14159, .orbit_speed = 0.0, .distance = config.LIGHT_DISTANCE_INITIAL, .elevation = 0.65, .color = if (light_idx == 0) math.Vec3.new(1.0, 0.9, 0.8) else math.Vec3.new(0.5, 0.6, 1.0), .shadow_map = .{
-                .width = config.POST_SHADOW_MAP_SIZE,
-                .height = config.POST_SHADOW_MAP_SIZE,
-                .depth = sm_depth,
-                .basis_right = math.Vec3.new(1.0, 0.0, 0.0),
-                .basis_up = math.Vec3.new(0.0, 1.0, 0.0),
-                .basis_forward = math.Vec3.new(0.0, 0.0, 1.0),
-                .min_x = -1.0,
-                .max_x = 1.0,
-                .min_y = -1.0,
-                .max_y = 1.0,
-                .min_z = -1.0,
-                .max_z = 1.0,
-                .inv_extent_x = 1.0,
-                .inv_extent_y = 1.0,
-                .depth_bias = config.POST_SHADOW_DEPTH_BIAS,
-                .texel_bias = 0.0,
-                .active = false,
-            } });
+            try lights.append(allocator, try initLightInfo(allocator, light_idx));
         }
+        const light_dir_x = try allocator.alloc(f32, lights.items.len);
+        errdefer allocator.free(light_dir_x);
+        const light_dir_y = try allocator.alloc(f32, lights.items.len);
+        errdefer allocator.free(light_dir_y);
+        const light_dir_z = try allocator.alloc(f32, lights.items.len);
+        errdefer allocator.free(light_dir_z);
+        const light_dir_cam_x = try allocator.alloc(f32, lights.items.len);
+        errdefer allocator.free(light_dir_cam_x);
+        const light_dir_cam_y = try allocator.alloc(f32, lights.items.len);
+        errdefer allocator.free(light_dir_cam_y);
+        const light_dir_cam_z = try allocator.alloc(f32, lights.items.len);
+        errdefer allocator.free(light_dir_cam_z);
+        const light_distance = try allocator.alloc(f32, lights.items.len);
+        errdefer allocator.free(light_distance);
+        const light_shadow_mode = try allocator.alloc(u8, lights.items.len);
+        errdefer allocator.free(light_shadow_mode);
+        for (lights.items, 0..) |light, i| {
+            light_dir_x[i] = light.direction.x;
+            light_dir_y[i] = light.direction.y;
+            light_dir_z[i] = light.direction.z;
+            light_dir_cam_x[i] = light.direction.x;
+            light_dir_cam_y[i] = light.direction.y;
+            light_dir_cam_z[i] = light.direction.z;
+            light_distance[i] = light.distance;
+            light_shadow_mode[i] = @intFromEnum(light.shadow_mode);
+        }
+        const shadow_build_elapsed_ns = try allocator.alloc(i128, lights.items.len);
+        errdefer allocator.free(shadow_build_elapsed_ns);
+        @memset(shadow_build_elapsed_ns, 0);
+        const shadow_resolve_elapsed_ns = try allocator.alloc(i128, lights.items.len);
+        errdefer allocator.free(shadow_resolve_elapsed_ns);
+        @memset(shadow_resolve_elapsed_ns, 0);
+        const tile_light_index_capacity = @max(@as(usize, 1), tile_count * lights.items.len);
+        const tile_light_indices = try allocator.alloc(usize, tile_light_index_capacity);
+        errdefer allocator.free(tile_light_indices);
         const ao_downsample = @max(1, config.POST_SSAO_DOWNSAMPLE);
         const ao_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + ao_downsample - 1, ao_downsample))));
         const ao_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + ao_downsample - 1, ao_downsample))));
@@ -1495,6 +1826,18 @@ pub const Renderer = struct {
             .mouse_initialized = false,
             .mouse_last_pos = .{ .x = 0, .y = 0 },
             .lights = lights,
+            .light_soa = .{
+                .dir_x = light_dir_x,
+                .dir_y = light_dir_y,
+                .dir_z = light_dir_z,
+                .dir_cam_x = light_dir_cam_x,
+                .dir_cam_y = light_dir_cam_y,
+                .dir_cam_z = light_dir_cam_z,
+                .distance = light_distance,
+                .shadow_mode = light_shadow_mode,
+            },
+            .shadow_build_elapsed_ns = shadow_build_elapsed_ns,
+            .shadow_resolve_elapsed_ns = shadow_resolve_elapsed_ns,
             .sys_shadows = shadow_system.ShadowSystem.init(allocator),
             .camera_fov_deg = config.CAMERA_FOV_INITIAL,
             .keys_pressed = 0,
@@ -1528,6 +1871,8 @@ pub const Renderer = struct {
             .tile_triangle_lists = tile_triangle_lists,
             .active_tile_flags = active_tile_flags,
             .active_tile_indices = active_tile_indices,
+            .tile_light_ranges = tile_light_ranges,
+            .tile_light_indices = tile_light_indices,
             .render_pass_timings = [_]RenderPassTiming{.{
                 .name = "",
                 .frame_duration_ms = 0.0,
@@ -1610,6 +1955,7 @@ pub const Renderer = struct {
             .hybrid_shadow_cached_meshlet_vertex_count = 0,
             .hybrid_shadow_cached_meshlet_primitive_count = 0,
             .hybrid_shadow_stats = .{},
+            .meshlet_ray_tests_counter = std.atomic.Value(usize).init(0),
             .hybrid_shadow_debug = .{},
             .ao_scratch = .{
                 .width = ao_width,
@@ -1678,6 +2024,8 @@ pub const Renderer = struct {
         if (self.tile_triangle_lists) |lists| BinningStage.freeTileTriangleLists(lists, self.allocator);
         if (self.active_tile_flags) |flags| self.allocator.free(flags);
         if (self.active_tile_indices) |indices| self.allocator.free(indices);
+        self.allocator.free(self.tile_light_ranges);
+        self.allocator.free(self.tile_light_indices);
         self.allocator.free(self.scene_depth);
         self.allocator.free(self.scene_camera);
         self.allocator.free(self.scene_normal);
@@ -1700,6 +2048,16 @@ pub const Renderer = struct {
             self.allocator.free(light.shadow_map.depth);
         }
         self.lights.deinit(self.allocator);
+        self.allocator.free(self.light_soa.dir_x);
+        self.allocator.free(self.light_soa.dir_y);
+        self.allocator.free(self.light_soa.dir_z);
+        self.allocator.free(self.light_soa.dir_cam_x);
+        self.allocator.free(self.light_soa.dir_cam_y);
+        self.allocator.free(self.light_soa.dir_cam_z);
+        self.allocator.free(self.light_soa.distance);
+        self.allocator.free(self.light_soa.shadow_mode);
+        self.allocator.free(self.shadow_build_elapsed_ns);
+        self.allocator.free(self.shadow_resolve_elapsed_ns);
         self.allocator.free(self.ao_scratch.ping);
         self.allocator.free(self.ao_scratch.pong);
         self.allocator.free(self.ao_scratch.depth);
@@ -1764,6 +2122,7 @@ pub const Renderer = struct {
         cam_right: math.Vec3,
         cam_up: math.Vec3,
         cam_fwd: math.Vec3,
+        meshlet_ray_counter: ?*std.atomic.Value(usize),
         shadow_start_idx: usize = 0,
         shadow_end_idx: usize = 0,
 
@@ -2029,6 +2388,9 @@ pub const Renderer = struct {
                     }
 
                     if (packet.active_mask != 0) {
+                        if (job.meshlet_ray_counter) |counter| {
+                            _ = counter.fetchAdd(@as(usize, @intCast(@popCount(packet.active_mask))), .monotonic);
+                        }
                         {
                             const _z_meshletShadowTrace = profiler.zone("meshletShadowTrace");
                             defer if (_z_meshletShadowTrace) |z| z.end();
@@ -3504,6 +3866,77 @@ pub const Renderer = struct {
         self.textures = textures;
     }
 
+    pub fn setLightCapacity(self: *Renderer, light_count: usize) !void {
+        const requested_count = @max(@as(usize, 1), light_count);
+        const light_count_max = @max(config.LIGHT_COUNT_MIN, config.LIGHT_COUNT_MAX);
+        const desired_count = std.math.clamp(requested_count, config.LIGHT_COUNT_MIN, light_count_max);
+        if (desired_count != requested_count) {
+            renderer_logger.infoSub(
+                "lights",
+                "clamped requested light capacity {} to {} (min={}, max={})",
+                .{ requested_count, desired_count, config.LIGHT_COUNT_MIN, light_count_max },
+            );
+        }
+        if (desired_count > self.shadow_build_elapsed_ns.len) {
+            const prev_len = self.shadow_build_elapsed_ns.len;
+            self.shadow_build_elapsed_ns = try self.allocator.realloc(self.shadow_build_elapsed_ns, desired_count);
+            @memset(self.shadow_build_elapsed_ns[prev_len..], 0);
+        }
+        if (desired_count > self.shadow_resolve_elapsed_ns.len) {
+            const prev_len = self.shadow_resolve_elapsed_ns.len;
+            self.shadow_resolve_elapsed_ns = try self.allocator.realloc(self.shadow_resolve_elapsed_ns, desired_count);
+            @memset(self.shadow_resolve_elapsed_ns[prev_len..], 0);
+        }
+        if (desired_count > self.light_soa.distance.len) {
+            self.light_soa.dir_x = try self.allocator.realloc(self.light_soa.dir_x, desired_count);
+            self.light_soa.dir_y = try self.allocator.realloc(self.light_soa.dir_y, desired_count);
+            self.light_soa.dir_z = try self.allocator.realloc(self.light_soa.dir_z, desired_count);
+            self.light_soa.dir_cam_x = try self.allocator.realloc(self.light_soa.dir_cam_x, desired_count);
+            self.light_soa.dir_cam_y = try self.allocator.realloc(self.light_soa.dir_cam_y, desired_count);
+            self.light_soa.dir_cam_z = try self.allocator.realloc(self.light_soa.dir_cam_z, desired_count);
+            self.light_soa.distance = try self.allocator.realloc(self.light_soa.distance, desired_count);
+            self.light_soa.shadow_mode = try self.allocator.realloc(self.light_soa.shadow_mode, desired_count);
+        }
+        const tile_count = self.tile_light_ranges.len;
+        const tile_light_capacity = @max(@as(usize, 1), tile_count * desired_count);
+        if (tile_light_capacity > self.tile_light_indices.len) {
+            self.tile_light_indices = try self.allocator.realloc(self.tile_light_indices, tile_light_capacity);
+        }
+        while (self.lights.items.len > desired_count) {
+            const remove_index = self.lights.items.len - 1;
+            const removed = self.lights.items[remove_index];
+            self.allocator.free(removed.shadow_map.depth);
+            self.lights.items.len = remove_index;
+        }
+        while (self.lights.items.len < desired_count) {
+            const light_idx = self.lights.items.len;
+            try self.lights.append(self.allocator, try initLightInfo(self.allocator, light_idx));
+        }
+        var min_shadow_size: usize = config.POST_SHADOW_MAP_SIZE;
+        var max_shadow_size: usize = config.POST_SHADOW_MAP_SIZE;
+        if (self.lights.items.len > 0) {
+            min_shadow_size = self.lights.items[0].shadow_map.width;
+            max_shadow_size = self.lights.items[0].shadow_map.width;
+            for (self.lights.items[1..]) |light| {
+                min_shadow_size = @min(min_shadow_size, light.shadow_map.width);
+                max_shadow_size = @max(max_shadow_size, light.shadow_map.width);
+            }
+        }
+        const total_shadow_bytes = self.totalShadowMapBytes();
+        renderer_logger.infoSub(
+            "lights",
+            "capacity={} shadow_map_range={}..{} total_shadow_mem={d:.2} MiB",
+            .{
+                self.lights.items.len,
+                min_shadow_size,
+                max_shadow_size,
+                @as(f64, @floatFromInt(total_shadow_bytes)) / (1024.0 * 1024.0),
+            },
+        );
+        self.syncLightSoA();
+        self.frame_view_cache.invalidate();
+    }
+
     pub fn setDirectionalLight(self: *Renderer, index: usize, direction: math.Vec3, distance: f32, color: ?math.Vec3) void {
         if (index >= self.lights.items.len) return;
         const dir_len = math.Vec3.length(direction);
@@ -3516,6 +3949,22 @@ pub const Renderer = struct {
         if (color) |c| self.lights.items[index].color = c;
         self.lights.items[index].manual_direction = true;
         self.frame_view_cache.invalidate();
+    }
+
+    pub fn setLightShadowMode(self: *Renderer, index: usize, mode: LightInfo.ShadowMode) void {
+        if (index >= self.lights.items.len) return;
+        self.lights.items[index].shadow_mode = mode;
+        self.light_soa.shadow_mode[index] = @intFromEnum(mode);
+    }
+
+    pub fn setLightShadowUpdateInterval(self: *Renderer, index: usize, interval_frames: u32) void {
+        if (index >= self.lights.items.len) return;
+        self.lights.items[index].shadow_update_interval_frames = @max(@as(u32, 1), interval_frames);
+        self.lights.items[index].shadow_dynamic_interval_scale = 1;
+    }
+
+    pub fn setLightShadowMapSize(self: *Renderer, index: usize, shadow_map_size: usize) !void {
+        _ = try self.resizeLightShadowMap(index, shadow_map_size, true, "config");
     }
 
     pub fn setLightGlow(self: *Renderer, index: usize, radius: f32, intensity: f32) void {
@@ -3588,8 +4037,12 @@ pub const Renderer = struct {
                 light.direction = math.Vec3.normalize(light_pos);
             }
         }
-        const light_distance_0 = if (self.lights.items.len > 0) self.lights.items[0].distance else 10.0;
-        const light_dir_world = if (self.lights.items.len > 0) self.lights.items[0].direction else math.Vec3.new(0, -1, 0);
+        self.syncLightSoA();
+        const light_distance_0 = if (self.lights.items.len > 0) self.light_soa.distance[0] else 10.0;
+        const light_dir_world = if (self.lights.items.len > 0)
+            math.Vec3.new(self.light_soa.dir_x[0], self.light_soa.dir_y[0], self.light_soa.dir_z[0])
+        else
+            math.Vec3.new(0, -1, 0);
 
         const frame_view = if (self.frame_view_cache.needsUpdate(
             self.camera_position,
@@ -3743,10 +4196,78 @@ pub const Renderer = struct {
         }
 
         const mesh_work = &cache.work;
-        var shadow_elapsed_ns: i128 = 0;
+        const shadow_map_light_count = if (config.POST_SHADOW_ENABLED)
+            self.countLightsWithShadowMode(.shadow_map)
+        else
+            0;
+        const meshlet_shadow_light_count = if (config.MESHLET_SHADOWS_ENABLED)
+            self.countLightsWithShadowMode(.meshlet_ray)
+        else
+            0;
+        self.light_work_stats.active_lights = self.lights.items.len;
+        self.light_work_stats.shadow_map_lights = shadow_map_light_count;
+        self.light_work_stats.meshlet_shadow_lights = meshlet_shadow_light_count;
+        self.light_work_stats.shadow_map_reused_lights = 0;
+        self.light_work_stats.shadow_budget_skipped_lights = 0;
+        self.light_work_stats.shadow_map_downscaled_lights = 0;
+        self.light_work_stats.shadow_map_upscaled_lights = 0;
+        self.light_work_stats.shadow_cadence_increased_lights = 0;
+        self.light_work_stats.shadow_cadence_decreased_lights = 0;
+        self.light_work_stats.shadow_queries = self.bitmap.pixels.len * shadow_map_light_count;
+        self.light_work_stats.meshlet_ray_tests = 0;
+        self.light_work_stats.shadow_budget_ns = 0;
+        self.light_work_stats.shadow_build_ns = 0;
+        self.light_work_stats.shadow_resolve_ns = 0;
+        self.light_work_stats.active_tiles = 0;
+        self.light_work_stats.tile_light_candidates = 0;
+        self.light_work_stats.tile_light_final = 0;
+        self.light_work_stats.tile_light_rejected = 0;
+        self.light_work_stats.tile_light_overflow_tiles = 0;
+        @memset(self.shadow_resolve_elapsed_ns[0..self.lights.items.len], 0);
         if (config.POST_SHADOW_ENABLED) {
-            for (self.lights.items) |*light| {
-                shadow_elapsed_ns += self.buildShadowMap(mesh, light.direction, &light.shadow_map);
+            const shadow_budget_ns = self.computeShadowBuildBudgetNs();
+            const enforce_shadow_budget = shadow_budget_ns >= 0;
+            if (shadow_budget_ns > 0) {
+                self.light_work_stats.shadow_budget_ns = shadow_budget_ns;
+            }
+            var shadow_budget_spent_ns: i128 = 0;
+            @memset(self.shadow_build_elapsed_ns[0..self.lights.items.len], 0);
+            const frame_number = self.total_frames_rendered + 1;
+            for (self.lights.items, 0..) |*light, light_index| {
+                if (light.shadow_mode != .shadow_map) continue;
+                const base_cadence = @max(@as(u64, 1), @as(u64, light.shadow_update_interval_frames));
+                const cadence_scale = @max(@as(u64, 1), @as(u64, light.shadow_dynamic_interval_scale));
+                const cadence = @max(@as(u64, 1), @min(std.math.maxInt(u64), base_cadence * cadence_scale));
+                const frames_since_last_build = if (light.shadow_last_build_frame == 0)
+                    cadence
+                else
+                    frame_number - light.shadow_last_build_frame;
+                const should_rebuild = !light.shadow_map.active or frames_since_last_build >= cadence;
+                if (!should_rebuild) {
+                    self.light_work_stats.shadow_map_reused_lights += 1;
+                    continue;
+                }
+                if (enforce_shadow_budget and light.shadow_map.active) {
+                    const estimated_build_ns = estimateShadowBuildCostNs(light);
+                    if (shadow_budget_spent_ns + estimated_build_ns > shadow_budget_ns) {
+                        self.light_work_stats.shadow_map_reused_lights += 1;
+                        self.light_work_stats.shadow_budget_skipped_lights += 1;
+                        continue;
+                    }
+                }
+                const light_dir_world_for_shadow = math.Vec3.new(
+                    self.light_soa.dir_x[light_index],
+                    self.light_soa.dir_y[light_index],
+                    self.light_soa.dir_z[light_index],
+                );
+                self.shadow_build_elapsed_ns[light_index] = self.buildShadowMap(mesh, light_dir_world_for_shadow, &light.shadow_map);
+                light.shadow_last_build_frame = frame_number;
+                light.shadow_last_build_ns = self.shadow_build_elapsed_ns[light_index];
+                self.light_work_stats.shadow_build_ns += self.shadow_build_elapsed_ns[light_index];
+                shadow_budget_spent_ns += self.shadow_build_elapsed_ns[light_index];
+            }
+            if (self.light_work_stats.shadow_build_ns > 0) {
+                self.recordRenderPassDuration("shadow_map_build_total", self.light_work_stats.shadow_build_ns);
             }
         }
 
@@ -3767,7 +4288,18 @@ pub const Renderer = struct {
             self.recordRenderPassTiming("meshlet_direct", scene_pass_start);
         }
 
-        self.applyPostProcessingPasses(mesh, self.camera_position, right, up, forward, taa_view, raster_projection, light_dir_world, shadow_elapsed_ns);
+        self.applyPostProcessingPasses(
+            mesh,
+            self.camera_position,
+            right,
+            up,
+            forward,
+            taa_view,
+            raster_projection,
+            light_dir_world,
+            self.shadow_build_elapsed_ns[0..self.lights.items.len],
+        );
+        try self.applyAdaptiveShadowBudgetPolicy();
         if (self.show_light_orb) {
             const light_camera_z = light_camera.z;
             if (light_camera_z > NEAR_CLIP) {
@@ -3832,6 +4364,45 @@ pub const Renderer = struct {
 
         for (self.render_pass_timings[0..self.render_pass_count]) |pass| {
             renderer_logger.infoSub("frame_profile", "{s}: {d:.3} ms", .{ pass.name, pass.frame_duration_ms });
+        }
+        renderer_logger.infoSub(
+            "frame_profile",
+            "light_work active={} shadow_map_lights={} meshlet_shadow_lights={} shadow_map_reused={} shadow_budget_skipped={} shadow_map_downscaled={} shadow_map_upscaled={} shadow_cadence_increased={} shadow_cadence_decreased={} shadow_queries={} meshlet_ray_tests={} shadow_budget={d:.3} ms shadow_build={d:.3} ms shadow_resolve={d:.3} ms active_tiles={} tile_light_candidates={} tile_light_final={} tile_light_rejected={} tile_light_overflow_tiles={}",
+            .{
+                self.light_work_stats.active_lights,
+                self.light_work_stats.shadow_map_lights,
+                self.light_work_stats.meshlet_shadow_lights,
+                self.light_work_stats.shadow_map_reused_lights,
+                self.light_work_stats.shadow_budget_skipped_lights,
+                self.light_work_stats.shadow_map_downscaled_lights,
+                self.light_work_stats.shadow_map_upscaled_lights,
+                self.light_work_stats.shadow_cadence_increased_lights,
+                self.light_work_stats.shadow_cadence_decreased_lights,
+                self.light_work_stats.shadow_queries,
+                self.light_work_stats.meshlet_ray_tests,
+                render_utils.nanosecondsToMs(self.light_work_stats.shadow_budget_ns),
+                render_utils.nanosecondsToMs(self.light_work_stats.shadow_build_ns),
+                render_utils.nanosecondsToMs(self.light_work_stats.shadow_resolve_ns),
+                self.light_work_stats.active_tiles,
+                self.light_work_stats.tile_light_candidates,
+                self.light_work_stats.tile_light_final,
+                self.light_work_stats.tile_light_rejected,
+                self.light_work_stats.tile_light_overflow_tiles,
+            },
+        );
+        for (0..self.lights.items.len) |light_index| {
+            const build_ns = self.shadow_build_elapsed_ns[light_index];
+            const resolve_ns = self.shadow_resolve_elapsed_ns[light_index];
+            if (build_ns == 0 and resolve_ns == 0) continue;
+            renderer_logger.infoSub(
+                "frame_profile",
+                "shadow_light {} build={d:.3} ms resolve={d:.3} ms",
+                .{
+                    light_index,
+                    render_utils.nanosecondsToMs(build_ns),
+                    render_utils.nanosecondsToMs(resolve_ns),
+                },
+            );
         }
 
         if (self.hybrid_shadow_stats.job_count != 0) {
@@ -4185,7 +4756,6 @@ pub const Renderer = struct {
         basis_up: math.Vec3,
         basis_forward: math.Vec3,
         projection: ProjectionParams,
-        build_elapsed_ns: i128,
         target_shadow_map: *const ShadowMap,
         pass_index: usize,
     ) void {
@@ -4204,16 +4774,18 @@ pub const Renderer = struct {
             .near_plane = projection.near_plane,
             .darkness_percent = config.POST_SHADOW_STRENGTH_PERCENT,
         };
-        shadow_map_pass.runPipeline(
+        const resolve_elapsed_ns = shadow_map_pass.runPipeline(
             self,
             width,
             height,
             resolve_config,
             target_shadow_map,
-            pass_index,
-            build_elapsed_ns,
             noopRenderPassJob,
         );
+        if (pass_index < self.shadow_resolve_elapsed_ns.len) {
+            self.shadow_resolve_elapsed_ns[pass_index] = resolve_elapsed_ns;
+        }
+        self.light_work_stats.shadow_resolve_ns += resolve_elapsed_ns;
     }
 
     fn applyAdaptiveShadowPass(
@@ -4300,14 +4872,16 @@ pub const Renderer = struct {
     }
 
     fn applyShadowLightFromPass(ctx: ShadowLightDispatchContext, pass_index: usize) void {
+        if (pass_index >= ctx.renderer.lights.items.len) return;
+        if (ctx.renderer.lights.items[pass_index].shadow_mode != .shadow_map) return;
         const shadow_map_ptr = &ctx.renderer.lights.items[pass_index].shadow_map;
+        _ = ctx.shadow_build_elapsed_ns;
         ctx.renderer.applyShadowPass(
             ctx.camera_position,
             ctx.basis_right,
             ctx.basis_up,
             ctx.basis_forward,
             ctx.projection,
-            ctx.shadow_elapsed_ns,
             shadow_map_ptr,
             pass_index,
         );
@@ -4327,8 +4901,8 @@ pub const Renderer = struct {
     fn isPostPassEnabled(ctx: PostPassExecutionContext, pass_id: pass_registry.RenderPassId) bool {
         const enabled = switch (pass_id) {
             .skybox => config.POST_SKYBOX_ENABLED,
-            .shadow_map => config.POST_SHADOW_ENABLED,
-            .shadow_resolve => config.POST_SHADOW_ENABLED,
+            .shadow_map => config.POST_SHADOW_ENABLED and ctx.renderer.countLightsWithShadowMode(.shadow_map) > 0,
+            .shadow_resolve => config.POST_SHADOW_ENABLED and ctx.renderer.countLightsWithShadowMode(.shadow_map) > 0,
             .hybrid_shadow => config.POST_HYBRID_SHADOW_ENABLED,
             .ssao => config.POST_SSAO_ENABLED,
             .ssgi => config.POST_SSGI_ENABLED,
@@ -4420,7 +4994,8 @@ pub const Renderer = struct {
         bindScratchForPass(ctx, pass_id);
         switch (pass_id) {
             .skybox => ctx.renderer.applySkyboxPass(ctx.basis_right, ctx.basis_up, ctx.basis_forward, ctx.projection),
-            .shadow_map, .shadow_resolve => {
+            .shadow_map => {},
+            .shadow_resolve => {
                 const shadow_ctx = ShadowLightDispatchContext{
                     .renderer = ctx.renderer,
                     .camera_position = ctx.camera_position,
@@ -4428,9 +5003,12 @@ pub const Renderer = struct {
                     .basis_up = ctx.basis_up,
                     .basis_forward = ctx.basis_forward,
                     .projection = ctx.projection,
-                    .shadow_elapsed_ns = ctx.shadow_elapsed_ns,
+                    .shadow_build_elapsed_ns = ctx.shadow_build_elapsed_ns,
                 };
                 shadow_map_pass.runPerLight(ctx.renderer.lights.items.len, shadow_ctx, applyShadowLightFromPass);
+                if (ctx.renderer.light_work_stats.shadow_resolve_ns > 0) {
+                    ctx.renderer.recordRenderPassDuration("shadow_map_resolve_total", ctx.renderer.light_work_stats.shadow_resolve_ns);
+                }
             },
             .hybrid_shadow => {
                 const hybrid_ctx = HybridShadowDispatchContext{
@@ -4470,7 +5048,7 @@ pub const Renderer = struct {
         current_view: TemporalAAViewState,
         projection: ProjectionParams,
         light_dir_world: math.Vec3,
-        shadow_elapsed_ns: i128,
+        shadow_build_elapsed_ns: []const i128,
     ) void {
         const base_ctx = PostPassExecutionContext{
             .renderer = self,
@@ -4482,7 +5060,7 @@ pub const Renderer = struct {
             .current_view = current_view,
             .projection = projection,
             .light_dir_world = light_dir_world,
-            .shadow_elapsed_ns = shadow_elapsed_ns,
+            .shadow_build_elapsed_ns = shadow_build_elapsed_ns,
             .plan = .{ .enabled_mask = 0 },
         };
         const enabled_mask = pass_registry.buildEnabledMask(base_ctx, isPostPassEnabled);
@@ -4517,7 +5095,7 @@ pub const Renderer = struct {
             .current_view = current_view,
             .projection = projection,
             .light_dir_world = light_dir_world,
-            .shadow_elapsed_ns = shadow_elapsed_ns,
+            .shadow_build_elapsed_ns = shadow_build_elapsed_ns,
             .plan = plan,
         };
         const iface = pass_registry.PassInterface(PostPassExecutionContext){
@@ -5103,6 +5681,228 @@ pub const Renderer = struct {
         return true;
     }
 
+    fn runtimeTileLightCullLanes() usize {
+        return switch (cpu_features.detect().preferredVectorBackend()) {
+            .avx512, .avx2 => 8,
+            .sse2, .neon => 4,
+            .scalar => 1,
+        };
+    }
+
+    fn tileLightBroadphaseMaskSimd(
+        comptime lanes: usize,
+        dir_cam_x: []const f32,
+        dir_cam_y: []const f32,
+        dir_cam_z: []const f32,
+        shadow_mode: []const u8,
+        start_index: usize,
+        min_nx: f32,
+        max_nx: f32,
+        min_ny: f32,
+        max_ny: f32,
+        min_nz: f32,
+        max_nz: f32,
+    ) u32 {
+        const FloatVec = @Vector(lanes, f32);
+        const x_ptr: *const [lanes]f32 = @ptrCast(dir_cam_x[start_index..][0..lanes]);
+        const y_ptr: *const [lanes]f32 = @ptrCast(dir_cam_y[start_index..][0..lanes]);
+        const z_ptr: *const [lanes]f32 = @ptrCast(dir_cam_z[start_index..][0..lanes]);
+        const dx: FloatVec = @bitCast(x_ptr.*);
+        const dy: FloatVec = @bitCast(y_ptr.*);
+        const dz: FloatVec = @bitCast(z_ptr.*);
+
+        const zero: FloatVec = @splat(0.0);
+        const bound_x = @select(f32, dx >= zero, @as(FloatVec, @splat(max_nx)), @as(FloatVec, @splat(min_nx)));
+        const bound_y = @select(f32, dy >= zero, @as(FloatVec, @splat(max_ny)), @as(FloatVec, @splat(min_ny)));
+        const bound_z = @select(f32, dz >= zero, @as(FloatVec, @splat(max_nz)), @as(FloatVec, @splat(min_nz)));
+        const dot_max = bound_x * dx + bound_y * dy + bound_z * dz;
+
+        var mask: u32 = 0;
+        inline for (0..lanes) |lane| {
+            const light_mode: LightInfo.ShadowMode = @enumFromInt(shadow_mode[start_index + lane]);
+            if (light_mode != .none and dot_max[lane] > 0.0) {
+                mask |= (@as(u32, 1) << @as(u5, @intCast(lane)));
+            }
+        }
+        return mask;
+    }
+
+    fn tileLightBroadphaseAccept(
+        dir_cam_x: f32,
+        dir_cam_y: f32,
+        dir_cam_z: f32,
+        min_nx: f32,
+        max_nx: f32,
+        min_ny: f32,
+        max_ny: f32,
+        min_nz: f32,
+        max_nz: f32,
+    ) bool {
+        const bound_x = (if (dir_cam_x >= 0.0) max_nx else min_nx) * dir_cam_x;
+        const bound_y = (if (dir_cam_y >= 0.0) max_ny else min_ny) * dir_cam_y;
+        const bound_z = (if (dir_cam_z >= 0.0) max_nz else min_nz) * dir_cam_z;
+        return (bound_x + bound_y + bound_z) > 0.0;
+    }
+
+    fn firstTileLightWithMode(self: *const Renderer, range: TileLightRange, mode: LightInfo.ShadowMode) ?usize {
+        var i: usize = 0;
+        while (i < range.count) : (i += 1) {
+            const light_index = self.tile_light_indices[range.offset + i];
+            if (light_index >= self.lights.items.len) continue;
+            if (self.lights.items[light_index].shadow_mode == mode) return light_index;
+        }
+        return null;
+    }
+
+    fn buildTileLightLists(
+        self: *Renderer,
+        active_tile_indices: []const usize,
+        tile_lists: []const BinningStage.TileTriangleList,
+        packets: []const TrianglePacket,
+    ) void {
+        const light_count = self.lights.items.len;
+        var write_index: usize = 0;
+        if (light_count == 0) {
+            for (active_tile_indices) |tile_idx| {
+                self.tile_light_ranges[tile_idx] = .{ .offset = write_index, .count = 0 };
+            }
+            self.light_work_stats.active_tiles = active_tile_indices.len;
+            self.light_work_stats.tile_light_candidates = 0;
+            self.light_work_stats.tile_light_final = 0;
+            self.light_work_stats.tile_light_rejected = 0;
+            self.light_work_stats.tile_light_overflow_tiles = 0;
+            return;
+        }
+
+        var candidate_count: usize = 0;
+        var rejected_count: usize = 0;
+        var overflow_tile_count: usize = 0;
+        const max_indices = self.tile_light_indices.len;
+        const simd_lanes = runtimeTileLightCullLanes();
+        for (active_tile_indices) |tile_idx| {
+            var range = TileLightRange{
+                .offset = write_index,
+                .count = 0,
+            };
+            const tile_list = tile_lists[tile_idx];
+            var overflowed_tile = false;
+            var min_nx = std.math.inf(f32);
+            var max_nx = -std.math.inf(f32);
+            var min_ny = std.math.inf(f32);
+            var max_ny = -std.math.inf(f32);
+            var min_nz = std.math.inf(f32);
+            var max_nz = -std.math.inf(f32);
+
+            for (tile_list.triangles.items) |tri_idx| {
+                if (tri_idx >= packets.len) continue;
+                const normal = packets[tri_idx].normals[0];
+                min_nx = @min(min_nx, normal.x);
+                max_nx = @max(max_nx, normal.x);
+                min_ny = @min(min_ny, normal.y);
+                max_ny = @max(max_ny, normal.y);
+                min_nz = @min(min_nz, normal.z);
+                max_nz = @max(max_nz, normal.z);
+            }
+
+            if (!std.math.isFinite(min_nx) or !std.math.isFinite(max_nx)) {
+                self.tile_light_ranges[tile_idx] = range;
+                continue;
+            }
+
+            var light_index: usize = 0;
+            while (light_index < light_count) {
+                const remaining = light_count - light_index;
+                var lane_count: usize = 1;
+                var accepted_mask: u32 = 0;
+                if (simd_lanes >= 8 and remaining >= 8) {
+                    lane_count = 8;
+                    accepted_mask = tileLightBroadphaseMaskSimd(
+                        8,
+                        self.light_soa.dir_cam_x,
+                        self.light_soa.dir_cam_y,
+                        self.light_soa.dir_cam_z,
+                        self.light_soa.shadow_mode,
+                        light_index,
+                        min_nx,
+                        max_nx,
+                        min_ny,
+                        max_ny,
+                        min_nz,
+                        max_nz,
+                    );
+                } else if (simd_lanes >= 4 and remaining >= 4) {
+                    lane_count = 4;
+                    accepted_mask = tileLightBroadphaseMaskSimd(
+                        4,
+                        self.light_soa.dir_cam_x,
+                        self.light_soa.dir_cam_y,
+                        self.light_soa.dir_cam_z,
+                        self.light_soa.shadow_mode,
+                        light_index,
+                        min_nx,
+                        max_nx,
+                        min_ny,
+                        max_ny,
+                        min_nz,
+                        max_nz,
+                    );
+                } else {
+                    const light_mode: LightInfo.ShadowMode = @enumFromInt(self.light_soa.shadow_mode[light_index]);
+                    accepted_mask = if (light_mode != .none and tileLightBroadphaseAccept(
+                        self.light_soa.dir_cam_x[light_index],
+                        self.light_soa.dir_cam_y[light_index],
+                        self.light_soa.dir_cam_z[light_index],
+                        min_nx,
+                        max_nx,
+                        min_ny,
+                        max_ny,
+                        min_nz,
+                        max_nz,
+                    )) 1 else 0;
+                }
+
+                candidate_count += lane_count;
+                var lane: usize = 0;
+                while (lane < lane_count) : (lane += 1) {
+                    const lane_bit = (@as(u32, 1) << @as(u5, @intCast(lane)));
+                    if ((accepted_mask & lane_bit) == 0) {
+                        rejected_count += 1;
+                        continue;
+                    }
+                    if (write_index < max_indices) {
+                        self.tile_light_indices[write_index] = light_index + lane;
+                        write_index += 1;
+                        range.count += 1;
+                    } else {
+                        overflowed_tile = true;
+                    }
+                }
+                light_index += lane_count;
+            }
+            self.tile_light_ranges[tile_idx] = range;
+            if (overflowed_tile) overflow_tile_count += 1;
+        }
+
+        self.light_work_stats.active_tiles = active_tile_indices.len;
+        self.light_work_stats.tile_light_candidates = candidate_count;
+        self.light_work_stats.tile_light_final = write_index;
+        self.light_work_stats.tile_light_rejected = rejected_count;
+        self.light_work_stats.tile_light_overflow_tiles = overflow_tile_count;
+        if (overflow_tile_count > 0) {
+            pipeline_logger.errorSub(
+                "tile_light_cull",
+                "tile light index overflow tiles={} active_tiles={} lights={} capacity={} written={}",
+                .{
+                    overflow_tile_count,
+                    active_tile_indices.len,
+                    light_count,
+                    max_indices,
+                    write_index,
+                },
+            );
+        }
+    }
+
     /// Renders the scene using the parallel, tile-based pipeline.
     fn renderTiled(
         self: *Renderer,
@@ -5116,6 +5916,7 @@ pub const Renderer = struct {
         const _z_renderTiled = profiler.zone("renderTiled");
         defer if (_z_renderTiled) |z| z.end();
         _ = light_dir;
+        self.meshlet_ray_tests_counter.store(0, .release);
         const grid = self.tile_grid.?;
         const tile_buffers = self.tile_buffers.?;
         const tile_lists = self.tile_triangle_lists.?;
@@ -5164,11 +5965,38 @@ pub const Renderer = struct {
             active_tile_count += 1;
         }
 
+        const cam_right = math.Vec3.new(transform.data[0], transform.data[1], transform.data[2]);
+        const cam_up = math.Vec3.new(transform.data[4], transform.data[5], transform.data[6]);
+        const cam_fwd = math.Vec3.new(transform.data[8], transform.data[9], transform.data[10]);
+        self.syncLightCameraSoA(cam_right, cam_up, cam_fwd);
+
+        self.buildTileLightLists(
+            active_indices[0..active_tile_count],
+            tile_lists,
+            triangles,
+        );
+
         for (active_indices[0..active_tile_count]) |tile_idx| {
             if (pump) |p| {
                 if ((tile_idx & 7) == 0 and !p(self)) return error.RenderInterrupted;
             }
             const tile = &grid.tiles[tile_idx];
+            const tile_light_range = self.tile_light_ranges[tile_idx];
+            const meshlet_light_index_opt = self.firstTileLightWithMode(tile_light_range, .meshlet_ray);
+            const primary_light_index = if (meshlet_light_index_opt) |meshlet_light_index|
+                meshlet_light_index
+            else if (tile_light_range.count > 0)
+                self.tile_light_indices[tile_light_range.offset]
+            else
+                @as(usize, 0);
+            const primary_light_direction = if (primary_light_index < self.lights.items.len)
+                math.Vec3.new(
+                    self.light_soa.dir_x[primary_light_index],
+                    self.light_soa.dir_y[primary_light_index],
+                    self.light_soa.dir_z[primary_light_index],
+                )
+            else
+                math.Vec3.new(0, -1, 0);
             tile_jobs[tile_idx] = TileRenderJob{
                 .tile = tile,
                 .tile_buffer = &tile_buffers[tile_idx],
@@ -5177,13 +6005,14 @@ pub const Renderer = struct {
                 .draw_wireframe = self.show_wireframe,
                 .textures = self.textures,
                 .projection = projection,
-                .sys_shadows = if (config.MESHLET_SHADOWS_ENABLED) &self.sys_shadows else null,
-                .light_direction = if (self.lights.items.len > 0) self.lights.items[0].direction else math.Vec3.new(0, -1, 0),
+                .sys_shadows = if (config.MESHLET_SHADOWS_ENABLED and meshlet_light_index_opt != null) &self.sys_shadows else null,
+                .light_direction = primary_light_direction,
                 .mesh_ptr = mesh,
                 .cam_pos = self.camera_position,
-                .cam_right = math.Vec3.new(transform.data[0], transform.data[1], transform.data[2]),
-                .cam_up = math.Vec3.new(transform.data[4], transform.data[5], transform.data[6]),
-                .cam_fwd = math.Vec3.new(transform.data[8], transform.data[9], transform.data[10]),
+                .cam_right = cam_right,
+                .cam_up = cam_up,
+                .cam_fwd = cam_fwd,
+                .meshlet_ray_counter = &self.meshlet_ray_tests_counter,
                 .shadow_start_idx = 0,
                 .shadow_end_idx = 0,
             };
@@ -5257,7 +6086,10 @@ pub const Renderer = struct {
             var shadow_job_count: usize = 0;
 
             for (active_indices[0..active_tile_count]) |tile_idx| {
+                const tile_light_range = self.tile_light_ranges[tile_idx];
+                if (tile_light_range.count == 0) continue;
                 const base_job = tile_jobs[tile_idx];
+                if (base_job.sys_shadows == null) continue;
                 const total_pixels = @as(usize, @intCast(base_job.tile.width)) * @as(usize, @intCast(base_job.tile.height));
                 const tri_cost = tile_lists[tile_idx].count();
                 const should_split = worker_count > 2 and total_pixels >= shadow_chunk_pixels and tri_cost >= shadow_split_tri_threshold;
@@ -5323,6 +6155,7 @@ pub const Renderer = struct {
                 shadow_pass_elapsed_ns = @intCast(shadow_elapsed_ns);
             }
         }
+        self.light_work_stats.meshlet_ray_tests = self.meshlet_ray_tests_counter.load(.acquire);
 
         // 4. Compositing: Copy the pixels from each completed tile buffer to the main screen bitmap.
         for (active_indices[0..active_tile_count]) |tile_idx| {

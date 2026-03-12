@@ -88,7 +88,9 @@ extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
 // Import other modules from our project.
 // JS Analogy: `const Window = require('./window.js');`
 const Window = @import("platform/window.zig").Window;
-const Renderer = @import("render/renderer.zig").Renderer;
+const renderer_module = @import("render/renderer.zig");
+const Renderer = renderer_module.Renderer;
+const LightShadowMode = renderer_module.LightInfo.ShadowMode;
 const gltf_loader = @import("assets/gltf_loader.zig");
 const obj_loader = @import("assets/obj_loader.zig");
 const texture = @import("assets/texture.zig");
@@ -131,6 +133,9 @@ const SceneAssetConfigEntry = struct {
     cameraName: ?[]const u8 = null,
     lightColor: ?[3]f32 = null,
     lightDistance: ?f32 = null,
+    lightShadowMode: ?[]const u8 = null,
+    lightShadowUpdateInterval: ?u32 = null,
+    lightShadowMapSize: ?u32 = null,
     glowRadius: ?f32 = null,
     glowIntensity: ?f32 = null,
     physicsMotion: ?[]const u8 = null,
@@ -196,6 +201,9 @@ const SceneDefinition = struct {
 const SceneLightDefinition = struct {
     direction: math.Vec3,
     distance: f32,
+    shadow_mode: LightShadowMode,
+    shadow_update_interval_frames: u32,
+    shadow_map_size: usize,
     color: math.Vec3,
     glow_radius: f32,
     glow_intensity: f32,
@@ -419,6 +427,7 @@ pub fn main() !void {
     defer allocator.free(scene_def.texture_slots);
     defer allocator.free(scene_def.lights);
     app_logger.infoSub("bootstrap", "launch scene: {s}", .{scene_def.key});
+    try renderer.setLightCapacity(scene_def.lights.len);
 
     if (parsed_scene_index.value.loadingScene) |loading_key| {
         const loading_file_path = resolveSceneFilePath(parsed_scene_index.value, loading_key) catch null;
@@ -482,7 +491,7 @@ pub fn main() !void {
             app_logger.warn("failed to load HDRI {s}: {s}", .{ hdri_path, @errorName(err) });
         }
     }
-    configureSceneLights(&renderer, scene_def.lights);
+    try configureSceneLights(&renderer, scene_def.lights);
     if (scene_def.runtime == .scene_physics) {
         // Scene-physics showcases (Cornell) should always run with direct shadow resolve enabled.
         config.POST_SHADOW_ENABLED = true;
@@ -696,6 +705,8 @@ fn loadProfileFrameTarget(allocator: std.mem.Allocator) ?u64 {
 
 fn resolveLaunchSceneKey(allocator: std.mem.Allocator, scene_index: SceneIndexFile) ![]const u8 {
     var requested_scene: ?[]const u8 = null;
+    var owned_requested_scene: ?[]u8 = null;
+    defer if (owned_requested_scene) |buf| allocator.free(buf);
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
     var i: usize = 1;
@@ -718,7 +729,11 @@ fn resolveLaunchSceneKey(allocator: std.mem.Allocator, scene_index: SceneIndexFi
         };
         if (env_scene) |env| {
             defer allocator.free(env);
-            requested_scene = std.mem.trim(u8, env, " \t\r\n");
+            const trimmed = std.mem.trim(u8, env, " \t\r\n");
+            if (trimmed.len != 0) {
+                owned_requested_scene = try allocator.dupe(u8, trimmed);
+                requested_scene = owned_requested_scene.?;
+            }
         }
     }
 
@@ -738,6 +753,22 @@ fn resolveSceneFilePath(scene_index: SceneIndexFile, key: []const u8) ![]const u
         if (std.ascii.eqlIgnoreCase(key, entry.key)) return entry.file;
     }
     return error.SceneFilePathNotFound;
+}
+
+fn defaultSceneLightShadowMode() LightShadowMode {
+    if (config.MESHLET_SHADOWS_ENABLED) return .meshlet_ray;
+    if (config.POST_SHADOW_ENABLED) return .shadow_map;
+    return .none;
+}
+
+fn parseSceneLightShadowMode(raw_mode: ?[]const u8) LightShadowMode {
+    if (raw_mode) |mode| {
+        if (std.ascii.eqlIgnoreCase(mode, "none")) return .none;
+        if (std.ascii.eqlIgnoreCase(mode, "shadow_map")) return .shadow_map;
+        if (std.ascii.eqlIgnoreCase(mode, "meshlet_ray")) return .meshlet_ray;
+        if (std.ascii.eqlIgnoreCase(mode, "meshlet")) return .meshlet_ray;
+    }
+    return defaultSceneLightShadowMode();
 }
 
 fn buildSceneDefinition(allocator: std.mem.Allocator, scene_file: SceneFile) !SceneDefinition {
@@ -789,6 +820,9 @@ fn buildSceneDefinition(allocator: std.mem.Allocator, scene_file: SceneFile) !Sc
             lights[light_index] = .{
                 .direction = direction,
                 .distance = dist,
+                .shadow_mode = parseSceneLightShadowMode(asset.lightShadowMode),
+                .shadow_update_interval_frames = @max(@as(u32, 1), asset.lightShadowUpdateInterval orelse 1),
+                .shadow_map_size = @max(@as(usize, 64), @as(usize, asset.lightShadowMapSize orelse @intCast(config.POST_SHADOW_MAP_SIZE))),
                 .color = math.Vec3.new(color_arr[0], color_arr[1], color_arr[2]),
                 .glow_radius = asset.glowRadius orelse 0.0,
                 .glow_intensity = asset.glowIntensity orelse 0.0,
@@ -844,9 +878,12 @@ fn buildSceneDefinition(allocator: std.mem.Allocator, scene_file: SceneFile) !Sc
     };
 }
 
-fn configureSceneLights(renderer: *Renderer, lights: []const SceneLightDefinition) void {
+fn configureSceneLights(renderer: *Renderer, lights: []const SceneLightDefinition) !void {
     for (lights, 0..) |light, i| {
         renderer.setDirectionalLight(i, light.direction, light.distance, light.color);
+        renderer.setLightShadowMode(i, light.shadow_mode);
+        renderer.setLightShadowUpdateInterval(i, light.shadow_update_interval_frames);
+        try renderer.setLightShadowMapSize(i, light.shadow_map_size);
         renderer.setLightGlow(i, light.glow_radius, light.glow_intensity);
     }
 }

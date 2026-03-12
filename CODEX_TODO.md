@@ -259,3 +259,75 @@ Goal: add explicit SIMD/vectorized code paths in hottest kernels while preservin
 - [x] Replace full-frame copy-back with buffer swaps for scratch-output passes where safe:
 - [x] `ssgi`, `ssr`, `motion_blur`, `god_rays`, `lens_flare`, `chromatic_aberration`.
 - [x] Validate runtime launch in `ReleaseFast` after composition swap changes.
+
+## Phase 12 - Arbitrary Lights + Arbitrary Shadows (CPU-First Execution Model)
+Goal: evolve from fixed-size light/shadow assumptions into a data-driven CPU renderer pipeline tuned for high IPC, SIMD/vector lanes, and large-cache locality.
+
+### 12.0 Profiling Contract and Guardrails
+- [x] Add mandatory per-frame counters: active lights, shadow-casting lights, shadow queries, meshlet-ray tests, and rejected light tiles.
+- [x] Add single-frame profile labels that separate shadow-map build vs shadow resolve vs meshlet-ray shadowing without double-counting.
+  Status: `shadow_map_build_total`, `shadow_map_resolve_total`, `meshlet_shadows` labels + per-light `shadow_light {id} build/resolve` capture.
+- [x] Add per-pass cache/throughput notes in profiling docs (L1/L2 miss-sensitive loops, branch-heavy loops, SIMD-hot loops).
+- [x] Define default perf targets for 720p and 1080p in `docs/technical-overview.md` (frame time budget + shadow budget).
+
+### 12.1 Dynamic Light Capacity (Foundational)
+- [x] Remove fixed two-light assumption from renderer allocation path by adding runtime light-capacity API.
+- [x] Set renderer light capacity from selected scene light count before scene runtime starts.
+- [x] Add safety floor/ceiling config (`LIGHT_COUNT_MIN`, `LIGHT_COUNT_MAX`) to protect CPU budget.
+- [x] Add runtime log line with actual allocated light count and shadow map memory footprint.
+- [x] Validate parity on existing scenes (`gun_physics`, `cornell`) after dynamic capacity wiring.
+
+### 12.2 Light Data Layout for CPU Efficiency
+- [ ] Introduce light SoA buffer set for hot shading/shadow loops (`dir_x[]`, `dir_y[]`, `dir_z[]`, `distance[]`, `color_r/g/b[]`, flags).
+  Status: partial - landed contiguous `dir_x/dir_y/dir_z/dir_cam_x/dir_cam_y/dir_cam_z/distance/shadow_mode` arrays and migrated hot culling/shadow loops to SoA reads.
+- [ ] Keep AoS `LightInfo` only as authoring/control structure; generate SoA views once per frame or on light changes.
+- [ ] Ensure SoA arrays are contiguous and cache-line friendly; avoid pointer-chasing from per-pixel loops.
+- [ ] Add SIMD lane-width aware light batch iterators (`1/4/8/16/32`) keyed off detected backend.
+- [ ] Keep scalar fallback path for deterministic debugging and portability.
+
+### 12.3 Unified Shadow Interface
+- [x] Add `ShadowMode` per light (`none`, `shadow_map`, `meshlet_ray`) with explicit per-light enable toggles.
+  Status: `LightInfo.shadow_mode` + renderer API toggle + scene `lightShadowMode` parsing + mode-aware shadow-map build/resolve and meshlet tile dispatch landed.
+- [ ] Route shading through one interface (`sampleShadow(light_id, surface_sample)`) regardless of backend.
+- [x] Decouple pass naming from fixed light indexes; emit stable labels with light id + mode.
+- [ ] Add configuration policy for per-light shadow resolution and update cadence.
+  Status: partial - scene-configurable per-light cadence (`lightShadowUpdateInterval`) and per-light map size (`lightShadowMapSize`) landed/validated; per-frame shadow budget governor is now integrated (`shadowBudgetPercent` + budget-skip reuse path + profile counters), remaining is auto-scaling rules.
+
+### 12.4 Tiled/Clustered Light Culling
+- [ ] Build per-tile compact light lists before shading (screen-space bounds + depth bounds).
+  Status: partial - landed contiguous per-tile light ranges/indices and frame profile counters; now performs tile-level light rejection using camera-space normal bounds with SIMD broad-phase tests (directional-light path), with local-list-driven shadow dispatch.
+- [x] Add SIMD broad-phase overlap tests for tile/light rejection.
+- [ ] Store tile-light lists in contiguous compressed ranges to maximize prefetch efficiency.
+- [x] Add hard cap and overflow diagnostics for tile-light list growth.
+- [ ] Validate shading loops only iterate local tile lists (not global light array).
+
+### 12.5 Meshlet-Native Shadow Accelerator
+- [ ] Build/maintain meshlet acceleration data in contiguous arrays (BVH/TLAS-friendly, branch-light traversal).
+- [ ] Add packetized shadow ray traversal (SIMD packet width based on backend) with coherent ray sorting.
+- [ ] Add early-out rules: backface, depth-threshold, tile frustum, and conservative meshlet bounds.
+- [ ] Add temporal reuse for stable light/camera conditions (skip unchanged shadow query regions).
+- [ ] Measure instruction mix and branch divergence changes after each traversal optimization.
+
+### 12.6 Shadow Work Scheduling (CPU Throughput)
+- [ ] Batch shadow work by `(shadow mode, light id, tile chunk)` for cache locality and predictable worker utilization.
+- [ ] Tune chunk sizes for IPC and L2 reuse; avoid over-fragmentation that increases scheduling overhead.
+- [ ] Keep worker queues lock-light with preallocated job arrays for steady frame times.
+- [ ] Add shadow budget governor: gracefully degrade sample counts/resolution when frame budget is exceeded.
+  Status: partial - per-frame shadow-map rebuild budget now skips/reuses active maps when over budget (`POST_SHADOW_BUDGET_PERCENT`, `shadow_budget_skipped`), adaptive shadow-map resolution scaling is active (budget downscale/upscale with target-size recovery), and adaptive rebuild cadence scaling is active (dynamic interval multiplier under sustained pressure); adaptive sample-count control is still pending.
+
+### 12.7 Visual/Behavioral Correctness
+- [ ] Add deterministic parity captures for core scenes across scalar and SIMD paths.
+- [ ] Add regression checks for acne/peter-panning, temporal flicker, and shadow pop-in under moving lights.
+- [x] Validate mixed shadow modes in one frame (`shadow_map` and `meshlet_ray` concurrently).
+- [x] Confirm existing pass toggles (`render_passes.json` + `engine.ini`) still map correctly to runtime behavior.
+  Status: added `tools/validate-pass-toggles.ps1`, validating `engine.ini` precedence over `render_passes.json` and runtime shadow-pass activation/deactivation on `mixed_shadows_static`.
+- [x] Add automated regression fixture for mixed shadow modes (avoid relying on manual run).
+  Status: added `tools/validate-mixed-shadows.ps1` with log-pattern assertions for mixed-mode frame profile output.
+
+### 12.8 Rollout Sequence
+- [x] Start implementation with dynamic light-capacity support and scene-driven sizing.
+- [x] Next: fix shadow timing attribution so per-light metrics are trustworthy.
+- [x] Next: introduce SoA light views and migrate one hot shading loop to SoA+SIMD.
+- [ ] Next: land tile-light culling and verify frame-time scaling with increasing light counts.
+  Status: in progress - directional-light tile rejection and local shadow dispatch wiring landed; remaining work is screen/depth broad-phase + scaling sweeps.
+- [ ] Next: integrate unified shadow mode dispatch with per-light backends.
