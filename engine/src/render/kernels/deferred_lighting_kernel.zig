@@ -1,9 +1,12 @@
+//! Implements the Deferred Lighting kernel logic used in renderer jobs.
+//! CPU pixel/compute kernel used by the software renderer post-processing and shading stack.
+
 const std = @import("std");
 const compute = @import("compute.zig");
 const ComputeContext = compute.ComputeContext;
-const loadR = compute.loadR;
-const loadRGBA = compute.loadRGBA;
-const storeRGBA = compute.storeRGBA;
+const loadR32F = compute.loadR32F;
+const loadRGBA32F = compute.loadRGBA32F;
+const storeRGBA32F = compute.storeRGBA32F;
 
 pub const DeferredLightingPC = extern struct {
     light_direction: [3]f32,
@@ -20,10 +23,13 @@ pub const DeferredLightingKernel = struct {
     pub const group_size_y: u32 = 8;
     pub const SharedSize: usize = 0;
 
+    /// getPC returns state derived from Deferred Lighting Kernel.
     fn getPC(ctx: *const ComputeContext) *const DeferredLightingPC {
         return @ptrCast(*const DeferredLightingPC, ctx.push_constants.?.ptr);
     }
 
+    /// Kernel entry point executed by the compute dispatcher for this pass.
+    /// Reads bound inputs from `ctx`, processes the current dispatch work, and writes results to the configured outputs.
     pub fn main(ctx: *ComputeContext) void {
         const albedo_tex = ctx.ro_textures[0]; // Albedo (RGBA32F)
         const normal_tex = ctx.ro_textures[1]; // Normals (RGBA32F)
@@ -34,9 +40,9 @@ pub const DeferredLightingKernel = struct {
         const x = ctx.global_id.x;
         const y = ctx.global_id.y;
 
-        const albedo = loadRGBA(albedo_tex, x, y);
-        const normal_packed = loadRGBA(normal_tex, x, y);
-        const depth = loadR(depth_tex, x, y);
+        const albedo = loadRGBA32F(albedo_tex, x, y);
+        const normal_packed = loadRGBA32F(normal_tex, x, y);
+        const depth = loadR32F(depth_tex, x, y);
 
         // Unpack normal from [0,1] range to [-1,1] range
         const normal_x = normal_packed[0] * 2.0 - 1.0;
@@ -77,6 +83,6 @@ pub const DeferredLightingKernel = struct {
         const final_g = diffuse_g + ambient_g + spec_g;
         const final_b = diffuse_b + ambient_b + spec_b;
 
-        storeRGBA(dst, x, y, .{ final_r, final_g, final_b, albedo[3] });
+        storeRGBA32F(dst, x, y, .{ final_r, final_g, final_b, albedo[3] });
     }
 };

@@ -159,174 +159,182 @@ const texture = @import("assets/texture.zig");
 const mesh_module = @import("render/core/mesh.zig");
 const config = @import("core/app_config.zig");
 const cpu_features = @import("core/cpu_features.zig");
-const physics_utils = @import("physics/physics_utils.zig");
 const input = @import("platform/input.zig");
 const log = @import("core/log.zig");
+const scene_runtime = @import("scene_main");
 
 const app_logger = log.get("app.main");
 const scenes_index_path = "assets/configs/scenes/index.json";
-const gun_jump_velocity: [3]f32 = .{ 0.0, 12.0, 0.0 };
 
-const SceneRuntime = enum {
-    static,
-    gun_physics,
-    scene_physics,
-};
+const SceneModelType = scene_runtime.LoadedSceneModelType;
+const SceneAssetConfigEntry = scene_runtime.SceneAssetConfigEntry;
+const SceneTextureSlotEntry = scene_runtime.SceneTextureSlotEntry;
+const SceneFile = scene_runtime.SceneFile;
+const SceneIndexEntry = scene_runtime.SceneIndexEntry;
+const SceneIndexFile = scene_runtime.SceneIndexFile;
+const LoadedSceneAsset = scene_runtime.LoadedSceneAsset;
+const LoadedSceneLight = scene_runtime.LoadedSceneLight;
+const LoadedSceneDescription = scene_runtime.LoadedSceneDescription;
+const LoadedSceneRuntimeKind = scene_runtime.LoadedSceneRuntimeKind;
 
-const SceneModelType = enum {
-    gltf,
-    obj,
-};
-
-const SceneAssetConfigEntry = struct {
-    type: []const u8,
-    modelType: []const u8 = "",
-    modelPath: []const u8 = "",
-    fallbackModelPath: ?[]const u8 = null,
-    applyCornellPalette: bool = false,
-    position: [3]f32 = .{ 0.0, 0.0, 0.0 },
-    rotationDeg: [3]f32 = .{ 0.0, 0.0, 0.0 },
-    scale: [3]f32 = .{ 1.0, 1.0, 1.0 },
-    textures: []SceneTextureSlotEntry = &[_]SceneTextureSlotEntry{},
-    path: ?[]const u8 = null,
-    runtimeName: ?[]const u8 = null,
-    cameraPosition: ?[3]f32 = null,
-    cameraOrientation: ?[2]f32 = null,
-    cameraName: ?[]const u8 = null,
-    lightColor: ?[3]f32 = null,
-    lightDistance: ?f32 = null,
-    lightShadowMode: ?[]const u8 = null,
-    lightShadowUpdateInterval: ?u32 = null,
-    lightShadowMapSize: ?u32 = null,
-    glowRadius: ?f32 = null,
-    glowIntensity: ?f32 = null,
-    physicsMotion: ?[]const u8 = null,
-    physicsShape: ?[]const u8 = null,
-    physicsMass: ?f32 = null,
-    physicsRestitution: ?f32 = null,
-};
-
-const SceneTextureSlotEntry = struct {
-    slot: u32,
-    path: []const u8,
-};
-
-const SceneFile = struct {
-    key: []const u8,
-    assets: []SceneAssetConfigEntry,
-};
-
-const SceneIndexEntry = struct {
-    key: []const u8,
-    file: []const u8,
-};
-
-const SceneIndexFile = struct {
-    defaultScene: []const u8,
-    loadingScene: ?[]const u8 = null,
-    loadingFrames: ?u32 = null,
-    scenes: []SceneIndexEntry,
-};
-
-const SceneAssetDefinition = struct {
-    model_type: SceneModelType,
-    model_path: []const u8,
-    fallback_model_path: ?[]const u8,
-    apply_cornell_palette: bool,
-    position: math.Vec3,
-    rotation_deg: math.Vec3,
-    scale: math.Vec3,
-    texture_slots: []SceneTextureSlotDefinition,
-    physics_motion: ?[]const u8,
-    physics_shape: ?[]const u8,
-    physics_mass: ?f32,
-    physics_restitution: ?f32,
-};
-
-const SceneTextureSlotDefinition = struct {
-    slot: usize,
-    path: []const u8,
-};
-
-const SceneDefinition = struct {
-    key: []const u8,
-    assets: []SceneAssetDefinition,
-    texture_slots: []SceneTextureSlotDefinition,
-    lights: []SceneLightDefinition,
-    runtime: SceneRuntime,
-    hdri_path: ?[]const u8,
-    camera_position: math.Vec3,
-    camera_orientation_pitch: f32,
-    camera_orientation_yaw: f32,
-};
-
-const SceneLightDefinition = struct {
-    direction: math.Vec3,
-    distance: f32,
-    shadow_mode: LightShadowMode,
-    shadow_update_interval_frames: u32,
-    shadow_map_size: usize,
-    color: math.Vec3,
-    glow_radius: f32,
-    glow_intensity: f32,
-};
-
-const SceneAsset = struct {
+const SceneMeshResources = struct {
     mesh: mesh_module.Mesh,
-    model_instances: []SceneModelInstance,
+    render_instances: []SceneRenderInstance,
+
+    fn deinit(self: *SceneMeshResources, allocator: std.mem.Allocator) void {
+        for (self.render_instances) |instance| {
+            allocator.free(instance.local_vertices);
+            allocator.free(instance.local_normals);
+        }
+        self.mesh.deinit();
+        allocator.free(self.render_instances);
+    }
 };
 
-const SceneModelInstance = struct {
+const SceneRenderInstance = struct {
+    entity: scene_runtime.EntityId,
     asset_index: usize,
     vertex_start: usize,
     vertex_count: usize,
     triangle_start: usize,
     triangle_count: usize,
+    local_bounds_min: math.Vec3,
+    local_bounds_max: math.Vec3,
     bounds_min: math.Vec3,
     bounds_max: math.Vec3,
-};
-
-const GunRuntime = struct {
-    pw: *physics_utils.PhysicsWorld,
-    gun_body_id: zphysics.BodyId,
-    num_gun_vertices: usize,
-    num_gun_triangles: usize,
-    original_gun_vertices: []math.Vec3,
-    original_gun_normals: []math.Vec3,
-    enter_was_down: bool = false,
-
-    fn deinit(self: *GunRuntime, allocator: std.mem.Allocator) void {
-        allocator.free(self.original_gun_vertices);
-        allocator.free(self.original_gun_normals);
-        self.pw.deinit(allocator);
-    }
-};
-
-const ScenePhysicsBinding = struct {
-    instance_index: usize,
-    body_id: zphysics.BodyId,
-    vertex_start: usize,
-    vertex_count: usize,
-    triangle_start: usize,
-    triangle_count: usize,
-    gizmo_offset_local: math.Vec3,
     local_vertices: []math.Vec3,
     local_normals: []math.Vec3,
 };
 
-const ScenePhysicsRuntime = struct {
-    pw: *physics_utils.PhysicsWorld,
-    bindings: []ScenePhysicsBinding,
-
-    fn deinit(self: *ScenePhysicsRuntime, allocator: std.mem.Allocator) void {
-        for (self.bindings) |binding| {
-            allocator.free(binding.local_vertices);
-            allocator.free(binding.local_normals);
-        }
-        allocator.free(self.bindings);
-        self.pw.deinit(allocator);
+fn populateSceneRuntimeBootstrap(runtime: *scene_runtime.SceneRuntime, scene_desc: scene_runtime.LoadedSceneDescription) !void {
+    const bootstrap_camera_scripts = try runtime.allocator.alloc(scene_runtime.BootstrapScriptAttachment, scene_desc.camera_scripts.len);
+    defer runtime.allocator.free(bootstrap_camera_scripts);
+    for (scene_desc.camera_scripts, 0..) |script, index| {
+        bootstrap_camera_scripts[index] = .{ .module_name = script.module_name };
     }
-};
+
+    const bootstrap_lights = try runtime.allocator.alloc(scene_runtime.BootstrapLight, scene_desc.lights.len);
+    defer runtime.allocator.free(bootstrap_lights);
+    for (scene_desc.lights, 0..) |light, index| {
+        const light_scripts = try runtime.allocator.alloc(scene_runtime.BootstrapScriptAttachment, light.scripts.len);
+        for (light.scripts, 0..) |script, script_index| {
+            light_scripts[script_index] = .{ .module_name = script.module_name };
+        }
+        bootstrap_lights[index] = .{
+            .authored_id = light.authored_id,
+            .parent_authored_id = light.parent_authored_id,
+            .scripts = light_scripts,
+            .direction = .{ .x = light.direction.x, .y = light.direction.y, .z = light.direction.z },
+            .distance = light.distance,
+            .color = .{ .x = light.color.x, .y = light.color.y, .z = light.color.z },
+            .glow_radius = light.glow_radius,
+            .glow_intensity = light.glow_intensity,
+            .shadow_mode = light.shadow_mode,
+            .shadow_update_interval_frames = light.shadow_update_interval_frames,
+            .shadow_map_size = light.shadow_map_size,
+        };
+    }
+
+    const bootstrap_assets = try runtime.allocator.alloc(scene_runtime.BootstrapAsset, scene_desc.assets.len);
+    defer {
+        for (bootstrap_assets) |asset| {
+            if (asset.texture_slots.len != 0) runtime.allocator.free(asset.texture_slots);
+            if (asset.scripts.len != 0) runtime.allocator.free(asset.scripts);
+        }
+        for (bootstrap_lights) |light| {
+            if (light.scripts.len != 0) runtime.allocator.free(light.scripts);
+        }
+        runtime.allocator.free(bootstrap_assets);
+    }
+
+    for (scene_desc.assets, 0..) |asset, asset_index| {
+        const texture_slots = try runtime.allocator.alloc(scene_runtime.BootstrapTextureSlot, asset.texture_slots.len);
+        for (asset.texture_slots, 0..) |slot, slot_index| {
+            texture_slots[slot_index] = .{ .slot = slot.slot, .path = slot.path };
+        }
+        const asset_scripts = try runtime.allocator.alloc(scene_runtime.BootstrapScriptAttachment, asset.scripts.len);
+        for (asset.scripts, 0..) |script, script_index| {
+            asset_scripts[script_index] = .{ .module_name = script.module_name };
+        }
+        bootstrap_assets[asset_index] = .{
+            .authored_id = asset.authored_id,
+            .parent_authored_id = asset.parent_authored_id,
+            .scripts = asset_scripts,
+            .model_path = asset.model_path,
+            .position = .{ .x = asset.position.x, .y = asset.position.y, .z = asset.position.z },
+            .rotation_deg = .{ .x = asset.rotation_deg.x, .y = asset.rotation_deg.y, .z = asset.rotation_deg.z },
+            .scale = .{ .x = asset.scale.x, .y = asset.scale.y, .z = asset.scale.z },
+            .texture_slots = texture_slots,
+            .physics_motion = asset.physics_motion,
+            .physics_shape = asset.physics_shape,
+            .physics_mass = asset.physics_mass,
+            .physics_restitution = asset.physics_restitution,
+        };
+    }
+
+    try runtime.bootstrapFromDescription(.{
+        .camera = .{
+            .authored_id = scene_desc.camera_authored_id,
+            .parent_authored_id = scene_desc.camera_parent_authored_id,
+            .scripts = bootstrap_camera_scripts,
+            .position = .{ .x = scene_desc.camera_position.x, .y = scene_desc.camera_position.y, .z = scene_desc.camera_position.z },
+            .pitch = scene_desc.camera_orientation_pitch,
+            .yaw = scene_desc.camera_orientation_yaw,
+            .fov_deg = config.CAMERA_FOV_INITIAL,
+        },
+        .lights = bootstrap_lights,
+        .assets = bootstrap_assets,
+        .hdri_path = scene_desc.hdri_path,
+    });
+}
+
+fn toSceneLightShadowMode(mode: LightShadowMode) scene_runtime.components.LightShadowMode {
+    return switch (mode) {
+        .none => .none,
+        .shadow_map => .shadow_map,
+        .meshlet_ray => .meshlet_ray,
+    };
+}
+
+fn toRendererLightShadowMode(mode: scene_runtime.components.LightShadowMode) LightShadowMode {
+    return switch (mode) {
+        .none => .none,
+        .shadow_map => .shadow_map,
+        .meshlet_ray => .meshlet_ray,
+    };
+}
+
+fn toRenderVec3(vec: anytype) math.Vec3 {
+    return .{ .x = vec.x, .y = vec.y, .z = vec.z };
+}
+
+fn entityToSelectionId(entity: scene_runtime.EntityId) u64 {
+    return @bitCast(entity);
+}
+
+fn selectionIdToEntity(selection_id: u64) scene_runtime.EntityId {
+    return @bitCast(selection_id);
+}
+
+fn syncRendererFromSceneSnapshot(renderer: *Renderer, snapshot: *const scene_runtime.RenderSnapshot) !void {
+    if (snapshot.active_camera) |camera| {
+        renderer.setCameraPosition(toRenderVec3(camera.position));
+        renderer.setCameraOrientation(camera.pitch, camera.yaw);
+    }
+
+    try renderer.setLightCapacity(snapshot.lights.items.len);
+    for (snapshot.lights.items, 0..) |light, index| {
+        const direction = if (light.kind == .directional)
+            toRenderVec3(light.position)
+        else
+            math.Vec3.new(0.0, -1.0, 0.0);
+        renderer.setDirectionalLight(index, direction, light.range, toRenderVec3(light.color));
+        renderer.setLightShadowMode(index, toRendererLightShadowMode(light.shadow_mode));
+        renderer.setLightShadowUpdateInterval(index, light.shadow_update_interval_frames);
+        try renderer.setLightShadowMapSize(index, light.shadow_map_size);
+        renderer.setLightGlow(index, light.glow_radius, light.glow_intensity);
+    }
+}
 
 const SceneLoadingProgress = struct {
     renderer: *Renderer,
@@ -336,14 +344,17 @@ const SceneLoadingProgress = struct {
     completed_steps: usize = 0,
 };
 
+/// Returns whether i se nt er do wn.
+/// The check is side-effect free so callers can gate expensive follow-up work cheaply.
 fn isEnterDown() bool {
     return GetAsyncKeyState(VK_RETURN) < 0;
 }
 
-fn sceneLoadingTotalSteps(scene_def: SceneDefinition) usize {
-    return @max(@as(usize, 1), scene_def.assets.len + scene_def.texture_slots.len + 1);
+fn sceneLoadingTotalSteps(scene_desc: LoadedSceneDescription) usize {
+    return @max(@as(usize, 1), scene_desc.assets.len + scene_desc.textureSlotCount() + 1);
 }
 
+/// renderSceneLoadingFrame renders Main output.
 fn renderSceneLoadingFrame(progress: *SceneLoadingProgress) void {
     if (!progress.running.*) return;
     if (!progress.renderer.renderLoadingOverlayFrame(progress.pump)) {
@@ -367,6 +378,8 @@ fn advanceSceneLoadingProgress(progress: ?*SceneLoadingProgress, phase: []const 
     }
 }
 
+/// Updates registry/attachment state for register raw mouse input.
+/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
 fn registerRawMouseInput(hwnd: windows.HWND) !void {
     const device = RAWINPUTDEVICE{
         .usUsagePage = HID_USAGE_PAGE_GENERIC,
@@ -398,6 +411,11 @@ pub fn main() !void {
     // that `gpa.deinit()` is called at the end of the `main` function, cleaning up the allocator.
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    var phase13_runtime = try scene_runtime.SceneRuntime.init(allocator, .{
+        .min = .{ .x = -512.0, .y = -512.0, .z = -512.0 },
+        .max = .{ .x = 512.0, .y = 512.0, .z = 512.0 },
+    });
+    defer phase13_runtime.deinit();
     const renderer_ttl_ns = loadRendererTtlNs(allocator);
     const renderer_ttl_frames = loadRendererTtlFrames(allocator);
     const profile_frame_target = loadProfileFrameTarget(allocator);
@@ -487,6 +505,8 @@ pub fn main() !void {
             return @ptrFromInt(id);
         }
 
+        /// Applies cursor from renderer.
+        /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
         fn applyCursorFromRenderer(r: *Renderer) void {
             const desired = r.desiredCursorStyle();
             switch (desired) {
@@ -612,12 +632,18 @@ pub fn main() !void {
     const parsed_scene_file = try std.json.parseFromSlice(SceneFile, allocator, scene_file_bytes, .{ .ignore_unknown_fields = true });
     defer parsed_scene_file.deinit();
 
-    const scene_def = try buildSceneDefinition(allocator, parsed_scene_file.value);
-    defer allocator.free(scene_def.assets);
-    defer allocator.free(scene_def.texture_slots);
-    defer allocator.free(scene_def.lights);
-    app_logger.infoSub("bootstrap", "launch scene: {s}", .{scene_def.key});
-    try renderer.setLightCapacity(scene_def.lights.len);
+    var scene_desc = try scene_runtime.buildSceneDescription(
+        allocator,
+        parsed_scene_file.value,
+        config.MESHLET_SHADOWS_ENABLED,
+        config.POST_SHADOW_ENABLED,
+        config.POST_SHADOW_MAP_SIZE,
+    );
+    defer scene_desc.deinit(allocator);
+
+    try populateSceneRuntimeBootstrap(&phase13_runtime, scene_desc);
+    app_logger.infoSub("bootstrap", "launch scene: {s}", .{scene_desc.key});
+    try renderer.setLightCapacity(scene_desc.lights.len);
     var scene_loading_progress: ?SceneLoadingProgress = null;
     var scene_loading_overlay_active = false;
     defer if (scene_loading_overlay_active) renderer.endSceneLoadingOverlay();
@@ -625,8 +651,8 @@ pub fn main() !void {
     if (parsed_scene_index.value.loadingScene) |loading_key| {
         const loading_file_path = resolveSceneFilePath(parsed_scene_index.value, loading_key) catch null;
         if (loading_file_path != null) {
-            const total_steps = sceneLoadingTotalSteps(scene_def);
-            renderer.beginSceneLoadingOverlay(scene_def.key, total_steps);
+            const total_steps = sceneLoadingTotalSteps(scene_desc);
+            renderer.beginSceneLoadingOverlay(scene_desc.key, total_steps);
             scene_loading_overlay_active = true;
             scene_loading_progress = .{
                 .renderer = &renderer,
@@ -634,9 +660,7 @@ pub fn main() !void {
                 .pump = MessagePump.pump,
                 .total_steps = total_steps,
             };
-            if (scene_loading_progress) |*progress| {
-                startSceneLoadingProgress(progress);
-            }
+            if (scene_loading_progress) |*progress| startSceneLoadingProgress(progress);
         }
     }
 
@@ -649,23 +673,26 @@ pub fn main() !void {
     try zphysics.init(allocator, .{});
     defer zphysics.deinit();
 
-    var scene_asset = try loadPrimaryMeshWithProgress(allocator, scene_def, if (scene_loading_progress) |*progress| progress else null);
-    defer scene_asset.mesh.deinit(); // Guarantees the mesh memory is freed on exit.
-    defer allocator.free(scene_asset.model_instances);
-    try configureSceneItemBindings(allocator, &renderer, &scene_asset, scene_def);
-    var gun_runtime: ?GunRuntime = null;
-    var scene_physics_runtime: ?ScenePhysicsRuntime = null;
-    if (scene_def.texture_slots.len > 0) {
+    var scene_resources = try loadSceneMeshResourcesWithProgress(allocator, scene_desc, if (scene_loading_progress) |*progress| progress else null);
+    defer scene_resources.deinit(allocator);
+    assignSceneRenderEntities(&scene_resources, &phase13_runtime);
+    syncSceneMeshFromRuntime(null, &scene_resources, &phase13_runtime);
+    const runtime_renderables = try buildRuntimeRenderableSetups(allocator, &scene_resources);
+    defer allocator.free(runtime_renderables);
+    try phase13_runtime.configureExecution(scene_desc.runtime, runtime_renderables);
+    syncSceneMeshFromRuntime(null, &scene_resources, &phase13_runtime);
+    try configureSceneItemBindings(allocator, &renderer, &scene_resources, &phase13_runtime);
+    if (scene_desc.textureSlotCount() > 0) {
         try loadSceneTexturesWithProgress(
             allocator,
-            scene_def.assets,
+            scene_desc.assets,
             &scene_textures,
             &material_textures,
             if (scene_loading_progress) |*progress| progress else null,
         );
         renderer.setTextures(material_textures[0..]);
     }
-    if (scene_def.hdri_path) |hdri_path| {
+    if (scene_desc.hdri_path) |hdri_path| {
         if (texture.loadHdrRaw(allocator, hdri_path)) |env_map| {
             app_logger.infoSub("assets", "loaded HDRI env map", .{});
             renderer.setHdriMap(env_map);
@@ -673,40 +700,31 @@ pub fn main() !void {
             app_logger.warn("failed to load HDRI {s}: {s}", .{ hdri_path, @errorName(err) });
         }
     }
-    try renderer.setLightCapacity(scene_def.lights.len);
-    try configureSceneLights(&renderer, scene_def.lights);
-    if (scene_def.runtime == .gun_physics) {
-        gun_runtime = try setupGunRuntime(allocator, &scene_asset.mesh);
-    } else if (scene_def.runtime == .scene_physics) {
-        scene_physics_runtime = try setupScenePhysicsRuntime(allocator, &scene_asset, scene_def);
-    }
-    defer if (gun_runtime) |*runtime| runtime.deinit(allocator);
-    defer if (scene_physics_runtime) |*runtime| runtime.deinit(allocator);
+    try renderer.setLightCapacity(scene_desc.lights.len);
+    try configureSceneLights(&renderer, scene_desc.lights);
 
-    try scene_asset.mesh.generateMeshlets(64, 126);
+    try scene_resources.mesh.generateMeshlets(64, 126);
     advanceSceneLoadingProgress(if (scene_loading_progress) |*progress| progress else null, "Building meshlets");
     app_logger.infoSub(
         "assets",
         "loaded scene mesh vertices={} triangles={} meshlets={}",
-        .{ scene_asset.mesh.vertices.len, scene_asset.mesh.triangles.len, scene_asset.mesh.meshlets.len },
+        .{ scene_resources.mesh.vertices.len, scene_resources.mesh.triangles.len, scene_resources.mesh.meshlets.len },
     );
     if (scene_loading_overlay_active) {
         renderer.endSceneLoadingOverlay();
         scene_loading_overlay_active = false;
     }
 
-    renderer.setCameraPosition(scene_def.camera_position);
-    renderer.setCameraOrientation(scene_def.camera_orientation_pitch, scene_def.camera_orientation_yaw);
+    renderer.setCameraPosition(toRenderVec3(scene_desc.camera_position));
+    renderer.setCameraOrientation(scene_desc.camera_orientation_pitch, scene_desc.camera_orientation_yaw);
+    var selected_scene_entity_pin: ?scene_runtime.EntityId = null;
+    defer if (selected_scene_entity_pin) |entity| phase13_runtime.residency.unpinEntity(entity);
 
     if (!running) return;
 
     app_logger.info("starting main event loop...", .{});
 
-    // ========== EVENT LOOP PHASE ==========
-
     var frame_count: u32 = 0;
-    // The main event loop.
-    // JS Analogy: `while(true)` combined with `requestAnimationFrame`.
     while (running) {
         if (renderer_ttl_ns) |ttl_ns| {
             if (std.time.nanoTimestamp() - renderer_start_ns >= ttl_ns) {
@@ -723,98 +741,70 @@ pub fn main() !void {
             }
         }
 
-        // First, process all pending user input and window events.
         if (!MessagePump.pump(&renderer)) {
             app_logger.info("message pump requested shutdown", .{});
             running = false;
             break;
         }
 
+        const current_selected_entity = blk: {
+            const selection_id = renderer.selectedSceneItemSelectionId() orelse break :blk null;
+            const entity = selectionIdToEntity(selection_id);
+            if (!entity.isValid() or !phase13_runtime.world.isAlive(entity)) break :blk null;
+            break :blk entity;
+        };
+        phase13_runtime.setSelectedEntity(current_selected_entity) catch |err| {
+            app_logger.warn("phase13 selection sync failed: {}", .{err});
+        };
+
+        const enter_is_down = ((renderer.keys_pressed & input.KeyBits.enter) != 0) or isEnterDown();
+        phase13_runtime.setExecutionInputs(enter_is_down, renderer.isSceneItemDragActive());
+
+        var phase13_snapshot = phase13_runtime.updateFrame(
+            .{
+                .x = renderer.camera_position.x,
+                .y = renderer.camera_position.y,
+                .z = renderer.camera_position.z,
+            },
+            renderer.rotation_x,
+            renderer.rotation_angle,
+            48.0,
+            96.0,
+            frame_count,
+            1.0 / 60.0,
+        ) catch |err| {
+            app_logger.warn("phase13 runtime update failed: {}", .{err});
+            continue;
+        };
+        defer phase13_snapshot.deinit();
+        phase13_runtime.pinFrameAssets(&phase13_snapshot);
+        defer phase13_runtime.unpinFrameAssets(&phase13_snapshot);
+        syncRendererFromSceneSnapshot(&renderer, &phase13_snapshot) catch |err| {
+            app_logger.warn("phase13 renderer bridge failed: {}", .{err});
+            continue;
+        };
+        syncSceneMeshIfDirty(&renderer, &scene_resources, &phase13_runtime);
+        if (selected_scene_entity_pin) |pinned_entity| {
+            if (current_selected_entity == null or !pinned_entity.eql(current_selected_entity.?)) {
+                phase13_runtime.residency.unpinEntity(pinned_entity);
+                selected_scene_entity_pin = null;
+            }
+        }
+        if (current_selected_entity) |entity| {
+            if (selected_scene_entity_pin == null) {
+                phase13_runtime.residency.pinEntity(entity);
+                selected_scene_entity_pin = entity;
+            }
+        }
+
         if (renderer.consumeSceneItemTranslateRequest()) |move_request| {
             applySceneItemTranslateRequest(
                 &renderer,
-                &scene_asset,
-                scene_def,
-                if (scene_physics_runtime) |*runtime| runtime else null,
+                &phase13_runtime,
+                &scene_resources,
                 move_request,
             );
-        }
-
-        if (gun_runtime) |*runtime| {
-            const enter_is_down = ((renderer.keys_pressed & input.KeyBits.enter) != 0) or isEnterDown();
-            if (enter_is_down and !runtime.enter_was_down) {
-                const body_interface = runtime.pw.system.getBodyInterfaceMut();
-                body_interface.activate(runtime.gun_body_id);
-                body_interface.setLinearVelocity(runtime.gun_body_id, gun_jump_velocity);
-            }
-            runtime.enter_was_down = enter_is_down;
-
-            runtime.pw.system.update(1.0 / 60.0, .{ .collision_steps = 1 }) catch {};
-
-            const lock_iface = runtime.pw.system.getBodyLockInterfaceNoLock();
-            var read_lock: zphysics.BodyLockRead = .{};
-            read_lock.lock(lock_iface, runtime.gun_body_id);
-            const body = read_lock.body.?;
-            const xform = body.getWorldTransform();
-            const rot = xform.rotation;
-            const pos = xform.position;
-
-            for (scene_asset.mesh.vertices[0..runtime.num_gun_vertices], 0..) |*v, i| {
-                const ov = runtime.original_gun_vertices[i];
-                v.x = rot[0] * ov.x + rot[3] * ov.y + rot[6] * ov.z + pos[0];
-                v.y = rot[1] * ov.x + rot[4] * ov.y + rot[7] * ov.z + pos[1];
-                v.z = rot[2] * ov.x + rot[5] * ov.y + rot[8] * ov.z + pos[2];
-            }
-            for (scene_asset.mesh.normals[0..runtime.num_gun_triangles], 0..) |*n, i| {
-                const on = runtime.original_gun_normals[i];
-                n.x = rot[0] * on.x + rot[3] * on.y + rot[6] * on.z;
-                n.y = rot[1] * on.x + rot[4] * on.y + rot[7] * on.z;
-                n.z = rot[2] * on.x + rot[5] * on.y + rot[8] * on.z;
-            }
-            scene_asset.mesh.refreshMeshlets();
-            renderer.invalidateMeshWork();
-        } else if (scene_physics_runtime) |*runtime| {
-            const pause_scene_physics = renderer.isSceneItemDragActive();
-            if (!pause_scene_physics) {
-                runtime.pw.system.update(1.0 / 60.0, .{ .collision_steps = 1 }) catch {};
-            }
-            const lock_iface = runtime.pw.system.getBodyLockInterfaceNoLock();
-            for (runtime.bindings) |binding| {
-                var read_lock: zphysics.BodyLockRead = .{};
-                read_lock.lock(lock_iface, binding.body_id);
-                const body = read_lock.body.?;
-                const xform = body.getWorldTransform();
-                const rot = xform.rotation;
-                const pos = xform.position;
-                for (scene_asset.mesh.vertices[binding.vertex_start .. binding.vertex_start + binding.vertex_count], 0..) |*v, i| {
-                    const lv = binding.local_vertices[i];
-                    v.x = rot[0] * lv.x + rot[3] * lv.y + rot[6] * lv.z + pos[0];
-                    v.y = rot[1] * lv.x + rot[4] * lv.y + rot[7] * lv.z + pos[1];
-                    v.z = rot[2] * lv.x + rot[5] * lv.y + rot[8] * lv.z + pos[2];
-                }
-                for (scene_asset.mesh.normals[binding.triangle_start .. binding.triangle_start + binding.triangle_count], 0..) |*n, i| {
-                    const on = binding.local_normals[i];
-                    n.x = rot[0] * on.x + rot[3] * on.y + rot[6] * on.z;
-                    n.y = rot[1] * on.x + rot[4] * on.y + rot[7] * on.z;
-                    n.z = rot[2] * on.x + rot[5] * on.y + rot[8] * on.z;
-                }
-                const offset = binding.gizmo_offset_local;
-                const gizmo_offset_world = math.Vec3.new(
-                    rot[0] * offset.x + rot[3] * offset.y + rot[6] * offset.z,
-                    rot[1] * offset.x + rot[4] * offset.y + rot[7] * offset.z,
-                    rot[2] * offset.x + rot[5] * offset.y + rot[8] * offset.z,
-                );
-                renderer.setSceneItemCenter(
-                    binding.instance_index,
-                    math.Vec3.new(
-                        @as(f32, @floatCast(pos[0])) + gizmo_offset_world.x,
-                        @as(f32, @floatCast(pos[1])) + gizmo_offset_world.y,
-                        @as(f32, @floatCast(pos[2])) + gizmo_offset_world.z,
-                    ),
-                );
-            }
-            scene_asset.mesh.refreshMeshlets();
-            renderer.invalidateMeshWork();
+            syncSceneMeshIfDirty(&renderer, &scene_resources, &phase13_runtime);
         }
 
         // Check if it's time to render a new frame, based on our target FPS.
@@ -830,7 +820,9 @@ pub fn main() !void {
         }
         // This is the main drawing call.
         // JS Analogy: `renderer.renderScene(scene);` inside a `requestAnimationFrame` callback.
-        renderer.render3DMeshWithPump(&scene_asset.mesh, MessagePump.pump) catch |err| {
+        phase13_runtime.beginPresent();
+        renderer.render3DMeshWithPump(&scene_resources.mesh, MessagePump.pump) catch |err| {
+            phase13_runtime.endPresent();
             // If rendering fails, log the error and exit the loop.
             if (err == error.RenderInterrupted) {
                 app_logger.info("render interrupted by shutdown request", .{});
@@ -840,6 +832,7 @@ pub fn main() !void {
             running = false;
             break;
         };
+        phase13_runtime.endPresent();
         if (frame_count <= 3) {
             app_logger.debug("frame {} complete", .{frame_count});
         }
@@ -848,6 +841,8 @@ pub fn main() !void {
     app_logger.info("exited main loop after {} frames", .{frame_count});
 }
 
+/// Loads l oa dr en de re rt tl ns from external or cached data sources.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn loadRendererTtlNs(allocator: std.mem.Allocator) ?i128 {
     const raw_value = std.process.getEnvVarOwned(allocator, "ZIG_RENDER_TTL_SECONDS") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return null,
@@ -872,6 +867,8 @@ fn loadRendererTtlNs(allocator: std.mem.Allocator) ?i128 {
     return @as(i128, @intFromFloat(ttl_ns_f64));
 }
 
+/// Loads l oa dr en de re rt tl fr am es from external or cached data sources.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn loadRendererTtlFrames(allocator: std.mem.Allocator) ?u64 {
     const raw_value = std.process.getEnvVarOwned(allocator, "ZIG_RENDER_TTL_FRAMES") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return null,
@@ -894,6 +891,8 @@ fn loadRendererTtlFrames(allocator: std.mem.Allocator) ?u64 {
     return ttl_frames;
 }
 
+/// Loads l oa dp ro fi le fr am et ar ge t from external or cached data sources.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn loadProfileFrameTarget(allocator: std.mem.Allocator) ?u64 {
     const raw_value = std.process.getEnvVarOwned(allocator, "ZIG_RENDER_PROFILE_FRAME") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return null,
@@ -904,6 +903,8 @@ fn loadProfileFrameTarget(allocator: std.mem.Allocator) ?u64 {
     return std.fmt.parseUnsigned(u64, trimmed, 10) catch null;
 }
 
+/// Resolves r es ol ve la un ch sc en ek ey into a final normalized result.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn resolveLaunchSceneKey(allocator: std.mem.Allocator, scene_index: SceneIndexFile) ![]const u8 {
     var requested_scene: ?[]const u8 = null;
     var owned_requested_scene: ?[]u8 = null;
@@ -949,6 +950,8 @@ fn resolveLaunchSceneKey(allocator: std.mem.Allocator, scene_index: SceneIndexFi
     return error.SceneNotFound;
 }
 
+/// Resolves r es ol ve sc en ef il ep at h into a final normalized result.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
 fn resolveSceneFilePath(scene_index: SceneIndexFile, key: []const u8) ![]const u8 {
     for (scene_index.scenes) |entry| {
         if (std.ascii.eqlIgnoreCase(key, entry.key)) return entry.file;
@@ -956,235 +959,165 @@ fn resolveSceneFilePath(scene_index: SceneIndexFile, key: []const u8) ![]const u
     return error.SceneFilePathNotFound;
 }
 
-fn defaultSceneLightShadowMode() LightShadowMode {
-    if (config.MESHLET_SHADOWS_ENABLED) return .meshlet_ray;
-    if (config.POST_SHADOW_ENABLED) return .shadow_map;
-    return .none;
-}
-
-fn parseSceneLightShadowMode(raw_mode: ?[]const u8) LightShadowMode {
-    if (raw_mode) |mode| {
-        if (std.ascii.eqlIgnoreCase(mode, "none")) return .none;
-        if (std.ascii.eqlIgnoreCase(mode, "shadow_map")) return .shadow_map;
-        if (std.ascii.eqlIgnoreCase(mode, "meshlet_ray")) return .meshlet_ray;
-        if (std.ascii.eqlIgnoreCase(mode, "meshlet")) return .meshlet_ray;
-    }
-    return defaultSceneLightShadowMode();
-}
-
-fn buildSceneDefinition(allocator: std.mem.Allocator, scene_file: SceneFile) !SceneDefinition {
-    var runtime: SceneRuntime = .static;
-    var hdri_path: ?[]const u8 = null;
-    var camera_position = math.Vec3.new(0.0, 2.0, -6.5);
-    var camera_orientation_pitch: f32 = 0.0;
-    var camera_orientation_yaw: f32 = 0.0;
-
-    var model_count: usize = 0;
-    var texture_count: usize = 0;
-    var light_count: usize = 0;
-    for (scene_file.assets) |asset| {
-        if (std.ascii.eqlIgnoreCase(asset.type, "model")) {
-            model_count += 1;
-            texture_count += asset.textures.len;
-        } else if (std.ascii.eqlIgnoreCase(asset.type, "runtime")) {
-            if (asset.runtimeName) |runtime_name| {
-                if (std.ascii.eqlIgnoreCase(runtime_name, "gun_physics")) runtime = .gun_physics;
-                if (std.ascii.eqlIgnoreCase(runtime_name, "scene_physics")) runtime = .scene_physics;
-            }
-        } else if (std.ascii.eqlIgnoreCase(asset.type, "hdri")) {
-            hdri_path = asset.path;
-        } else if (std.ascii.eqlIgnoreCase(asset.type, "camera")) {
-            if (asset.cameraPosition) |pos| {
-                camera_position = math.Vec3.new(pos[0], pos[1], pos[2]);
-            }
-            if (asset.cameraOrientation) |angles| {
-                camera_orientation_pitch = angles[0];
-                camera_orientation_yaw = angles[1];
-            }
-        } else if (std.ascii.eqlIgnoreCase(asset.type, "light")) {
-            light_count += 1;
-        }
-    }
-
-    const assets = try allocator.alloc(SceneAssetDefinition, model_count);
-    const texture_slots = try allocator.alloc(SceneTextureSlotDefinition, texture_count);
-    const lights = try allocator.alloc(SceneLightDefinition, light_count);
-    var model_index: usize = 0;
-    var texture_index: usize = 0;
-    var light_index: usize = 0;
-    for (scene_file.assets) |asset| {
-        if (std.ascii.eqlIgnoreCase(asset.type, "light")) {
-            const pos = math.Vec3.new(asset.position[0], asset.position[1], asset.position[2]);
-            const dist = asset.lightDistance orelse @max(0.01, math.Vec3.length(pos));
-            const color_arr = asset.lightColor orelse [3]f32{ 1.0, 1.0, 1.0 };
-            const direction = if (math.Vec3.length(pos) > 1e-6) math.Vec3.normalize(pos) else math.Vec3.new(0.0, 1.0, 0.0);
-            lights[light_index] = .{
-                .direction = direction,
-                .distance = dist,
-                .shadow_mode = parseSceneLightShadowMode(asset.lightShadowMode),
-                .shadow_update_interval_frames = @max(@as(u32, 1), asset.lightShadowUpdateInterval orelse 1),
-                .shadow_map_size = @max(@as(usize, 64), @as(usize, asset.lightShadowMapSize orelse @intCast(config.POST_SHADOW_MAP_SIZE))),
-                .color = math.Vec3.new(color_arr[0], color_arr[1], color_arr[2]),
-                .glow_radius = asset.glowRadius orelse 0.0,
-                .glow_intensity = asset.glowIntensity orelse 0.0,
-            };
-            light_index += 1;
-            continue;
-        }
-        if (!std.ascii.eqlIgnoreCase(asset.type, "model")) continue;
-
-        const model_type = if (std.ascii.eqlIgnoreCase(asset.modelType, "gltf"))
-            SceneModelType.gltf
-        else if (std.ascii.eqlIgnoreCase(asset.modelType, "obj"))
-            SceneModelType.obj
-        else
-            return error.InvalidSceneModelType;
-
-        const start = texture_index;
-        for (asset.textures) |slot| {
-            texture_slots[texture_index] = .{
-                .slot = @intCast(slot.slot),
-                .path = slot.path,
-            };
-            texture_index += 1;
-        }
-
-        assets[model_index] = .{
-            .model_type = model_type,
-            .model_path = asset.modelPath,
-            .fallback_model_path = asset.fallbackModelPath,
-            .apply_cornell_palette = asset.applyCornellPalette,
-            .position = math.Vec3.new(asset.position[0], asset.position[1], asset.position[2]),
-            .rotation_deg = math.Vec3.new(asset.rotationDeg[0], asset.rotationDeg[1], asset.rotationDeg[2]),
-            .scale = math.Vec3.new(asset.scale[0], asset.scale[1], asset.scale[2]),
-            .texture_slots = texture_slots[start..texture_index],
-            .physics_motion = asset.physicsMotion,
-            .physics_shape = asset.physicsShape,
-            .physics_mass = asset.physicsMass,
-            .physics_restitution = asset.physicsRestitution,
-        };
-        model_index += 1;
-    }
-
-    return .{
-        .key = scene_file.key,
-        .assets = assets,
-        .texture_slots = texture_slots,
-        .lights = lights,
-        .runtime = runtime,
-        .hdri_path = hdri_path,
-        .camera_position = camera_position,
-        .camera_orientation_pitch = camera_orientation_pitch,
-        .camera_orientation_yaw = camera_orientation_yaw,
-    };
-}
-
-fn configureSceneLights(renderer: *Renderer, lights: []const SceneLightDefinition) !void {
+/// configureSceneLights applies configuration for Main.
+fn configureSceneLights(renderer: *Renderer, lights: []const LoadedSceneLight) !void {
     for (lights, 0..) |light, i| {
-        renderer.setDirectionalLight(i, light.direction, light.distance, light.color);
-        renderer.setLightShadowMode(i, light.shadow_mode);
+        renderer.setDirectionalLight(i, toRenderVec3(light.direction), light.distance, toRenderVec3(light.color));
+        renderer.setLightShadowMode(i, toRendererLightShadowMode(light.shadow_mode));
         renderer.setLightShadowUpdateInterval(i, light.shadow_update_interval_frames);
         try renderer.setLightShadowMapSize(i, light.shadow_map_size);
         renderer.setLightGlow(i, light.glow_radius, light.glow_intensity);
     }
 }
 
+/// configureSceneItemBindings applies configuration for Main.
 fn configureSceneItemBindings(
     allocator: std.mem.Allocator,
     renderer: *Renderer,
-    scene_asset: *const SceneAsset,
-    scene_def: SceneDefinition,
+    scene_resources: *const SceneMeshResources,
+    runtime: *const scene_runtime.SceneRuntime,
 ) !void {
-    const bindings = try allocator.alloc(SceneItemBinding, scene_asset.model_instances.len);
+    const bindings = try allocator.alloc(SceneItemBinding, scene_resources.render_instances.len);
     defer allocator.free(bindings);
-    for (scene_asset.model_instances, 0..) |instance, idx| {
-        const asset = scene_def.assets[instance.asset_index];
+    for (scene_resources.render_instances, 0..) |instance, idx| {
+        const gizmo_origin = if (runtime.worldTransform(instance.entity)) |transform|
+            toRenderVec3(transform.position)
+        else
+            math.Vec3.scale(math.Vec3.add(instance.bounds_min, instance.bounds_max), 0.5);
         bindings[idx] = .{
+            .selection_id = entityToSelectionId(instance.entity),
             .vertex_start = instance.vertex_start,
             .vertex_count = instance.vertex_count,
             .triangle_start = instance.triangle_start,
             .triangle_count = instance.triangle_count,
             .bounds_min = instance.bounds_min,
             .bounds_max = instance.bounds_max,
-            .gizmo_origin = asset.position,
+            .gizmo_origin = gizmo_origin,
         };
     }
-    try renderer.setSceneItemBindings(bindings, scene_asset.mesh.triangles.len);
+    try renderer.setSceneItemBindings(bindings, scene_resources.mesh.triangles.len);
 }
 
+/// Applies scene item translate request.
+/// Mutates owned state and keeps dependent cached values coherent for downstream systems.
 fn applySceneItemTranslateRequest(
     renderer: *Renderer,
-    scene_asset: *SceneAsset,
-    scene_def: SceneDefinition,
-    scene_physics_runtime: ?*ScenePhysicsRuntime,
+    runtime: *scene_runtime.SceneRuntime,
+    scene_resources: *SceneMeshResources,
     request: SceneItemTranslateRequest,
 ) void {
-    if (request.item_index >= scene_asset.model_instances.len) return;
-    const instance = &scene_asset.model_instances[request.item_index];
-    const asset = scene_def.assets[instance.asset_index];
-    const is_dynamic = asset.physics_motion != null and std.ascii.eqlIgnoreCase(asset.physics_motion.?, "dynamic");
+    const instance_index = findSceneRenderInstanceIndexBySelectionId(scene_resources, request.selection_id) orelse blk: {
+        if (request.item_index >= scene_resources.render_instances.len) return;
+        break :blk request.item_index;
+    };
+    const instance = &scene_resources.render_instances[instance_index];
+    _ = runtime.translateEntity(instance.entity, .{ .x = request.delta.x, .y = request.delta.y, .z = request.delta.z });
+    renderer.notifySceneItemTranslated(instance_index, request.delta);
+}
 
-    if (is_dynamic) {
-        if (scene_physics_runtime) |runtime| {
-            const body_interface = runtime.pw.system.getBodyInterfaceMut();
-            for (runtime.bindings) |binding| {
-                if (binding.instance_index != request.item_index) continue;
-                const pos = body_interface.getPosition(binding.body_id);
-                const next_pos = [3]zphysics.Real{
-                    pos[0] + @as(zphysics.Real, @floatCast(request.delta.x)),
-                    pos[1] + @as(zphysics.Real, @floatCast(request.delta.y)),
-                    pos[2] + @as(zphysics.Real, @floatCast(request.delta.z)),
-                };
-                body_interface.setPosition(binding.body_id, next_pos, .activate);
-                body_interface.setLinearVelocity(binding.body_id, .{ 0.0, 0.0, 0.0 });
-                body_interface.setAngularVelocity(binding.body_id, .{ 0.0, 0.0, 0.0 });
-                instance.bounds_min = math.Vec3.add(instance.bounds_min, request.delta);
-                instance.bounds_max = math.Vec3.add(instance.bounds_max, request.delta);
-                renderer.notifySceneItemTranslated(request.item_index, request.delta);
-                return;
-            }
-        }
+fn buildRuntimeRenderableSetups(allocator: std.mem.Allocator, scene_resources: *const SceneMeshResources) ![]scene_runtime.RuntimeRenderableSetup {
+    const setups = try allocator.alloc(scene_runtime.RuntimeRenderableSetup, scene_resources.render_instances.len);
+    for (scene_resources.render_instances, 0..) |instance, index| {
+        setups[index] = .{
+            .entity = instance.entity,
+            .local_bounds_min = .{ .x = instance.local_bounds_min.x, .y = instance.local_bounds_min.y, .z = instance.local_bounds_min.z },
+            .local_bounds_max = .{ .x = instance.local_bounds_max.x, .y = instance.local_bounds_max.y, .z = instance.local_bounds_max.z },
+        };
     }
+    return setups;
+}
 
-    if (instance.vertex_count == 0) return;
-    const vertex_slice = scene_asset.mesh.vertices[instance.vertex_start .. instance.vertex_start + instance.vertex_count];
-    for (vertex_slice) |*v| {
-        v.* = math.Vec3.add(v.*, request.delta);
-    }
-    instance.bounds_min = math.Vec3.add(instance.bounds_min, request.delta);
-    instance.bounds_max = math.Vec3.add(instance.bounds_max, request.delta);
-    scene_asset.mesh.refreshMeshlets();
-    renderer.notifySceneItemTranslated(request.item_index, request.delta);
+fn syncSceneMeshIfDirty(renderer: *Renderer, scene_resources: *SceneMeshResources, runtime: *scene_runtime.SceneRuntime) void {
+    if (!runtime.takeRenderablesDirty()) return;
+    syncSceneMeshFromRuntime(renderer, scene_resources, runtime);
+    scene_resources.mesh.refreshMeshlets();
     renderer.invalidateMeshWork();
 }
 
-fn loadPrimaryMesh(allocator: std.mem.Allocator, scene_def: SceneDefinition) !SceneAsset {
-    return loadPrimaryMeshWithProgress(allocator, scene_def, null);
+fn syncSceneMeshFromRuntime(renderer: ?*Renderer, scene_resources: *SceneMeshResources, runtime: *const scene_runtime.SceneRuntime) void {
+    for (scene_resources.render_instances, 0..) |*instance, instance_index| {
+        const transform = runtime.worldTransform(instance.entity) orelse continue;
+        if (instance.vertex_count == 0) continue;
+        const position = toRenderVec3(transform.position);
+        const rotation = toRenderVec3(transform.rotation_deg);
+        const scale = toRenderVec3(transform.scale);
+        var bounds_min = math.Vec3.new(0.0, 0.0, 0.0);
+        var bounds_max = math.Vec3.new(0.0, 0.0, 0.0);
+        var initialized = false;
+        for (scene_resources.mesh.vertices[instance.vertex_start .. instance.vertex_start + instance.vertex_count], instance.local_vertices) |*vertex, local_vertex| {
+            vertex.* = transformPoint(local_vertex, position, rotation, scale);
+            if (!initialized) {
+                bounds_min = vertex.*;
+                bounds_max = vertex.*;
+                initialized = true;
+            } else {
+                bounds_min.x = @min(bounds_min.x, vertex.x);
+                bounds_min.y = @min(bounds_min.y, vertex.y);
+                bounds_min.z = @min(bounds_min.z, vertex.z);
+                bounds_max.x = @max(bounds_max.x, vertex.x);
+                bounds_max.y = @max(bounds_max.y, vertex.y);
+                bounds_max.z = @max(bounds_max.z, vertex.z);
+            }
+        }
+        for (scene_resources.mesh.normals[instance.triangle_start .. instance.triangle_start + instance.triangle_count], instance.local_normals) |*normal, local_normal| {
+            normal.* = rotateVector(local_normal, rotation).normalize();
+        }
+        if (initialized) {
+            instance.bounds_min = bounds_min;
+            instance.bounds_max = bounds_max;
+            if (renderer) |r| {
+                r.setSceneItemCenter(instance_index, math.Vec3.scale(math.Vec3.add(bounds_min, bounds_max), 0.5));
+            }
+        }
+    }
 }
 
-fn loadPrimaryMeshWithProgress(
+fn assignSceneRenderEntities(scene_resources: *SceneMeshResources, runtime: *const scene_runtime.SceneRuntime) void {
+    for (scene_resources.render_instances, 0..) |*instance, asset_index| {
+        instance.entity = runtime.renderableEntityAt(asset_index) orelse scene_runtime.EntityId.invalid();
+    }
+}
+
+fn findSceneRenderInstanceIndexBySelectionId(scene_resources: *const SceneMeshResources, selection_id: u64) ?usize {
+    const entity = selectionIdToEntity(selection_id);
+    if (!entity.isValid()) return null;
+    for (scene_resources.render_instances, 0..) |instance, index| {
+        if (instance.entity.eql(entity)) return index;
+    }
+    return null;
+}
+
+fn loadSceneMeshResources(allocator: std.mem.Allocator, scene_desc: LoadedSceneDescription) !SceneMeshResources {
+    return loadSceneMeshResourcesWithProgress(allocator, scene_desc, null);
+}
+
+fn loadSceneMeshResourcesWithProgress(
     allocator: std.mem.Allocator,
-    scene_def: SceneDefinition,
+    scene_desc: LoadedSceneDescription,
     progress: ?*SceneLoadingProgress,
-) !SceneAsset {
-    if (scene_def.assets.len == 0) return error.SceneHasNoAssets;
+) !SceneMeshResources {
+    if (scene_desc.assets.len == 0) return error.SceneHasNoAssets;
 
     var merged_mesh: ?mesh_module.Mesh = null;
-    const instances = try allocator.alloc(SceneModelInstance, scene_def.assets.len);
+    const instances = try allocator.alloc(SceneRenderInstance, scene_desc.assets.len);
     var instance_count: usize = 0;
-    for (scene_def.assets, 0..) |asset, asset_index| {
+    for (scene_desc.assets, 0..) |asset, asset_index| {
         const prev_vertex_count = if (merged_mesh) |m| m.vertices.len else 0;
         const prev_triangle_count = if (merged_mesh) |m| m.triangles.len else 0;
         var loaded_mesh: mesh_module.Mesh = switch (asset.model_type) {
             .gltf => try loadGltfMeshAsset(allocator, asset),
             .obj => try loadObjMeshAsset(allocator, asset),
         };
-        applyAssetTransform(&loaded_mesh, asset);
+        if (scene_desc.runtime == .gun_physics and asset_index == 0) loaded_mesh.centerToOrigin();
         const loaded_vertex_count = loaded_mesh.vertices.len;
         const loaded_triangle_count = loaded_mesh.triangles.len;
-        var bounds_min = loaded_mesh.vertices[0];
-        var bounds_max = loaded_mesh.vertices[0];
-        for (loaded_mesh.vertices[1..]) |v| {
+        const local_vertices = try allocator.dupe(math.Vec3, loaded_mesh.vertices);
+        errdefer allocator.free(local_vertices);
+        const local_normals = try allocator.dupe(math.Vec3, loaded_mesh.normals);
+        errdefer allocator.free(local_normals);
+        var bounds_min = local_vertices[0];
+        var bounds_max = local_vertices[0];
+        for (local_vertices[1..]) |v| {
             bounds_min.x = @min(bounds_min.x, v.x);
             bounds_min.y = @min(bounds_min.y, v.y);
             bounds_min.z = @min(bounds_min.z, v.z);
@@ -1203,13 +1136,18 @@ fn loadPrimaryMeshWithProgress(
         }
 
         instances[instance_count] = .{
+            .entity = scene_runtime.EntityId.invalid(),
             .asset_index = asset_index,
             .vertex_start = prev_vertex_count,
             .vertex_count = loaded_vertex_count,
             .triangle_start = prev_triangle_count,
             .triangle_count = loaded_triangle_count,
+            .local_bounds_min = bounds_min,
+            .local_bounds_max = bounds_max,
             .bounds_min = bounds_min,
             .bounds_max = bounds_max,
+            .local_vertices = local_vertices,
+            .local_normals = local_normals,
         };
         instance_count += 1;
 
@@ -1217,26 +1155,73 @@ fn loadPrimaryMeshWithProgress(
         const phase = std.fmt.bufPrint(
             &phase_buf,
             "Loading mesh {}/{}: {s}",
-            .{ asset_index + 1, scene_def.assets.len, std.fs.path.basename(asset.model_path) },
+            .{ asset_index + 1, scene_desc.assets.len, std.fs.path.basename(asset.model_path) },
         ) catch "Loading mesh";
         advanceSceneLoadingProgress(progress, phase);
     }
 
+    if (merged_mesh) |*mesh| {
+        if (scene_desc.runtime == .gun_physics) try levelAppendGroundPlane(mesh, allocator);
+    }
+
     return .{
         .mesh = merged_mesh.?,
-        .model_instances = instances[0..instance_count],
+        .render_instances = instances[0..instance_count],
     };
 }
 
-fn loadGltfMeshAsset(allocator: std.mem.Allocator, asset: SceneAssetDefinition) !mesh_module.Mesh {
+/// Loads l oa ds ce ne te xt ur es from external or cached data sources.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
+fn loadSceneTextures(
+    allocator: std.mem.Allocator,
+    assets: []const LoadedSceneAsset,
+    loaded_slots: *[3]?texture.Texture,
+    material_textures: *[3]?*const texture.Texture,
+) !void {
+    return loadSceneTexturesWithProgress(allocator, assets, loaded_slots, material_textures, null);
+}
+
+/// Loads l oa ds ce ne te xt ur es wi th pr og re ss from external or cached data sources.
+/// Validates inputs and applies fallback/default rules before exposing results to callers.
+fn loadSceneTexturesWithProgress(
+    allocator: std.mem.Allocator,
+    assets: []const LoadedSceneAsset,
+    loaded_slots: *[3]?texture.Texture,
+    material_textures: *[3]?*const texture.Texture,
+    progress: ?*SceneLoadingProgress,
+) !void {
+    var texture_total: usize = 0;
+    for (assets) |asset| texture_total += asset.texture_slots.len;
+    var texture_index: usize = 0;
+    for (assets) |asset| {
+        for (asset.texture_slots) |slot| {
+            if (slot.slot >= loaded_slots.len) {
+                app_logger.warn("texture slot {} out of range for {s}", .{ slot.slot, slot.path });
+            } else {
+                loaded_slots[slot.slot] = texture.loadBmp(allocator, slot.path) catch |err| blk: {
+                    app_logger.warn("failed to load texture slot {} {s}: {s}", .{ slot.slot, slot.path, @errorName(err) });
+                    break :blk null;
+                };
+                if (loaded_slots[slot.slot]) |*tex| material_textures[slot.slot] = tex;
+            }
+            texture_index += 1;
+            var phase_buf: [160]u8 = undefined;
+            const phase = std.fmt.bufPrint(
+                &phase_buf,
+                "Loading texture {}/{}: {s}",
+                .{ texture_index, texture_total, std.fs.path.basename(slot.path) },
+            ) catch "Loading texture";
+            advanceSceneLoadingProgress(progress, phase);
+        }
+    }
+}
+
+fn loadGltfMeshAsset(allocator: std.mem.Allocator, asset: LoadedSceneAsset) !mesh_module.Mesh {
     if (gltf_loader.load(allocator, asset.model_path)) |mesh| {
         app_logger.infoSub("assets", "loaded gltf asset from {s}", .{asset.model_path});
         return mesh;
     } else |err| {
-        app_logger.warn("scene gltf load failed for {s}: {s}", .{
-            asset.model_path,
-            @errorName(err),
-        });
+        app_logger.warn("scene gltf load failed for {s}: {s}", .{ asset.model_path, @errorName(err) });
     }
     if (asset.fallback_model_path) |fallback_path| {
         const fallback_mesh = try obj_loader.load(allocator, fallback_path);
@@ -1246,7 +1231,7 @@ fn loadGltfMeshAsset(allocator: std.mem.Allocator, asset: SceneAssetDefinition) 
     return error.SceneModelLoadFailed;
 }
 
-fn loadObjMeshAsset(allocator: std.mem.Allocator, asset: SceneAssetDefinition) !mesh_module.Mesh {
+fn loadObjMeshAsset(allocator: std.mem.Allocator, asset: LoadedSceneAsset) !mesh_module.Mesh {
     var mesh = try obj_loader.load(allocator, asset.model_path);
     if (asset.apply_cornell_palette) applyCornellColors(&mesh);
     app_logger.infoSub("assets", "loaded obj asset from {s}", .{asset.model_path});
@@ -1295,57 +1280,6 @@ fn appendMesh(allocator: std.mem.Allocator, target: *mesh_module.Mesh, source: *
     target.clearMeshlets();
 }
 
-fn loadSceneTextures(
-    allocator: std.mem.Allocator,
-    assets: []const SceneAssetDefinition,
-    loaded_slots: *[3]?texture.Texture,
-    material_textures: *[3]?*const texture.Texture,
-) !void {
-    return loadSceneTexturesWithProgress(allocator, assets, loaded_slots, material_textures, null);
-}
-
-fn loadSceneTexturesWithProgress(
-    allocator: std.mem.Allocator,
-    assets: []const SceneAssetDefinition,
-    loaded_slots: *[3]?texture.Texture,
-    material_textures: *[3]?*const texture.Texture,
-    progress: ?*SceneLoadingProgress,
-) !void {
-    var texture_total: usize = 0;
-    for (assets) |asset| texture_total += asset.texture_slots.len;
-    var texture_index: usize = 0;
-    for (assets) |asset| {
-        for (asset.texture_slots) |slot| {
-            if (slot.slot >= loaded_slots.len) {
-                app_logger.warn("texture slot {} out of range for {s}", .{ slot.slot, slot.path });
-            } else {
-                loaded_slots[slot.slot] = texture.loadBmp(allocator, slot.path) catch |err| blk: {
-                    app_logger.warn("failed to load texture slot {} {s}: {s}", .{ slot.slot, slot.path, @errorName(err) });
-                    break :blk null;
-                };
-                if (loaded_slots[slot.slot]) |*tex| material_textures[slot.slot] = tex;
-            }
-            texture_index += 1;
-            var phase_buf: [160]u8 = undefined;
-            const phase = std.fmt.bufPrint(
-                &phase_buf,
-                "Loading texture {}/{}: {s}",
-                .{ texture_index, texture_total, std.fs.path.basename(slot.path) },
-            ) catch "Loading texture";
-            advanceSceneLoadingProgress(progress, phase);
-        }
-    }
-}
-
-fn applyAssetTransform(mesh: *mesh_module.Mesh, asset: SceneAssetDefinition) void {
-    for (mesh.vertices) |*v| {
-        v.* = transformPoint(v.*, asset.position, asset.rotation_deg, asset.scale);
-    }
-    for (mesh.normals) |*n| {
-        n.* = rotateVector(n.*, asset.rotation_deg).normalize();
-    }
-}
-
 fn transformPoint(v: math.Vec3, position: math.Vec3, rotation_deg: math.Vec3, scale: math.Vec3) math.Vec3 {
     const scaled = math.Vec3.new(v.x * scale.x, v.y * scale.y, v.z * scale.z);
     const rotated = rotateVector(scaled, rotation_deg);
@@ -1380,205 +1314,6 @@ fn rotateVector(v: math.Vec3, rotation_deg: math.Vec3) math.Vec3 {
     );
 }
 
-fn setupGunRuntime(allocator: std.mem.Allocator, mesh: *mesh_module.Mesh) !GunRuntime {
-    mesh.centerToOrigin();
-
-    var gun_min_b = mesh.vertices[0];
-    var gun_max_b = mesh.vertices[0];
-    for (mesh.vertices[1..]) |v| {
-        gun_min_b.x = @min(gun_min_b.x, v.x);
-        gun_min_b.y = @min(gun_min_b.y, v.y);
-        gun_min_b.z = @min(gun_min_b.z, v.z);
-        gun_max_b.x = @max(gun_max_b.x, v.x);
-        gun_max_b.y = @max(gun_max_b.y, v.y);
-        gun_max_b.z = @max(gun_max_b.z, v.z);
-    }
-
-    const num_gun_vertices = mesh.vertices.len;
-    const num_gun_triangles = mesh.triangles.len;
-    const original_gun_vertices = try allocator.alloc(math.Vec3, num_gun_vertices);
-    const original_gun_normals = try allocator.alloc(math.Vec3, num_gun_triangles);
-    @memcpy(original_gun_vertices, mesh.vertices[0..num_gun_vertices]);
-    @memcpy(original_gun_normals, mesh.normals[0..num_gun_triangles]);
-
-    try levelAppendGroundPlane(mesh, allocator);
-
-    var pw = try physics_utils.PhysicsWorld.init(allocator);
-    const body_interface = pw.system.getBodyInterfaceMut();
-
-    const floor_shape_settings = try zphysics.BoxShapeSettings.create(.{ 100.0, 1.0, 100.0 });
-    defer floor_shape_settings.asShapeSettings().release();
-    const floor_shape = try floor_shape_settings.asShapeSettings().createShape();
-    defer floor_shape.release();
-    const floor_body_settings = zphysics.BodyCreationSettings{
-        .shape = floor_shape,
-        .position = .{ 0.0, -2.0, 0.0, 0.0 },
-        .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
-        .motion_type = .static,
-        .object_layer = physics_utils.object_layers.non_moving,
-    };
-    _ = try body_interface.createAndAddBody(floor_body_settings, .activate);
-    const wall_thickness: f32 = 0.1;
-    const wall_height: f32 = 2.1;
-    const wall_half_depth: f32 = 2.0;
-    const wall_half_width: f32 = 2.0;
-    const wall_shape_lr = try zphysics.BoxShapeSettings.create(.{ wall_thickness, wall_height, wall_half_depth });
-    defer wall_shape_lr.asShapeSettings().release();
-    const wall_shape_lr_obj = try wall_shape_lr.asShapeSettings().createShape();
-    defer wall_shape_lr_obj.release();
-    _ = try body_interface.createAndAddBody(.{
-        .shape = wall_shape_lr_obj,
-        .position = .{ -2.0, wall_height, 0.0, 0.0 },
-        .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
-        .motion_type = .static,
-        .object_layer = physics_utils.object_layers.non_moving,
-    }, .activate);
-    _ = try body_interface.createAndAddBody(.{
-        .shape = wall_shape_lr_obj,
-        .position = .{ 2.0, wall_height, 0.0, 0.0 },
-        .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
-        .motion_type = .static,
-        .object_layer = physics_utils.object_layers.non_moving,
-    }, .activate);
-    const wall_shape_back = try zphysics.BoxShapeSettings.create(.{ wall_half_width, wall_height, wall_thickness });
-    defer wall_shape_back.asShapeSettings().release();
-    const wall_shape_back_obj = try wall_shape_back.asShapeSettings().createShape();
-    defer wall_shape_back_obj.release();
-    _ = try body_interface.createAndAddBody(.{
-        .shape = wall_shape_back_obj,
-        .position = .{ 0.0, wall_height, 2.0, 0.0 },
-        .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
-        .motion_type = .static,
-        .object_layer = physics_utils.object_layers.non_moving,
-    }, .activate);
-
-    const gun_hx = (gun_max_b.x - gun_min_b.x) * 0.5;
-    const gun_hy = (gun_max_b.y - gun_min_b.y) * 0.5;
-    const gun_hz = (gun_max_b.z - gun_min_b.z) * 0.5;
-    const gun_shape_settings = try zphysics.BoxShapeSettings.create(.{ gun_hx, gun_hy, gun_hz });
-    defer gun_shape_settings.asShapeSettings().release();
-    const gun_shape = try gun_shape_settings.asShapeSettings().createShape();
-    defer gun_shape.release();
-
-    var gun_body_settings = zphysics.BodyCreationSettings{
-        .shape = gun_shape,
-        .position = .{ 0.0, 5.0, 0.0, 0.0 },
-        .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
-        .motion_type = .dynamic,
-        .object_layer = physics_utils.object_layers.moving,
-    };
-    gun_body_settings.angular_velocity = .{ 2.0, 1.0, 3.0, 0.0 };
-    gun_body_settings.restitution = 0.5;
-    const gun_body_id = try body_interface.createAndAddBody(gun_body_settings, .activate);
-
-    return .{
-        .pw = pw,
-        .gun_body_id = gun_body_id,
-        .num_gun_vertices = num_gun_vertices,
-        .num_gun_triangles = num_gun_triangles,
-        .original_gun_vertices = original_gun_vertices,
-        .original_gun_normals = original_gun_normals,
-    };
-}
-
-fn setupScenePhysicsRuntime(allocator: std.mem.Allocator, scene_asset: *SceneAsset, scene_def: SceneDefinition) !ScenePhysicsRuntime {
-    var pw = try physics_utils.PhysicsWorld.init(allocator);
-    errdefer pw.deinit(allocator);
-    const body_interface = pw.system.getBodyInterfaceMut();
-
-    // Basic floor collider for scene_physics layouts like Cornell.
-    const floor_shape_settings = try zphysics.BoxShapeSettings.create(.{ 6.0, 0.1, 6.0 });
-    defer floor_shape_settings.asShapeSettings().release();
-    const floor_shape = try floor_shape_settings.asShapeSettings().createShape();
-    defer floor_shape.release();
-    const floor_body_settings = zphysics.BodyCreationSettings{
-        .shape = floor_shape,
-        .position = .{ 0.0, -0.1, 0.0, 0.0 },
-        .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
-        .motion_type = .static,
-        .object_layer = physics_utils.object_layers.non_moving,
-    };
-    _ = try body_interface.createAndAddBody(floor_body_settings, .activate);
-
-    var dynamic_count: usize = 0;
-    for (scene_asset.model_instances) |inst| {
-        const asset = scene_def.assets[inst.asset_index];
-        if (asset.physics_motion != null and std.ascii.eqlIgnoreCase(asset.physics_motion.?, "dynamic")) dynamic_count += 1;
-    }
-
-    const bindings = try allocator.alloc(ScenePhysicsBinding, dynamic_count);
-    var bind_idx: usize = 0;
-    for (scene_asset.model_instances, 0..) |inst, instance_index| {
-        const asset = scene_def.assets[inst.asset_index];
-        if (asset.physics_motion == null or !std.ascii.eqlIgnoreCase(asset.physics_motion.?, "dynamic")) continue;
-
-        const center = math.Vec3.scale(math.Vec3.add(inst.bounds_min, inst.bounds_max), 0.5);
-        const extents = math.Vec3.scale(math.Vec3.sub(inst.bounds_max, inst.bounds_min), 0.5);
-        const local_vertices = try allocator.alloc(math.Vec3, inst.vertex_count);
-        for (scene_asset.mesh.vertices[inst.vertex_start .. inst.vertex_start + inst.vertex_count], 0..) |v, i| {
-            local_vertices[i] = math.Vec3.sub(v, center);
-        }
-        const local_normals = try allocator.alloc(math.Vec3, inst.triangle_count);
-        @memcpy(local_normals, scene_asset.mesh.normals[inst.triangle_start .. inst.triangle_start + inst.triangle_count]);
-
-        const use_sphere = asset.physics_shape != null and std.ascii.eqlIgnoreCase(asset.physics_shape.?, "sphere");
-        const body_id = if (use_sphere) blk: {
-            const radius = @max(extents.x, @max(extents.y, extents.z));
-            const sphere_shape_settings = try zphysics.SphereShapeSettings.create(radius);
-            defer sphere_shape_settings.asShapeSettings().release();
-            const sphere_shape = try sphere_shape_settings.asShapeSettings().createShape();
-            defer sphere_shape.release();
-            var body_settings = zphysics.BodyCreationSettings{
-                .shape = sphere_shape,
-                .position = .{ center.x, center.y, center.z, 0.0 },
-                .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
-                .motion_type = .dynamic,
-                .object_layer = physics_utils.object_layers.moving,
-            };
-            const mass_hint = asset.physics_mass orelse 2.0;
-            body_settings.inertia_multiplier = std.math.clamp(mass_hint / 3.0, 0.3, 6.0);
-            body_settings.linear_damping = std.math.clamp(mass_hint * 0.02, 0.02, 0.25);
-            body_settings.restitution = asset.physics_restitution orelse 0.35;
-            break :blk try body_interface.createAndAddBody(body_settings, .activate);
-        } else blk: {
-            const box_shape_settings = try zphysics.BoxShapeSettings.create(.{ extents.x, extents.y, extents.z });
-            defer box_shape_settings.asShapeSettings().release();
-            const box_shape = try box_shape_settings.asShapeSettings().createShape();
-            defer box_shape.release();
-            var body_settings = zphysics.BodyCreationSettings{
-                .shape = box_shape,
-                .position = .{ center.x, center.y, center.z, 0.0 },
-                .rotation = .{ 0.0, 0.0, 0.0, 1.0 },
-                .motion_type = .dynamic,
-                .object_layer = physics_utils.object_layers.moving,
-            };
-            const mass_hint = asset.physics_mass orelse 6.0;
-            body_settings.inertia_multiplier = std.math.clamp(mass_hint / 4.0, 0.4, 8.0);
-            body_settings.linear_damping = std.math.clamp(mass_hint * 0.015, 0.02, 0.3);
-            body_settings.restitution = asset.physics_restitution orelse 0.2;
-            break :blk try body_interface.createAndAddBody(body_settings, .activate);
-        };
-
-        bindings[bind_idx] = .{
-            .instance_index = instance_index,
-            .body_id = body_id,
-            .vertex_start = inst.vertex_start,
-            .vertex_count = inst.vertex_count,
-            .triangle_start = inst.triangle_start,
-            .triangle_count = inst.triangle_count,
-            .gizmo_offset_local = math.Vec3.sub(asset.position, center),
-            .local_vertices = local_vertices,
-            .local_normals = local_normals,
-        };
-        bind_idx += 1;
-    }
-
-    return .{
-        .pw = pw,
-        .bindings = bindings,
-    };
-}
-
 fn applyCornellColors(mesh: *mesh_module.Mesh) void {
     const white: u32 = 0xFFE6E6E6;
     const red: u32 = 0xFF3A3ACB;
@@ -1586,19 +1321,17 @@ fn applyCornellColors(mesh: *mesh_module.Mesh) void {
 
     for (mesh.triangles, 0..) |*tri, i| {
         tri.base_color = if (i < 2)
-            white // back
+            white
         else if (i < 4)
-            red // left
+            red
         else if (i < 6)
-            green // right
+            green
         else if (i < 12)
-            white // floor, ceiling, light
+            white
         else
-            white; // inner boxes
+            white;
     }
 
-    // Cornell room is viewed from the inside; flip room and light panel normals so
-    // backface rejection keeps interior surfaces visible.
     const flip_count: usize = @min(mesh.normals.len, 12);
     for (mesh.normals[0..flip_count]) |*n| {
         n.x = -n.x;
@@ -1610,63 +1343,38 @@ fn applyCornellColors(mesh: *mesh_module.Mesh) void {
 fn levelAppendGroundPlane(mesh: *mesh_module.Mesh, allocator: std.mem.Allocator) !void {
     const plane_extent: f32 = 40.0;
     const plane_y: f32 = -1.0;
-    const plane_color: u32 = 0xFFFFFFFF;
-    const segments: usize = 16;
+    const start_vertex = mesh.vertices.len;
+    const start_triangle = mesh.triangles.len;
 
-    const old_vertex_count = mesh.vertices.len;
-    const old_triangle_count = mesh.triangles.len;
-    const verts_per_row = segments + 1;
-    const plane_vertex_count = verts_per_row * verts_per_row;
-    const plane_triangle_count = segments * segments * 2;
-    const new_vertex_count = old_vertex_count + plane_vertex_count;
-    const new_triangle_count = old_triangle_count + plane_triangle_count;
-
-    const new_vertices = try allocator.alloc(math.Vec3, new_vertex_count);
+    const new_vertices = try allocator.alloc(math.Vec3, mesh.vertices.len + 4);
     errdefer allocator.free(new_vertices);
-    const new_tex_coords = try allocator.alloc(math.Vec2, new_vertex_count);
+    const new_tex_coords = try allocator.alloc(math.Vec2, mesh.tex_coords.len + 4);
     errdefer allocator.free(new_tex_coords);
-    const new_triangles = try allocator.alloc(mesh_module.Triangle, new_triangle_count);
+    const new_triangles = try allocator.alloc(mesh_module.Triangle, mesh.triangles.len + 2);
     errdefer allocator.free(new_triangles);
-
-    std.mem.copyForwards(math.Vec3, new_vertices[0..old_vertex_count], mesh.vertices);
-    std.mem.copyForwards(math.Vec2, new_tex_coords[0..old_vertex_count], mesh.tex_coords);
-
-    const base = old_vertex_count;
-    const step = (plane_extent * 2.0) / @as(f32, @floatFromInt(segments));
-    var row: usize = 0;
-    while (row < verts_per_row) : (row += 1) {
-        const z = -plane_extent + step * @as(f32, @floatFromInt(row));
-        var col: usize = 0;
-        while (col < verts_per_row) : (col += 1) {
-            const x = -plane_extent + step * @as(f32, @floatFromInt(col));
-            const idx = base + row * verts_per_row + col;
-            new_vertices[idx] = math.Vec3.new(x, plane_y, z);
-            new_tex_coords[idx] = math.Vec2.new(
-                @as(f32, @floatFromInt(col)) / @as(f32, @floatFromInt(segments)),
-                @as(f32, @floatFromInt(row)) / @as(f32, @floatFromInt(segments)),
-            );
-        }
-    }
-
-    std.mem.copyForwards(mesh_module.Triangle, new_triangles[0..old_triangle_count], mesh.triangles);
-    var tri_write: usize = old_triangle_count;
-    row = 0;
-    while (row < segments) : (row += 1) {
-        var col: usize = 0;
-        while (col < segments) : (col += 1) {
-            const v00 = base + row * verts_per_row + col;
-            const v10 = base + row * verts_per_row + (col + 1);
-            const v01 = base + (row + 1) * verts_per_row + col;
-            const v11 = base + (row + 1) * verts_per_row + (col + 1);
-            new_triangles[tri_write] = mesh_module.Triangle.newWithColor(v00, v11, v10, plane_color);
-            tri_write += 1;
-            new_triangles[tri_write] = mesh_module.Triangle.newWithColor(v00, v01, v11, plane_color);
-            tri_write += 1;
-        }
-    }
-
-    const new_normals = try allocator.alloc(math.Vec3, new_triangle_count);
+    const new_normals = try allocator.alloc(math.Vec3, mesh.normals.len + 2);
     errdefer allocator.free(new_normals);
+
+    std.mem.copyForwards(math.Vec3, new_vertices[0..mesh.vertices.len], mesh.vertices);
+    std.mem.copyForwards(math.Vec2, new_tex_coords[0..mesh.tex_coords.len], mesh.tex_coords);
+    std.mem.copyForwards(mesh_module.Triangle, new_triangles[0..mesh.triangles.len], mesh.triangles);
+    std.mem.copyForwards(math.Vec3, new_normals[0..mesh.normals.len], mesh.normals);
+
+    new_vertices[start_vertex + 0] = math.Vec3.new(-plane_extent, plane_y, -plane_extent);
+    new_vertices[start_vertex + 1] = math.Vec3.new(plane_extent, plane_y, -plane_extent);
+    new_vertices[start_vertex + 2] = math.Vec3.new(plane_extent, plane_y, plane_extent);
+    new_vertices[start_vertex + 3] = math.Vec3.new(-plane_extent, plane_y, plane_extent);
+
+    new_tex_coords[start_vertex + 0] = math.Vec2.new(0.0, 0.0);
+    new_tex_coords[start_vertex + 1] = math.Vec2.new(1.0, 0.0);
+    new_tex_coords[start_vertex + 2] = math.Vec2.new(1.0, 1.0);
+    new_tex_coords[start_vertex + 3] = math.Vec2.new(0.0, 1.0);
+
+    new_triangles[start_triangle + 0] = mesh_module.Triangle.newWithColor(start_vertex + 0, start_vertex + 2, start_vertex + 1, 0xFF4A4A4A);
+    new_triangles[start_triangle + 1] = mesh_module.Triangle.newWithColor(start_vertex + 0, start_vertex + 3, start_vertex + 2, 0xFF4A4A4A);
+    new_normals[start_triangle + 0] = math.Vec3.new(0.0, 1.0, 0.0);
+    new_normals[start_triangle + 1] = math.Vec3.new(0.0, 1.0, 0.0);
+
     allocator.free(mesh.vertices);
     allocator.free(mesh.tex_coords);
     allocator.free(mesh.triangles);
@@ -1675,6 +1383,5 @@ fn levelAppendGroundPlane(mesh: *mesh_module.Mesh, allocator: std.mem.Allocator)
     mesh.tex_coords = new_tex_coords;
     mesh.triangles = new_triangles;
     mesh.normals = new_normals;
-    mesh.recalculateNormals();
     mesh.clearMeshlets();
 }

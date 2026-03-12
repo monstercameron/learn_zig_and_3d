@@ -1,5 +1,9 @@
+//! Build module.
+//! Build and shared interfaces for the hot-reload experiment.
+
 const std = @import("std");
 
+/// build builds data structures used by Build.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});

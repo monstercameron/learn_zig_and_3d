@@ -41,8 +41,8 @@ fn applyBlock(
 
     var lane: usize = 0;
     while (lane < lanes) : (lane += 1) {
-            const r_clamped = @max(0, @min(width_i32 - 1, r_idx_raw[lane]));
-            const b_clamped = @max(0, @min(width_i32 - 1, b_idx_raw[lane]));
+        const r_clamped = @max(0, @min(width_i32 - 1, r_idx_raw[lane]));
+        const b_clamped = @max(0, @min(width_i32 - 1, b_idx_raw[lane]));
         const idx = row_start + x_start + lane;
         const r_idx = row_start + @as(usize, @intCast(r_clamped));
         const b_idx = row_start + @as(usize, @intCast(b_clamped));

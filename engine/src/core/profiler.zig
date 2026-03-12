@@ -1,4 +1,7 @@
-﻿const std = @import("std");
+//! Profiler module.
+//! Core runtime infrastructure shared engine-wide (config, logging, jobs, profiling, math).
+
+const std = @import("std");
 
 pub const ProfilerEvent = struct {
     name: []const u8,
@@ -15,6 +18,7 @@ pub const Profiler = struct {
 
     pub var instance: ?Profiler = null;
 
+    /// init initializes Profiler state and returns the configured value.
     pub fn init(allocator: std.mem.Allocator) void {
         instance = .{
             .events = std.ArrayList(ProfilerEvent){},
@@ -24,6 +28,7 @@ pub const Profiler = struct {
         };
     }
 
+    /// deinit releases resources owned by Profiler.
     pub fn deinit() void {
         if (instance) |*p| {
             p.events.deinit(p.allocator);
@@ -31,6 +36,8 @@ pub const Profiler = struct {
         }
     }
 
+    /// Controls playback/state through start capture.
+    /// Keeps start capture as the single implementation point so call-site behavior stays consistent.
     pub fn startCapture() void {
         if (instance) |*p| {
             p.mutex.lock();
@@ -40,6 +47,8 @@ pub const Profiler = struct {
         }
     }
 
+    /// Controls playback/state through stop capture and save.
+    /// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
     pub fn stopCaptureAndSave(path: []const u8) !void {
         if (instance) |*p| {
             p.mutex.lock();
@@ -71,6 +80,8 @@ pub const Profiler = struct {
 
     pub const Zone = struct {
         index: usize,
+        /// Finalizes the current operation and commits or clears temporary state.
+        /// It finalizes an in-flight operation and commits/clears temporary state.
         pub fn end(self: *const Zone) void {
             if (instance) |*p| {
                 if (!p.active) return;
@@ -84,6 +95,8 @@ pub const Profiler = struct {
         }
     };
 
+    /// Begins an operation and captures temporary context used until completion.
+    /// It marks the start of an operation and prepares transient state used until completion.
     pub fn begin(name: []const u8) ?Zone {
         if (instance) |*p| {
             if (!p.active) return null;
@@ -103,6 +116,8 @@ pub const Profiler = struct {
     }
 };
 
+/// Performs zone.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 pub fn zone(name: []const u8) ?Profiler.Zone {
     return Profiler.begin(name);
 }

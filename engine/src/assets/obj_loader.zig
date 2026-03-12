@@ -30,12 +30,12 @@
 const std = @import("std");
 const math = @import("../core/math.zig");
 const MeshModule = @import("../render/core/mesh.zig");
-const Mesh = MeshModule.Mesh;
-const Triangle = MeshModule.Triangle;
+pub const Mesh = MeshModule.Mesh;
+pub const Triangle = MeshModule.Triangle;
 const meshlet_builder = @import("../render/core/meshlets/meshlet_builder.zig");
 const meshlet_cache = @import("../render/core/meshlets/meshlet_cache.zig");
-const Vec3 = math.Vec3;
-const Vec2 = math.Vec2;
+pub const Vec3 = math.Vec3;
+pub const Vec2 = math.Vec2;
 
 /// Loads a mesh from a .obj file path.
 pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {

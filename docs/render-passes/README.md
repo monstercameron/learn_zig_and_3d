@@ -1,0 +1,28 @@
+# Render Pass Documentation
+
+This folder contains implementation-grounded docs for each pass module in engine/src/render/passes.
+
+- [Adaptive Shadow Tile Pass](./adaptive_shadow_tile_pass.md)
+- [Bloom Pass](./bloom_pass.md)
+- [Bloom Rows](./bloom_rows.md)
+- [Chromatic Aberration Pass](./chromatic_aberration_pass.md)
+- [Color Grade Pass](./color_grade_pass.md)
+- [Depth Fog Pass](./depth_fog_pass.md)
+- [Depth Of Field Pass](./depth_of_field_pass.md)
+- [Film Grain Vignette Pass](./film_grain_vignette_pass.md)
+- [God Rays Pass](./god_rays_pass.md)
+- [Hybrid Shadow Pass](./hybrid_shadow_pass.md)
+- [Lens Flare Pass](./lens_flare_pass.md)
+- [Lighting Pass Interface](./lighting_pass.md)
+- [Motion Blur Pass](./motion_blur_pass.md)
+- [Shadow Map Pass](./shadow_map_pass.md)
+- [Shadow Raster Rows](./shadow_raster_rows.md)
+- [Shadow Resolve Pass](./shadow_resolve_pass.md)
+- [Skybox Pass](./skybox_pass.md)
+- [SSAO Pass](./ssao_pass.md)
+- [SSAO Rows](./ssao_rows.md)
+- [SSGI Pass](./ssgi_pass.md)
+- [SSR Pass](./ssr_pass.md)
+- [TAA Helpers](./taa_helpers.md)
+- [TAA Meshlet Batch](./taa_meshlet_batch.md)
+- [Temporal AA Pass](./taa_pass.md)

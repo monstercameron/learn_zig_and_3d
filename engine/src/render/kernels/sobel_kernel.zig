@@ -1,3 +1,6 @@
+//! Implements the Sobel kernel logic used in renderer jobs.
+//! CPU pixel/compute kernel used by the software renderer post-processing and shading stack.
+
 const std = @import("std");
 const compute = @import("compute.zig");
 const ComputeContext = compute.ComputeContext;
@@ -9,8 +12,12 @@ pub const SobelKernel = struct {
     pub const group_size_y: u32 = 16;
     pub const SharedSize: usize = 0;
 
+    /// Computes clamp.
+    /// Structured for hot inner-loop execution with predictable memory access and minimal branching for CPU SIMD paths.
     fn clamp(v: i32, lo: i32, hi: i32) i32 { return if (v < lo) lo else if (v > hi) hi else v; }
 
+    /// Kernel entry point executed by the compute dispatcher for this pass.
+    /// Reads bound inputs from `ctx`, processes the current dispatch work, and writes results to the configured outputs.
     pub fn main(ctx: *ComputeContext) void {
         const src = ctx.ro_textures[0];
         const dst = ctx.rw_textures[0];

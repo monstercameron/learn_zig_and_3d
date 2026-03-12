@@ -1,3 +1,6 @@
+//! Build configuration for the root workspace and package targets.
+//! Project module.
+
 const std = @import("std");
 
 // This is the build script for our Zig Windows API application.
@@ -31,8 +34,22 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .omit_frame_pointer = if (profile) false else null,
     });
+    const scene_main_module = b.createModule(.{
+        .root_source_file = b.path("engine/src/scene/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const physics_utils_module = b.createModule(.{
+        .root_source_file = b.path("engine/src/physics/physics_utils.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     app_module.addImport("engine_main", engine_main_module);
     engine_main_module.addImport("zphysics", zphysics_dep.module("root"));
+    engine_main_module.addImport("scene_main", scene_main_module);
+    scene_main_module.addImport("zphysics", zphysics_dep.module("root"));
+    scene_main_module.addImport("physics_utils", physics_utils_module);
+    physics_utils_module.addImport("zphysics", zphysics_dep.module("root"));
 
     const exe = b.addExecutable(.{
         .name = "zig-windows-app",
@@ -77,10 +94,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     }));
+    test_module.addImport("scene_main", scene_main_module);
 
     const unit_tests = b.addTest(.{
         .root_module = test_module,
     });
+    unit_tests.root_module.addImport("zphysics", zphysics_dep.module("root"));
+    unit_tests.linkLibrary(zphysics_dep.artifact("joltc"));
     const test_step = b.step("test", "Run unit tests");
     const run_unit_tests = b.addRunArtifact(unit_tests);
     test_step.dependOn(&run_unit_tests.step);

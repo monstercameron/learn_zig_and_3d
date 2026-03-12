@@ -1,3 +1,5 @@
+//! Implements the SSAO kernel logic used in renderer jobs.
+//! CPU pixel/compute kernel used by the software renderer post-processing and shading stack.
 const std = @import("std");
 const compute = @import("compute.zig");
 const ComputeContext = compute.ComputeContext;
@@ -17,10 +19,13 @@ pub const SsaoKernel = struct {
     pub const group_size_y: u32 = 8;
     pub const SharedSize: usize = 0;
 
+    /// getPC returns state derived from SSAO Kernel.
     fn getPC(ctx: *const ComputeContext) *const SsaoPC {
         return @ptrCast(*const SsaoPC, ctx.push_constants.?.ptr);
     }
 
+    /// Kernel entry point executed by the compute dispatcher for this pass.
+    /// Reads bound inputs from `ctx`, processes the current dispatch work, and writes results to the configured outputs.
     pub fn main(ctx: *ComputeContext) void {
         const ntex = ctx.ro_textures[0]; // normals (rgba32f: xyz in rgb)
         const dtex = ctx.ro_textures[1]; // depth (r32f)

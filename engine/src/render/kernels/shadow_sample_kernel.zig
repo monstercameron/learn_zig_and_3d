@@ -1,6 +1,10 @@
+//! Implements the Shadow Sample kernel logic used in renderer jobs.
+//! CPU pixel/compute kernel used by the software renderer post-processing and shading stack.
+
 const std = @import("std");
 const math = @import("../../core/math.zig");
 
+/// sampleOcclusion samples values used by Shadow Sample Kernel.
 pub fn sampleOcclusion(shadow: anytype, world_pos: math.Vec3) f32 {
     if (!shadow.active) return 0.0;
 

@@ -127,6 +127,7 @@ const CameraToLightTransform = struct {
     camera_v: math.Vec3,
     camera_depth: math.Vec3,
 
+    /// init initializes Renderer state and returns the configured value.
     fn init(
         camera_position: math.Vec3,
         basis_right: math.Vec3,
@@ -158,6 +159,7 @@ const CameraToLightTransform = struct {
         };
     }
 
+    /// project projects coordinates for Renderer calculations.
     pub fn project(self: CameraToLightTransform, camera_pos: math.Vec3) LightSpaceSample {
         return .{
             .u = self.origin_u + math.Vec3.dot(camera_pos, self.camera_u),
@@ -386,6 +388,8 @@ const SSGIJobContext = struct {
     start_row: usize,
     end_row: usize,
 
+    /// Runs this module step with the currently bound configuration.
+    /// Keeps run as the single implementation point so call-site behavior stays consistent.
     pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *SSGIJobContext = @ptrCast(@alignCast(ctx_ptr));
         const width: usize = @intCast(ctx.renderer.bitmap.width);
@@ -412,6 +416,8 @@ const SSRJobContext = struct {
     thickness: f32,
     intensity: f32,
 
+    /// Runs this module step with the currently bound configuration.
+    /// Keeps run as the single implementation point so call-site behavior stays consistent.
     pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *SSRJobContext = @ptrCast(@alignCast(ctx_ptr));
         ssr_pass.runRows(
@@ -445,6 +451,8 @@ const DepthOfFieldJobContext = struct {
     focal_range: f32,
     max_blur_radius: i32,
 
+    /// Runs this module step with the currently bound configuration.
+    /// Keeps run as the single implementation point so call-site behavior stays consistent.
     pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *DepthOfFieldJobContext = @ptrCast(@alignCast(ctx_ptr));
         depth_of_field_pass.runRows(
@@ -530,6 +538,7 @@ const FrameViewCache = struct {
         return false;
     }
 
+    /// update updates Renderer state for the current tick/frame.
     fn update(
         self: *FrameViewCache,
         camera_position: math.Vec3,
@@ -674,6 +683,8 @@ fn validSceneCameraSample(camera_pos: math.Vec3) bool {
 
 const sampleSceneCameraClamped = render_utils.sampleSceneCameraClamped;
 
+/// Estimates scene normal.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 fn estimateSceneNormal(scene_camera: []const math.Vec3, width: usize, height: usize, center: math.Vec3, x: i32, y: i32, step: i32) math.Vec3 {
     return render_utils.estimateSceneNormal(scene_camera, width, height, center, x, y, step, NEAR_CLIP);
 }
@@ -696,6 +707,7 @@ const TemporalAAViewState = struct {
     basis_forward: math.Vec3,
     projection: ProjectionParams,
 
+    /// init initializes Renderer state and returns the configured value.
     fn init(
         camera_position: math.Vec3,
         basis_right: math.Vec3,
@@ -811,6 +823,7 @@ fn taaJitterForFrame(frame_index: u64) math.Vec2 {
     };
 }
 
+/// projectCameraPositionFloat projects coordinates for Renderer calculations.
 fn projectCameraPositionFloat(position: math.Vec3, projection: ProjectionParams) math.Vec2 {
     return render_utils.projectCameraPositionFloat(position, projection, NEAR_EPSILON);
 }
@@ -902,6 +915,8 @@ fn addPackedColorBatch(
     }
 }
 
+/// Processes pack shifted color batch simd.
+/// Keeps pack shifted color batch simd as the single implementation point so call-site behavior stays consistent.
 fn packShiftedColorBatchSimd(
     comptime lanes: usize,
     alpha: *const [lanes]u32,
@@ -919,6 +934,8 @@ fn packShiftedColorBatchSimd(
     return result;
 }
 
+/// Processes pack shifted color batch.
+/// Keeps pack shifted color batch as the single implementation point so call-site behavior stays consistent.
 fn packShiftedColorBatch(
     alpha: []const u32,
     r_arr: []const u32,
@@ -983,6 +1000,7 @@ fn tryApplyTemporalAAMeshletBatch(
     );
 }
 
+/// renderAmbientOcclusionRows renders Renderer output.
 fn renderAmbientOcclusionRows(
     scene_camera: []const math.Vec3,
     scene_width: usize,
@@ -1083,6 +1101,8 @@ const ColorGradeJobContext = struct {
     end_index: usize,
     profile: *const ColorGradeProfile,
 
+    /// Runs this module step with the currently bound configuration.
+    /// Keeps run as the single implementation point so call-site behavior stays consistent.
     pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *ColorGradeJobContext = @ptrCast(@alignCast(ctx_ptr));
         color_grade_pass.runRange(ctx.pixels, ctx.start_index, ctx.end_index, ctx.profile);
@@ -1097,6 +1117,8 @@ const FogJobContext = struct {
     end_row: usize,
     config: DepthFogConfig,
 
+    /// Runs this module step with the currently bound configuration.
+    /// Keeps run as the single implementation point so call-site behavior stays consistent.
     pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *FogJobContext = @ptrCast(@alignCast(ctx_ptr));
         depth_fog_pass.runRows(ctx.pixels, ctx.depth, ctx.width, ctx.start_row, ctx.end_row, ctx.config);
@@ -1176,6 +1198,8 @@ const TAAJobContext = struct {
     width: usize,
     height: usize,
 
+    /// Runs this module step with the currently bound configuration.
+    /// Keeps run as the single implementation point so call-site behavior stays consistent.
     pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *TAAJobContext = @ptrCast(@alignCast(ctx_ptr));
         ctx.renderer.applyTemporalAARows(
@@ -1212,6 +1236,8 @@ const AdaptiveShadowTileJob = struct {
     candidate_offset: usize,
     candidate_count: usize,
 
+    /// Runs this module step with the currently bound configuration.
+    /// Keeps run as the single implementation point so call-site behavior stays consistent.
     pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *AdaptiveShadowTileJob = @ptrCast(@alignCast(ctx_ptr));
         adaptive_shadow_tile_pass.run(ctx);
@@ -1447,6 +1473,7 @@ pub const Renderer = struct {
         return .none;
     }
 
+    /// initLightInfo initializes Renderer state and returns the configured value.
     fn initLightInfo(allocator: std.mem.Allocator, light_idx: usize) !LightInfo {
         const sm_depth = try allocator.alloc(f32, config.POST_SHADOW_MAP_SIZE * config.POST_SHADOW_MAP_SIZE);
         return LightInfo{
@@ -1516,6 +1543,8 @@ pub const Renderer = struct {
         return total_bytes;
     }
 
+    /// Computes shadow build budget ns.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     fn computeShadowBuildBudgetNs(self: *const Renderer) i128 {
         if (self.target_frame_time_ns <= 0) return -1;
         const budget_percent = std.math.clamp(config.POST_SHADOW_BUDGET_PERCENT, 0, 100);
@@ -1524,6 +1553,8 @@ pub const Renderer = struct {
         return @divTrunc(self.target_frame_time_ns * @as(i128, @intCast(budget_percent)), 100);
     }
 
+    /// Estimates shadow build cost ns.
+    /// Keeps estimate shadow build cost ns as the single implementation point so call-site behavior stays consistent.
     fn estimateShadowBuildCostNs(light: *const LightInfo) i128 {
         if (light.shadow_last_build_ns > 0) return light.shadow_last_build_ns;
         const shadow_texel_count = light.shadow_map.width * light.shadow_map.height;
@@ -1649,6 +1680,8 @@ pub const Renderer = struct {
         return true;
     }
 
+    /// Applies adaptive shadow budget policy.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     fn applyAdaptiveShadowBudgetPolicy(self: *Renderer) !void {
         if (!config.POST_SHADOW_ENABLED) return;
         if (!config.POST_SHADOW_ADAPTIVE_RESOLUTION_ENABLED) return;
@@ -1688,6 +1721,7 @@ pub const Renderer = struct {
         self.shadow_budget_relief_frames = 0;
     }
 
+    /// init initializes Renderer state and returns the configured value.
     pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allocator) !Renderer {
         const hdc = GetDC(hwnd) orelse return error.DCNotFound;
         const hdc_mem = CreateCompatibleDC(hdc) orelse {
@@ -2104,6 +2138,8 @@ pub const Renderer = struct {
         };
     }
 
+    /// Parses p ar se pr of il ec ap tu re fr am e into typed runtime values.
+    /// Validates inputs and applies fallback/default rules before exposing results to callers.
     fn parseProfileCaptureFrame(allocator: std.mem.Allocator) !u64 {
         const raw_value = std.process.getEnvVarOwned(allocator, "ZIG_RENDER_PROFILE_FRAME") catch |err| switch (err) {
             error.EnvironmentVariableNotFound => return 0,
@@ -2113,6 +2149,7 @@ pub const Renderer = struct {
         return std.fmt.parseUnsigned(u64, raw_value, 10) catch 0;
     }
 
+    /// createFramePacingTimer creates a new value used by Renderer.
     fn createFramePacingTimer() ?windows.HANDLE {
         const desired_access = TIMER_MODIFY_STATE | SYNCHRONIZE_ACCESS;
         return CreateWaitableTimerExW(null, null, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, desired_access) orelse
@@ -2306,6 +2343,7 @@ pub const Renderer = struct {
             return out_count;
         }
 
+        /// projectToScreen projects coordinates for Renderer calculations.
         fn projectToScreen(self: *const TileRenderJob, position: math.Vec3) math.Vec2 {
             const clamped_z = if (position.z < self.projection.near_plane + NEAR_EPSILON)
                 self.projection.near_plane + NEAR_EPSILON
@@ -2322,6 +2360,8 @@ pub const Renderer = struct {
             };
         }
 
+        /// Returns whether i sd eg en er at e.
+        /// The check is side-effect free so callers can gate expensive follow-up work cheaply.
         fn isDegenerate(p0: math.Vec2, p1: math.Vec2, p2: math.Vec2) bool {
             const ax = p1.x - p0.x;
             const ay = p1.y - p0.y;
@@ -2380,6 +2420,7 @@ pub const Renderer = struct {
             }
         }
 
+        /// renderTileJob renders Renderer output.
         fn renderTileJob(ctx: *anyopaque) void {
             const _z_renderTileJob = profiler.zone("renderTileJob");
             defer if (_z_renderTileJob) |z| z.end();
@@ -2421,6 +2462,8 @@ pub const Renderer = struct {
             }
         }
 
+        /// Applies meshlet shadows.
+        /// Consumes the provided context pointer and updates owned state through explicit, localized side effects.
         fn applyMeshletShadows(ctx: *anyopaque) void {
             const job: *TileRenderJob = @ptrCast(@alignCast(ctx));
             if (job.sys_shadows) |sys| {
@@ -2826,6 +2869,7 @@ pub const Renderer = struct {
         );
     }
 
+    /// projectCameraPosition projects coordinates for Renderer calculations.
     fn projectCameraPosition(position: math.Vec3, projection: ProjectionParams) [2]i32 {
         const clamped_z = if (position.z < projection.near_plane + NEAR_EPSILON)
             projection.near_plane + NEAR_EPSILON
@@ -2844,6 +2888,8 @@ pub const Renderer = struct {
 
     const max_meshlet_vertex_transform_lanes = 16;
 
+    /// Returns runtime meshlet vertex transform lanes.
+    /// Keeps runtime meshlet vertex transform lanes as the single implementation point so call-site behavior stays consistent.
     fn runtimeMeshletVertexTransformLanes() usize {
         return switch (cpu_features.detect().preferredVectorBackend()) {
             .avx512 => 16,
@@ -2878,6 +2924,7 @@ pub const Renderer = struct {
             vertex_z_arr[lane] = vertex.z;
         }
 
+        // Convert AoS vertex data to SoA lane vectors so basis projection runs as wide vector FMAs.
         const relative_x = @as(FloatVec, @bitCast(vertex_x_arr)) - @as(FloatVec, @splat(camera_position.x));
         const relative_y = @as(FloatVec, @bitCast(vertex_y_arr)) - @as(FloatVec, @splat(camera_position.y));
         const relative_z = @as(FloatVec, @bitCast(vertex_z_arr)) - @as(FloatVec, @splat(camera_position.z));
@@ -2923,6 +2970,7 @@ pub const Renderer = struct {
         const lanes = runtimeMeshletVertexTransformLanes();
         var index: usize = 0;
         while (index + lanes <= meshlet_vertices.len) : (index += lanes) {
+            // One backend-specific branch per batch keeps inner math loops branch-free.
             switch (lanes) {
                 16 => {
                     var camera_batch: [16]math.Vec3 = undefined;
@@ -3011,6 +3059,8 @@ pub const Renderer = struct {
             }
         }
 
+        /// Runs this module step with the currently bound configuration.
+        /// Keeps run as the single implementation point so call-site behavior stays consistent.
         fn run(ctx: *anyopaque) void {
             const job: *MeshletCullJob = @ptrCast(@alignCast(ctx));
             job.process();
@@ -3115,6 +3165,8 @@ pub const Renderer = struct {
             }
         }
 
+        /// Runs this module step with the currently bound configuration.
+        /// Keeps run as the single implementation point so call-site behavior stays consistent.
         fn run(ctx: *anyopaque) void {
             const job: *MeshletRenderJob = @ptrCast(@alignCast(ctx));
             job.process();
@@ -3135,6 +3187,7 @@ pub const Renderer = struct {
         lookup_generation: u32,
         active_count: usize,
 
+        /// init initializes Renderer state and returns the configured value.
         fn init(allocator: std.mem.Allocator) MeshletContribution {
             return MeshletContribution{
                 .allocator = allocator,
@@ -3147,6 +3200,7 @@ pub const Renderer = struct {
             };
         }
 
+        /// deinit releases resources owned by Renderer.
         fn deinit(self: *MeshletContribution) void {
             const storage = self.entries.items;
             for (storage) |*entry| {
@@ -3351,6 +3405,8 @@ pub const Renderer = struct {
             }
         }
 
+        /// Runs this module step with the currently bound configuration.
+        /// Keeps run as the single implementation point so call-site behavior stays consistent.
         fn run(ctx: *anyopaque) void {
             const job: *MeshletBinningJob = @ptrCast(@alignCast(ctx));
             job.process();
@@ -3366,6 +3422,7 @@ pub const Renderer = struct {
         meshlet_reserved: usize,
         next_triangle: std.atomic.Value(usize),
 
+        /// init initializes Renderer state and returns the configured value.
         fn init() MeshWork {
             return MeshWork{
                 .triangles = &[_]TrianglePacket{},
@@ -3378,6 +3435,7 @@ pub const Renderer = struct {
             };
         }
 
+        /// deinit releases resources owned by Renderer.
         fn deinit(self: *MeshWork, allocator: std.mem.Allocator) void {
             if (self.triangles.len != 0) allocator.free(self.triangles);
             if (self.meshlet_packets.len != 0) allocator.free(self.meshlet_packets);
@@ -3416,6 +3474,8 @@ pub const Renderer = struct {
             }
         }
 
+        /// Begins an operation and captures temporary context used until completion.
+        /// It marks the start of an operation and prepares transient state used until completion.
         fn beginWrite(self: *MeshWork, allocator: std.mem.Allocator, meshlet_capacity: usize, triangle_capacity: usize) !void {
             self.clear();
             if (meshlet_capacity == 0 and triangle_capacity == 0) return;
@@ -3447,6 +3507,7 @@ pub const Renderer = struct {
     const MeshWorkWriter = struct {
         work: *MeshWork,
 
+        /// init initializes Renderer state and returns the configured value.
         fn init(work: *MeshWork) MeshWorkWriter {
             return MeshWorkWriter{ .work = work };
         }
@@ -3459,6 +3520,8 @@ pub const Renderer = struct {
             return idx;
         }
 
+        /// Returns write at index.
+        /// Keeps write at index as the single implementation point so call-site behavior stays consistent.
         fn writeAtIndex(
             self: *MeshWorkWriter,
             idx: usize,
@@ -3528,6 +3591,7 @@ pub const Renderer = struct {
         full_vertex_cache_valid: bool,
         valid: bool,
 
+        /// init initializes Renderer state and returns the configured value.
         fn init() MeshWorkCache {
             return MeshWorkCache{
                 .projected = &[_][2]i32{},
@@ -3568,6 +3632,7 @@ pub const Renderer = struct {
             };
         }
 
+        /// deinit releases resources owned by Renderer.
         fn deinit(self: *MeshWorkCache, allocator: std.mem.Allocator) void {
             self.work.deinit(allocator);
             if (self.projected.len != 0) allocator.free(self.projected);
@@ -3810,6 +3875,8 @@ pub const Renderer = struct {
             self.valid = false;
         }
 
+        /// Begins an operation and captures temporary context used until completion.
+        /// It marks the start of an operation and prepares transient state used until completion.
         fn beginUpdate(self: *MeshWorkCache) void {
             self.valid = false;
             self.work.clear();
@@ -3849,18 +3916,26 @@ pub const Renderer = struct {
         }
     };
 
+    /// Handles handle key input.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleKeyInput(self: *Renderer, key: u32, is_down: bool) void {
         _ = input.updateKeyState(&self.keys_pressed, key, is_down);
     }
 
+    /// Returns whether i sf ir st pe rs on mo de.
+    /// The check is side-effect free so callers can gate expensive follow-up work cheaply.
     pub fn isFirstPersonMode(self: *const Renderer) bool {
         return self.camera_control_mode == .first_person;
     }
 
+    /// Returns whether i ss ce ne it em dr ag ac ti ve.
+    /// The check is side-effect free so callers can gate expensive follow-up work cheaply.
     pub fn isSceneItemDragActive(self: *const Renderer) bool {
         return self.scene_item_gizmo.isDragging();
     }
 
+    /// Handles handle mouse move.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleMouseMove(self: *Renderer, x: i32, y: i32) void {
         if (self.camera_control_mode == .first_person) return;
 
@@ -3897,6 +3972,8 @@ pub const Renderer = struct {
         );
     }
 
+    /// Handles handle raw mouse delta.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleRawMouseDelta(self: *Renderer, delta_x: i32, delta_y: i32) void {
         if (self.camera_control_mode != .first_person) return;
         camera_controller.accumulateFirstPersonDelta(
@@ -3908,6 +3985,8 @@ pub const Renderer = struct {
         );
     }
 
+    /// Handles handle mouse left click.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleMouseLeftClick(self: *Renderer, x: i32, y: i32) void {
         if (self.camera_control_mode == .first_person) {
             camera_controller.beginHoldZoom(&self.fps_zoom_state, self.camera_fov_deg, .left_button);
@@ -3935,6 +4014,8 @@ pub const Renderer = struct {
         );
     }
 
+    /// Handles handle mouse left release.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleMouseLeftRelease(self: *Renderer, x: i32, y: i32) void {
         _ = x;
         _ = y;
@@ -3946,6 +4027,8 @@ pub const Renderer = struct {
         self.clearLightGizmoInteraction();
     }
 
+    /// Handles handle mouse right click.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleMouseRightClick(self: *Renderer, x: i32, y: i32) void {
         _ = x;
         _ = y;
@@ -3953,12 +4036,16 @@ pub const Renderer = struct {
         camera_controller.beginHoldZoom(&self.fps_zoom_state, self.camera_fov_deg, .right_button);
     }
 
+    /// Handles handle mouse right release.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleMouseRightRelease(self: *Renderer, x: i32, y: i32) void {
         _ = x;
         _ = y;
         camera_controller.endHoldZoom(&self.fps_zoom_state, self.camera_fov_deg, .right_button);
     }
 
+    /// Handles handle focus lost.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleFocusLost(self: *Renderer) void {
         self.keys_pressed = 0;
         self.scene_item_gizmo.handlePointerUp();
@@ -3969,10 +4056,14 @@ pub const Renderer = struct {
         camera_controller.resetForModeToggle(&self.mouse_state);
     }
 
+    /// Handles handle focus gained.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleFocusGained(self: *Renderer) void {
         camera_controller.resetForModeToggle(&self.mouse_state);
     }
 
+    /// Performs desired cursor style.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn desiredCursorStyle(self: *const Renderer) CursorStyle {
         if (self.camera_control_mode == .first_person) return .hidden;
         const item_hint = self.scene_item_gizmo.cursorHint();
@@ -3981,32 +4072,50 @@ pub const Renderer = struct {
         return .arrow;
     }
 
+    /// Sets s et sc en ei te mb in di ng s.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setSceneItemBindings(self: *Renderer, bindings: []const SceneItemBinding, triangle_count: usize) !void {
         try self.scene_item_gizmo.setBindings(self.allocator, bindings, triangle_count);
     }
 
+    /// Propagates an external state change into local bookkeeping and dependent systems.
+    /// It propagates an external state change into the local subsystem bookkeeping.
     pub fn notifySceneItemTranslated(self: *Renderer, item_index: usize, delta: math.Vec3) void {
         self.scene_item_gizmo.notifyItemTranslated(item_index, delta);
     }
 
+    /// Sets s et sc en ei te mc en te r.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setSceneItemCenter(self: *Renderer, item_index: usize, center: math.Vec3) void {
         self.scene_item_gizmo.setItemOrigin(item_index, center);
     }
 
+    /// Returns pending data and advances internal cursors/flags to avoid reprocessing.
+    /// It returns pending data and clears or advances the underlying queue/state.
     pub fn consumeSceneItemTranslateRequest(self: *Renderer) ?SceneItemTranslateRequest {
         return self.scene_item_gizmo.consumeTranslateRequest();
     }
 
+    pub fn selectedSceneItemSelectionId(self: *const Renderer) ?u64 {
+        return self.scene_item_gizmo.selectedSelectionId();
+    }
+
+    /// Sets s et ca me ra po si ti on.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setCameraPosition(self: *Renderer, position: math.Vec3) void {
         self.camera_position = position;
         camera_controller.resetFpsBody(&self.fps_body_state, self.camera_position, fps_camera_floor_y, fps_camera_eye_height);
     }
 
+    /// Sets s et ca me ra or ie nt at io n.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setCameraOrientation(self: *Renderer, pitch: f32, yaw: f32) void {
         self.rotation_x = camera_controller.clampPitch(pitch);
         self.rotation_angle = yaw;
     }
 
+    /// Marks cached/derived data stale so it is recomputed on the next usage.
+    /// It marks cached/derived data stale so dependent work is recomputed on next use.
     pub fn invalidateMeshWork(self: *Renderer) void {
         self.mesh_work_cache.invalidate();
         self.frame_view_cache.invalidate();
@@ -4025,6 +4134,8 @@ pub const Renderer = struct {
         self.taa_previous_mesh_valid = false;
     }
 
+    /// Performs capture temporal mesh state.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn captureTemporalMeshState(self: *Renderer, mesh: *const Mesh) void {
         if (self.taa_previous_mesh_vertices.len < mesh.vertices.len) {
             self.taa_previous_mesh_valid = false;
@@ -4053,6 +4164,8 @@ pub const Renderer = struct {
         projection: ProjectionParams,
     };
 
+    /// Computes pointer view state.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     fn computePointerViewState(self: *const Renderer) PointerViewState {
         const basis = camera_controller.computeViewBasis(self.rotation_angle, self.rotation_x);
         const projection = camera_controller.computeProjectionScalars(self.bitmap.width, self.bitmap.height, self.camera_fov_deg);
@@ -4164,6 +4277,8 @@ pub const Renderer = struct {
         return best_axis;
     }
 
+    /// Computes light gizmo drag delta.
+    /// Keeps compute light gizmo drag delta as the single implementation point so call-site behavior stays consistent.
     fn computeLightGizmoDragDelta(
         self: *Renderer,
         axis: LightGizmoAxis,
@@ -4202,6 +4317,7 @@ pub const Renderer = struct {
         return pixels_along_axis * (axis_extent / axis_screen_len);
     }
 
+    /// updateLightGizmoPointer updates Renderer state for the current tick/frame.
     fn updateLightGizmoPointer(self: *Renderer, pointer: math.Vec2, pointer_view: PointerViewState) void {
         if (!self.light_gizmo.enabled or self.lights.items.len == 0) {
             self.clearLightGizmoInteraction();
@@ -4226,6 +4342,8 @@ pub const Renderer = struct {
         self.light_gizmo.hover_axis = self.hoverLightGizmoAxisAtPointer(pointer, pointer_view);
     }
 
+    /// Begins an operation and captures temporary context used until completion.
+    /// It marks the start of an operation and prepares transient state used until completion.
     fn beginLightGizmoDrag(self: *Renderer, window_x: i32, window_y: i32, pointer_view: PointerViewState) bool {
         if (!self.light_gizmo.enabled or self.lights.items.len == 0) return false;
         const mapped = self.mapWindowPointToBackbuffer(window_x, window_y) orelse return false;
@@ -4241,12 +4359,15 @@ pub const Renderer = struct {
         return true;
     }
 
+    /// Returns whether s ho ul dr en de rf ra me.
+    /// The check is side-effect free so callers can gate expensive follow-up work cheaply.
     pub fn shouldRenderFrame(self: *Renderer) bool {
         if (!self.usesSoftwareFramePacing()) return true;
         const now = std.time.nanoTimestamp();
         return now >= self.next_frame_time;
     }
 
+    /// renderLoadingOverlayFrame renders Renderer output.
     pub fn renderLoadingOverlayFrame(self: *Renderer, pump: ?*const fn (*Renderer) bool) bool {
         if (pump) |pump_fn| {
             if (!pump_fn(self)) return false;
@@ -4267,12 +4388,16 @@ pub const Renderer = struct {
         return true;
     }
 
+    /// Moves data for copy text truncate.
+    /// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
     fn copyTextTruncate(dest: []u8, src: []const u8) usize {
         const copy_len = @min(dest.len, src.len);
         if (copy_len > 0) std.mem.copyForwards(u8, dest[0..copy_len], src[0..copy_len]);
         return copy_len;
     }
 
+    /// Begins an operation and captures temporary context used until completion.
+    /// It marks the start of an operation and prepares transient state used until completion.
     pub fn beginSceneLoadingOverlay(self: *Renderer, scene_key: []const u8, total_steps: usize) void {
         self.loading_overlay.enabled = true;
         self.loading_overlay.total_steps = @max(@as(usize, 1), total_steps);
@@ -4283,6 +4408,7 @@ pub const Renderer = struct {
         self.loading_overlay.phase_text_len = copyTextTruncate(&self.loading_overlay.phase_text_buf, "Preparing assets...");
     }
 
+    /// updateSceneLoadingOverlay updates Renderer state for the current tick/frame.
     pub fn updateSceneLoadingOverlay(self: *Renderer, completed_steps: usize, total_steps: usize, phase: []const u8) void {
         if (!self.loading_overlay.enabled) return;
         const resolved_total = @max(@as(usize, 1), total_steps);
@@ -4294,6 +4420,8 @@ pub const Renderer = struct {
         self.loading_overlay.spinner_tick +%= 1;
     }
 
+    /// Finalizes the current operation and commits or clears temporary state.
+    /// It finalizes an in-flight operation and commits/clears temporary state.
     pub fn endSceneLoadingOverlay(self: *Renderer) void {
         self.loading_overlay.enabled = false;
         self.loading_overlay.progress = 0.0;
@@ -4347,6 +4475,7 @@ pub const Renderer = struct {
         return remaining_ns - safety_margin_ns - bias_ns;
     }
 
+    /// updateFramePacingSleepBias updates Renderer state for the current tick/frame.
     fn updateFramePacingSleepBias(self: *Renderer, requested_sleep_ns: i128, actual_wait_ns: i128) void {
         if (requested_sleep_ns <= 0 or actual_wait_ns <= 0) return;
 
@@ -4354,6 +4483,8 @@ pub const Renderer = struct {
         self.frame_pacing_sleep_bias_ns = @divTrunc(self.frame_pacing_sleep_bias_ns * 7 + overshoot_ns, 8);
     }
 
+    /// Performs wait until next frame.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn waitUntilNextFrame(self: *Renderer) void {
         if (!self.usesSoftwareFramePacing()) return;
 
@@ -4416,6 +4547,8 @@ pub const Renderer = struct {
         }
     }
 
+    /// Handles handle char input.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleCharInput(self: *Renderer, char_code: u32) void {
         switch (char_code) {
             'q', 'Q' => {
@@ -4553,6 +4686,8 @@ pub const Renderer = struct {
         }
     }
 
+    /// Clamps light gizmo selection to a valid range for downstream code.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     fn clampLightGizmoSelection(self: *Renderer) void {
         if (self.lights.items.len == 0) {
             self.light_gizmo.selected_light_index = 0;
@@ -4590,6 +4725,7 @@ pub const Renderer = struct {
         projection: ProjectionParams,
     };
 
+    /// projectSceneItemWorld projects coordinates for Renderer calculations.
     fn projectSceneItemWorld(ctx_ptr: *anyopaque, world_position: math.Vec3) ?[2]i32 {
         const ctx: *const SceneItemGizmoDrawContext = @ptrCast(@alignCast(ctx_ptr));
         return ctx.renderer.projectWorldToScreen(
@@ -4607,19 +4743,27 @@ pub const Renderer = struct {
         ctx.renderer.drawLineColored(x0, y0, x1, y1, color);
     }
 
+    /// Sets s et te xt ur e.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setTexture(self: *Renderer, tex: *const texture.Texture) void {
         self.single_texture_binding[0] = tex;
         self.textures = self.single_texture_binding[0..];
     }
 
+    /// Sets s et hd ri ma p.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setHdriMap(self: *Renderer, hdri_map: texture.HdrTexture) void {
         self.hdri_map = hdri_map;
     }
 
+    /// Sets s et te xt ur es.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setTextures(self: *Renderer, textures: []const ?*const texture.Texture) void {
         self.textures = textures;
     }
 
+    /// Sets s et li gh tc ap ac it y.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setLightCapacity(self: *Renderer, light_count: usize) !void {
         const requested_count = @max(@as(usize, 1), light_count);
         const light_count_max = @max(config.LIGHT_COUNT_MIN, config.LIGHT_COUNT_MAX);
@@ -4691,6 +4835,8 @@ pub const Renderer = struct {
         self.frame_view_cache.invalidate();
     }
 
+    /// Sets s et di re ct io na ll ig ht.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setDirectionalLight(self: *Renderer, index: usize, direction: math.Vec3, distance: f32, color: ?math.Vec3) void {
         if (index >= self.lights.items.len) return;
         const dir_len = math.Vec3.length(direction);
@@ -4711,22 +4857,30 @@ pub const Renderer = struct {
         self.frame_view_cache.invalidate();
     }
 
+    /// Sets s et li gh ts ha do wm od e.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setLightShadowMode(self: *Renderer, index: usize, mode: LightInfo.ShadowMode) void {
         if (index >= self.lights.items.len) return;
         self.lights.items[index].shadow_mode = mode;
         self.light_soa.shadow_mode[index] = @intFromEnum(mode);
     }
 
+    /// Sets s et li gh ts ha do wu pd at ei nt er va l.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setLightShadowUpdateInterval(self: *Renderer, index: usize, interval_frames: u32) void {
         if (index >= self.lights.items.len) return;
         self.lights.items[index].shadow_update_interval_frames = @max(@as(u32, 1), interval_frames);
         self.lights.items[index].shadow_dynamic_interval_scale = 1;
     }
 
+    /// Sets s et li gh ts ha do wm ap si ze.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setLightShadowMapSize(self: *Renderer, index: usize, shadow_map_size: usize) !void {
         _ = try self.resizeLightShadowMap(index, shadow_map_size, true, "config");
     }
 
+    /// Sets s et li gh tg lo w.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setLightGlow(self: *Renderer, index: usize, radius: f32, intensity: f32) void {
         if (index >= self.lights.items.len) return;
         self.lights.items[index].glow_radius = std.math.clamp(radius, 0.0, 256.0);
@@ -4941,6 +5095,7 @@ pub const Renderer = struct {
         try cache.ensureCapacity(self.allocator, mesh.vertices.len);
         if (config.POST_TAA_ENABLED) try self.ensureTemporalMeshVertexCapacity(mesh.vertices.len);
 
+        // Recompute mesh work only when camera/light/projection dependencies diverge from cached keys.
         const needs_update = cache.needsUpdate(
             mesh,
             self.camera_position,
@@ -4970,6 +5125,7 @@ pub const Renderer = struct {
                 &cache.work,
                 light_dir,
             );
+            // Capture the exact dependency snapshot that will be checked on the next frame.
             cache.finalizeUpdate(mesh, self.camera_position, right, up, forward, light_dir, cache_projection);
             self.recordRenderPassTiming("mesh_work_update", mesh_work_start);
         } else {
@@ -5166,6 +5322,8 @@ pub const Renderer = struct {
         );
     }
 
+    /// Begins an operation and captures temporary context used until completion.
+    /// It marks the start of an operation and prepares transient state used until completion.
     fn beginFrame(self: *Renderer) f32 {
         const now = std.time.nanoTimestamp();
         var delta_ns = now - self.last_frame_time;
@@ -5283,6 +5441,7 @@ pub const Renderer = struct {
         self.updateWindowTitle(avg_frame_time_ms);
     }
 
+    /// updateWindowTitle updates Renderer state for the current tick/frame.
     fn updateWindowTitle(self: *Renderer, avg_frame_time_ms: f32) void {
         var title_buffer: [256]u8 = undefined;
         const telemetry = self.meshlet_telemetry;
@@ -5306,17 +5465,23 @@ pub const Renderer = struct {
         self.render_pass_count = 0;
     }
 
+    /// Records telemetry/sample data and updates aggregate counters/statistics.
+    /// It appends telemetry/sample data and updates aggregate counters/statistics.
     pub fn recordRenderPassTiming(self: *Renderer, name: []const u8, start_ns: i128) void {
         const elapsed_ns = std.time.nanoTimestamp() - start_ns;
         self.recordRenderPassDuration(name, elapsed_ns);
     }
 
+    /// Computes stripe count.
+    /// Keeps compute stripe count as the single implementation point so call-site behavior stays consistent.
     fn computeStripeCount(max_jobs: usize, row_count: usize) usize {
         if (row_count == 0 or max_jobs == 0) return 0;
         const desired = @max(@as(usize, 1), (row_count + min_rows_per_parallel_job - 1) / min_rows_per_parallel_job);
         return @min(max_jobs, desired);
     }
 
+    /// Records telemetry/sample data and updates aggregate counters/statistics.
+    /// It appends telemetry/sample data and updates aggregate counters/statistics.
     pub fn recordRenderPassDuration(self: *Renderer, name: []const u8, elapsed_ns: i128) void {
         if (self.render_pass_count >= self.render_pass_timings.len) return;
         const elapsed_ms = render_utils.nanosecondsToMs(elapsed_ns);
@@ -5335,10 +5500,12 @@ pub const Renderer = struct {
         self.render_pass_count += 1;
     }
 
+    /// renderPassSortMetric renders Renderer output.
     fn renderPassSortMetric(pass: RenderPassTiming) f32 {
         return if (pass.has_sample) pass.sampled_ms_per_frame else pass.frame_duration_ms;
     }
 
+    /// sampleRenderPassTimings samples values used by Renderer.
     fn sampleRenderPassTimings(self: *Renderer, frame_samples: u32) void {
         if (frame_samples == 0) return;
         const sample_count = @as(f32, @floatFromInt(frame_samples));
@@ -5523,6 +5690,7 @@ pub const Renderer = struct {
         );
     }
 
+    /// projectWorldToScreen projects coordinates for Renderer calculations.
     fn projectWorldToScreen(
         self: *Renderer,
         camera_position: math.Vec3,
@@ -5677,6 +5845,7 @@ pub const Renderer = struct {
         }
     }
 
+    /// buildShadowMap builds data structures used by Renderer.
     fn buildShadowMap(self: *Renderer, mesh: *const Mesh, light_dir_world: math.Vec3, target_shadow_map: *ShadowMap) i128 {
         return shadow_map_pass.runBuild(
             self,
@@ -5691,6 +5860,8 @@ pub const Renderer = struct {
         );
     }
 
+    /// Applies shadow pass.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     fn applyShadowPass(
         self: *Renderer,
         camera_position: math.Vec3,
@@ -5730,6 +5901,8 @@ pub const Renderer = struct {
         self.light_work_stats.shadow_resolve_ns += resolve_elapsed_ns;
     }
 
+    /// Applies adaptive shadow pass.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     fn applyAdaptiveShadowPass(
         self: *Renderer,
         mesh: *const Mesh,
@@ -5789,6 +5962,8 @@ pub const Renderer = struct {
 
     const SkyboxJobContext = skybox_pass.JobContext(Renderer, ProjectionParams, texture.HdrTexture);
 
+    /// Applies skybox pass.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     fn applySkyboxPass(
         self: *Renderer,
         basis_right: math.Vec3,
@@ -5813,6 +5988,8 @@ pub const Renderer = struct {
         self.recordRenderPassTiming("skybox", pass_start);
     }
 
+    /// Applies shadow light from pass.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     fn applyShadowLightFromPass(ctx: ShadowLightDispatchContext, pass_index: usize) void {
         if (pass_index >= ctx.renderer.lights.items.len) return;
         if (ctx.renderer.lights.items[pass_index].shadow_mode != .shadow_map) return;
@@ -5829,6 +6006,8 @@ pub const Renderer = struct {
         );
     }
 
+    /// Applies hybrid shadow from pass.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     fn applyHybridShadowFromPass(ctx: HybridShadowDispatchContext) void {
         ctx.renderer.applyAdaptiveShadowPass(
             ctx.mesh,
@@ -5840,6 +6019,8 @@ pub const Renderer = struct {
         );
     }
 
+    /// Returns whether i sp os tp as se na bl ed.
+    /// The check is side-effect free so callers can gate expensive follow-up work cheaply.
     fn isPostPassEnabled(ctx: PostPassExecutionContext, pass_id: pass_registry.RenderPassId) bool {
         const enabled = switch (pass_id) {
             .skybox => config.POST_SKYBOX_ENABLED,
@@ -5898,6 +6079,8 @@ pub const Renderer = struct {
         };
     }
 
+    /// Applies composition scratch bindings.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     fn applyCompositionScratchBindings(self: *Renderer, plan: CompositionPlan) void {
         _ = self;
         _ = plan;
@@ -5932,6 +6115,8 @@ pub const Renderer = struct {
         self.lens_flare_scratch_pixels = saved.lens_flare_scratch_pixels;
     }
 
+    /// Runs post pass by id.
+    /// Keeps run post pass by id as the single implementation point so call-site behavior stays consistent.
     fn runPostPassById(ctx: PostPassExecutionContext, pass_id: pass_registry.RenderPassId) void {
         bindScratchForPass(ctx, pass_id);
         switch (pass_id) {
@@ -5980,6 +6165,8 @@ pub const Renderer = struct {
         }
     }
 
+    /// Applies post processing passes.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     fn applyPostProcessingPasses(
         self: *Renderer,
         mesh: *const Mesh,
@@ -6063,6 +6250,8 @@ pub const Renderer = struct {
         }
     }
 
+    /// Applies ssgi pass.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     fn applySSGIPass(self: *Renderer) void {
         const pass_start = std.time.nanoTimestamp();
         const height: usize = @intCast(self.bitmap.height);
@@ -6071,6 +6260,8 @@ pub const Renderer = struct {
         std.mem.swap([]u32, &self.bitmap.pixels, &self.ssgi_scratch_pixels);
         self.recordRenderPassTiming("ssgi", pass_start);
     }
+    /// Applies ambient occlusion pass.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     fn applyAmbientOcclusionPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
@@ -6089,6 +6280,8 @@ pub const Renderer = struct {
         self.recordRenderPassTiming("ssao", pass_start);
     }
 
+    /// Applies depth fog pass.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     fn applyDepthFogPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
@@ -6098,6 +6291,8 @@ pub const Renderer = struct {
         self.recordRenderPassTiming("depth_fog", pass_start);
     }
 
+    /// Applies temporal aa rows.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn applyTemporalAARows(
         self: *Renderer,
         mesh: *const Mesh,
@@ -6133,6 +6328,8 @@ pub const Renderer = struct {
         height: usize,
         light_screen_pos: math.Vec2,
 
+        /// Runs this module step with the currently bound configuration.
+        /// Keeps run as the single implementation point so call-site behavior stays consistent.
         pub fn run(ctx_ptr: *anyopaque) void {
             const ctx: *GodRaysJobContext = @ptrCast(@alignCast(ctx_ptr));
             god_rays_pass.runRows(
@@ -6160,6 +6357,8 @@ pub const Renderer = struct {
         width: usize,
         height: usize,
 
+        /// Runs this module step with the currently bound configuration.
+        /// Keeps run as the single implementation point so call-site behavior stays consistent.
         pub fn run(ctx_ptr: *anyopaque) void {
             const ctx: *ChromaticAberrationJobContext = @ptrCast(@alignCast(ctx_ptr));
             chromatic_aberration_pass.runRows(
@@ -6181,6 +6380,8 @@ pub const Renderer = struct {
         width: usize,
         height: usize,
 
+        /// Runs this module step with the currently bound configuration.
+        /// Keeps run as the single implementation point so call-site behavior stays consistent.
         pub fn run(ctx_ptr: *anyopaque) void {
             const ctx: *FilmGrainVignetteJobContext = @ptrCast(@alignCast(ctx_ptr));
             film_grain_vignette_pass.runRows(
@@ -6203,6 +6404,8 @@ pub const Renderer = struct {
         width: usize,
         height: usize,
 
+        /// Runs this module step with the currently bound configuration.
+        /// Keeps run as the single implementation point so call-site behavior stays consistent.
         pub fn run(ctx_ptr: *anyopaque) void {
             const ctx: *LensFlareJobContext = @ptrCast(@alignCast(ctx_ptr));
             _ = ctx.height;
@@ -6227,6 +6430,8 @@ pub const Renderer = struct {
         width: usize,
         height: usize,
 
+        /// Runs this module step with the currently bound configuration.
+        /// Keeps run as the single implementation point so call-site behavior stays consistent.
         pub fn run(ctx_ptr: *anyopaque) void {
             const ctx: *MotionBlurJobContext = @ptrCast(@alignCast(ctx_ptr));
             motion_blur_pass.runRows(
@@ -6335,6 +6540,8 @@ pub const Renderer = struct {
         self.recordRenderPassTiming("film_grain_vignette", pass_start);
     }
 
+    /// Applies motion blur pass.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     fn applyMotionBlurPass(self: *Renderer, current_view: TemporalAAViewState) void {
         if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
@@ -6351,6 +6558,8 @@ pub const Renderer = struct {
         self.recordRenderPassTiming("motion_blur", pass_start);
     }
 
+    /// Applies temporal aa pass.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     fn applyTemporalAAPass(self: *Renderer, mesh: *const Mesh, current_view: TemporalAAViewState) void {
         const _zone = profiler.zone("applyTemporalAAPass");
         defer if (_zone) |z| z.end();
@@ -6371,6 +6580,8 @@ pub const Renderer = struct {
         self.recordRenderPassTiming("taa", pass_start);
     }
 
+    /// Applies ssr pass.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     fn applySSRPass(self: *Renderer, projection: ProjectionParams) void {
         if (self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
@@ -6382,6 +6593,8 @@ pub const Renderer = struct {
         self.recordRenderPassTiming("ssr", pass_start);
     }
 
+    /// Applies depth of field pass.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     fn applyDepthOfFieldPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
@@ -6393,6 +6606,8 @@ pub const Renderer = struct {
         self.recordRenderPassTiming("dof", pass_start);
     }
 
+    /// Applies bloom pass.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     fn applyBloomPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0) return;
         const pass_start = std.time.nanoTimestamp();
@@ -6413,6 +6628,8 @@ pub const Renderer = struct {
         self.recordRenderPassTiming("bloom", pass_start);
     }
 
+    /// Applies blockbuster color grade pass.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     fn applyBlockbusterColorGradePass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0) return;
         const pass_start = std.time.nanoTimestamp();
@@ -6782,6 +6999,7 @@ pub const Renderer = struct {
         _ = TextOutW(hdc_mem, x, y, &wide_buffer, @intCast(len));
     }
 
+    /// buildBlockbusterGradeProfile builds data structures used by Renderer.
     fn buildBlockbusterGradeProfile() ColorGradeProfile {
         var profile: ColorGradeProfile = undefined;
         var i: usize = 0;
@@ -6846,6 +7064,8 @@ pub const Renderer = struct {
         return true;
     }
 
+    /// Returns runtime tile light cull lanes.
+    /// Keeps runtime tile light cull lanes as the single implementation point so call-site behavior stays consistent.
     fn runtimeTileLightCullLanes() usize {
         return switch (cpu_features.detect().preferredVectorBackend()) {
             .avx512, .avx2 => 8,
@@ -6919,6 +7139,7 @@ pub const Renderer = struct {
         return null;
     }
 
+    /// buildTileLightLists builds data structures used by Renderer.
     fn buildTileLightLists(
         self: *Renderer,
         active_tile_indices: []const usize,
@@ -7751,6 +7972,7 @@ pub const Renderer = struct {
         work.finalize(visible_meshlet_count);
     }
 
+    /// renderDirect renders Renderer output.
     fn renderDirect(
         self: *Renderer,
         mesh: *const Mesh,

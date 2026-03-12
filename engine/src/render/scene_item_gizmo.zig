@@ -1,3 +1,6 @@
+//! Scene Item Gizmo module.
+//! Renderer subsystem module for camera/input integration, overlays, or scene interaction.
+
 const std = @import("std");
 const windows = std.os.windows;
 const math = @import("../core/math.zig");
@@ -9,6 +12,8 @@ pub const Axis = enum(u8) {
     z = 2,
 };
 
+/// Performs axis name.
+/// Processes the provided slices directly to avoid per-call allocations and keep memory access predictable.
 pub fn axisName(axis: Axis) []const u8 {
     return switch (axis) {
         .x => "x",
@@ -24,6 +29,7 @@ pub const CursorHint = enum(u8) {
 };
 
 pub const ItemBinding = struct {
+    selection_id: u64,
     vertex_start: usize,
     vertex_count: usize,
     triangle_start: usize,
@@ -34,6 +40,7 @@ pub const ItemBinding = struct {
 };
 
 pub const TranslateRequest = struct {
+    selection_id: u64,
     item_index: usize,
     delta: math.Vec3,
 };
@@ -42,6 +49,7 @@ const invalid_item_index: u32 = std.math.maxInt(u32);
 const axis_hover_threshold_px: f32 = 8.0;
 
 const ItemState = struct {
+    selection_id: u64,
     bounds_min: math.Vec3,
     bounds_max: math.Vec3,
     origin: math.Vec3,
@@ -67,6 +75,7 @@ pub const State = struct {
     items: []ItemState = &[_]ItemState{},
     triangle_to_item: []u32 = &[_]u32{},
 
+    /// deinit releases resources owned by Scene Item Gizmo.
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         if (self.items.len != 0) allocator.free(self.items);
         if (self.triangle_to_item.len != 0) allocator.free(self.triangle_to_item);
@@ -81,6 +90,8 @@ pub const State = struct {
         self.drag_last_pointer = null;
     }
 
+    /// Sets s et bi nd in gs.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setBindings(self: *State, allocator: std.mem.Allocator, bindings: []const ItemBinding, triangle_count: usize) !void {
         self.deinit(allocator);
         if (bindings.len == 0 or triangle_count == 0) return;
@@ -89,6 +100,7 @@ pub const State = struct {
         errdefer allocator.free(items);
         for (bindings, 0..) |binding, idx| {
             items[idx] = .{
+                .selection_id = binding.selection_id,
                 .bounds_min = binding.bounds_min,
                 .bounds_max = binding.bounds_max,
                 .origin = binding.gizmo_origin,
@@ -112,36 +124,55 @@ pub const State = struct {
         self.triangle_to_item = triangle_to_item;
     }
 
+    /// Sets s et pe nd in gp ic k.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setPendingPick(self: *State, x: i32, y: i32) void {
         self.pending_pick = windows.POINT{ .x = x, .y = y };
     }
 
+    /// Toggles feature state and keeps related interaction/selection state coherent.
+    /// It flips the feature state and keeps related selection/interaction flags coherent.
     pub fn toggleEnabled(self: *State) void {
         self.enabled = !self.enabled;
         self.clampSelection();
         if (!self.enabled) self.cancelInteraction();
     }
 
+    /// Sets s et ax is.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setAxis(self: *State, axis: Axis) void {
         self.active_axis = axis;
     }
 
+    /// Returns whether i sa ct iv e.
+    /// The check is side-effect free so callers can gate expensive follow-up work cheaply.
     pub fn isActive(self: *const State) bool {
         if (!self.enabled) return false;
         const selected = self.selected_item_index orelse return false;
         return selected < self.items.len;
     }
 
+    /// Returns selected item index.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn selectedItemIndex(self: *const State) ?usize {
         const selected = self.selected_item_index orelse return null;
         if (selected >= self.items.len) return null;
         return selected;
     }
 
+    pub fn selectedSelectionId(self: *const State) ?u64 {
+        const selected = self.selectedItemIndex() orelse return null;
+        return self.items[selected].selection_id;
+    }
+
+    /// Returns item count.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn itemCount(self: *const State) usize {
         return self.items.len;
     }
 
+    /// Queues a deferred request/event for processing at a safe synchronization point.
+    /// It appends a request for deferred processing so mutation happens at a safe sync point.
     pub fn queueSelectedTranslation(self: *State, delta_step: f32) void {
         if (!self.isActive()) return;
         const item_index = self.selected_item_index.?;
@@ -154,6 +185,8 @@ pub const State = struct {
         self.queueTranslation(item_index, delta);
     }
 
+    /// Handles handle pointer move.
+    /// Keeps handle pointer move as the single implementation point so call-site behavior stays consistent.
     pub fn handlePointerMove(
         self: *State,
         window_x: i32,
@@ -201,6 +234,8 @@ pub const State = struct {
         self.hover_axis = hoverAxisAtPointer(self, pointer, ctx, project_world);
     }
 
+    /// Handles handle pointer down.
+    /// Keeps handle pointer down as the single implementation point so call-site behavior stays consistent.
     pub fn handlePointerDown(
         self: *State,
         window_x: i32,
@@ -238,33 +273,45 @@ pub const State = struct {
         return false;
     }
 
+    /// Handles handle pointer up.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handlePointerUp(self: *State) void {
         self.drag_axis = null;
         self.drag_last_pointer = null;
     }
 
+    /// Returns whether c an ce li nt er ac ti on.
+    /// The check is side-effect free so callers can gate expensive follow-up work cheaply.
     pub fn cancelInteraction(self: *State) void {
         self.hover_axis = null;
         self.drag_axis = null;
         self.drag_last_pointer = null;
     }
 
+    /// Performs cursor hint.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn cursorHint(self: *const State) CursorHint {
         if (self.drag_axis != null) return .grabbing;
         if (self.isActive() and self.hover_axis != null) return .grab;
         return .arrow;
     }
 
+    /// Returns whether i sd ra gg in g.
+    /// The check is side-effect free so callers can gate expensive follow-up work cheaply.
     pub fn isDragging(self: *const State) bool {
         return self.drag_axis != null;
     }
 
+    /// Returns pending data and advances internal cursors/flags to avoid reprocessing.
+    /// It returns pending data and clears or advances the underlying queue/state.
     pub fn consumeTranslateRequest(self: *State) ?TranslateRequest {
         const request = self.pending_translate;
         self.pending_translate = null;
         return request;
     }
 
+    /// Propagates an external state change into local bookkeeping and dependent systems.
+    /// It propagates an external state change into the local subsystem bookkeeping.
     pub fn notifyItemTranslated(self: *State, item_index: usize, delta: math.Vec3) void {
         if (item_index >= self.items.len) return;
         self.items[item_index].origin = math.Vec3.add(self.items[item_index].origin, delta);
@@ -272,6 +319,8 @@ pub const State = struct {
         self.items[item_index].bounds_max = math.Vec3.add(self.items[item_index].bounds_max, delta);
     }
 
+    /// Sets s et it em or ig in.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setItemOrigin(self: *State, item_index: usize, origin: math.Vec3) void {
         if (item_index >= self.items.len) return;
         const extents = math.Vec3.scale(math.Vec3.sub(self.items[item_index].bounds_max, self.items[item_index].bounds_min), 0.5);
@@ -280,6 +329,8 @@ pub const State = struct {
         self.items[item_index].bounds_max = math.Vec3.add(origin, extents);
     }
 
+    /// Resolves r es ol ve pe nd in gp ic k into a final normalized result.
+    /// Validates inputs and applies fallback/default rules before exposing results to callers.
     pub fn resolvePendingPick(
         self: *State,
         bitmap_width: i32,
@@ -346,6 +397,8 @@ pub const State = struct {
         self.cancelInteraction();
     }
 
+    /// Applies outline.
+    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn applyOutline(
         self: *const State,
         pixels: []u32,
@@ -382,6 +435,8 @@ pub const State = struct {
         }
     }
 
+    /// Produces visual output from current state and target buffers.
+    /// It emits frame output by transforming current state into rasterized/presentable results.
     pub fn drawGizmo(self: *const State, ctx: *anyopaque, project_world: ProjectWorldFn, draw_line: DrawLineFn) void {
         const selected = self.selectedItemIndex() orelse return;
         if (selected >= self.items.len) return;
@@ -415,6 +470,8 @@ pub const State = struct {
         draw_line(ctx, origin_screen[0], origin_screen[1] - 3, origin_screen[0], origin_screen[1] + 3, 0xFFFFFFFF);
     }
 
+    /// Clamps selection to a valid range for downstream code.
+    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     fn clampSelection(self: *State) void {
         if (self.items.len == 0) {
             self.selected_item_index = null;
@@ -429,14 +486,15 @@ pub const State = struct {
 
     fn queueTranslation(self: *State, item_index: usize, delta: math.Vec3) void {
         if (@abs(delta.x) + @abs(delta.y) + @abs(delta.z) < 1e-6) return;
+        const selection_id = if (item_index < self.items.len) self.items[item_index].selection_id else 0;
         if (self.pending_translate) |*pending| {
             if (pending.item_index == item_index) {
                 pending.delta = math.Vec3.add(pending.delta, delta);
             } else {
-                pending.* = .{ .item_index = item_index, .delta = delta };
+                pending.* = .{ .selection_id = selection_id, .item_index = item_index, .delta = delta };
             }
         } else {
-            self.pending_translate = .{ .item_index = item_index, .delta = delta };
+            self.pending_translate = .{ .selection_id = selection_id, .item_index = item_index, .delta = delta };
         }
     }
 };
@@ -465,6 +523,8 @@ fn hoverAxisAtPointer(self: *const State, pointer: math.Vec2, ctx: *anyopaque, p
     return best_axis;
 }
 
+/// Computes axis drag delta.
+/// Keeps compute axis drag delta as the single implementation point so call-site behavior stays consistent.
 fn computeAxisDragDelta(
     self: *const State,
     item_index: usize,
