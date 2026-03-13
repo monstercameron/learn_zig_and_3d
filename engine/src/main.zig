@@ -765,8 +765,11 @@ pub fn main() !void {
     try renderer.setLightCapacity(scene_desc.lights.len);
     try configureSceneLights(&renderer, scene_desc.lights);
 
-    try scene_resources.mesh.generateMeshlets(64, 126);
+    // TEMP: skip meshlet generation to diagnose rendering
+    const meshlet_builder = @import("render/core/meshlets/meshlet_builder.zig");
     advanceSceneLoadingProgress(if (scene_loading_progress) |*progress| progress else null, "Building meshlets");
+    try meshlet_builder.buildMeshlets(allocator, &scene_resources.mesh, .{});
+
     app_logger.infoSub(
         "assets",
         "loaded scene mesh vertices={} triangles={} meshlets={}",

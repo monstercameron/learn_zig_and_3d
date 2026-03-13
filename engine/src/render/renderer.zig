@@ -8016,9 +8016,10 @@ pub const Renderer = struct {
 
         const mesh_vertices = mesh.vertices;
 
-        if (mesh.meshlets.len == 0) {
+        // TEMP: force per-triangle path — skip meshlet generation
+        if (false) {
             const mesh_mut: *Mesh = @constCast(mesh);
-            mesh_mut.generateMeshlets(64, 126) catch |err| {
+            mesh_mut.generateMeshlets(255, 512) catch |err| {
                 meshlet_logger.errorSub("build", "generateMeshlets failed: {s}", .{@errorName(err)});
             };
             self.mesh_work_cache.invalidate();
@@ -8280,6 +8281,7 @@ pub const Renderer = struct {
                 const meshlet_vertices = mesh.meshletVertexSlice(meshlet_ptr);
                 transformMeshletVertices(mesh_vertices, meshlet_vertices, self.camera_position, right, up, forward, projection, local_camera_vertices, local_projected_vertices);
 
+                const start_cursor = cursor;
                 for (mesh.meshletPrimitiveSlice(meshlet_ptr)) |primitive| {
                     const tri_idx = primitive.triangle_index;
                     const tri = mesh.triangles[tri_idx];
@@ -8303,6 +8305,8 @@ pub const Renderer = struct {
                         continue;
                     };
                 }
+                work.meshlet_packets[visible_idx].triangle_start = start_cursor;
+                work.meshlet_packets[visible_idx].triangle_count = cursor - start_cursor;
             }
 
             work.next_triangle.store(cursor, .release);
