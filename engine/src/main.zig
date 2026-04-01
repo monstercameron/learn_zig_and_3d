@@ -160,9 +160,11 @@ const texture = @import("assets/texture.zig");
 const mesh_module = @import("render/core/mesh.zig");
 const config = @import("core/app_config.zig");
 const cpu_features = @import("core/cpu_features.zig");
+const app_loop = @import("app_loop.zig");
 const input = @import("platform_input");
 const log = @import("core/log.zig");
 const scene_runtime = @import("scene_main");
+const main_module = @This();
 
 const app_logger = log.get("app.main");
 const scenes_index_path = "assets/configs/scenes/index.json";
@@ -206,6 +208,15 @@ const SceneRenderInstance = struct {
     bounds_max: math.Vec3,
     local_vertices: []math.Vec3,
     local_normals: []math.Vec3,
+};
+
+const AppSession = struct {
+    renderer: *Renderer,
+    phase13_runtime: *scene_runtime.SceneRuntime,
+    scene_resources: *SceneMeshResources,
+    mouse_grabbed: *bool,
+    selected_scene_entity_pin: *?scene_runtime.EntityId,
+    last_runtime_update_ns: i128,
 };
 
 fn populateSceneRuntimeBootstrap(runtime: *scene_runtime.SceneRuntime, scene_desc: scene_runtime.LoadedSceneDescription) !void {
@@ -419,6 +430,120 @@ fn syncFirstPersonMouseGrab(renderer: *Renderer, mouse_grabbed: *bool) void {
     }
 }
 
+fn cursorResource(id: usize) [*:0]align(1) const u16 {
+    return @ptrFromInt(id);
+}
+
+fn applyCursorFromRenderer(renderer: *Renderer) void {
+    const desired = renderer.desiredCursorStyle();
+    switch (desired) {
+        .hidden => {
+            _ = SetCursor(null);
+        },
+        else => {
+            const cursor_id: usize = switch (desired) {
+                .arrow => IDC_ARROW_ID,
+                .grab => IDC_HAND_ID,
+                .grabbing => IDC_SIZEALL_ID,
+                .hidden => unreachable,
+            };
+            const cursor = LoadCursorW(null, cursorResource(cursor_id));
+            _ = SetCursor(cursor);
+        },
+    }
+}
+
+fn decodeRawMouseDelta(lParam: windows.LPARAM) ?windows.POINT {
+    var raw_input: RAWINPUTMOUSE = undefined;
+    var size: u32 = @sizeOf(RAWINPUTMOUSE);
+    const handle: ?windows.HANDLE = @ptrFromInt(@as(usize, @bitCast(lParam)));
+    const copied = GetRawInputData(handle, RID_INPUT, @ptrCast(&raw_input), &size, @sizeOf(RAWINPUTHEADER));
+    if (copied == std.math.maxInt(u32) or copied < @sizeOf(RAWINPUTHEADER)) return null;
+    if (raw_input.header.dwType != RIM_TYPEMOUSE) return null;
+    if ((raw_input.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) != 0) return null;
+    if (raw_input.mouse.lLastX == 0 and raw_input.mouse.lLastY == 0) return null;
+    return windows.POINT{
+        .x = raw_input.mouse.lLastX,
+        .y = raw_input.mouse.lLastY,
+    };
+}
+
+fn decodeMouseCoords(lParam: windows.LPARAM) windows.POINT {
+    const raw: usize = @bitCast(lParam);
+    const x16: u16 = @intCast(raw & 0xFFFF);
+    const y16: u16 = @intCast((raw >> 16) & 0xFFFF);
+    const x_component: i16 = @bitCast(x16);
+    const y_component: i16 = @bitCast(y16);
+    return windows.POINT{
+        .x = @intCast(x_component),
+        .y = @intCast(y_component),
+    };
+}
+
+fn pumpMessages(renderer: *Renderer) bool {
+    var m: MSG = undefined;
+    while (PeekMessageW(&m, null, 0, 0, PM_REMOVE) != 0) {
+        if (m.message == WM_QUIT) {
+            app_logger.info("received WM_QUIT message, exiting", .{});
+            return false;
+        }
+        if (m.message == WM_KEYDOWN or m.message == WM_SYSKEYDOWN) {
+            const key_code: u32 = @intCast(m.wParam);
+            renderer.handleKeyInput(key_code, true);
+        } else if (m.message == WM_KEYUP or m.message == WM_SYSKEYUP) {
+            const key_code: u32 = @intCast(m.wParam);
+            renderer.handleKeyInput(key_code, false);
+        } else if (m.message == WM_CHAR) {
+            const char_code: u32 = @intCast(m.wParam);
+            renderer.handleCharInput(char_code);
+            applyCursorFromRenderer(renderer);
+        } else if (m.message == WM_SETFOCUS) {
+            renderer.handleFocusGained();
+            applyCursorFromRenderer(renderer);
+        } else if (m.message == WM_KILLFOCUS) {
+            _ = ReleaseCapture();
+            renderer.handleFocusLost();
+            applyCursorFromRenderer(renderer);
+        } else if (m.message == WM_INPUT) {
+            if (decodeRawMouseDelta(m.lParam)) |delta| {
+                renderer.handleRawMouseDelta(delta.x, delta.y);
+            }
+        } else if (m.message == WM_MOUSEMOVE) {
+            const coords = decodeMouseCoords(m.lParam);
+            if (!renderer.isFirstPersonMode()) {
+                const button_mask: usize = @intCast(m.wParam);
+                if ((button_mask & MK_LBUTTON) == 0) {
+                    renderer.handleMouseLeftRelease(coords.x, coords.y);
+                }
+                if ((button_mask & MK_RBUTTON) == 0) {
+                    renderer.handleMouseRightRelease(coords.x, coords.y);
+                }
+            }
+            renderer.handleMouseMove(coords.x, coords.y);
+            applyCursorFromRenderer(renderer);
+        } else if (m.message == WM_LBUTTONDOWN) {
+            const coords = decodeMouseCoords(m.lParam);
+            renderer.handleMouseLeftClick(coords.x, coords.y);
+            applyCursorFromRenderer(renderer);
+        } else if (m.message == WM_LBUTTONUP) {
+            const coords = decodeMouseCoords(m.lParam);
+            renderer.handleMouseLeftRelease(coords.x, coords.y);
+            applyCursorFromRenderer(renderer);
+        } else if (m.message == WM_RBUTTONDOWN) {
+            const coords = decodeMouseCoords(m.lParam);
+            renderer.handleMouseRightClick(coords.x, coords.y);
+            applyCursorFromRenderer(renderer);
+        } else if (m.message == WM_RBUTTONUP) {
+            const coords = decodeMouseCoords(m.lParam);
+            renderer.handleMouseRightRelease(coords.x, coords.y);
+            applyCursorFromRenderer(renderer);
+        }
+        _ = TranslateMessage(&m);
+        _ = DispatchMessageW(&m);
+    }
+    return true;
+}
+
 /// renderSceneLoadingFrame renders Main output.
 fn renderSceneLoadingFrame(progress: *SceneLoadingProgress) void {
     if (!progress.running.*) return;
@@ -567,123 +692,6 @@ pub fn main() !void {
     app_logger.infoSub("bootstrap", "renderer initialized backbuffer={d}x{d}", .{ renderer.bitmap.width, renderer.bitmap.height });
 
     var running = true;
-    const MessagePump = struct {
-        fn cursorResource(id: usize) [*:0]align(1) const u16 {
-            return @ptrFromInt(id);
-        }
-
-        /// Applies cursor from renderer.
-        /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-        fn applyCursorFromRenderer(r: *Renderer) void {
-            const desired = r.desiredCursorStyle();
-            switch (desired) {
-                .hidden => {
-                    _ = SetCursor(null);
-                },
-                else => {
-                    const cursor_id: usize = switch (desired) {
-                        .arrow => IDC_ARROW_ID,
-                        .grab => IDC_HAND_ID,
-                        .grabbing => IDC_SIZEALL_ID,
-                        .hidden => unreachable,
-                    };
-                    const cursor = LoadCursorW(null, cursorResource(cursor_id));
-                    _ = SetCursor(cursor);
-                },
-            }
-        }
-
-        fn decodeRawMouseDelta(lParam: windows.LPARAM) ?windows.POINT {
-            var raw_input: RAWINPUTMOUSE = undefined;
-            var size: u32 = @sizeOf(RAWINPUTMOUSE);
-            const handle: ?windows.HANDLE = @ptrFromInt(@as(usize, @bitCast(lParam)));
-            const copied = GetRawInputData(handle, RID_INPUT, @ptrCast(&raw_input), &size, @sizeOf(RAWINPUTHEADER));
-            if (copied == std.math.maxInt(u32) or copied < @sizeOf(RAWINPUTHEADER)) return null;
-            if (raw_input.header.dwType != RIM_TYPEMOUSE) return null;
-            if ((raw_input.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) != 0) return null;
-            if (raw_input.mouse.lLastX == 0 and raw_input.mouse.lLastY == 0) return null;
-            return windows.POINT{
-                .x = raw_input.mouse.lLastX,
-                .y = raw_input.mouse.lLastY,
-            };
-        }
-
-        fn decodeMouseCoords(lParam: windows.LPARAM) windows.POINT {
-            const raw: usize = @bitCast(lParam);
-            const x16: u16 = @intCast(raw & 0xFFFF);
-            const y16: u16 = @intCast((raw >> 16) & 0xFFFF);
-            const x_component: i16 = @bitCast(x16);
-            const y_component: i16 = @bitCast(y16);
-            return windows.POINT{
-                .x = @intCast(x_component),
-                .y = @intCast(y_component),
-            };
-        }
-
-        fn pump(r: *Renderer) bool {
-            var m: MSG = undefined;
-            while (PeekMessageW(&m, null, 0, 0, PM_REMOVE) != 0) {
-                if (m.message == WM_QUIT) {
-                    app_logger.info("received WM_QUIT message, exiting", .{});
-                    return false;
-                }
-                if (m.message == WM_KEYDOWN or m.message == WM_SYSKEYDOWN) {
-                    const key_code: u32 = @intCast(m.wParam);
-                    r.handleKeyInput(key_code, true);
-                } else if (m.message == WM_KEYUP or m.message == WM_SYSKEYUP) {
-                    const key_code: u32 = @intCast(m.wParam);
-                    r.handleKeyInput(key_code, false);
-                } else if (m.message == WM_CHAR) {
-                    const char_code: u32 = @intCast(m.wParam);
-                    r.handleCharInput(char_code);
-                    applyCursorFromRenderer(r);
-                } else if (m.message == WM_SETFOCUS) {
-                    r.handleFocusGained();
-                    applyCursorFromRenderer(r);
-                } else if (m.message == WM_KILLFOCUS) {
-                    _ = ReleaseCapture();
-                    r.handleFocusLost();
-                    applyCursorFromRenderer(r);
-                } else if (m.message == WM_INPUT) {
-                    if (decodeRawMouseDelta(m.lParam)) |delta| {
-                        r.handleRawMouseDelta(delta.x, delta.y);
-                    }
-                } else if (m.message == WM_MOUSEMOVE) {
-                    const coords = decodeMouseCoords(m.lParam);
-                    if (!r.isFirstPersonMode()) {
-                        const button_mask: usize = @intCast(m.wParam);
-                        if ((button_mask & MK_LBUTTON) == 0) {
-                            r.handleMouseLeftRelease(coords.x, coords.y);
-                        }
-                        if ((button_mask & MK_RBUTTON) == 0) {
-                            r.handleMouseRightRelease(coords.x, coords.y);
-                        }
-                    }
-                    r.handleMouseMove(coords.x, coords.y);
-                    applyCursorFromRenderer(r);
-                } else if (m.message == WM_LBUTTONDOWN) {
-                    const coords = decodeMouseCoords(m.lParam);
-                    r.handleMouseLeftClick(coords.x, coords.y);
-                    applyCursorFromRenderer(r);
-                } else if (m.message == WM_LBUTTONUP) {
-                    const coords = decodeMouseCoords(m.lParam);
-                    r.handleMouseLeftRelease(coords.x, coords.y);
-                    applyCursorFromRenderer(r);
-                } else if (m.message == WM_RBUTTONDOWN) {
-                    const coords = decodeMouseCoords(m.lParam);
-                    r.handleMouseRightClick(coords.x, coords.y);
-                    applyCursorFromRenderer(r);
-                } else if (m.message == WM_RBUTTONUP) {
-                    const coords = decodeMouseCoords(m.lParam);
-                    r.handleMouseRightRelease(coords.x, coords.y);
-                    applyCursorFromRenderer(r);
-                }
-                _ = TranslateMessage(&m);
-                _ = DispatchMessageW(&m);
-            }
-            return true;
-        }
-    };
 
     const scene_index_bytes = try std.fs.cwd().readFileAlloc(allocator, scenes_index_path, 1024 * 1024);
     defer allocator.free(scene_index_bytes);
@@ -722,7 +730,7 @@ pub fn main() !void {
             scene_loading_progress = .{
                 .renderer = &renderer,
                 .running = &running,
-                .pump = MessagePump.pump,
+                .pump = pumpMessages,
                 .total_steps = total_steps,
             };
             if (scene_loading_progress) |*progress| startSceneLoadingProgress(progress);
@@ -790,148 +798,164 @@ pub fn main() !void {
     if (!running) return;
 
     app_logger.info("starting main event loop...", .{});
-
-    var frame_count: u32 = 0;
-    var last_runtime_update_ns = std.time.nanoTimestamp();
-    while (running) {
-        renderer.keys_pressed.beginFrame();
-        renderer.mouse_input.beginFrame();
-        if (renderer_ttl_ns) |ttl_ns| {
-            if (std.time.nanoTimestamp() - renderer_start_ns >= ttl_ns) {
-                app_logger.info("renderer TTL expired, exiting", .{});
-                running = false;
-                break;
-            }
-        }
-        if (effective_ttl_frames) |ttl_frames| {
-            if (frame_count >= ttl_frames) {
-                app_logger.info("renderer frame TTL expired, exiting", .{});
-                running = false;
-                break;
-            }
+    const AppLoopDriver = struct {
+        pub fn beginFrame(session: *AppSession) void {
+            session.renderer.keys_pressed.beginFrame();
+            session.renderer.mouse_input.beginFrame();
         }
 
-        if (!MessagePump.pump(&renderer)) {
-            app_logger.info("message pump requested shutdown", .{});
-            running = false;
-            break;
+        pub fn pump(session: *AppSession) bool {
+            return pumpMessages(session.renderer);
         }
 
-        const current_selected_entity = blk: {
-            const selection_id = renderer.selectedSceneItemSelectionId() orelse break :blk null;
-            const entity = selectionIdToEntity(selection_id);
-            if (!entity.isValid() or !phase13_runtime.world.isAlive(entity)) break :blk null;
-            break :blk entity;
-        };
-        phase13_runtime.setSelectedEntity(current_selected_entity) catch |err| {
-            app_logger.warn("phase13 selection sync failed: {}", .{err});
-        };
+        pub fn update(session: *AppSession, frame_count: u32) !void {
+            const current_selected_entity = blk: {
+                const selection_id = session.renderer.selectedSceneItemSelectionId() orelse break :blk null;
+                const entity = main_module.selectionIdToEntity(selection_id);
+                if (!entity.isValid() or !session.phase13_runtime.world.isAlive(entity)) break :blk null;
+                break :blk entity;
+            };
+            session.phase13_runtime.setSelectedEntity(current_selected_entity) catch |err| {
+                app_logger.warn("phase13 selection sync failed: {}", .{err});
+            };
 
-        const enter_is_down = renderer.keys_pressed.isDown(.enter) or isEnterDown();
-
-        const now_ns = std.time.nanoTimestamp();
-        const runtime_delta_ns = @max(@as(i128, 0), now_ns - last_runtime_update_ns);
-        last_runtime_update_ns = now_ns;
-        const runtime_delta_seconds = std.math.clamp(
-            @as(f32, @floatFromInt(runtime_delta_ns)) / @as(f32, @floatFromInt(std.time.ns_per_s)),
-            0.0,
-            0.1,
-        );
-        const scene_look_delta = renderer.consumeSceneCameraLookDelta(runtime_delta_seconds);
-        const current_keys_pressed = renderer.keys_pressed;
-        phase13_runtime.setExecutionInputs(enter_is_down, renderer.isSceneItemDragActive(), .{
-            .first_person_active = renderer.isFirstPersonMode(),
-            .keyboard = current_keys_pressed,
-            .mouse = renderer.mouse_input,
-            .look_delta = .{
-                .x = scene_look_delta.x,
-                .y = scene_look_delta.y,
-            },
-        });
-
-        var phase13_snapshot = phase13_runtime.updateFrame(
-            .{
-                .x = renderer.camera_position.x,
-                .y = renderer.camera_position.y,
-                .z = renderer.camera_position.z,
-            },
-            renderer.rotation_x,
-            renderer.rotation_angle,
-            48.0,
-            96.0,
-            frame_count,
-            runtime_delta_seconds,
-        ) catch |err| {
-            app_logger.warn("phase13 runtime update failed: {}", .{err});
-            continue;
-        };
-        defer phase13_snapshot.deinit();
-        phase13_runtime.pinFrameAssets(&phase13_snapshot);
-        defer phase13_runtime.unpinFrameAssets(&phase13_snapshot);
-        syncRendererFromSceneSnapshot(&renderer, &phase13_snapshot) catch |err| {
-            app_logger.warn("phase13 renderer bridge failed: {}", .{err});
-            continue;
-        };
-        for (phase13_runtime.rendererCommands()) |command| {
-            applySceneRendererCommand(&renderer, command);
-        }
-        phase13_runtime.clearRendererCommands();
-        syncFirstPersonMouseGrab(&renderer, &mouse_grabbed);
-        MessagePump.applyCursorFromRenderer(&renderer);
-        syncSceneMeshIfDirty(&renderer, &scene_resources, &phase13_runtime);
-        if (selected_scene_entity_pin) |pinned_entity| {
-            if (current_selected_entity == null or !pinned_entity.eql(current_selected_entity.?)) {
-                phase13_runtime.residency.unpinEntity(pinned_entity);
-                selected_scene_entity_pin = null;
-            }
-        }
-        if (current_selected_entity) |entity| {
-            if (selected_scene_entity_pin == null) {
-                phase13_runtime.residency.pinEntity(entity);
-                selected_scene_entity_pin = entity;
-            }
-        }
-
-        if (renderer.consumeSceneItemTranslateRequest()) |move_request| {
-            applySceneItemTranslateRequest(
-                &renderer,
-                &phase13_runtime,
-                &scene_resources,
-                move_request,
+            const enter_is_down = session.renderer.keys_pressed.isDown(.enter) or main_module.isEnterDown();
+            const now_ns = std.time.nanoTimestamp();
+            const runtime_delta_ns = @max(@as(i128, 0), now_ns - session.last_runtime_update_ns);
+            session.last_runtime_update_ns = now_ns;
+            const runtime_delta_seconds = std.math.clamp(
+                @as(f32, @floatFromInt(runtime_delta_ns)) / @as(f32, @floatFromInt(std.time.ns_per_s)),
+                0.0,
+                0.1,
             );
-            syncSceneMeshIfDirty(&renderer, &scene_resources, &phase13_runtime);
+            const scene_look_delta = session.renderer.consumeSceneCameraLookDelta(runtime_delta_seconds);
+            const current_keys_pressed = session.renderer.keys_pressed;
+            session.phase13_runtime.setExecutionInputs(enter_is_down, session.renderer.isSceneItemDragActive(), .{
+                .first_person_active = session.renderer.isFirstPersonMode(),
+                .keyboard = current_keys_pressed,
+                .mouse = session.renderer.mouse_input,
+                .look_delta = .{
+                    .x = scene_look_delta.x,
+                    .y = scene_look_delta.y,
+                },
+            });
+
+            var phase13_snapshot = session.phase13_runtime.updateFrame(
+                .{
+                    .x = session.renderer.camera_position.x,
+                    .y = session.renderer.camera_position.y,
+                    .z = session.renderer.camera_position.z,
+                },
+                session.renderer.rotation_x,
+                session.renderer.rotation_angle,
+                48.0,
+                96.0,
+                frame_count,
+                runtime_delta_seconds,
+            ) catch |err| {
+                app_logger.warn("phase13 runtime update failed: {}", .{err});
+                return;
+            };
+            defer phase13_snapshot.deinit();
+            session.phase13_runtime.pinFrameAssets(&phase13_snapshot);
+            defer session.phase13_runtime.unpinFrameAssets(&phase13_snapshot);
+
+            main_module.syncRendererFromSceneSnapshot(session.renderer, &phase13_snapshot) catch |err| {
+                app_logger.warn("phase13 renderer bridge failed: {}", .{err});
+                return;
+            };
+            for (session.phase13_runtime.rendererCommands()) |command| {
+                main_module.applySceneRendererCommand(session.renderer, command);
+            }
+            session.phase13_runtime.clearRendererCommands();
+            main_module.syncFirstPersonMouseGrab(session.renderer, session.mouse_grabbed);
+            main_module.applyCursorFromRenderer(session.renderer);
+            main_module.syncSceneMeshIfDirty(session.renderer, session.scene_resources, session.phase13_runtime);
+
+            if (session.selected_scene_entity_pin.*) |pinned_entity| {
+                if (current_selected_entity == null or !pinned_entity.eql(current_selected_entity.?)) {
+                    session.phase13_runtime.residency.unpinEntity(pinned_entity);
+                    session.selected_scene_entity_pin.* = null;
+                }
+            }
+            if (current_selected_entity) |entity| {
+                if (session.selected_scene_entity_pin.* == null) {
+                    session.phase13_runtime.residency.pinEntity(entity);
+                    session.selected_scene_entity_pin.* = entity;
+                }
+            }
+
+            if (session.renderer.consumeSceneItemTranslateRequest()) |move_request| {
+                main_module.applySceneItemTranslateRequest(
+                    session.renderer,
+                    session.phase13_runtime,
+                    session.scene_resources,
+                    move_request,
+                );
+                main_module.syncSceneMeshIfDirty(session.renderer, session.scene_resources, session.phase13_runtime);
+            }
         }
 
-        // Check if it's time to render a new frame, based on our target FPS.
-
-        if (!renderer.shouldRenderFrame()) {
-            renderer.waitUntilNextFrame();
-            continue;
+        pub fn shouldRender(session: *AppSession) bool {
+            return session.renderer.shouldRenderFrame();
         }
 
-        frame_count += 1;
-        if (frame_count <= 3) {
-            app_logger.debug("rendering frame {}", .{frame_count});
+        pub fn waitUntilNextFrame(session: *AppSession) void {
+            session.renderer.waitUntilNextFrame();
         }
-        // This is the main drawing call.
-        // JS Analogy: `renderer.renderScene(scene);` inside a `requestAnimationFrame` callback.
-        phase13_runtime.beginPresent();
-        renderer.render3DMeshWithPump(&scene_resources.mesh, MessagePump.pump) catch |err| {
-            phase13_runtime.endPresent();
-            // If rendering fails, log the error and exit the loop.
+
+        pub fn render(session: *AppSession) !void {
+            session.phase13_runtime.beginPresent();
+            session.renderer.render3DMeshWithPump(&session.scene_resources.mesh, pumpMessages) catch |err| {
+                session.phase13_runtime.endPresent();
+                return err;
+            };
+            session.phase13_runtime.endPresent();
+        }
+
+        pub fn onTtlExpired(_: *AppSession, kind: enum { time, frames }) void {
+            switch (kind) {
+                .time => app_logger.info("renderer TTL expired, exiting", .{}),
+                .frames => app_logger.info("renderer frame TTL expired, exiting", .{}),
+            }
+        }
+
+        pub fn onMessagePumpShutdown(_: *AppSession) void {
+            app_logger.info("message pump requested shutdown", .{});
+        }
+
+        pub fn onFrameStart(_: *AppSession, frame_count: u32) void {
+            if (frame_count <= 3) app_logger.debug("rendering frame {}", .{frame_count});
+        }
+
+        pub fn onRenderError(_: *AppSession, err: anyerror) void {
             if (err == error.RenderInterrupted) {
                 app_logger.info("render interrupted by shutdown request", .{});
             } else {
                 app_logger.@"error"("rendering failed: {s}", .{@errorName(err)});
             }
-            running = false;
-            break;
-        };
-        phase13_runtime.endPresent();
-        if (frame_count <= 3) {
-            app_logger.debug("frame {} complete", .{frame_count});
         }
-    }
+
+        pub fn onFrameComplete(_: *AppSession, frame_count: u32) void {
+            if (frame_count <= 3) app_logger.debug("frame {} complete", .{frame_count});
+        }
+    };
+
+    var loop_control = app_loop.LoopControl{
+        .running = &running,
+        .start_ns = renderer_start_ns,
+        .ttl_ns = renderer_ttl_ns,
+        .ttl_frames = effective_ttl_frames,
+    };
+    var app_session = AppSession{
+        .renderer = &renderer,
+        .phase13_runtime = &phase13_runtime,
+        .scene_resources = &scene_resources,
+        .mouse_grabbed = &mouse_grabbed,
+        .selected_scene_entity_pin = &selected_scene_entity_pin,
+        .last_runtime_update_ns = std.time.nanoTimestamp(),
+    };
+    const frame_count = try app_loop.run(&loop_control, &app_session, AppLoopDriver);
 
     app_logger.info("exited main loop after {} frames", .{frame_count});
 }

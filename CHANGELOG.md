@@ -22,6 +22,14 @@
 - `zig build test`
 - `zig build check`
 
+### App Loop Refactor
+
+- extracted generic app-loop control flow into `engine/src/app_loop.zig`
+- replaced the old wide context and forwarding-hook shape with `LoopControl` plus a typed driver/session boundary
+- added `AppSession` and `AppLoopDriver` in `engine/src/main.zig` so app-specific update and render policy remains local to the app shell
+- promoted Win32 message pumping and cursor application to reusable file-level helpers in `engine/src/main.zig`
+- added direct unit tests for app-loop frame TTL exit, message-pump shutdown, and skipped-render wait behavior
+
 ### Known Limits
 
 - the direct raster backend is still a stub in `engine/src/render/renderer.zig`
