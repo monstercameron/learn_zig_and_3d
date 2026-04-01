@@ -5,6 +5,7 @@ const std = @import("std");
 const taa_kernel = @import("taa_kernel");
 const hybrid_shadow_candidate_kernel = @import("hybrid_shadow_candidate_kernel");
 const hybrid_shadow_resolve_kernel = @import("hybrid_shadow_resolve_kernel");
+const render_main = @import("render_main");
 const scene_main = @import("scene_main");
 
 test "default camera controls debounce held mode toggle" {
@@ -260,6 +261,58 @@ test "hybrid shadow resolve kernel blends with clamped factor" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.75), blended_a, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 0.25), blended_b, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), blended_c, 1e-6);
+}
+
+test "frame graph compiles enabled passes with explicit resources" {
+    var graph = try render_main.frame_graph.compileEnabledPasses(
+        std.testing.allocator,
+        render_main.pass_graph.passBit(.skybox) | render_main.pass_graph.passBit(.ssao) | render_main.pass_graph.passBit(.bloom),
+        render_main.pass_graph.resourceMask(&.{ .scene_color, .scene_depth, .scene_normals }),
+    );
+    defer graph.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 3), graph.passes.len);
+    try std.testing.expectEqual(render_main.pass_graph.RenderPassId.skybox, graph.passes[0].id);
+    try std.testing.expectEqual(render_main.pass_graph.RenderPassId.ssao, graph.passes[1].id);
+    try std.testing.expectEqual(render_main.pass_graph.RenderPassId.bloom, graph.passes[2].id);
+}
+
+test "frame graph rejects history dependent pass without history resource" {
+    try std.testing.expectError(
+        error.HistoryRequestedWithoutResource,
+        render_main.frame_graph.compileEnabledPasses(
+            std.testing.allocator,
+            render_main.pass_graph.passBit(.motion_blur),
+            render_main.pass_graph.resourceMask(&.{ .scene_color, .scene_depth }),
+        ),
+    );
+}
+
+test "cached frame graph reuses compiled plan and frame plan selects backend stage" {
+    var graph_cache = render_main.frame_graph.CachedGraph{};
+    try graph_cache.compileIfNeeded(
+        render_main.pass_graph.passBit(.skybox) | render_main.pass_graph.passBit(.ssao),
+        render_main.pass_graph.resourceMask(&.{ .scene_color, .scene_depth, .scene_normals }),
+    );
+    const first_pass_count = graph_cache.pass_count;
+    try graph_cache.compileIfNeeded(
+        render_main.pass_graph.passBit(.skybox) | render_main.pass_graph.passBit(.ssao),
+        render_main.pass_graph.resourceMask(&.{ .scene_color, .scene_depth, .scene_normals }),
+    );
+    try std.testing.expect(graph_cache.valid);
+    try std.testing.expectEqual(first_pass_count, graph_cache.pass_count);
+
+    var plan_cache = render_main.frame_plan.CachedPlan{};
+    plan_cache.compileIfNeeded(.{
+        .include_shadow_build = true,
+        .backend = .tiled,
+        .include_post_process = true,
+        .include_present = true,
+    });
+    const compiled = plan_cache.compiled();
+    try std.testing.expectEqual(@as(usize, 4), compiled.stages.len);
+    try std.testing.expectEqual(render_main.frame_plan.FrameStageId.shadow_build, compiled.stages[0]);
+    try std.testing.expectEqual(render_main.frame_plan.FrameStageId.scene_raster_tiled, compiled.stages[1]);
 }
 
 test "scene runtime entity generations change after destroy" {

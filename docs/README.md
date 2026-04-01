@@ -6,6 +6,7 @@ This folder is the long-form companion to the repository README. It keeps the ar
 
 - `technical-overview.md`: current engine shape, major systems, and runtime responsibilities
 - `rendering-pipeline.md`: frame flow from camera update through mesh work, raster, and post-processing
+- `render-core-redesign.md`: render-graph, frame-plan, executor, and hook split introduced during the render-core cleanup
 - `current-features-api-usage.md`: feature-to-function map with concrete usage patterns and call sites
 - `performance-profiling.md`: exact frame timing, native sampling, and Chrome trace workflow
 - `project-roadmap.md`: active backlog, follow-up work, and longer-horizon renderer tasks

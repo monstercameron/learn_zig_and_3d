@@ -49,6 +49,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const render_main_module = b.createModule(.{
+        .root_source_file = b.path("engine/src/render/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     app_module.addImport("engine_main", engine_main_module);
     engine_main_module.addImport("zphysics", zphysics_dep.module("root"));
     engine_main_module.addImport("scene_main", scene_main_module);
@@ -101,6 +106,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     }));
+    test_module.addImport("render_main", render_main_module);
     test_module.addImport("scene_main", scene_main_module);
 
     const unit_tests = b.addTest(.{

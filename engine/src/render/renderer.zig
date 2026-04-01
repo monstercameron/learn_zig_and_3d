@@ -61,8 +61,12 @@ const shadow_map_pass = @import("passes/shadow_map_pass.zig");
 const shadow_resolve_pass = @import("passes/shadow_resolve_pass.zig");
 const hybrid_shadow_pass = @import("passes/hybrid_shadow_pass.zig");
 const adaptive_shadow_tile_pass = @import("passes/adaptive_shadow_tile_pass.zig");
-const pass_registry = @import("pipeline/pass_registry.zig");
 const pass_graph = @import("pipeline/pass_graph.zig");
+const frame_graph = @import("graph/frame_graph.zig");
+const frame_plan = @import("graph/frame_plan.zig");
+const frame_pipeline = @import("frame_pipeline.zig");
+const frame_executor = @import("frame_executor.zig");
+const frame_hooks = @import("frame_hooks.zig");
 const render_utils = @import("core/utils.zig");
 const scene_item_gizmo = @import("scene_item_gizmo.zig");
 const camera_controller = @import("camera_controller.zig");
@@ -1158,19 +1162,6 @@ const HybridShadowDispatchContext = struct {
     light_dir_world: math.Vec3,
 };
 
-const CompositionPlan = struct {
-    enabled_mask: pass_registry.PassMask,
-    uses_scratch_a: bool = false,
-    uses_scratch_b: bool = false,
-    uses_history: bool = false,
-    scratch_pool_a: []u32 = &[_]u32{},
-    scratch_pool_b: []u32 = &[_]u32{},
-    scene_mask: pass_registry.PassMask = 0,
-    geometry_post_mask: pass_registry.PassMask = 0,
-    lighting_scatter_mask: pass_registry.PassMask = 0,
-    final_color_mask: pass_registry.PassMask = 0,
-};
-
 const CompositionScratchBindings = struct {
     ssgi_scratch_pixels: []u32,
     ssr_scratch_pixels: []u32,
@@ -1190,7 +1181,6 @@ const PostPassExecutionContext = struct {
     projection: ProjectionParams,
     light_dir_world: math.Vec3,
     shadow_build_elapsed_ns: []const i128,
-    plan: CompositionPlan,
 };
 
 const AOJobContext = ssao_pass.JobContext(
@@ -1394,6 +1384,8 @@ pub const Renderer = struct {
     tile_light_indices: []usize,
     mesh_work_cache: MeshWorkCache = MeshWorkCache.init(),
     frame_view_cache: FrameViewCache = .{},
+    cached_post_graph: frame_graph.CachedGraph = .{},
+    cached_frame_plan: frame_plan.CachedPlan = .{},
 
     // Rendering options and data
     single_texture_binding: [1]?*const texture.Texture,
@@ -1578,7 +1570,7 @@ pub const Renderer = struct {
         }
     }
 
-    fn countLightsWithShadowMode(self: *const Renderer, mode: LightInfo.ShadowMode) usize {
+    pub fn countLightsWithShadowMode(self: *const Renderer, mode: LightInfo.ShadowMode) usize {
         var count: usize = 0;
         for (self.lights.items) |light| {
             if (light.shadow_mode == mode) count += 1;
@@ -3695,6 +3687,29 @@ pub const Renderer = struct {
         }
     };
 
+    const FrameExecutionContext = struct {
+        renderer: *Renderer,
+        mesh: *const Mesh,
+        view_rotation: math.Mat4,
+        light_dir: math.Vec3,
+        pump: ?*const fn (*Renderer) bool,
+        raster_projection: ProjectionParams,
+        mesh_work: *const MeshWork,
+        is_editor_mode: bool,
+        light_camera: math.Vec3,
+        center_x: f32,
+        center_y: f32,
+        x_scale: f32,
+        y_scale: f32,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        taa_view: TemporalAAViewState,
+        shadow_map_light_count: usize,
+        light_dir_world: math.Vec3,
+        cache_projection: ProjectionParams,
+    };
+
     const MeshWorkWriter = struct {
         work: *MeshWork,
 
@@ -5410,161 +5425,42 @@ pub const Renderer = struct {
         self.light_work_stats.tile_light_rejected = 0;
         self.light_work_stats.tile_light_overflow_tiles = 0;
         @memset(self.shadow_resolve_elapsed_ns[0..self.lights.items.len], 0);
-        if (config.POST_SHADOW_ENABLED) {
-            const shadow_budget_ns = self.computeShadowBuildBudgetNs();
-            const enforce_shadow_budget = shadow_budget_ns >= 0;
-            if (shadow_budget_ns > 0) {
-                self.light_work_stats.shadow_budget_ns = shadow_budget_ns;
-            }
-            var shadow_budget_spent_ns: i128 = 0;
-            @memset(self.shadow_build_elapsed_ns[0..self.lights.items.len], 0);
-            const frame_number = self.total_frames_rendered + 1;
-            for (self.lights.items, 0..) |*light, light_index| {
-                if (light.shadow_mode != .shadow_map) continue;
-                const base_cadence = @max(@as(u64, 1), @as(u64, light.shadow_update_interval_frames));
-                const cadence_scale = @max(@as(u64, 1), @as(u64, light.shadow_dynamic_interval_scale));
-                const cadence = @max(@as(u64, 1), @min(std.math.maxInt(u64), base_cadence * cadence_scale));
-                const frames_since_last_build = if (light.shadow_last_build_frame == 0)
-                    cadence
-                else
-                    frame_number - light.shadow_last_build_frame;
-                const should_rebuild = !light.shadow_map.active or frames_since_last_build >= cadence;
-                if (!should_rebuild) {
-                    self.light_work_stats.shadow_map_reused_lights += 1;
-                    continue;
-                }
-                if (enforce_shadow_budget and light.shadow_map.active) {
-                    const estimated_build_ns = estimateShadowBuildCostNs(light);
-                    if (shadow_budget_spent_ns + estimated_build_ns > shadow_budget_ns) {
-                        self.light_work_stats.shadow_map_reused_lights += 1;
-                        self.light_work_stats.shadow_budget_skipped_lights += 1;
-                        continue;
-                    }
-                }
-                const light_dir_world_for_shadow = math.Vec3.new(
-                    self.light_soa.dir_x[light_index],
-                    self.light_soa.dir_y[light_index],
-                    self.light_soa.dir_z[light_index],
-                );
-                self.shadow_build_elapsed_ns[light_index] = self.buildShadowMap(mesh, light_dir_world_for_shadow, &light.shadow_map);
-                light.shadow_last_build_frame = frame_number;
-                light.shadow_last_build_ns = self.shadow_build_elapsed_ns[light_index];
-                self.light_work_stats.shadow_build_ns += self.shadow_build_elapsed_ns[light_index];
-                shadow_budget_spent_ns += self.shadow_build_elapsed_ns[light_index];
-            }
-            if (self.light_work_stats.shadow_build_ns > 0) {
-                self.recordRenderPassDuration("shadow_map_build_total", self.light_work_stats.shadow_build_ns);
-            }
-        }
-
-        const scene_pass_start = std.time.nanoTimestamp();
-        if (self.use_tiled_rendering and self.tile_grid != null and self.tile_buffers != null) {
-            const tri_count = mesh_work.triangleSlice().len;
-            pipeline_logger.debugSub("dispatch", "rendering tiled path triangles={} meshlets={}", .{ tri_count, mesh_work.*.meshlet_len });
-            const shadow_pass_elapsed_ns = try self.renderTiled(mesh, view_rotation, light_dir, pump, raster_projection, mesh_work);
-            const scene_pass_elapsed_ns = std.time.nanoTimestamp() - scene_pass_start;
-            self.recordRenderPassDuration("meshlet_tiled", scene_pass_elapsed_ns - @as(i128, @intCast(shadow_pass_elapsed_ns)));
-            if (config.MESHLET_SHADOWS_ENABLED) {
-                self.recordRenderPassDuration("meshlet_shadows", @as(i128, @intCast(shadow_pass_elapsed_ns)));
-            }
-        } else {
-            const tri_count = mesh_work.triangleSlice().len;
-            pipeline_logger.debugSub("dispatch", "rendering direct path triangles={} meshlets={}", .{ tri_count, mesh_work.*.meshlet_len });
-            try self.renderDirect(mesh, view_rotation, light_dir, raster_projection, mesh_work);
-            self.recordRenderPassTiming("meshlet_direct", scene_pass_start);
-        }
-
         const is_editor_mode = self.camera_control_mode != .first_person;
-        if (is_editor_mode) {
-            self.scene_item_gizmo.resolvePendingPick(
-                self.bitmap.width,
-                self.bitmap.height,
-                @as(i32, @intCast(config.WINDOW_WIDTH)),
-                @as(i32, @intCast(config.WINDOW_HEIGHT)),
-                self.scene_surface,
-            );
-        }
-        self.applyPostProcessingPasses(
-            mesh,
-            self.camera_position,
-            right,
-            up,
-            forward,
-            taa_view,
-            raster_projection,
-            light_dir_world,
-            self.shadow_build_elapsed_ns[0..self.lights.items.len],
+        const compiled_frame_plan = frame_pipeline.compileCachedFramePlan(&self.cached_frame_plan, .{
+            .has_shadow_map_lights = shadow_map_light_count > 0,
+            .backend = if (self.use_tiled_rendering and self.tile_grid != null and self.tile_buffers != null) .tiled else .direct,
+            .include_post_process = true,
+            .include_present = true,
+        });
+        const frame_exec_ctx = FrameExecutionContext{
+            .renderer = self,
+            .mesh = mesh,
+            .view_rotation = view_rotation,
+            .light_dir = light_dir,
+            .pump = pump,
+            .raster_projection = raster_projection,
+            .mesh_work = mesh_work,
+            .is_editor_mode = is_editor_mode,
+            .light_camera = light_camera,
+            .center_x = center_x,
+            .center_y = center_y,
+            .x_scale = x_scale,
+            .y_scale = y_scale,
+            .basis_right = right,
+            .basis_up = up,
+            .basis_forward = forward,
+            .taa_view = taa_view,
+            .shadow_map_light_count = shadow_map_light_count,
+            .light_dir_world = light_dir_world,
+            .cache_projection = cache_projection,
+        };
+        const current_time = try frame_executor.executeFramePlan(
+            FrameExecutionContext,
+            compiled_frame_plan,
+            frame_exec_ctx,
+            frame_stage_dispatcher,
+            std.time.nanoTimestamp(),
         );
-        if (is_editor_mode) {
-            self.scene_item_gizmo.applyOutline(
-                self.bitmap.pixels,
-                self.bitmap.width,
-                self.bitmap.height,
-                self.scene_surface,
-            );
-        }
-        try self.applyAdaptiveShadowBudgetPolicy();
-        if (self.show_light_orb) {
-            const light_camera_z = light_camera.z;
-            if (light_camera_z > NEAR_CLIP) {
-                var glow_color = math.Vec3.new(1.0, 1.0, 1.0);
-                var glow_radius: f32 = 0.0;
-                var glow_intensity: f32 = 0.0;
-                if (self.lights.items.len > 0) {
-                    glow_color = self.lights.items[0].color;
-                    glow_radius = self.lights.items[0].glow_radius;
-                    glow_intensity = self.lights.items[0].glow_intensity;
-                }
-                if (glow_radius > 0.0 and glow_intensity > 0.0) {
-                    self.drawLightGlow(light_camera, light_camera_z, center_x, center_y, x_scale, y_scale, glow_color, glow_radius, glow_intensity);
-                }
-                self.drawLightMarker(light_camera, light_camera_z, center_x, center_y, x_scale, y_scale);
-            }
-        }
-        if (is_editor_mode and self.light_gizmo.enabled) {
-            self.drawLightGizmo(self.camera_position, right, up, forward, cache_projection);
-        }
-        if (is_editor_mode and self.scene_item_gizmo.isActive()) {
-            self.drawSceneItemGizmo(self.camera_position, right, up, forward, cache_projection);
-        }
-        const present_start = std.time.nanoTimestamp();
-        const cpu_frame_ns = present_start - self.current_frame_start_time;
-
-        // Pre-present compensation: if render finished early relative to the
-        // ideal present cadence, spin-wait so the present lands on the deadline.
-        // This absorbs render-time variance and produces evenly spaced presents.
-        if (self.usesSoftwareFramePacing() and self.last_completed_frame_time > 0) {
-            const ideal_present_time = self.last_completed_frame_time + self.target_frame_time_ns - self.present_cost_ema_ns;
-            var spin_now = std.time.nanoTimestamp();
-            while (spin_now < ideal_present_time) {
-                std.atomic.spinLoopHint();
-                spin_now = std.time.nanoTimestamp();
-            }
-        }
-
-        const pre_present_time = std.time.nanoTimestamp();
-        self.drawBitmap();
-        const present_end = std.time.nanoTimestamp();
-        // Update EMA of drawBitmap() cost so the pre-present spin accounts for it.
-        const draw_cost_ns = @max(present_end - pre_present_time, @as(i128, 0));
-        self.present_cost_ema_ns = @divTrunc(self.present_cost_ema_ns * 7 + draw_cost_ns, 8);
-        self.recordRenderPassTiming("present", present_start);
-        pipeline_logger.debugSub("present", "bitmap presented", .{});
-
-        self.frame_count += 1;
-        self.total_frames_rendered += 1;
-        self.maybeEmitSingleFrameProfile();
-        const current_time = present_end;
-        const frame_interval_ns = current_time - self.last_completed_frame_time;
-        self.frame_pacing.recordSample(.{
-            .total_ms = @as(f32, @floatFromInt(@max(frame_interval_ns, @as(i128, 0)))) / 1_000_000.0,
-            .cpu_ms = @as(f32, @floatFromInt(@max(cpu_frame_ns, @as(i128, 0)))) / 1_000_000.0,
-            .software_wait_ms = @as(f32, @floatFromInt(@max(self.active_software_wait_ns, @as(i128, 0)))) / 1_000_000.0,
-            .present_wait_ms = @as(f32, @floatFromInt(@max(present_end - present_start, @as(i128, 0)))) / 1_000_000.0,
-            .deadline_error_ms = @as(f32, @floatFromInt(self.frame_deadline_error_ns)) / 1_000_000.0,
-        }, self.effectiveFramePacingTargetNs());
-        self.last_completed_frame_time = current_time;
-        self.active_software_wait_ns = 0;
         self.finalizeFrame(current_time);
         self.advanceFrameDeadline(current_time);
 
@@ -6246,7 +6142,7 @@ pub const Renderer = struct {
 
     /// Applies skybox pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applySkyboxPass(
+    pub fn applySkyboxPass(
         self: *Renderer,
         basis_right: math.Vec3,
         basis_up: math.Vec3,
@@ -6268,6 +6164,86 @@ pub const Renderer = struct {
             skybox_pass.runJobWrapper(SkyboxJobContext),
         );
         self.recordRenderPassTiming("skybox", pass_start);
+    }
+
+    pub fn runShadowResolvePass(
+        self: *Renderer,
+        camera_position: math.Vec3,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        projection: ProjectionParams,
+        shadow_build_elapsed_ns: []const i128,
+    ) void {
+        const shadow_ctx = ShadowLightDispatchContext{
+            .renderer = self,
+            .camera_position = camera_position,
+            .basis_right = basis_right,
+            .basis_up = basis_up,
+            .basis_forward = basis_forward,
+            .projection = projection,
+            .shadow_build_elapsed_ns = shadow_build_elapsed_ns,
+        };
+        shadow_map_pass.runPerLight(self.lights.items.len, shadow_ctx, applyShadowLightFromPass);
+        if (self.light_work_stats.shadow_resolve_ns > 0) {
+            self.recordRenderPassDuration("shadow_map_resolve_total", self.light_work_stats.shadow_resolve_ns);
+        }
+    }
+
+    pub fn runHybridShadowPass(
+        self: *Renderer,
+        mesh: *const Mesh,
+        camera_position: math.Vec3,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        light_dir_world: math.Vec3,
+    ) void {
+        const hybrid_ctx = HybridShadowDispatchContext{
+            .renderer = self,
+            .mesh = mesh,
+            .camera_position = camera_position,
+            .basis_right = basis_right,
+            .basis_up = basis_up,
+            .basis_forward = basis_forward,
+            .light_dir_world = light_dir_world,
+        };
+        hybrid_shadow_pass.run(hybrid_ctx, applyHybridShadowFromPass);
+    }
+
+    pub fn runPostProcessStage(
+        self: *Renderer,
+        is_editor_mode: bool,
+        mesh: *const Mesh,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        current_view: TemporalAAViewState,
+        projection: ProjectionParams,
+        shadow_map_light_count: usize,
+        light_dir_world: math.Vec3,
+    ) void {
+        if (is_editor_mode) {
+            self.scene_item_gizmo.resolvePendingPick(
+                self.bitmap.width,
+                self.bitmap.height,
+                @as(i32, @intCast(config.WINDOW_WIDTH)),
+                @as(i32, @intCast(config.WINDOW_HEIGHT)),
+                self.scene_surface,
+            );
+        }
+        self.applyPostProcessingPasses(
+            mesh,
+            self.camera_position,
+            basis_right,
+            basis_up,
+            basis_forward,
+            current_view,
+            projection,
+            shadow_map_light_count,
+            light_dir_world,
+            self.shadow_build_elapsed_ns[0..self.lights.items.len],
+        );
     }
 
     /// Applies shadow light from pass.
@@ -6303,54 +6279,6 @@ pub const Renderer = struct {
 
     /// Returns whether i sp os tp as se na bl ed.
     /// The check is side-effect free so callers can gate expensive follow-up work cheaply.
-    fn isPostPassEnabled(ctx: PostPassExecutionContext, pass_id: pass_registry.RenderPassId) bool {
-        const enabled = switch (pass_id) {
-            .skybox => config.POST_SKYBOX_ENABLED,
-            .shadow_map => config.POST_SHADOW_ENABLED and ctx.renderer.countLightsWithShadowMode(.shadow_map) > 0,
-            .shadow_resolve => config.POST_SHADOW_ENABLED and ctx.renderer.countLightsWithShadowMode(.shadow_map) > 0,
-            .hybrid_shadow => config.POST_HYBRID_SHADOW_ENABLED,
-            .ssao => config.POST_SSAO_ENABLED,
-            .ssgi => config.POST_SSGI_ENABLED,
-            .ssr => config.POST_SSR_ENABLED,
-            .depth_fog => config.POST_DEPTH_FOG_ENABLED,
-            .taa => config.POST_TAA_ENABLED,
-            .motion_blur => config.POST_MOTION_BLUR_ENABLED,
-            .god_rays => config.POST_GOD_RAYS_ENABLED,
-            .bloom => config.POST_BLOOM_ENABLED,
-            .lens_flare => config.POST_LENS_FLARE_ENABLED,
-            .dof => config.POST_DOF_ENABLED,
-            .chromatic_aberration => config.POST_CHROMATIC_ABERRATION_ENABLED,
-            .film_grain_vignette => config.POST_FILM_GRAIN_VIGNETTE_ENABLED,
-            .color_grade => config.POST_COLOR_CORRECTION_ENABLED,
-        };
-        if (!enabled) return false;
-        if (pass_id == .motion_blur and !ctx.renderer.taa_scratch.valid) return false;
-        return true;
-    }
-
-    fn onPostPassPhaseBoundary(ctx: PostPassExecutionContext, phase: pass_registry.PassPhase) void {
-        _ = phase;
-        _ = ctx.plan;
-    }
-
-    fn phaseMaskFor(plan: CompositionPlan, phase: pass_registry.PassPhase) pass_registry.PassMask {
-        return switch (phase) {
-            .scene => plan.scene_mask,
-            .geometry_post => plan.geometry_post_mask,
-            .lighting_scatter => plan.lighting_scatter_mask,
-            .final_color => plan.final_color_mask,
-        };
-    }
-
-    fn phaseTimingName(phase: pass_registry.PassPhase) []const u8 {
-        return switch (phase) {
-            .scene => "phase_scene",
-            .geometry_post => "phase_geometry_post",
-            .lighting_scatter => "phase_lighting_scatter",
-            .final_color => "phase_final_color",
-        };
-    }
-
     fn snapshotScratchBindings(self: *Renderer) CompositionScratchBindings {
         return .{
             .ssgi_scratch_pixels = self.ssgi_scratch_pixels,
@@ -6363,30 +6291,26 @@ pub const Renderer = struct {
 
     /// Applies composition scratch bindings.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applyCompositionScratchBindings(self: *Renderer, plan: CompositionPlan) void {
-        _ = self;
-        _ = plan;
+    fn applyCompositionScratchBindings(self: *Renderer, scratch_a: []u32, scratch_b: []u32) void {
+        const applied = frame_pipeline.applyScratchBindings(.{ .scratch_a = scratch_a, .scratch_b = scratch_b });
+        self.ssgi_scratch_pixels = applied.scratch_a;
+        self.ssr_scratch_pixels = applied.scratch_b;
+        self.moblur_scratch_pixels = applied.scratch_a;
+        self.god_rays_scratch_pixels = applied.scratch_a;
+        self.lens_flare_scratch_pixels = applied.scratch_a;
     }
 
-    fn chooseNonFrontScratch(ctx: PostPassExecutionContext) []u32 {
-        const front = ctx.renderer.bitmap.pixels.ptr;
-        if (ctx.plan.scratch_pool_a.len != 0 and front != ctx.plan.scratch_pool_a.ptr) return ctx.plan.scratch_pool_a;
-        if (ctx.plan.scratch_pool_b.len != 0 and front != ctx.plan.scratch_pool_b.ptr) return ctx.plan.scratch_pool_b;
-        return ctx.plan.scratch_pool_a;
+    fn recordPostPhaseTiming(ctx: *anyopaque, phase: pass_graph.PassPhase, duration_ns: i128) void {
+        const self: *Renderer = @ptrCast(@alignCast(ctx));
+        self.recordRenderPassDuration(frame_pipeline.phaseTimingName(phase), duration_ns);
     }
 
-    fn bindScratchForPass(ctx: PostPassExecutionContext, pass_id: pass_registry.RenderPassId) void {
-        const target = chooseNonFrontScratch(ctx);
-        if (target.len == 0) return;
-        switch (pass_id) {
-            .ssgi => ctx.renderer.ssgi_scratch_pixels = target,
-            .ssr => ctx.renderer.ssr_scratch_pixels = target,
-            .motion_blur => ctx.renderer.moblur_scratch_pixels = target,
-            .god_rays => ctx.renderer.god_rays_scratch_pixels = target,
-            .lens_flare => ctx.renderer.lens_flare_scratch_pixels = target,
-            .chromatic_aberration => ctx.renderer.moblur_scratch_pixels = target,
-            else => {},
+    fn shouldRecordPostPhaseTimings(self: *const Renderer) bool {
+        if (self.show_render_overlay) return true;
+        if (profiler.Profiler.instance) |instance| {
+            if (instance.active) return true;
         }
+        return self.profile_capture_frame != 0 and self.total_frames_rendered + 1 == self.profile_capture_frame;
     }
 
     fn restoreScratchBindings(self: *Renderer, saved: CompositionScratchBindings) void {
@@ -6396,56 +6320,8 @@ pub const Renderer = struct {
         self.god_rays_scratch_pixels = saved.god_rays_scratch_pixels;
         self.lens_flare_scratch_pixels = saved.lens_flare_scratch_pixels;
     }
-
-    /// Runs post pass by id.
-    /// Keeps run post pass by id as the single implementation point so call-site behavior stays consistent.
-    fn runPostPassById(ctx: PostPassExecutionContext, pass_id: pass_registry.RenderPassId) void {
-        bindScratchForPass(ctx, pass_id);
-        switch (pass_id) {
-            .skybox => ctx.renderer.applySkyboxPass(ctx.basis_right, ctx.basis_up, ctx.basis_forward, ctx.projection),
-            .shadow_map => {},
-            .shadow_resolve => {
-                const shadow_ctx = ShadowLightDispatchContext{
-                    .renderer = ctx.renderer,
-                    .camera_position = ctx.camera_position,
-                    .basis_right = ctx.basis_right,
-                    .basis_up = ctx.basis_up,
-                    .basis_forward = ctx.basis_forward,
-                    .projection = ctx.projection,
-                    .shadow_build_elapsed_ns = ctx.shadow_build_elapsed_ns,
-                };
-                shadow_map_pass.runPerLight(ctx.renderer.lights.items.len, shadow_ctx, applyShadowLightFromPass);
-                if (ctx.renderer.light_work_stats.shadow_resolve_ns > 0) {
-                    ctx.renderer.recordRenderPassDuration("shadow_map_resolve_total", ctx.renderer.light_work_stats.shadow_resolve_ns);
-                }
-            },
-            .hybrid_shadow => {
-                const hybrid_ctx = HybridShadowDispatchContext{
-                    .renderer = ctx.renderer,
-                    .mesh = ctx.mesh,
-                    .camera_position = ctx.camera_position,
-                    .basis_right = ctx.basis_right,
-                    .basis_up = ctx.basis_up,
-                    .basis_forward = ctx.basis_forward,
-                    .light_dir_world = ctx.light_dir_world,
-                };
-                hybrid_shadow_pass.run(hybrid_ctx, applyHybridShadowFromPass);
-            },
-            .ssao => ctx.renderer.applyAmbientOcclusionPass(),
-            .ssgi => ctx.renderer.applySSGIPass(),
-            .ssr => ctx.renderer.applySSRPass(ctx.projection),
-            .depth_fog => ctx.renderer.applyDepthFogPass(),
-            .taa => ctx.renderer.applyTemporalAAPass(ctx.mesh, ctx.current_view),
-            .motion_blur => ctx.renderer.applyMotionBlurPass(ctx.current_view),
-            .god_rays => ctx.renderer.applyGodRaysPass(ctx.projection, ctx.light_dir_world),
-            .bloom => ctx.renderer.applyBloomPass(),
-            .lens_flare => ctx.renderer.applyLensFlarePass(),
-            .dof => ctx.renderer.applyDepthOfFieldPass(),
-            .chromatic_aberration => ctx.renderer.applyChromaticAberrationPass(),
-            .film_grain_vignette => ctx.renderer.applyFilmGrainVignettePass(),
-            .color_grade => ctx.renderer.applyBlockbusterColorGradePass(),
-        }
-    }
+    const post_pass_dispatcher = frame_hooks.makePostPassDispatcher(PostPassExecutionContext);
+    const frame_stage_dispatcher = frame_hooks.makeFrameStageDispatcher(FrameExecutionContext);
 
     /// Applies post processing passes.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
@@ -6458,43 +6334,17 @@ pub const Renderer = struct {
         basis_forward: math.Vec3,
         current_view: TemporalAAViewState,
         projection: ProjectionParams,
+        shadow_map_light_count: usize,
         light_dir_world: math.Vec3,
         shadow_build_elapsed_ns: []const i128,
     ) void {
-        const base_ctx = PostPassExecutionContext{
-            .renderer = self,
-            .mesh = mesh,
-            .camera_position = camera_position,
-            .basis_right = basis_right,
-            .basis_up = basis_up,
-            .basis_forward = basis_forward,
-            .current_view = current_view,
-            .projection = projection,
-            .light_dir_world = light_dir_world,
-            .shadow_build_elapsed_ns = shadow_build_elapsed_ns,
-            .plan = .{ .enabled_mask = 0 },
+        const compiled_graph = frame_pipeline.compileCachedPostGraph(&self.cached_post_graph, .{
+            .shadow_map_light_count = shadow_map_light_count,
+            .taa_history_valid = self.taa_scratch.valid,
+        }) catch |err| {
+            pipeline_logger.errorSub("graph", "failed to compile post graph: {s}", .{@errorName(err)});
+            return;
         };
-        const enabled_mask = pass_registry.buildEnabledMask(base_ctx, isPostPassEnabled);
-        var plan = CompositionPlan{
-            .enabled_mask = enabled_mask,
-            .scratch_pool_a = self.moblur_scratch_pixels,
-            .scratch_pool_b = self.ssr_scratch_pixels,
-        };
-        for (pass_registry.post_passes) |node| {
-            if ((enabled_mask & pass_graph.passBit(node.id)) == 0) continue;
-            switch (node.phase) {
-                .scene => plan.scene_mask |= pass_graph.passBit(node.id),
-                .geometry_post => plan.geometry_post_mask |= pass_graph.passBit(node.id),
-                .lighting_scatter => plan.lighting_scatter_mask |= pass_graph.passBit(node.id),
-                .final_color => plan.final_color_mask |= pass_graph.passBit(node.id),
-            }
-            switch (node.output_target) {
-                .main => {},
-                .scratch_a => plan.uses_scratch_a = true,
-                .scratch_b => plan.uses_scratch_b = true,
-                .history => plan.uses_history = true,
-            }
-        }
 
         const ctx = PostPassExecutionContext{
             .renderer = self,
@@ -6507,44 +6357,201 @@ pub const Renderer = struct {
             .projection = projection,
             .light_dir_world = light_dir_world,
             .shadow_build_elapsed_ns = shadow_build_elapsed_ns,
-            .plan = plan,
-        };
-        const iface = pass_registry.PassInterface(PostPassExecutionContext){
-            .is_enabled = isPostPassEnabled,
-            .run = runPostPassById,
-            .on_phase_boundary = onPostPassPhaseBoundary,
         };
         const saved_bindings = snapshotScratchBindings(self);
         defer restoreScratchBindings(self, saved_bindings);
-        applyCompositionScratchBindings(self, plan);
-        const phase_order = [_]pass_registry.PassPhase{
-            .scene,
-            .geometry_post,
-            .lighting_scatter,
-            .final_color,
-        };
-        for (phase_order) |phase| {
-            const phase_mask = phaseMaskFor(plan, phase);
-            if (phase_mask == 0) continue;
-            const phase_start = std.time.nanoTimestamp();
-            pass_registry.executeMaskWithInterface(ctx, phase_mask, iface);
-            self.recordRenderPassDuration(phaseTimingName(phase), std.time.nanoTimestamp() - phase_start);
+        applyCompositionScratchBindings(self, saved_bindings.moblur_scratch_pixels, saved_bindings.ssr_scratch_pixels);
+        frame_executor.executePostGraph(
+            PostPassExecutionContext,
+            compiled_graph,
+            .{
+                .front = &self.bitmap.pixels,
+                .scratch_a = &self.moblur_scratch_pixels,
+                .scratch_b = &self.ssr_scratch_pixels,
+            },
+            .{
+                .enabled = self.shouldRecordPostPhaseTimings(),
+                .ctx = self,
+                .record = recordPostPhaseTiming,
+            },
+            ctx,
+            post_pass_dispatcher,
+        );
+    }
+
+    pub fn stageBuildShadowMaps(self: *Renderer, mesh: *const Mesh) void {
+        if (!config.POST_SHADOW_ENABLED) return;
+
+        const shadow_budget_ns = self.computeShadowBuildBudgetNs();
+        const enforce_shadow_budget = shadow_budget_ns >= 0;
+        if (shadow_budget_ns > 0) {
+            self.light_work_stats.shadow_budget_ns = shadow_budget_ns;
         }
+        var shadow_budget_spent_ns: i128 = 0;
+        @memset(self.shadow_build_elapsed_ns[0..self.lights.items.len], 0);
+        const frame_number = self.total_frames_rendered + 1;
+        for (self.lights.items, 0..) |*light, light_index| {
+            if (light.shadow_mode != .shadow_map) continue;
+            const base_cadence = @max(@as(u64, 1), @as(u64, light.shadow_update_interval_frames));
+            const cadence_scale = @max(@as(u64, 1), @as(u64, light.shadow_dynamic_interval_scale));
+            const cadence = @max(@as(u64, 1), @min(std.math.maxInt(u64), base_cadence * cadence_scale));
+            const frames_since_last_build = if (light.shadow_last_build_frame == 0)
+                cadence
+            else
+                frame_number - light.shadow_last_build_frame;
+            const should_rebuild = !light.shadow_map.active or frames_since_last_build >= cadence;
+            if (!should_rebuild) {
+                self.light_work_stats.shadow_map_reused_lights += 1;
+                continue;
+            }
+            if (enforce_shadow_budget and light.shadow_map.active) {
+                const estimated_build_ns = estimateShadowBuildCostNs(light);
+                if (shadow_budget_spent_ns + estimated_build_ns > shadow_budget_ns) {
+                    self.light_work_stats.shadow_map_reused_lights += 1;
+                    self.light_work_stats.shadow_budget_skipped_lights += 1;
+                    continue;
+                }
+            }
+            const light_dir_world_for_shadow = math.Vec3.new(
+                self.light_soa.dir_x[light_index],
+                self.light_soa.dir_y[light_index],
+                self.light_soa.dir_z[light_index],
+            );
+            self.shadow_build_elapsed_ns[light_index] = self.buildShadowMap(mesh, light_dir_world_for_shadow, &light.shadow_map);
+            light.shadow_last_build_frame = frame_number;
+            light.shadow_last_build_ns = self.shadow_build_elapsed_ns[light_index];
+            self.light_work_stats.shadow_build_ns += self.shadow_build_elapsed_ns[light_index];
+            shadow_budget_spent_ns += self.shadow_build_elapsed_ns[light_index];
+        }
+        if (self.light_work_stats.shadow_build_ns > 0) {
+            self.recordRenderPassDuration("shadow_map_build_total", self.light_work_stats.shadow_build_ns);
+        }
+    }
+
+    pub fn stageRenderScene(
+        self: *Renderer,
+        backend: frame_plan.BackendKind,
+        mesh: *const Mesh,
+        view_rotation: math.Mat4,
+        light_dir: math.Vec3,
+        pump: ?*const fn (*Renderer) bool,
+        raster_projection: ProjectionParams,
+        mesh_work: *const MeshWork,
+    ) !void {
+        const scene_pass_start = std.time.nanoTimestamp();
+        const tri_count = mesh_work.triangleSlice().len;
+        switch (backend) {
+            .tiled => {
+                pipeline_logger.debugSub("dispatch", "rendering tiled path triangles={} meshlets={}", .{ tri_count, mesh_work.*.meshlet_len });
+                const shadow_pass_elapsed_ns = try self.renderTiled(mesh, view_rotation, light_dir, pump, raster_projection, mesh_work);
+                const scene_pass_elapsed_ns = std.time.nanoTimestamp() - scene_pass_start;
+                self.recordRenderPassDuration("meshlet_tiled", scene_pass_elapsed_ns - @as(i128, @intCast(shadow_pass_elapsed_ns)));
+                if (config.MESHLET_SHADOWS_ENABLED) {
+                    self.recordRenderPassDuration("meshlet_shadows", @as(i128, @intCast(shadow_pass_elapsed_ns)));
+                }
+            },
+            .direct => {
+                pipeline_logger.debugSub("dispatch", "rendering direct path triangles={} meshlets={}", .{ tri_count, mesh_work.*.meshlet_len });
+                try self.renderDirect(mesh, view_rotation, light_dir, raster_projection, mesh_work);
+                self.recordRenderPassTiming("meshlet_direct", scene_pass_start);
+            },
+        }
+    }
+
+    pub fn stageOverlayAndPresent(
+        self: *Renderer,
+        is_editor_mode: bool,
+        light_camera: math.Vec3,
+        center_x: f32,
+        center_y: f32,
+        x_scale: f32,
+        y_scale: f32,
+        right: math.Vec3,
+        up: math.Vec3,
+        forward: math.Vec3,
+        cache_projection: ProjectionParams,
+    ) !i128 {
+        if (is_editor_mode) {
+            self.scene_item_gizmo.applyOutline(
+                self.bitmap.pixels,
+                self.bitmap.width,
+                self.bitmap.height,
+                self.scene_surface,
+            );
+        }
+        try self.applyAdaptiveShadowBudgetPolicy();
+        if (self.show_light_orb) {
+            const light_camera_z = light_camera.z;
+            if (light_camera_z > NEAR_CLIP) {
+                var glow_color = math.Vec3.new(1.0, 1.0, 1.0);
+                var glow_radius: f32 = 0.0;
+                var glow_intensity: f32 = 0.0;
+                if (self.lights.items.len > 0) {
+                    glow_color = self.lights.items[0].color;
+                    glow_radius = self.lights.items[0].glow_radius;
+                    glow_intensity = self.lights.items[0].glow_intensity;
+                }
+                if (glow_radius > 0.0 and glow_intensity > 0.0) {
+                    self.drawLightGlow(light_camera, light_camera_z, center_x, center_y, x_scale, y_scale, glow_color, glow_radius, glow_intensity);
+                }
+                self.drawLightMarker(light_camera, light_camera_z, center_x, center_y, x_scale, y_scale);
+            }
+        }
+        if (is_editor_mode and self.light_gizmo.enabled) {
+            self.drawLightGizmo(self.camera_position, right, up, forward, cache_projection);
+        }
+        if (is_editor_mode and self.scene_item_gizmo.isActive()) {
+            self.drawSceneItemGizmo(self.camera_position, right, up, forward, cache_projection);
+        }
+
+        const present_start = std.time.nanoTimestamp();
+        const cpu_frame_ns = present_start - self.current_frame_start_time;
+
+        if (self.usesSoftwareFramePacing() and self.last_completed_frame_time > 0) {
+            const ideal_present_time = self.last_completed_frame_time + self.target_frame_time_ns - self.present_cost_ema_ns;
+            var spin_now = std.time.nanoTimestamp();
+            while (spin_now < ideal_present_time) {
+                std.atomic.spinLoopHint();
+                spin_now = std.time.nanoTimestamp();
+            }
+        }
+
+        const pre_present_time = std.time.nanoTimestamp();
+        self.drawBitmap();
+        const present_end = std.time.nanoTimestamp();
+        const draw_cost_ns = @max(present_end - pre_present_time, @as(i128, 0));
+        self.present_cost_ema_ns = @divTrunc(self.present_cost_ema_ns * 7 + draw_cost_ns, 8);
+        self.recordRenderPassTiming("present", present_start);
+        pipeline_logger.debugSub("present", "bitmap presented", .{});
+
+        self.frame_count += 1;
+        self.total_frames_rendered += 1;
+        self.maybeEmitSingleFrameProfile();
+        const current_time = present_end;
+        const frame_interval_ns = current_time - self.last_completed_frame_time;
+        self.frame_pacing.recordSample(.{
+            .total_ms = @as(f32, @floatFromInt(@max(frame_interval_ns, @as(i128, 0)))) / 1_000_000.0,
+            .cpu_ms = @as(f32, @floatFromInt(@max(cpu_frame_ns, @as(i128, 0)))) / 1_000_000.0,
+            .software_wait_ms = @as(f32, @floatFromInt(@max(self.active_software_wait_ns, @as(i128, 0)))) / 1_000_000.0,
+            .present_wait_ms = @as(f32, @floatFromInt(@max(present_end - present_start, @as(i128, 0)))) / 1_000_000.0,
+            .deadline_error_ms = @as(f32, @floatFromInt(self.frame_deadline_error_ns)) / 1_000_000.0,
+        }, self.effectiveFramePacingTargetNs());
+        self.last_completed_frame_time = current_time;
+        self.active_software_wait_ns = 0;
+        return current_time;
     }
 
     /// Applies ssgi pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applySSGIPass(self: *Renderer) void {
+    pub fn applySSGIPass(self: *Renderer) void {
         const pass_start = std.time.nanoTimestamp();
         const height: usize = @intCast(self.bitmap.height);
         ssgi_pass.runPipeline(self, height, noopRenderPassJob);
-
-        std.mem.swap([]u32, &self.bitmap.pixels, &self.ssgi_scratch_pixels);
         self.recordRenderPassTiming("ssgi", pass_start);
     }
     /// Applies ambient occlusion pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applyAmbientOcclusionPass(self: *Renderer) void {
+    pub fn applyAmbientOcclusionPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
         const scene_width: usize = @intCast(self.bitmap.width);
@@ -6564,7 +6571,7 @@ pub const Renderer = struct {
 
     /// Applies depth fog pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applyDepthFogPass(self: *Renderer) void {
+    pub fn applyDepthFogPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
@@ -6731,7 +6738,7 @@ pub const Renderer = struct {
     };
 
     // --- God Rays ---
-    fn applyGodRaysPass(self: *Renderer, projection: ProjectionParams, light_dir_world: math.Vec3) void {
+    pub fn applyGodRaysPass(self: *Renderer, projection: ProjectionParams, light_dir_world: math.Vec3) void {
         if (self.bitmap.pixels.len == 0) return;
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
@@ -6762,13 +6769,11 @@ pub const Renderer = struct {
             config.POST_GOD_RAYS_EXPOSURE,
             noopRenderPassJob,
         );
-
-        std.mem.swap([]u32, &self.bitmap.pixels, &self.god_rays_scratch_pixels);
         self.recordRenderPassTiming("god_rays", pass_start);
     }
 
     // --- Lens Flare ---
-    fn applyLensFlarePass(self: *Renderer) void {
+    pub fn applyLensFlarePass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0) return;
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
@@ -6781,13 +6786,11 @@ pub const Renderer = struct {
             @as(f32, @floatFromInt(config.POST_LENS_FLARE_INTENSITY_PERCENT)) / 100.0,
             noopRenderPassJob,
         );
-
-        std.mem.swap([]u32, &self.bitmap.pixels, &self.lens_flare_scratch_pixels);
         self.recordRenderPassTiming("lens_flare", pass_start);
     }
 
     // --- Chromatic Aberration ---
-    fn applyChromaticAberrationPass(self: *Renderer) void {
+    pub fn applyChromaticAberrationPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0) return;
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
@@ -6799,13 +6802,11 @@ pub const Renderer = struct {
             config.POST_CHROMATIC_ABERRATION_STRENGTH,
             noopRenderPassJob,
         );
-
-        std.mem.swap([]u32, &self.bitmap.pixels, &self.moblur_scratch_pixels);
         self.recordRenderPassTiming("chromatic_aberration", pass_start);
     }
 
     // --- Film Grain & Vignette ---
-    fn applyFilmGrainVignettePass(self: *Renderer) void {
+    pub fn applyFilmGrainVignettePass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0) return;
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
@@ -6824,7 +6825,7 @@ pub const Renderer = struct {
 
     /// Applies motion blur pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applyMotionBlurPass(self: *Renderer, current_view: TemporalAAViewState) void {
+    pub fn applyMotionBlurPass(self: *Renderer, current_view: TemporalAAViewState) void {
         if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
@@ -6834,15 +6835,12 @@ pub const Renderer = struct {
         if (!self.taa_scratch.valid) return;
 
         motion_blur_pass.runPipeline(self, current_view, height, width, noopRenderPassJob);
-
-        std.mem.swap([]u32, &self.bitmap.pixels, &self.moblur_scratch_pixels);
-
         self.recordRenderPassTiming("motion_blur", pass_start);
     }
 
     /// Applies temporal aa pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applyTemporalAAPass(self: *Renderer, mesh: *const Mesh, current_view: TemporalAAViewState) void {
+    pub fn applyTemporalAAPass(self: *Renderer, mesh: *const Mesh, current_view: TemporalAAViewState) void {
         const _zone = profiler.zone("applyTemporalAAPass");
         defer if (_zone) |z| z.end();
         if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
@@ -6864,20 +6862,18 @@ pub const Renderer = struct {
 
     /// Applies ssr pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applySSRPass(self: *Renderer, projection: ProjectionParams) void {
+    pub fn applySSRPass(self: *Renderer, projection: ProjectionParams) void {
         if (self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
 
         const scene_height: usize = @intCast(self.bitmap.height);
         ssr_pass.runPipeline(self, projection, scene_height, noopRenderPassJob);
-
-        std.mem.swap([]u32, &self.bitmap.pixels, &self.ssr_scratch_pixels);
         self.recordRenderPassTiming("ssr", pass_start);
     }
 
     /// Applies depth of field pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applyDepthOfFieldPass(self: *Renderer) void {
+    pub fn applyDepthOfFieldPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
 
@@ -6890,7 +6886,7 @@ pub const Renderer = struct {
 
     /// Applies bloom pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applyBloomPass(self: *Renderer) void {
+    pub fn applyBloomPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0) return;
         const pass_start = std.time.nanoTimestamp();
         const scene_width: usize = @intCast(self.bitmap.width);
@@ -6912,7 +6908,7 @@ pub const Renderer = struct {
 
     /// Applies blockbuster color grade pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applyBlockbusterColorGradePass(self: *Renderer) void {
+    pub fn applyBlockbusterColorGradePass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0) return;
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
