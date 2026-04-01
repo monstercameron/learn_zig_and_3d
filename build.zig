@@ -49,6 +49,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const input_actions_module = b.createModule(.{
+        .root_source_file = b.path("engine/src/input/actions.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const render_main_module = b.createModule(.{
         .root_source_file = b.path("engine/src/render/main.zig"),
         .target = target,
@@ -58,10 +63,13 @@ pub fn build(b: *std.Build) void {
     engine_main_module.addImport("zphysics", zphysics_dep.module("root"));
     engine_main_module.addImport("scene_main", scene_main_module);
     engine_main_module.addImport("platform_input", platform_input_module);
+    engine_main_module.addImport("input_actions", input_actions_module);
     scene_main_module.addImport("zphysics", zphysics_dep.module("root"));
     scene_main_module.addImport("physics_utils", physics_utils_module);
     scene_main_module.addImport("platform_input", platform_input_module);
+    scene_main_module.addImport("input_actions", input_actions_module);
     physics_utils_module.addImport("zphysics", zphysics_dep.module("root"));
+    input_actions_module.addImport("platform_input", platform_input_module);
 
     const exe = b.addExecutable(.{
         .name = "zig-windows-app",

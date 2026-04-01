@@ -50,6 +50,7 @@ const cpu_features = @import("core/cpu_features.zig");
 const app_loop = @import("app_loop.zig");
 const platform_loop = @import("platform/loop.zig");
 const input = @import("platform_input");
+const input_actions = @import("input_actions");
 const log = @import("core/log.zig");
 const scene_runtime = @import("scene_main");
 const main_module = @This();
@@ -675,10 +676,20 @@ pub fn main() !void {
             );
             const scene_look_delta = session.renderer.consumeSceneCameraLookDelta(runtime_delta_seconds);
             const current_keys_pressed = session.renderer.keys_pressed;
+            const input_context: input_actions.InputContext = if (session.renderer.isFirstPersonMode())
+                .gameplay
+            else
+                .editor;
+            const resolved_actions = input_actions.resolveActions(
+                input_context,
+                current_keys_pressed,
+                session.renderer.mouse_input,
+            );
             session.phase13_runtime.setExecutionInputs(enter_is_down, session.renderer.isSceneItemDragActive(), .{
                 .first_person_active = session.renderer.isFirstPersonMode(),
                 .keyboard = current_keys_pressed,
                 .mouse = session.renderer.mouse_input,
+                .actions = resolved_actions,
                 .look_delta = .{
                     .x = scene_look_delta.x,
                     .y = scene_look_delta.y,

@@ -59,23 +59,23 @@ fn onEvent(ctx: *script_host.ScriptCallbackContext) void {
 fn updateCamera(ctx: *script_host.ScriptCallbackContext, state: *CameraControlState, delta_seconds: f32) void {
     initializeState(ctx, state);
     const state_view = getCameraState(ctx) orelse return;
-    const keyboard = ctx.input.keyboard;
+    const actions = ctx.input.actions;
     var camera_position = state_view.transform.position;
     var pitch = state_view.camera.pitch;
     var yaw = state_view.camera.yaw;
 
-    const toggle_camera_mode_down = keyboard.isDown(.v);
-    const toggle_mode_pressed = toggle_camera_mode_down and !state.toggle_mode_was_down;
+    const toggle_camera_mode_down = actions.isDown(.toggle_camera_mode);
+    const toggle_mode_pressed = actions.wasPressed(.toggle_camera_mode) or (toggle_camera_mode_down and !state.toggle_mode_was_down);
     state.toggle_mode_was_down = toggle_camera_mode_down;
 
     if (toggle_mode_pressed) ctx.commands.queueSetCameraMode(.toggle) catch {};
-    if (keyboard.wasPressed(.q)) ctx.commands.queueAdjustCameraFov(-fov_step) catch {};
-    if (keyboard.wasPressed(.e)) ctx.commands.queueAdjustCameraFov(fov_step) catch {};
+    if (actions.wasPressed(.fov_decrease)) ctx.commands.queueAdjustCameraFov(-fov_step) catch {};
+    if (actions.wasPressed(.fov_increase)) ctx.commands.queueAdjustCameraFov(fov_step) catch {};
 
     if (ctx.input.first_person_active) {
         applyLook(&yaw, &pitch, ctx.input.look_delta.x, ctx.input.look_delta.y);
 
-        if (!keyboard.isDown(.space)) {
+        if (!actions.isDown(.jump)) {
             state.repeat_jump_when_grounded = false;
         } else if (state.grounded and state.repeat_jump_when_grounded and state.jump_recycle_remaining_s <= 0.0) {
             state.jump_was_down = false;
@@ -84,7 +84,7 @@ fn updateCamera(ctx: *script_host.ScriptCallbackContext, state: *CameraControlSt
 
         stepPlayerBody(state, &camera_position, yaw, pitch, ctx.input, delta_seconds);
 
-        if (keyboard.isDown(.space) and !state.grounded) {
+        if (actions.isDown(.jump) and !state.grounded) {
             state.repeat_jump_when_grounded = true;
         }
     } else {
@@ -131,15 +131,13 @@ fn getState(ctx: *script_host.ScriptCallbackContext) ?*CameraControlState {
 }
 
 fn stepEditorCamera(camera_position: *scene_math.Vec3, yaw: *f32, pitch: *f32, input_state: *const script_host.ScriptInputState, delta_seconds: f32) void {
-    const keyboard = input_state.keyboard;
+    const actions = input_state.actions;
     const mouse = input_state.mouse;
     if (mouse.isDown(.right)) {
         applyLook(yaw, pitch, input_state.look_delta.x, input_state.look_delta.y);
     }
-    if (keyboard.isDown(.left)) yaw.* -= editor_turn_speed * delta_seconds;
-    if (keyboard.isDown(.right)) yaw.* += editor_turn_speed * delta_seconds;
-    if (keyboard.isDown(.up)) pitch.* -= editor_turn_speed * delta_seconds;
-    if (keyboard.isDown(.down)) pitch.* += editor_turn_speed * delta_seconds;
+    yaw.* += actions.axis(.turn_left, .turn_right) * editor_turn_speed * delta_seconds;
+    pitch.* += actions.axis(.turn_up, .turn_down) * editor_turn_speed * delta_seconds;
     pitch.* = std.math.clamp(pitch.*, -max_pitch, max_pitch);
 
     const forward = normalize(scene_math.Vec3.new(@sin(yaw.*) * @cos(pitch.*), @sin(pitch.*), @cos(yaw.*) * @cos(pitch.*)));
@@ -153,12 +151,9 @@ fn stepEditorCamera(camera_position: *scene_math.Vec3, yaw: *f32, pitch: *f32, i
     if (length(right_flat) <= 1e-4) right_flat = scene_math.Vec3.new(1.0, 0.0, 0.0);
 
     var movement_dir = scene_math.Vec3.new(0.0, 0.0, 0.0);
-    if (keyboard.isDown(.w)) movement_dir = scene_math.Vec3.add(movement_dir, forward_flat);
-    if (keyboard.isDown(.s)) movement_dir = scene_math.Vec3.sub(movement_dir, forward_flat);
-    if (keyboard.isDown(.d)) movement_dir = scene_math.Vec3.add(movement_dir, right_flat);
-    if (keyboard.isDown(.a)) movement_dir = scene_math.Vec3.sub(movement_dir, right_flat);
-    if (keyboard.isDown(.space)) movement_dir = scene_math.Vec3.add(movement_dir, scene_math.Vec3.new(0.0, 1.0, 0.0));
-    if (keyboard.isDown(.ctrl)) movement_dir = scene_math.Vec3.sub(movement_dir, scene_math.Vec3.new(0.0, 1.0, 0.0));
+    movement_dir = scene_math.Vec3.add(movement_dir, scene_math.Vec3.scale(forward_flat, actions.axis(.move_backward, .move_forward)));
+    movement_dir = scene_math.Vec3.add(movement_dir, scene_math.Vec3.scale(right_flat, actions.axis(.move_left, .move_right)));
+    movement_dir = scene_math.Vec3.add(movement_dir, scene_math.Vec3.new(0.0, actions.axis(.move_down, .move_up), 0.0));
 
     if (length(movement_dir) > 1e-4) {
         const move_step = scene_math.Vec3.scale(normalize(movement_dir), editor_move_speed * delta_seconds);
@@ -176,7 +171,7 @@ fn stepPlayerBody(state: *CameraControlState, camera_position: *scene_math.Vec3,
 }
 
 fn stepPlayerBodySubstep(state: *CameraControlState, camera_position: *scene_math.Vec3, yaw: f32, pitch: f32, input_state: *const script_host.ScriptInputState, dt: f32) void {
-    const keyboard = input_state.keyboard;
+    const actions = input_state.actions;
     state.jump_recycle_remaining_s = @max(0.0, state.jump_recycle_remaining_s - dt);
 
     var forward_flat = normalize(scene_math.Vec3.new(@sin(yaw) * @cos(pitch), 0.0, @cos(yaw) * @cos(pitch)));
@@ -185,10 +180,8 @@ fn stepPlayerBodySubstep(state: *CameraControlState, camera_position: *scene_mat
     if (length(right_flat) <= 1e-4) right_flat = scene_math.Vec3.new(1.0, 0.0, 0.0);
 
     var move_dir = scene_math.Vec3.new(0.0, 0.0, 0.0);
-    if (keyboard.isDown(.w)) move_dir = scene_math.Vec3.add(move_dir, forward_flat);
-    if (keyboard.isDown(.s)) move_dir = scene_math.Vec3.sub(move_dir, forward_flat);
-    if (keyboard.isDown(.d)) move_dir = scene_math.Vec3.add(move_dir, right_flat);
-    if (keyboard.isDown(.a)) move_dir = scene_math.Vec3.sub(move_dir, right_flat);
+    move_dir = scene_math.Vec3.add(move_dir, scene_math.Vec3.scale(forward_flat, actions.axis(.move_backward, .move_forward)));
+    move_dir = scene_math.Vec3.add(move_dir, scene_math.Vec3.scale(right_flat, actions.axis(.move_left, .move_right)));
 
     const desired_flat_velocity = if (length(move_dir) > 1e-4)
         scene_math.Vec3.scale(normalize(move_dir), 6.0)
@@ -199,7 +192,7 @@ fn stepPlayerBodySubstep(state: *CameraControlState, camera_position: *scene_mat
     state.velocity.x += (desired_flat_velocity.x - state.velocity.x) * accel_blend;
     state.velocity.z += (desired_flat_velocity.z - state.velocity.z) * accel_blend;
 
-    const jump_down = keyboard.isDown(.space);
+    const jump_down = actions.isDown(.jump);
     const jump_pressed = jump_down and !state.jump_was_down;
     state.jump_was_down = jump_down;
     const was_grounded = state.grounded;

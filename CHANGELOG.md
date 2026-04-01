@@ -47,6 +47,17 @@
 - restricted Win32 system-library linking in `build.zig` to Windows targets only
 - added direct platform backend tests for key, resize, focus-loss, and close-request event translation
 
+### Input System Refactor
+
+- split semantic input handling out of the raw platform device-state module by adding `engine/src/input/actions.zig`
+- kept `engine/src/platform/input.zig` focused on typed keyboard and mouse state only
+- added table-driven semantic input bindings with explicit `InputContext`, `InputAction`, `ActionState`, and `BindingMap`
+- added chord support for semantic actions such as editor nudge shortcuts
+- wired resolved actions through `engine/src/main.zig` into scene script execution inputs
+- exposed semantic actions through `engine/src/scene/script_host.zig` and `engine/src/scene/main.zig`
+- migrated default and shadow-scene scripts to consume semantic actions instead of hardcoded raw keys where appropriate
+- updated unit and smoke tests to cover semantic action resolution and runtime wiring
+
 ### Known Limits
 
 - the direct raster backend is still a stub in `engine/src/render/renderer.zig`

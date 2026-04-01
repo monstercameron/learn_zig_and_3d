@@ -7,6 +7,8 @@ const hybrid_shadow_candidate_kernel = @import("hybrid_shadow_candidate_kernel")
 const hybrid_shadow_resolve_kernel = @import("hybrid_shadow_resolve_kernel");
 const render_main = @import("render_main");
 const scene_main = @import("scene_main");
+const platform_input = scene_main.platform_input;
+const input_actions = scene_main.input_actions;
 
 test "default camera controls debounce held mode toggle" {
     var runtime = try scene_main.SceneRuntime.init(std.testing.allocator, .{
@@ -41,6 +43,7 @@ test "default camera controls debounce held mode toggle" {
 
     var script_input = scene_main.ScriptInputState{};
     script_input.setKey(.v, true);
+    script_input.actions = input_actions.resolveActions(.editor, script_input.keyboard, script_input.mouse);
     runtime.setExecutionInputs(false, false, script_input);
     var snapshot = try runtime.updateFrame(.{ .x = 0.0, .y = 1.0, .z = -4.0 }, 0.0, 0.0, 32.0, 64.0, 1, 1.0 / 60.0);
     snapshot.deinit();
@@ -51,6 +54,8 @@ test "default camera controls debounce held mode toggle" {
 
     script_input = scene_main.ScriptInputState{};
     script_input.setKey(.v, true);
+    script_input.keyboard.beginFrame();
+    script_input.actions = input_actions.resolveActions(.editor, script_input.keyboard, script_input.mouse);
     runtime.setExecutionInputs(false, false, script_input);
     snapshot = try runtime.updateFrame(.{ .x = 0.0, .y = 1.0, .z = -4.0 }, 0.0, 0.0, 32.0, 64.0, 2, 1.0 / 60.0);
     snapshot.deinit();
@@ -64,6 +69,7 @@ test "default camera controls debounce held mode toggle" {
 
     script_input = scene_main.ScriptInputState{};
     script_input.setKey(.v, true);
+    script_input.actions = input_actions.resolveActions(.editor, script_input.keyboard, script_input.mouse);
     runtime.setExecutionInputs(false, false, script_input);
     snapshot = try runtime.updateFrame(.{ .x = 0.0, .y = 1.0, .z = -4.0 }, 0.0, 0.0, 32.0, 64.0, 4, 1.0 / 60.0);
     snapshot.deinit();
@@ -154,6 +160,7 @@ test "default renderer controls reserve bare k for gameplay and use ctrl plus l 
 
     var script_input = scene_main.ScriptInputState{};
     script_input.setKey(.k, true);
+    script_input.actions = input_actions.resolveActions(.editor, script_input.keyboard, script_input.mouse);
     runtime.setExecutionInputs(false, false, script_input);
     var snapshot = try runtime.updateFrame(.{ .x = 0.0, .y = 1.0, .z = -4.0 }, 0.0, 0.0, 32.0, 64.0, 1, 1.0 / 60.0);
     snapshot.deinit();
@@ -163,6 +170,7 @@ test "default renderer controls reserve bare k for gameplay and use ctrl plus l 
     script_input = scene_main.ScriptInputState{};
     script_input.setKey(.ctrl, true);
     script_input.setKey(.l, true);
+    script_input.actions = input_actions.resolveActions(.editor, script_input.keyboard, script_input.mouse);
     runtime.setExecutionInputs(false, false, script_input);
     snapshot = try runtime.updateFrame(.{ .x = 0.0, .y = 1.0, .z = -4.0 }, 0.0, 0.0, 32.0, 64.0, 2, 1.0 / 60.0);
     snapshot.deinit();

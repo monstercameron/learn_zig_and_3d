@@ -18,6 +18,8 @@ const render_extraction_module = @import("render_extraction.zig");
 const scene_math = @import("math.zig");
 const loader_module = @import("loader.zig");
 const physics_utils = @import("physics_utils");
+const platform_input_module = @import("platform_input");
+const input_actions_module = @import("input_actions");
 
 pub const EntityId = handles.EntityId;
 pub const AssetHandle = handles.AssetHandle;
@@ -48,6 +50,8 @@ pub const CellState = residency_module.CellState;
 pub const ScriptHost = script_host_module.ScriptHost;
 pub const ScriptEvent = script_host_module.ScriptEvent;
 pub const ScriptInputState = script_host_module.ScriptInputState;
+pub const platform_input = platform_input_module;
+pub const input_actions = input_actions_module;
 pub const ScriptModuleVTable = script_host_module.ScriptModuleVTable;
 pub const ScriptCallbackContext = script_host_module.ScriptCallbackContext;
 pub const ScriptHostAbiVersion = script_host_module.abi_version;

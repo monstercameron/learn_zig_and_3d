@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const platform_input = @import("platform_input");
+const input_actions = @import("input_actions");
 const handles = @import("entity.zig");
 const AssetRegistry = @import("asset_registry.zig").AssetRegistry;
 const ComponentStore = @import("components.zig").ComponentStore;
@@ -22,6 +23,7 @@ pub const ScriptInputState = struct {
     first_person_active: bool = false,
     keyboard: platform_input.KeyboardState = .{},
     mouse: platform_input.MouseState = .{},
+    actions: input_actions.ActionState = .{},
     look_delta: ScriptLookDelta = .{},
 
     pub fn setKey(self: *ScriptInputState, key: platform_input.Key, is_down: bool) void {
