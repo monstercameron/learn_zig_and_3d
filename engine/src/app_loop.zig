@@ -34,12 +34,12 @@ pub fn run(control: *LoopControl, session: anytype, comptime Driver: type) !u32 
             break;
         }
 
-        try Driver.update(session, frame_count);
-
         if (!Driver.shouldRender(session)) {
             Driver.waitUntilNextFrame(session);
             continue;
         }
+
+        try Driver.update(session, frame_count);
 
         frame_count += 1;
         Driver.onFrameStart(session, frame_count);
@@ -160,8 +160,26 @@ test "app loop waits when render is skipped" {
     var session = TestSession{ .render_enabled = false };
     const frames = try run(&control, &session, TestDriver);
     try std.testing.expectEqual(@as(u32, 0), frames);
-    try std.testing.expectEqual(@as(u32, 1), session.update_calls);
+    try std.testing.expectEqual(@as(u32, 0), session.update_calls);
     try std.testing.expectEqual(@as(u32, 1), session.wait_calls);
     try std.testing.expectEqual(@as(u32, 0), session.render_calls);
     try std.testing.expectEqual(false, running);
+}
+
+test "app loop updates exactly once before a rendered frame" {
+    var running = true;
+    var control = LoopControl{
+        .running = &running,
+        .start_ns = std.time.nanoTimestamp(),
+    };
+    var session = TestSession{
+        .render_enabled = true,
+        .stop_after_update = true,
+    };
+    const frames = try run(&control, &session, TestDriver);
+    try std.testing.expectEqual(@as(u32, 1), frames);
+    try std.testing.expectEqual(@as(u32, 1), session.update_calls);
+    try std.testing.expectEqual(@as(u32, 1), session.render_calls);
+    try std.testing.expectEqual(@as(u32, 1), session.frame_start_calls);
+    try std.testing.expectEqual(@as(u32, 1), session.frame_complete_calls);
 }

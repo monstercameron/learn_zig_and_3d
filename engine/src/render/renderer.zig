@@ -71,6 +71,7 @@ const render_utils = @import("core/utils.zig");
 const scene_item_gizmo = @import("scene_item_gizmo.zig");
 const camera_controller = @import("camera_controller.zig");
 const frame_pacing_hud = @import("frame_pacing_hud.zig");
+const frame_pacing = @import("frame_pacing.zig");
 const shadow_raster_kernel = @import("kernels/shadow_raster_kernel.zig");
 const shadow_sample_kernel = @import("kernels/shadow_sample_kernel.zig");
 const hybrid_shadow_cache_kernel = @import("kernels/hybrid_shadow_cache_kernel.zig");
@@ -1967,7 +1968,7 @@ pub const Renderer = struct {
         const profile_capture_frame = try parseProfileCaptureFrame(allocator);
         const frame_pacing_timer = createFramePacingTimer();
         const configured_target_frame_time_ns = config.targetFrameTimeNs();
-        const pacing_mode = pacingModeForTarget(configured_target_frame_time_ns);
+        const pacing_mode = frame_pacing.resolveMode(config.WINDOW_VSYNC, configured_target_frame_time_ns);
 
         if (config.WINDOW_VSYNC and configured_target_frame_time_ns > 0) {
             renderer_logger.warnSub(
@@ -2214,12 +2215,6 @@ pub const Renderer = struct {
         const desired_access = TIMER_MODIFY_STATE | SYNCHRONIZE_ACCESS;
         return CreateWaitableTimerExW(null, null, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, desired_access) orelse
             CreateWaitableTimerExW(null, null, 0, desired_access);
-    }
-
-    fn pacingModeForTarget(target_frame_time_ns: i128) frame_pacing_hud.Mode {
-        if (config.WINDOW_VSYNC) return .compositor;
-        if (target_frame_time_ns > 0) return .software;
-        return .uncapped;
     }
 
     /// Cleans up all renderer resources in the reverse order of creation.
@@ -4705,9 +4700,8 @@ pub const Renderer = struct {
     /// Returns whether s ho ul dr en de rf ra me.
     /// The check is side-effect free so callers can gate expensive follow-up work cheaply.
     pub fn shouldRenderFrame(self: *Renderer) bool {
-        if (!self.usesSoftwareFramePacing()) return true;
         const now = std.time.nanoTimestamp();
-        return now >= self.next_frame_time;
+        return frame_pacing.shouldRender(self.currentPacingMode(), self.next_frame_time, now);
     }
 
     /// renderLoadingOverlayFrame renders Renderer output.
@@ -4724,10 +4718,8 @@ pub const Renderer = struct {
         self.drawBitmap();
 
         const now = std.time.nanoTimestamp();
-        self.last_completed_frame_time = now;
-        self.total_frames_rendered += 1;
-        self.frame_count +%= 1;
-        self.advanceFrameDeadline(now);
+        self.notePresentedFrame(now);
+        self.finalizeFrame(now);
         return true;
     }
 
@@ -4775,15 +4767,15 @@ pub const Renderer = struct {
     }
 
     fn currentPacingMode(self: *const Renderer) frame_pacing_hud.Mode {
-        return pacingModeForTarget(self.target_frame_time_ns);
+        return frame_pacing.resolveMode(config.WINDOW_VSYNC, self.target_frame_time_ns);
     }
 
     fn usesSoftwareFramePacing(self: *const Renderer) bool {
-        return self.currentPacingMode() == .software;
+        return frame_pacing.usesSoftwarePacing(self.currentPacingMode());
     }
 
     fn effectiveFramePacingTargetNs(self: *const Renderer) i128 {
-        return if (self.usesSoftwareFramePacing()) self.target_frame_time_ns else 0;
+        return frame_pacing.effectiveTargetNs(self.currentPacingMode(), self.target_frame_time_ns);
     }
 
     fn waitWithFramePacingTimer(self: *Renderer, sleep_ns: i128) bool {
@@ -4797,33 +4789,21 @@ pub const Renderer = struct {
         return true;
     }
 
-    fn framePacingSafetyMarginNs(self: *const Renderer) i128 {
-        if (self.target_frame_time_ns <= 0) return 500_000;
-        return std.math.clamp(@divTrunc(self.target_frame_time_ns, 30), @as(i128, 500_000), @as(i128, 2_000_000));
-    }
-
     fn framePacingCoarseThresholdNs(self: *const Renderer) i128 {
-        if (self.target_frame_time_ns <= 0) return 2_000_000;
-        return std.math.clamp(@divTrunc(self.target_frame_time_ns, 6), @as(i128, 2_000_000), @as(i128, 8_000_000));
+        return frame_pacing.coarseThresholdNs(self.target_frame_time_ns);
     }
 
     fn framePacingRequestedSleepNs(self: *const Renderer, remaining_ns: i128) i128 {
-        const safety_margin_ns = self.framePacingSafetyMarginNs();
-        const bias_ns = std.math.clamp(self.frame_pacing_sleep_bias_ns, @as(i128, 0), safety_margin_ns);
-        return remaining_ns - safety_margin_ns - bias_ns;
+        return frame_pacing.requestedSleepNs(self.target_frame_time_ns, self.frame_pacing_sleep_bias_ns, remaining_ns);
     }
 
     /// updateFramePacingSleepBias updates Renderer state for the current tick/frame.
     fn updateFramePacingSleepBias(self: *Renderer, requested_sleep_ns: i128, actual_wait_ns: i128) void {
-        if (requested_sleep_ns <= 0 or actual_wait_ns <= 0) return;
-
-        const overshoot_ns = @max(actual_wait_ns - requested_sleep_ns, @as(i128, 0));
-        // Instant-spike / fast-decay: react immediately to overshoots, recover in ~4 frames.
-        if (overshoot_ns > self.frame_pacing_sleep_bias_ns) {
-            self.frame_pacing_sleep_bias_ns = overshoot_ns;
-        } else {
-            self.frame_pacing_sleep_bias_ns = @divTrunc(self.frame_pacing_sleep_bias_ns * 3 + overshoot_ns, 4);
-        }
+        self.frame_pacing_sleep_bias_ns = frame_pacing.updateSleepBias(
+            self.frame_pacing_sleep_bias_ns,
+            requested_sleep_ns,
+            actual_wait_ns,
+        );
     }
 
     /// Performs wait until next frame.
@@ -4854,7 +4834,7 @@ pub const Renderer = struct {
                     self.updateFramePacingSleepBias(sleep_ns, @max(sleep_end - sleep_begin, @as(i128, 0)));
                     continue;
                 } else {
-                    self.frame_pacing_sleep_bias_ns = @divTrunc(self.frame_pacing_sleep_bias_ns * 3, 4);
+                    self.frame_pacing_sleep_bias_ns = frame_pacing.decaySleepBias(self.frame_pacing_sleep_bias_ns);
                 }
             }
 
@@ -4863,25 +4843,20 @@ pub const Renderer = struct {
     }
 
     fn advanceFrameDeadline(self: *Renderer, now_ns: i128) void {
-        if (!self.usesSoftwareFramePacing()) {
-            self.next_frame_time = now_ns;
-            return;
-        }
+        self.next_frame_time = frame_pacing.advanceDeadline(
+            self.currentPacingMode(),
+            self.next_frame_time,
+            self.target_frame_time_ns,
+            now_ns,
+        );
+    }
 
-        // Advance from the previous deadline to keep cadence steady instead of
-        // adding target dt to frame-end time (which drifts and causes uneven pacing).
-        if (self.next_frame_time <= 0) {
-            self.next_frame_time = now_ns + self.target_frame_time_ns;
-            return;
-        }
-        self.next_frame_time += self.target_frame_time_ns;
-
-        // If we fell behind, fast-forward by whole-frame quanta so we re-lock.
-        if (self.next_frame_time <= now_ns) {
-            const overdue = now_ns - self.next_frame_time;
-            const skip_frames = @divTrunc(overdue, self.target_frame_time_ns) + 1;
-            self.next_frame_time += skip_frames * self.target_frame_time_ns;
-        }
+    fn notePresentedFrame(self: *Renderer, current_time: i128) void {
+        self.frame_count += 1;
+        self.total_frames_rendered += 1;
+        self.last_completed_frame_time = current_time;
+        self.active_software_wait_ns = 0;
+        self.advanceFrameDeadline(current_time);
     }
 
     /// Handles handle char input.
@@ -6524,11 +6499,10 @@ pub const Renderer = struct {
         self.recordRenderPassTiming("present", present_start);
         pipeline_logger.debugSub("present", "bitmap presented", .{});
 
-        self.frame_count += 1;
-        self.total_frames_rendered += 1;
-        self.maybeEmitSingleFrameProfile();
         const current_time = present_end;
         const frame_interval_ns = current_time - self.last_completed_frame_time;
+        self.notePresentedFrame(current_time);
+        self.maybeEmitSingleFrameProfile();
         self.frame_pacing.recordSample(.{
             .total_ms = @as(f32, @floatFromInt(@max(frame_interval_ns, @as(i128, 0)))) / 1_000_000.0,
             .cpu_ms = @as(f32, @floatFromInt(@max(cpu_frame_ns, @as(i128, 0)))) / 1_000_000.0,
@@ -6536,8 +6510,6 @@ pub const Renderer = struct {
             .present_wait_ms = @as(f32, @floatFromInt(@max(present_end - present_start, @as(i128, 0)))) / 1_000_000.0,
             .deadline_error_ms = @as(f32, @floatFromInt(self.frame_deadline_error_ns)) / 1_000_000.0,
         }, self.effectiveFramePacingTargetNs());
-        self.last_completed_frame_time = current_time;
-        self.active_software_wait_ns = 0;
         return current_time;
     }
 

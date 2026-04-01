@@ -58,6 +58,15 @@
 - migrated default and shadow-scene scripts to consume semantic actions instead of hardcoded raw keys where appropriate
 - updated unit and smoke tests to cover semantic action resolution and runtime wiring
 
+### Frame Pacing Cleanup
+
+- fixed the app loop in `engine/src/app_loop.zig` so simulation update runs only when a frame is actually due to render
+- added direct app-loop coverage for the pacing-sensitive one-update-per-rendered-frame behavior
+- extracted pacing policy into `engine/src/render/frame_pacing.zig`
+- centralized render pacing mode selection, deadline checks, sleep budgeting, sleep-bias adjustment, and deadline advancement
+- rewired `engine/src/render/renderer.zig` to delegate pacing math and policy to the new render-side pacing module
+- unified presented-frame bookkeeping so loading-overlay frames and normal present frames keep counters and deadlines consistent
+
 ### Known Limits
 
 - the direct raster backend is still a stub in `engine/src/render/renderer.zig`
