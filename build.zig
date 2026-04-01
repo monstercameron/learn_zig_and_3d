@@ -68,12 +68,13 @@ pub fn build(b: *std.Build) void {
         .root_module = app_module,
     });
 
-    // Link against Windows system libraries for GUI and graphics
-    exe.linkSystemLibrary("user32"); // For window management functions
-    exe.linkSystemLibrary("gdi32"); // For graphics device interface functions
-    exe.linkSystemLibrary("kernel32"); // For kernel functions
-    exe.linkSystemLibrary("winmm"); // For timer resolution control
-    exe.linkSystemLibrary("dwmapi"); // For compositor-backed frame pacing
+    if (target.result.os.tag == .windows) {
+        exe.linkSystemLibrary("user32");
+        exe.linkSystemLibrary("gdi32");
+        exe.linkSystemLibrary("kernel32");
+        exe.linkSystemLibrary("winmm");
+        exe.linkSystemLibrary("dwmapi");
+    }
     exe.root_module.addImport("zphysics", zphysics_dep.module("root"));
     exe.linkLibrary(zphysics_dep.artifact("joltc"));
 

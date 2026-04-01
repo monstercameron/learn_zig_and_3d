@@ -29,121 +29,8 @@
 //!
 const std = @import("std");
 const profiler = @import("core/profiler.zig");
-const windows = std.os.windows;
 const math = @import("core/math.zig");
 const zphysics = @import("zphysics");
-
-// Windows message structure.
-// JS Analogy: This is the raw event object from the operating system. A browser
-// would normally process this and give you a cleaner `KeyboardEvent` or `MouseEvent`.
-const MSG = extern struct {
-    hwnd: windows.HWND, // The window handle this message is for.
-    message: u32, // The type of message (e.g., WM_KEYDOWN, WM_CLOSE).
-    wParam: windows.WPARAM, // Extra event-specific data. For keyboard events, this is the key code.
-    lParam: windows.LPARAM, // More event-specific data.
-    time: u32, // Timestamp of when the event occurred.
-    pt: windows.POINT, // Mouse position when the event occurred.
-};
-
-// Windows message type constants.
-const WM_KEYDOWN = 0x0100;
-const WM_KEYUP = 0x0101;
-const WM_SYSKEYDOWN = 0x0104;
-const WM_SYSKEYUP = 0x0105;
-const WM_CHAR = 0x0102;
-const WM_QUIT = 0x12;
-const WM_SETFOCUS = 0x0007;
-const WM_KILLFOCUS = 0x0008;
-const WM_INPUT = 0x00FF;
-const WM_MOUSEMOVE = 0x0200;
-const WM_LBUTTONDOWN = 0x0201;
-const WM_LBUTTONUP = 0x0202;
-const WM_RBUTTONDOWN = 0x0204;
-const WM_RBUTTONUP = 0x0205;
-
-const RAWINPUTDEVICE = extern struct {
-    usUsagePage: u16,
-    usUsage: u16,
-    dwFlags: u32,
-    hwndTarget: ?windows.HWND,
-};
-
-const RAWINPUTHEADER = extern struct {
-    dwType: u32,
-    dwSize: u32,
-    hDevice: ?windows.HANDLE,
-    wParam: windows.WPARAM,
-};
-
-const RAWMOUSE_BUTTONS = extern union {
-    ulButtons: u32,
-    buttons: extern struct {
-        usButtonFlags: u16,
-        usButtonData: u16,
-    },
-};
-
-const RAWMOUSE = extern struct {
-    usFlags: u16,
-    buttons: RAWMOUSE_BUTTONS,
-    ulRawButtons: u32,
-    lLastX: i32,
-    lLastY: i32,
-    ulExtraInformation: u32,
-};
-
-const RAWINPUTMOUSE = extern struct {
-    header: RAWINPUTHEADER,
-    mouse: RAWMOUSE,
-};
-
-// Declarations for Windows API functions.
-// JS Analogy: These are low-level functions to interact with the OS event queue.
-// Think of them as the underlying native functions a browser's JS engine would call
-// to handle events, but here we are calling them directly.
-extern "user32" fn GetMessageW(
-    lpMsg: *MSG,
-    hWnd: ?windows.HWND,
-    wMsgFilterMin: u32,
-    wMsgFilterMax: u32,
-) i32;
-
-extern "user32" fn PeekMessageW(
-    lpMsg: *MSG,
-    hWnd: ?windows.HWND,
-    wMsgFilterMin: u32,
-    wMsgFilterMax: u32,
-    wRemoveMsg: u32,
-) i32;
-
-extern "user32" fn TranslateMessage(lpMsg: *const MSG) bool;
-
-extern "user32" fn DispatchMessageW(lpMsg: *const MSG) windows.LRESULT;
-extern "user32" fn GetAsyncKeyState(vKey: i32) i16;
-extern "user32" fn RegisterRawInputDevices(pRawInputDevices: [*]const RAWINPUTDEVICE, uiNumDevices: u32, cbSize: u32) windows.BOOL;
-extern "user32" fn GetRawInputData(hRawInput: ?windows.HANDLE, uiCommand: u32, pData: ?*anyopaque, pcbSize: *u32, cbSizeHeader: u32) u32;
-extern "user32" fn LoadCursorW(hInstance: ?windows.HINSTANCE, lpCursorName: [*:0]align(1) const u16) ?windows.HCURSOR;
-extern "user32" fn SetCapture(hWnd: windows.HWND) ?windows.HWND;
-extern "user32" fn ReleaseCapture() windows.BOOL;
-extern "user32" fn GetFocus() ?windows.HWND;
-extern "user32" fn SetCursor(hCursor: ?windows.HCURSOR) ?windows.HCURSOR;
-extern "user32" fn GetClientRect(hWnd: windows.HWND, lpRect: *windows.RECT) windows.BOOL;
-extern "user32" fn ClientToScreen(hWnd: windows.HWND, lpPoint: *windows.POINT) windows.BOOL;
-extern "user32" fn SetCursorPos(X: i32, Y: i32) windows.BOOL;
-
-// Constant for PeekMessageW: remove the message from the queue after reading.
-const PM_REMOVE = 1;
-const VK_RETURN = 0x0D;
-const MK_LBUTTON: usize = 0x0001;
-const MK_RBUTTON: usize = 0x0002;
-const IDC_ARROW_ID: usize = 32512;
-const IDC_SIZEALL_ID: usize = 32646;
-const IDC_HAND_ID: usize = 32649;
-const RID_INPUT: u32 = 0x10000003;
-const RIM_TYPEMOUSE: u32 = 0;
-const MOUSE_MOVE_ABSOLUTE: u16 = 0x0001;
-const HID_USAGE_PAGE_GENERIC: u16 = 0x01;
-const HID_USAGE_GENERIC_MOUSE: u16 = 0x02;
 
 // Import other modules from our project.
 // JS Analogy: `const Window = require('./window.js');`
@@ -161,6 +48,7 @@ const mesh_module = @import("render/core/mesh.zig");
 const config = @import("core/app_config.zig");
 const cpu_features = @import("core/cpu_features.zig");
 const app_loop = @import("app_loop.zig");
+const platform_loop = @import("platform/loop.zig");
 const input = @import("platform_input");
 const log = @import("core/log.zig");
 const scene_runtime = @import("scene_main");
@@ -211,13 +99,122 @@ const SceneRenderInstance = struct {
 };
 
 const AppSession = struct {
+    window: *Window,
     renderer: *Renderer,
     phase13_runtime: *scene_runtime.SceneRuntime,
     scene_resources: *SceneMeshResources,
     mouse_grabbed: *bool,
     selected_scene_entity_pin: *?scene_runtime.EntityId,
     last_runtime_update_ns: i128,
+    minimized: bool = false,
+    close_requested: bool = false,
 };
+
+fn toPlatformCursorStyle(style: CursorStyle) platform_loop.CursorStyle {
+    return switch (style) {
+        .arrow => .arrow,
+        .grab => .grab,
+        .grabbing => .grabbing,
+        .hidden => .hidden,
+    };
+}
+
+fn applyPlatformCursor(renderer: *Renderer) void {
+    platform_loop.setCursor(toPlatformCursorStyle(renderer.desiredCursorStyle()));
+}
+
+fn syncFirstPersonMouseGrab(window: *Window, renderer: *Renderer, mouse_grabbed: *bool) void {
+    const focused = platform_loop.windowHasFocus(window.hwnd);
+    const should_grab = focused and renderer.isFirstPersonMode();
+    if (should_grab) {
+        if (!mouse_grabbed.*) {
+            platform_loop.setMouseCapture(window.hwnd, true);
+            platform_loop.centerCursorInWindow(window.hwnd);
+            mouse_grabbed.* = true;
+        }
+        return;
+    }
+    if (mouse_grabbed.*) {
+        platform_loop.setMouseCapture(window.hwnd, false);
+        mouse_grabbed.* = false;
+    }
+}
+
+fn consumePlatformEvent(session: *AppSession, event: platform_loop.PlatformEvent) void {
+    const renderer = session.renderer;
+    switch (event) {
+        .key => |payload| renderer.handleKeyInput(payload.code, payload.is_down),
+        .char => |char_code| renderer.handleCharInput(char_code),
+        .focus_changed => |focused| {
+            if (focused) {
+                renderer.handleFocusGained();
+            } else {
+                renderer.handleFocusLost();
+                session.mouse_grabbed.* = false;
+            }
+            applyPlatformCursor(renderer);
+        },
+        .raw_mouse_delta => |delta| renderer.handleRawMouseDelta(delta.x, delta.y),
+        .mouse_move => |move| {
+            if (!renderer.isFirstPersonMode()) {
+                if (!move.left_down) renderer.handleMouseLeftRelease(move.x, move.y);
+                if (!move.right_down) renderer.handleMouseRightRelease(move.x, move.y);
+            }
+            renderer.handleMouseMove(move.x, move.y);
+            applyPlatformCursor(renderer);
+        },
+        .mouse_button => |button| {
+            switch (button.button) {
+                .left => if (button.pressed)
+                    renderer.handleMouseLeftClick(button.x, button.y)
+                else
+                    renderer.handleMouseLeftRelease(button.x, button.y),
+                .right => if (button.pressed)
+                    renderer.handleMouseRightClick(button.x, button.y)
+                else
+                    renderer.handleMouseRightRelease(button.x, button.y),
+            }
+            applyPlatformCursor(renderer);
+        },
+        .resized => |size| {
+            if (size.width > 0 and size.height > 0) {
+                config.WINDOW_WIDTH = @intCast(size.width);
+                config.WINDOW_HEIGHT = @intCast(size.height);
+            }
+        },
+        .minimized => {
+            session.minimized = true;
+        },
+        .restored => {
+            session.minimized = false;
+        },
+        .close_requested => {
+            session.close_requested = true;
+        },
+        .quit => {},
+    }
+}
+
+fn pumpRendererEvents(renderer: *Renderer) bool {
+    var dummy_mouse_grabbed = false;
+    var dummy_selected_pin: ?scene_runtime.EntityId = null;
+    var dummy_window = Window{ .hwnd = renderer.hwnd };
+    var session = AppSession{
+        .window = &dummy_window,
+        .renderer = renderer,
+        .phase13_runtime = undefined,
+        .scene_resources = undefined,
+        .mouse_grabbed = &dummy_mouse_grabbed,
+        .selected_scene_entity_pin = &dummy_selected_pin,
+        .last_runtime_update_ns = 0,
+    };
+    const Hooks = struct {
+        pub fn handleEvent(target: *AppSession, event: platform_loop.PlatformEvent) void {
+            consumePlatformEvent(target, event);
+        }
+    };
+    return platform_loop.pumpEvents(&session, Hooks);
+}
 
 fn populateSceneRuntimeBootstrap(runtime: *scene_runtime.SceneRuntime, scene_desc: scene_runtime.LoadedSceneDescription) !void {
     const default_camera_modules = [_][]const u8{
@@ -391,157 +388,8 @@ const SceneLoadingProgress = struct {
     completed_steps: usize = 0,
 };
 
-/// Returns whether i se nt er do wn.
-/// The check is side-effect free so callers can gate expensive follow-up work cheaply.
-fn isEnterDown() bool {
-    return GetAsyncKeyState(VK_RETURN) < 0;
-}
-
 fn sceneLoadingTotalSteps(scene_desc: LoadedSceneDescription) usize {
     return @max(@as(usize, 1), scene_desc.assets.len + scene_desc.textureSlotCount() + 1);
-}
-
-fn centerCursorInWindow(hwnd: windows.HWND) void {
-    var rect: windows.RECT = undefined;
-    if (GetClientRect(hwnd, &rect) == 0) return;
-    var point = windows.POINT{
-        .x = @divTrunc(rect.right - rect.left, 2),
-        .y = @divTrunc(rect.bottom - rect.top, 2),
-    };
-    if (ClientToScreen(hwnd, &point) == 0) return;
-    _ = SetCursorPos(point.x, point.y);
-}
-
-fn syncFirstPersonMouseGrab(renderer: *Renderer, mouse_grabbed: *bool) void {
-    const focused = if (GetFocus()) |focused_hwnd| focused_hwnd == renderer.hwnd else false;
-    const should_grab = focused and renderer.isFirstPersonMode();
-    if (should_grab) {
-        if (!mouse_grabbed.*) {
-            _ = SetCapture(renderer.hwnd);
-            centerCursorInWindow(renderer.hwnd);
-            mouse_grabbed.* = true;
-        }
-        return;
-    }
-
-    if (mouse_grabbed.*) {
-        _ = ReleaseCapture();
-        mouse_grabbed.* = false;
-    }
-}
-
-fn cursorResource(id: usize) [*:0]align(1) const u16 {
-    return @ptrFromInt(id);
-}
-
-fn applyCursorFromRenderer(renderer: *Renderer) void {
-    const desired = renderer.desiredCursorStyle();
-    switch (desired) {
-        .hidden => {
-            _ = SetCursor(null);
-        },
-        else => {
-            const cursor_id: usize = switch (desired) {
-                .arrow => IDC_ARROW_ID,
-                .grab => IDC_HAND_ID,
-                .grabbing => IDC_SIZEALL_ID,
-                .hidden => unreachable,
-            };
-            const cursor = LoadCursorW(null, cursorResource(cursor_id));
-            _ = SetCursor(cursor);
-        },
-    }
-}
-
-fn decodeRawMouseDelta(lParam: windows.LPARAM) ?windows.POINT {
-    var raw_input: RAWINPUTMOUSE = undefined;
-    var size: u32 = @sizeOf(RAWINPUTMOUSE);
-    const handle: ?windows.HANDLE = @ptrFromInt(@as(usize, @bitCast(lParam)));
-    const copied = GetRawInputData(handle, RID_INPUT, @ptrCast(&raw_input), &size, @sizeOf(RAWINPUTHEADER));
-    if (copied == std.math.maxInt(u32) or copied < @sizeOf(RAWINPUTHEADER)) return null;
-    if (raw_input.header.dwType != RIM_TYPEMOUSE) return null;
-    if ((raw_input.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) != 0) return null;
-    if (raw_input.mouse.lLastX == 0 and raw_input.mouse.lLastY == 0) return null;
-    return windows.POINT{
-        .x = raw_input.mouse.lLastX,
-        .y = raw_input.mouse.lLastY,
-    };
-}
-
-fn decodeMouseCoords(lParam: windows.LPARAM) windows.POINT {
-    const raw: usize = @bitCast(lParam);
-    const x16: u16 = @intCast(raw & 0xFFFF);
-    const y16: u16 = @intCast((raw >> 16) & 0xFFFF);
-    const x_component: i16 = @bitCast(x16);
-    const y_component: i16 = @bitCast(y16);
-    return windows.POINT{
-        .x = @intCast(x_component),
-        .y = @intCast(y_component),
-    };
-}
-
-fn pumpMessages(renderer: *Renderer) bool {
-    var m: MSG = undefined;
-    while (PeekMessageW(&m, null, 0, 0, PM_REMOVE) != 0) {
-        if (m.message == WM_QUIT) {
-            app_logger.info("received WM_QUIT message, exiting", .{});
-            return false;
-        }
-        if (m.message == WM_KEYDOWN or m.message == WM_SYSKEYDOWN) {
-            const key_code: u32 = @intCast(m.wParam);
-            renderer.handleKeyInput(key_code, true);
-        } else if (m.message == WM_KEYUP or m.message == WM_SYSKEYUP) {
-            const key_code: u32 = @intCast(m.wParam);
-            renderer.handleKeyInput(key_code, false);
-        } else if (m.message == WM_CHAR) {
-            const char_code: u32 = @intCast(m.wParam);
-            renderer.handleCharInput(char_code);
-            applyCursorFromRenderer(renderer);
-        } else if (m.message == WM_SETFOCUS) {
-            renderer.handleFocusGained();
-            applyCursorFromRenderer(renderer);
-        } else if (m.message == WM_KILLFOCUS) {
-            _ = ReleaseCapture();
-            renderer.handleFocusLost();
-            applyCursorFromRenderer(renderer);
-        } else if (m.message == WM_INPUT) {
-            if (decodeRawMouseDelta(m.lParam)) |delta| {
-                renderer.handleRawMouseDelta(delta.x, delta.y);
-            }
-        } else if (m.message == WM_MOUSEMOVE) {
-            const coords = decodeMouseCoords(m.lParam);
-            if (!renderer.isFirstPersonMode()) {
-                const button_mask: usize = @intCast(m.wParam);
-                if ((button_mask & MK_LBUTTON) == 0) {
-                    renderer.handleMouseLeftRelease(coords.x, coords.y);
-                }
-                if ((button_mask & MK_RBUTTON) == 0) {
-                    renderer.handleMouseRightRelease(coords.x, coords.y);
-                }
-            }
-            renderer.handleMouseMove(coords.x, coords.y);
-            applyCursorFromRenderer(renderer);
-        } else if (m.message == WM_LBUTTONDOWN) {
-            const coords = decodeMouseCoords(m.lParam);
-            renderer.handleMouseLeftClick(coords.x, coords.y);
-            applyCursorFromRenderer(renderer);
-        } else if (m.message == WM_LBUTTONUP) {
-            const coords = decodeMouseCoords(m.lParam);
-            renderer.handleMouseLeftRelease(coords.x, coords.y);
-            applyCursorFromRenderer(renderer);
-        } else if (m.message == WM_RBUTTONDOWN) {
-            const coords = decodeMouseCoords(m.lParam);
-            renderer.handleMouseRightClick(coords.x, coords.y);
-            applyCursorFromRenderer(renderer);
-        } else if (m.message == WM_RBUTTONUP) {
-            const coords = decodeMouseCoords(m.lParam);
-            renderer.handleMouseRightRelease(coords.x, coords.y);
-            applyCursorFromRenderer(renderer);
-        }
-        _ = TranslateMessage(&m);
-        _ = DispatchMessageW(&m);
-    }
-    return true;
 }
 
 /// renderSceneLoadingFrame renders Main output.
@@ -565,20 +413,6 @@ fn advanceSceneLoadingProgress(progress: ?*SceneLoadingProgress, phase: []const 
         state.completed_steps = @min(state.total_steps, state.completed_steps + 1);
         state.renderer.updateSceneLoadingOverlay(state.completed_steps, state.total_steps, phase);
         renderSceneLoadingFrame(state);
-    }
-}
-
-/// Updates registry/attachment state for register raw mouse input.
-/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
-fn registerRawMouseInput(hwnd: windows.HWND) !void {
-    const device = RAWINPUTDEVICE{
-        .usUsagePage = HID_USAGE_PAGE_GENERIC,
-        .usUsage = HID_USAGE_GENERIC_MOUSE,
-        .dwFlags = 0,
-        .hwndTarget = hwnd,
-    };
-    if (RegisterRawInputDevices(@ptrCast(&device), 1, @sizeOf(RAWINPUTDEVICE)) == 0) {
-        return error.RawInputRegistrationFailed;
     }
 }
 
@@ -674,9 +508,14 @@ pub fn main() !void {
 
     const initial_width = @as(i32, @intCast(config.WINDOW_WIDTH));
     const initial_height = @as(i32, @intCast(config.WINDOW_HEIGHT));
-    var window = try Window.init(config.WINDOW_TITLE, initial_width, initial_height);
+    var window = try Window.init(.{
+        .title = config.WINDOW_TITLE,
+        .width = initial_width,
+        .height = initial_height,
+        .visible = true,
+    });
     defer window.deinit(); // Guarantees the window is destroyed on exit.
-    try registerRawMouseInput(window.hwnd);
+    try platform_loop.registerRawMouseInput(window.hwnd);
     app_logger.infoSub("bootstrap", "window created {d}x{d}", .{ initial_width, initial_height });
 
     // Safely enforce a minimum size to prevent 0-dimension crashes
@@ -730,7 +569,7 @@ pub fn main() !void {
             scene_loading_progress = .{
                 .renderer = &renderer,
                 .running = &running,
-                .pump = pumpMessages,
+                .pump = pumpRendererEvents,
                 .total_steps = total_steps,
             };
             if (scene_loading_progress) |*progress| startSceneLoadingProgress(progress);
@@ -805,7 +644,13 @@ pub fn main() !void {
         }
 
         pub fn pump(session: *AppSession) bool {
-            return pumpMessages(session.renderer);
+            const Hooks = struct {
+                pub fn handleEvent(target: *AppSession, event: platform_loop.PlatformEvent) void {
+                    consumePlatformEvent(target, event);
+                }
+            };
+            const keep_running = platform_loop.pumpEvents(session, Hooks);
+            return keep_running and !session.close_requested;
         }
 
         pub fn update(session: *AppSession, frame_count: u32) !void {
@@ -819,7 +664,7 @@ pub fn main() !void {
                 app_logger.warn("phase13 selection sync failed: {}", .{err});
             };
 
-            const enter_is_down = session.renderer.keys_pressed.isDown(.enter) or main_module.isEnterDown();
+            const enter_is_down = session.renderer.keys_pressed.isDown(.enter);
             const now_ns = std.time.nanoTimestamp();
             const runtime_delta_ns = @max(@as(i128, 0), now_ns - session.last_runtime_update_ns);
             session.last_runtime_update_ns = now_ns;
@@ -868,8 +713,8 @@ pub fn main() !void {
                 main_module.applySceneRendererCommand(session.renderer, command);
             }
             session.phase13_runtime.clearRendererCommands();
-            main_module.syncFirstPersonMouseGrab(session.renderer, session.mouse_grabbed);
-            main_module.applyCursorFromRenderer(session.renderer);
+            syncFirstPersonMouseGrab(session.window, session.renderer, session.mouse_grabbed);
+            applyPlatformCursor(session.renderer);
             main_module.syncSceneMeshIfDirty(session.renderer, session.scene_resources, session.phase13_runtime);
 
             if (session.selected_scene_entity_pin.*) |pinned_entity| {
@@ -897,6 +742,7 @@ pub fn main() !void {
         }
 
         pub fn shouldRender(session: *AppSession) bool {
+            if (session.minimized or session.close_requested) return false;
             return session.renderer.shouldRenderFrame();
         }
 
@@ -906,7 +752,7 @@ pub fn main() !void {
 
         pub fn render(session: *AppSession) !void {
             session.phase13_runtime.beginPresent();
-            session.renderer.render3DMeshWithPump(&session.scene_resources.mesh, pumpMessages) catch |err| {
+            session.renderer.render3DMeshWithPump(&session.scene_resources.mesh, pumpRendererEvents) catch |err| {
                 session.phase13_runtime.endPresent();
                 return err;
             };
@@ -948,6 +794,7 @@ pub fn main() !void {
         .ttl_frames = effective_ttl_frames,
     };
     var app_session = AppSession{
+        .window = &window,
         .renderer = &renderer,
         .phase13_runtime = &phase13_runtime,
         .scene_resources = &scene_resources,
