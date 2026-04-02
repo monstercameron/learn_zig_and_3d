@@ -90,4 +90,8 @@ pub const VisibleScene = struct {
     pub fn append(self: *VisibleScene, packet: VisiblePacket) !void {
         try self.packets.append(self.allocator, packet);
     }
+
+    pub fn appendAssumeCapacity(self: *VisibleScene, packet: VisiblePacket) void {
+        self.packets.appendAssumeCapacity(packet);
+    }
 };

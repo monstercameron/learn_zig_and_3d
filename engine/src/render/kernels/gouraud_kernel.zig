@@ -9,6 +9,7 @@ pub const LightConfig = struct {
 };
 
 pub fn applyBatchLighting(batch: *direct_batch.PrimitiveBatch, config: LightConfig) void {
+    if (batch.commands.items.len == 0) return;
     const light_dir = normalize(config.light_dir);
     const packed_config = PackedLightConfig.init(light_dir, config);
     for (batch.commands.items) |*command| {
@@ -26,23 +27,17 @@ inline fn normalize(v: math.Vec3) math.Vec3 {
     const len_sq = v.x * v.x + v.y * v.y + v.z * v.z;
     if (len_sq <= 1e-8) return math.Vec3.new(0.0, 0.0, 1.0);
     if (@abs(len_sq - 1.0) <= 1e-4) return v;
-    const inv_len = 1.0 / std.math.sqrt(len_sq);
+    const inv_len = 1.0 / @sqrt(len_sq);
     return math.Vec3.new(v.x * inv_len, v.y * inv_len, v.z * inv_len);
 }
 
-inline fn shadeColor(base_color: u32, normal: math.Vec3, light_dir: math.Vec3, config: LightConfig) u32 {
-    const n = normalize(normal);
-    const diffuse = std.math.clamp(math.Vec3.dot(n, light_dir), 0.0, 1.0);
-    const intensity = std.math.clamp(config.ambient + config.diffuse * diffuse, 0.0, 1.0);
-    const factor: u32 = @intFromFloat(intensity * 255.0 + 0.5);
-    const a: u32 = base_color & 0xFF000000;
-    const r = (((base_color >> 16) & 0xFF) * factor + 127) / 255;
-    const g = (((base_color >> 8) & 0xFF) * factor + 127) / 255;
-    const b = (((base_color) & 0xFF) * factor + 127) / 255;
-    return a | (r << 16) | (g << 8) | b;
-}
-
 inline fn shadeTriangle(base_color: u32, normals: [3]math.Vec3, packed_config: PackedLightConfig) [3]u32 {
+    if (sameNormals(normals)) {
+        const factor = scalarShadeFactor(normalize(normals[0]), packed_config);
+        const color = packLitColor(base_color, factor);
+        return .{ color, color, color };
+    }
+
     const channels = unpackBaseColor(base_color);
     const Vec = @Vector(4, f32);
     const nx: Vec = .{ normals[0].x, normals[1].x, normals[2].x, 0.0 };
@@ -76,12 +71,29 @@ const PackedNormals = struct {
     z: @Vector(4, f32),
 };
 
+inline fn sameNormals(normals: [3]math.Vec3) bool {
+    return normals[0].x == normals[1].x and normals[1].x == normals[2].x and
+        normals[0].y == normals[1].y and normals[1].y == normals[2].y and
+        normals[0].z == normals[1].z and normals[1].z == normals[2].z;
+}
+
 inline fn normalizeTriangleNormals(nx: @Vector(4, f32), ny: @Vector(4, f32), nz: @Vector(4, f32)) PackedNormals {
     const Vec = @Vector(4, f32);
     const eps: Vec = @splat(1e-8);
     const one: Vec = @splat(1.0);
     const zero: Vec = @splat(0.0);
     const len_sq = nx * nx + ny * ny + nz * nz;
+    if (allUnitLength(len_sq)) {
+        return .{ .x = nx, .y = ny, .z = nz };
+    }
+    if (allNonZeroLength(len_sq)) {
+        const inv_len = one / @sqrt(len_sq);
+        return .{
+            .x = nx * inv_len,
+            .y = ny * inv_len,
+            .z = nz * inv_len,
+        };
+    }
     const safe_len_sq = @max(len_sq, eps);
     const inv_len = one / @sqrt(safe_len_sq);
     const zero_mask = len_sq <= eps;
@@ -99,6 +111,16 @@ inline fn normalizeTriangleNormals(nx: @Vector(4, f32), ny: @Vector(4, f32), nz:
     };
 }
 
+inline fn allUnitLength(len_sq: @Vector(4, f32)) bool {
+    return @abs(len_sq[0] - 1.0) <= 1e-4 and
+        @abs(len_sq[1] - 1.0) <= 1e-4 and
+        @abs(len_sq[2] - 1.0) <= 1e-4;
+}
+
+inline fn allNonZeroLength(len_sq: @Vector(4, f32)) bool {
+    return len_sq[0] > 1e-8 and len_sq[1] > 1e-8 and len_sq[2] > 1e-8;
+}
+
 inline fn triangleShadeFactors(nx: @Vector(4, f32), ny: @Vector(4, f32), nz: @Vector(4, f32), packed_config: PackedLightConfig) @Vector(4, u32) {
     const Vec = @Vector(4, f32);
     const zero: Vec = @splat(0.0);
@@ -109,6 +131,18 @@ inline fn triangleShadeFactors(nx: @Vector(4, f32), ny: @Vector(4, f32), nz: @Ve
     const diffuse = @min(@max(nx * packed_config.light_x + ny * packed_config.light_y + nz * packed_config.light_z, zero), one);
     const intensity = @min(@max(packed_config.ambient + packed_config.diffuse_scale * diffuse, zero), one);
     return @intFromFloat(intensity * factor_scale + bias);
+}
+
+inline fn scalarShadeFactor(normal: math.Vec3, packed_config: PackedLightConfig) u32 {
+    const diffuse = std.math.clamp(
+        normal.x * packed_config.light_x[0] +
+            normal.y * packed_config.light_y[0] +
+            normal.z * packed_config.light_z[0],
+        0.0,
+        1.0,
+    );
+    const intensity = std.math.clamp(packed_config.ambient[0] + packed_config.diffuse_scale[0] * diffuse, 0.0, 1.0);
+    return @intFromFloat(intensity * 255.0 + 0.5);
 }
 
 const BaseColor = struct {
@@ -125,6 +159,14 @@ inline fn unpackBaseColor(base_color: u32) BaseColor {
         .g = (base_color >> 8) & 0xFF,
         .b = base_color & 0xFF,
     };
+}
+
+inline fn packLitColor(base_color: u32, factor: u32) u32 {
+    const a: u32 = base_color & 0xFF000000;
+    const r = ((((base_color >> 16) & 0xFF) * factor + 127) * 257) >> 16;
+    const g = ((((base_color >> 8) & 0xFF) * factor + 127) * 257) >> 16;
+    const b = (((base_color & 0xFF) * factor + 127) * 257) >> 16;
+    return a | (r << 16) | (g << 8) | b;
 }
 
 inline fn shadeTriangleColors(base_color: BaseColor, factors: @Vector(4, u32)) [3]u32 {

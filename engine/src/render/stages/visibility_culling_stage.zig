@@ -16,6 +16,29 @@ pub fn execute(
     camera: direct_batch.Camera,
 ) !Result {
     out_visible.clearRetainingCapacity();
+    if (packets.items().len == 0) {
+        return .{
+            .visible_packet_count = 0,
+            .visible_meshlet_count = 0,
+        };
+    }
+
+    if (packets.items().len == 1 and packets.items()[0].source == .mesh) {
+        const packet = packets.items()[0];
+        try out_visible.ensurePacketCapacity(1);
+        out_visible.appendAssumeCapacity(.{ .mesh = .{
+            .layer = packet.layer,
+            .flags = packet.flags,
+            .transform = packet.transform,
+            .mesh = packet.source.mesh.mesh,
+            .material_override = packet.source.mesh.material_override,
+        } });
+        return .{
+            .visible_packet_count = 1,
+            .visible_meshlet_count = 0,
+        };
+    }
+
     try out_visible.ensurePacketCapacity(packets.items().len);
     var meshlet_capacity: usize = 0;
     for (packets.items()) |packet| {
@@ -23,7 +46,9 @@ pub fn execute(
             meshlet_capacity += packet.source.meshlets.mesh.meshlets.len;
         }
     }
-    try out_visible.ensureMeshletIndexCapacity(meshlet_capacity);
+    if (meshlet_capacity > 0) {
+        try out_visible.ensureMeshletIndexCapacity(meshlet_capacity);
+    }
     var visible_meshlet_count: usize = 0;
 
     for (packets.items()) |packet| {

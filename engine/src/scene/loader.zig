@@ -192,8 +192,9 @@ pub fn buildSceneDescription(
                 camera_position = scene_math.Vec3.new(pos[0], pos[1], pos[2]);
             }
             if (asset.cameraOrientation) |angles| {
-                camera_orientation_pitch = angles[0];
-                camera_orientation_yaw = angles[1];
+                const deg_to_rad = std.math.pi / 180.0;
+                camera_orientation_pitch = angles[0] * deg_to_rad;
+                camera_orientation_yaw = angles[1] * deg_to_rad;
             }
             if (asset.cameraFovDeg) |fov_deg| {
                 camera_fov_deg = fov_deg;

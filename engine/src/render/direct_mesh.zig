@@ -16,19 +16,55 @@ pub fn appendMeshTriangles(
     mesh: *const Mesh,
     instance: MeshInstance,
 ) !void {
+    if (mesh.triangles.len == 0) return;
+
     const identity_transform = isIdentityTransform(instance.transform);
-    for (mesh.triangles) |triangle| {
+    const vertices = mesh.vertices;
+    const vertex_normals = mesh.vertex_normals;
+    const triangles = mesh.triangles;
+    try batch.ensureCommandCapacity(batch.items().len + triangles.len);
+
+    if (instance.material_override) |material_override| {
+        if (identity_transform) {
+            for (triangles) |triangle| {
+                batch.appendTriangleLitAssumeCapacity(.{
+                    .a = vertices[triangle.v0],
+                    .b = vertices[triangle.v1],
+                    .c = vertices[triangle.v2],
+                }, material_override, .{
+                    vertex_normals[triangle.v0],
+                    vertex_normals[triangle.v1],
+                    vertex_normals[triangle.v2],
+                });
+            }
+            return;
+        }
+
+        for (triangles) |triangle| {
+            batch.appendTriangleLitAssumeCapacity(.{
+                .a = instance.transform.mulVec3(vertices[triangle.v0]),
+                .b = instance.transform.mulVec3(vertices[triangle.v1]),
+                .c = instance.transform.mulVec3(vertices[triangle.v2]),
+            }, material_override, .{
+                vertex_normals[triangle.v0],
+                vertex_normals[triangle.v1],
+                vertex_normals[triangle.v2],
+            });
+        }
+        return;
+    }
+
+    for (triangles) |triangle| {
         const world_triangle: direct_batch.WorldTriangle = .{
-            .a = if (identity_transform) mesh.vertices[triangle.v0] else instance.transform.mulVec3(mesh.vertices[triangle.v0]),
-            .b = if (identity_transform) mesh.vertices[triangle.v1] else instance.transform.mulVec3(mesh.vertices[triangle.v1]),
-            .c = if (identity_transform) mesh.vertices[triangle.v2] else instance.transform.mulVec3(mesh.vertices[triangle.v2]),
+            .a = if (identity_transform) vertices[triangle.v0] else instance.transform.mulVec3(vertices[triangle.v0]),
+            .b = if (identity_transform) vertices[triangle.v1] else instance.transform.mulVec3(vertices[triangle.v1]),
+            .c = if (identity_transform) vertices[triangle.v2] else instance.transform.mulVec3(vertices[triangle.v2]),
         };
-        const vertex_normals = [_]math.Vec3{
-            mesh.vertex_normals[triangle.v0],
-            mesh.vertex_normals[triangle.v1],
-            mesh.vertex_normals[triangle.v2],
-        };
-        try batch.appendTriangleLit(world_triangle, resolveTriangleMaterial(triangle, instance.material_override), vertex_normals);
+        batch.appendTriangleLitAssumeCapacity(world_triangle, resolveTriangleMaterial(triangle, null), .{
+            vertex_normals[triangle.v0],
+            vertex_normals[triangle.v1],
+            vertex_normals[triangle.v2],
+        });
     }
 }
 

@@ -227,7 +227,7 @@ pub const PreparedGouraudTriangle = struct {
     alpha: u32,
     is_degenerate: bool,
     channel_steps: GouraudChannelSteps,
-    row_rgb: @Vector(4, i32),
+    row_rgb: @Vector(4, i64),
 };
 
 pub inline fn prepareGouraudTriangle(triangle: Triangle2i, vertex_colors: [3]u32) PreparedGouraudTriangle {
@@ -280,8 +280,8 @@ pub inline fn prepareGouraudTriangle(triangle: Triangle2i, vertex_colors: [3]u32
             .{ .x = @splat(0), .y = @splat(0) }
         else
             .{
-                .x = normalizeGouraudVectorQ16(numer_steps.x * @as(@Vector(4, i32), @splat(sign)), area_abs),
-                .y = normalizeGouraudVectorQ16(numer_steps.y * @as(@Vector(4, i32), @splat(sign)), area_abs),
+                .x = normalizeGouraudVectorQ16(numer_steps.x * @as(@Vector(4, i64), @splat(sign)), area_abs),
+                .y = normalizeGouraudVectorQ16(numer_steps.y * @as(@Vector(4, i64), @splat(sign)), area_abs),
             },
         .row_rgb = if (is_degenerate)
             @splat(0)
@@ -312,7 +312,9 @@ pub fn drawPreparedGouraudTrianglePrepared(target: FrameTarget, triangle: Triang
     const row_w0: i32 = prepared.base_w0 + offset_x * prepared.step_w0_x + offset_y * prepared.step_w0_y;
     const row_w1: i32 = prepared.base_w1 + offset_x * prepared.step_w1_x + offset_y * prepared.step_w1_y;
     const row_w2: i32 = prepared.base_w2 + offset_x * prepared.step_w2_x + offset_y * prepared.step_w2_y;
-    const row_rgb = prepared.row_rgb + @as(@Vector(4, i32), @splat(offset_x)) * prepared.channel_steps.x + @as(@Vector(4, i32), @splat(offset_y)) * prepared.channel_steps.y;
+    const row_rgb = prepared.row_rgb +
+        @as(@Vector(4, i64), @splat(offset_x)) * prepared.channel_steps.x +
+        @as(@Vector(4, i64), @splat(offset_y)) * prepared.channel_steps.y;
     drawPreparedGouraudTriangleInner(target, prepared, depth_value, min_x, max_x, min_y, max_y, row_w0, row_w1, row_w2, row_rgb);
 }
 
@@ -343,7 +345,9 @@ fn drawPreparedGouraudTriangleBlockPrepared(target: FrameTarget, triangle: Trian
     const row_w0: i32 = prepared.base_w0 + offset_x * prepared.step_w0_x + offset_y * prepared.step_w0_y;
     const row_w1: i32 = prepared.base_w1 + offset_x * prepared.step_w1_x + offset_y * prepared.step_w1_y;
     const row_w2: i32 = prepared.base_w2 + offset_x * prepared.step_w2_x + offset_y * prepared.step_w2_y;
-    const row_rgb = prepared.row_rgb + @as(@Vector(4, i32), @splat(offset_x)) * prepared.channel_steps.x + @as(@Vector(4, i32), @splat(offset_y)) * prepared.channel_steps.y;
+    const row_rgb = prepared.row_rgb +
+        @as(@Vector(4, i64), @splat(offset_x)) * prepared.channel_steps.x +
+        @as(@Vector(4, i64), @splat(offset_y)) * prepared.channel_steps.y;
     drawPreparedGouraudTriangleBlockInner(target, prepared, depth_value, min_x, max_x, min_y, max_y, row_w0, row_w1, row_w2, row_rgb);
 }
 
@@ -358,7 +362,7 @@ fn drawPreparedGouraudTriangleBlockInner(
     row_w0_init: i32,
     row_w1_init: i32,
     row_w2_init: i32,
-    row_rgb_init: @Vector(4, i32),
+    row_rgb_init: @Vector(4, i64),
 ) void {
     const stride: usize = @intCast(target.width);
     const alpha = prepared.alpha;
@@ -370,7 +374,7 @@ fn drawPreparedGouraudTriangleBlockInner(
     const step_w1_y = prepared.step_w1_y;
     const step_w2_y = prepared.step_w2_y;
     const step_rgb = prepared.channel_steps.x;
-    const step_rgb8 = step_rgb * @as(@Vector(4, i32), @splat(8));
+    const step_rgb8 = step_rgb * @as(@Vector(4, i64), @splat(8));
     const burst_offsets: @Vector(8, i32) = .{ 0, 1, 2, 3, 4, 5, 6, 7 };
     var y = min_y;
     var row_w0 = row_w0_init;
@@ -537,7 +541,7 @@ fn drawPreparedGouraudTriangleInner(
     row_w0_init: i32,
     row_w1_init: i32,
     row_w2_init: i32,
-    row_rgb_init: @Vector(4, i32),
+    row_rgb_init: @Vector(4, i64),
 ) void {
     const stride: usize = @intCast(target.width);
     const alpha = prepared.alpha;
@@ -652,22 +656,22 @@ fn drawPreparedGouraudTriangleInner(
 
 const GouraudColorComponents = struct {
     alpha: u32,
-    rgb0: @Vector(4, i32),
-    rgb1: @Vector(4, i32),
-    rgb2: @Vector(4, i32),
+    rgb0: @Vector(4, i64),
+    rgb1: @Vector(4, i64),
+    rgb2: @Vector(4, i64),
 };
 
 const GouraudChannelSteps = struct {
-    x: @Vector(4, i32),
-    y: @Vector(4, i32),
+    x: @Vector(4, i64),
+    y: @Vector(4, i64),
 };
 
 inline fn unpackGouraudColors(colors: [3]u32) GouraudColorComponents {
     return .{
         .alpha = (colors[0] >> 24) & 0xFF,
-        .rgb0 = .{ @as(i32, @intCast((colors[0] >> 16) & 0xFF)), @as(i32, @intCast((colors[0] >> 8) & 0xFF)), @as(i32, @intCast(colors[0] & 0xFF)), 0 },
-        .rgb1 = .{ @as(i32, @intCast((colors[1] >> 16) & 0xFF)), @as(i32, @intCast((colors[1] >> 8) & 0xFF)), @as(i32, @intCast(colors[1] & 0xFF)), 0 },
-        .rgb2 = .{ @as(i32, @intCast((colors[2] >> 16) & 0xFF)), @as(i32, @intCast((colors[2] >> 8) & 0xFF)), @as(i32, @intCast(colors[2] & 0xFF)), 0 },
+        .rgb0 = .{ @as(i64, @intCast((colors[0] >> 16) & 0xFF)), @as(i64, @intCast((colors[0] >> 8) & 0xFF)), @as(i64, @intCast(colors[0] & 0xFF)), 0 },
+        .rgb1 = .{ @as(i64, @intCast((colors[1] >> 16) & 0xFF)), @as(i64, @intCast((colors[1] >> 8) & 0xFF)), @as(i64, @intCast(colors[1] & 0xFF)), 0 },
+        .rgb2 = .{ @as(i64, @intCast((colors[2] >> 16) & 0xFF)), @as(i64, @intCast((colors[2] >> 8) & 0xFF)), @as(i64, @intCast(colors[2] & 0xFF)), 0 },
     };
 }
 
@@ -679,24 +683,21 @@ inline fn colorChannelSteps(colors: GouraudColorComponents, triangle: Triangle2i
     const w1_y: i32 = @intCast(edgeStepY(triangle.c, triangle.a));
     const w2_y: i32 = @intCast(edgeStepY(triangle.a, triangle.b));
     return .{
-        .x = colors.rgb0 * @as(@Vector(4, i32), @splat(w0_x)) + colors.rgb1 * @as(@Vector(4, i32), @splat(w1_x)) + colors.rgb2 * @as(@Vector(4, i32), @splat(w2_x)),
-        .y = colors.rgb0 * @as(@Vector(4, i32), @splat(w0_y)) + colors.rgb1 * @as(@Vector(4, i32), @splat(w1_y)) + colors.rgb2 * @as(@Vector(4, i32), @splat(w2_y)),
+        .x = colors.rgb0 * @as(@Vector(4, i64), @splat(w0_x)) + colors.rgb1 * @as(@Vector(4, i64), @splat(w1_x)) + colors.rgb2 * @as(@Vector(4, i64), @splat(w2_x)),
+        .y = colors.rgb0 * @as(@Vector(4, i64), @splat(w0_y)) + colors.rgb1 * @as(@Vector(4, i64), @splat(w1_y)) + colors.rgb2 * @as(@Vector(4, i64), @splat(w2_y)),
     };
 }
 
-inline fn gouraudRowColor(colors: GouraudColorComponents, w0: i64, w1: i64, w2: i64) @Vector(4, i32) {
-    const vw0: i32 = @intCast(w0);
-    const vw1: i32 = @intCast(w1);
-    const vw2: i32 = @intCast(w2);
-    return colors.rgb0 * @as(@Vector(4, i32), @splat(vw0)) + colors.rgb1 * @as(@Vector(4, i32), @splat(vw1)) + colors.rgb2 * @as(@Vector(4, i32), @splat(vw2));
+inline fn gouraudRowColor(colors: GouraudColorComponents, w0: i64, w1: i64, w2: i64) @Vector(4, i64) {
+    return colors.rgb0 * @as(@Vector(4, i64), @splat(w0)) + colors.rgb1 * @as(@Vector(4, i64), @splat(w1)) + colors.rgb2 * @as(@Vector(4, i64), @splat(w2));
 }
 
-inline fn packInterpolatedColorQ16(alpha: u32, rgb_q16: @Vector(4, i32)) u32 {
+inline fn packInterpolatedColorQ16(alpha: u32, rgb_q16: @Vector(4, i64)) u32 {
     const rgb = normalizedChannelsQ16(rgb_q16);
     return (alpha << 24) | (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
 }
 
-inline fn normalizeGouraudVectorQ16(value_num: @Vector(4, i32), area_abs: i64) @Vector(4, i32) {
+inline fn normalizeGouraudVectorQ16(value_num: @Vector(4, i64), area_abs: i64) @Vector(4, i64) {
     return .{
         divideQ16(value_num[0], area_abs),
         divideQ16(value_num[1], area_abs),
@@ -705,16 +706,16 @@ inline fn normalizeGouraudVectorQ16(value_num: @Vector(4, i32), area_abs: i64) @
     };
 }
 
-inline fn divideQ16(value_num: i32, area_abs: i64) i32 {
-    const wide_num = @as(i64, value_num) << 16;
+inline fn divideQ16(value_num: i64, area_abs: i64) i64 {
+    const wide_num = value_num << 16;
     const bias = @divTrunc(area_abs, 2);
-    return @intCast(@divTrunc(if (wide_num >= 0) wide_num + bias else wide_num - bias, area_abs));
+    return @divTrunc(if (wide_num >= 0) wide_num + bias else wide_num - bias, area_abs);
 }
 
-inline fn normalizedChannelsQ16(value_q16: @Vector(4, i32)) @Vector(4, u32) {
-    const scaled = value_q16 >> @as(@Vector(4, i32), @splat(16));
-    const zero: @Vector(4, i32) = @splat(0);
-    const max_channel: @Vector(4, i32) = @splat(255);
+inline fn normalizedChannelsQ16(value_q16: @Vector(4, i64)) @Vector(4, u32) {
+    const scaled = value_q16 >> @as(@Vector(4, i64), @splat(16));
+    const zero: @Vector(4, i64) = @splat(0);
+    const max_channel: @Vector(4, i64) = @splat(255);
     return @intCast(@min(@max(scaled, zero), max_channel));
 }
 

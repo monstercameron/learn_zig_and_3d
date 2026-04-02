@@ -66,6 +66,10 @@ pub const PacketList = struct {
     pub fn append(self: *PacketList, packet: WorldPacket) !void {
         try self.packets.append(self.allocator, packet);
     }
+
+    pub fn appendAssumeCapacity(self: *PacketList, packet: WorldPacket) void {
+        self.packets.appendAssumeCapacity(packet);
+    }
 };
 
 test "scene packet list can append primitive and mesh sources" {

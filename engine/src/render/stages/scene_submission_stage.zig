@@ -166,6 +166,25 @@ pub fn execute(
     return .{ .packet_count = packets.items().len };
 }
 
+pub fn executeMeshScene(
+    packets: *direct_scene_packets.PacketList,
+    mesh: *const direct_mesh.Mesh,
+    transform: math.Mat4,
+    material_override: ?direct_batch.SurfaceMaterial,
+) !Result {
+    packets.clearRetainingCapacity();
+    if (mesh.triangles.len == 0) return .{ .packet_count = 0 };
+    try packets.ensureCapacity(1);
+    packets.appendAssumeCapacity(.{
+        .transform = transform,
+        .source = .{ .mesh = .{
+            .mesh = mesh,
+            .material_override = material_override,
+        } },
+    });
+    return .{ .packet_count = packets.items().len };
+}
+
 test "scene submission stage builds expected showcase packets" {
     var packets = direct_scene_packets.PacketList.init(std.testing.allocator);
     defer packets.deinit();

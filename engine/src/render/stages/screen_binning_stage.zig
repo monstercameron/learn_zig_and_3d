@@ -129,7 +129,9 @@ pub fn execute(
         }
     }
 
-    deterministicSortTileRefs(tile_command_indices.items, tile_ranges.items, draw_list.items());
+    if (!sortKeysAlreadyOrdered(draw_list.items())) {
+        deterministicSortTileRefs(tile_command_indices.items, tile_ranges.items, draw_list.items());
+    }
 
     const dirty_rect = if (touched_tiles == 0)
         null
@@ -185,6 +187,16 @@ fn touchedTilesEstimate(counts: []const usize) usize {
         if (count != 0) total += 1;
     }
     return total;
+}
+
+fn sortKeysAlreadyOrdered(commands: []const direct_packets.DrawPacket) bool {
+    if (commands.len <= 1) return true;
+    var previous = commands[0].sort_key;
+    for (commands[1..]) |command| {
+        if (command.sort_key < previous) return false;
+        previous = command.sort_key;
+    }
+    return true;
 }
 
 fn lessThanCommandRef(commands: []const direct_packets.DrawPacket, lhs: usize, rhs: usize) bool {

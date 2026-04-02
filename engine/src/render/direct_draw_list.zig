@@ -56,10 +56,91 @@ pub const DrawList = struct {
         return self.prepared_gouraud.items;
     }
 
+    pub fn disablePreparedGouraud(self: *DrawList) void {
+        @memset(self.prepared_gouraud.items, null);
+        for (self.commands.items) |*packet| {
+            if (packet.payload == .triangle) {
+                packet.payload.triangle.gouraud_setup = null;
+            }
+        }
+    }
+
     pub fn append(self: *DrawList, packet: direct_packets.DrawPacket) !void {
         try self.commands.append(self.allocator, packet);
         try self.command_bounds.append(self.allocator, direct_primitives.packetBounds(packet));
         try self.prepared_gouraud.append(self.allocator, cachePreparedGouraud(packet));
+    }
+
+    pub fn appendProjectedTriangle(
+        self: *DrawList,
+        sort_key: u64,
+        material: direct_packets.SurfaceMaterial,
+        triangle: direct_primitives.Triangle2i,
+        vertex_colors: ?[3]u32,
+        gouraud_setup: ?direct_primitives.PreparedGouraudTriangle,
+    ) !void {
+        const packet: direct_packets.DrawPacket = .{
+            .sort_key = sort_key,
+            .layer = .geometry,
+            .flags = .{},
+            .material = .{ .surface = material },
+            .payload = .{ .triangle = .{
+                .triangle = triangle,
+                .vertex_colors = vertex_colors,
+                .gouraud_setup = gouraud_setup,
+            } },
+        };
+        try self.commands.append(self.allocator, packet);
+        try self.command_bounds.append(self.allocator, .{
+            .min_x = @min(triangle.a.x, @min(triangle.b.x, triangle.c.x)),
+            .min_y = @min(triangle.a.y, @min(triangle.b.y, triangle.c.y)),
+            .max_x = @max(triangle.a.x, @max(triangle.b.x, triangle.c.x)),
+            .max_y = @max(triangle.a.y, @max(triangle.b.y, triangle.c.y)),
+        });
+        try self.prepared_gouraud.append(self.allocator, if (gouraud_setup != null and material.outline_color == null)
+            .{
+                .triangle = triangle,
+                .prepared = gouraud_setup.?,
+                .depth_value = material.depth,
+            }
+        else
+            null);
+    }
+
+    pub fn appendProjectedTriangleAssumeCapacity(
+        self: *DrawList,
+        sort_key: u64,
+        material: direct_packets.SurfaceMaterial,
+        triangle: direct_primitives.Triangle2i,
+        vertex_colors: ?[3]u32,
+        gouraud_setup: ?direct_primitives.PreparedGouraudTriangle,
+    ) void {
+        const packet: direct_packets.DrawPacket = .{
+            .sort_key = sort_key,
+            .layer = .geometry,
+            .flags = .{},
+            .material = .{ .surface = material },
+            .payload = .{ .triangle = .{
+                .triangle = triangle,
+                .vertex_colors = vertex_colors,
+                .gouraud_setup = gouraud_setup,
+            } },
+        };
+        self.commands.appendAssumeCapacity(packet);
+        self.command_bounds.appendAssumeCapacity(.{
+            .min_x = @min(triangle.a.x, @min(triangle.b.x, triangle.c.x)),
+            .min_y = @min(triangle.a.y, @min(triangle.b.y, triangle.c.y)),
+            .max_x = @max(triangle.a.x, @max(triangle.b.x, triangle.c.x)),
+            .max_y = @max(triangle.a.y, @max(triangle.b.y, triangle.c.y)),
+        });
+        self.prepared_gouraud.appendAssumeCapacity(if (gouraud_setup != null and material.outline_color == null)
+            .{
+                .triangle = triangle,
+                .prepared = gouraud_setup.?,
+                .depth_value = material.depth,
+            }
+        else
+            null);
     }
 
     pub fn appendLine(self: *DrawList, line: direct_primitives.Line2i, style: direct_primitives.LineStyle) !void {

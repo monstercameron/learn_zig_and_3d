@@ -2,6 +2,61 @@
 
 ## 2026-04-02
 
+### ECS Suzanne Staged Mesh Pipeline
+
+- extracted the ECS tiled scene renderer into `engine/src/render/backends/scene_tiled_backend.zig`
+- removed the old renderer fallback where normal scene rendering could drop into the direct showcase path
+- routed the ECS Suzanne scene through the staged mesh pipeline instead of the legacy meshlet scene path:
+  - stage 1 `frame_setup`
+  - stage 2 `scene_submission`
+  - stage 3 `visibility_culling`
+  - stage 4 `primitive_expansion`
+  - stage 5 `screen_binning`
+  - stage 6 `rasterization`
+  - stage 7 `shading`
+  - stage 8 `composition`
+  - stage 9 `post_process`
+  - stage 10 present after scene render
+- added mesh-scene submission support in `engine/src/render/stages/scene_submission_stage.zig` so ECS scenes can feed the staged packet path directly
+- fixed scene camera loading in `engine/src/scene/loader.zig` by converting authored `cameraOrientation` degrees to renderer radians
+- removed the ground plane from `assets/configs/scenes/suzanne_behavior.scene.json`, moved Suzanne closer to the camera, and simplified the scene to a Suzanne-only ECS scene
+- simplified `engine/src/scene/scripts/suzanne_spin.zig` so the ECS behavior now drives yaw-only horizontal rotation
+- tightened ECS scene/runtime propagation in `engine/src/scene/main.zig` and `engine/src/main.zig` so scene transforms and scripted motion reach render extraction reliably
+
+### Scene-Path Call Stack Optimization
+
+- traced the active frame path from `engine/src/render/renderer.zig` `render3DMeshWithPump(...)` into the staged ECS scene backend
+- removed obsolete legacy `mesh_work` generation and meshlet-shadow prep from the normal staged ECS scene path in `engine/src/render/renderer.zig`
+- marked the extracted scene backend as not consuming legacy mesh work in `engine/src/render/backends/scene_tiled_backend.zig`
+- updated scene dispatch logging in `engine/src/render/renderer.zig` to use real mesh triangle and meshlet counts instead of the unused legacy cache
+- added a single-mesh visibility fast path in `engine/src/render/stages/visibility_culling_stage.zig`
+- added assume-capacity fast paths for:
+  - scene packet append in `engine/src/render/direct_scene_packets.zig`
+  - visible-scene append in `engine/src/render/visible_scene.zig`
+  - single-mesh submission in `engine/src/render/stages/scene_submission_stage.zig`
+  - mesh triangle expansion in `engine/src/render/direct_mesh.zig`
+  - triangle batch append in `engine/src/render/direct_batch.zig`
+  - triangle draw-list append in `engine/src/render/direct_draw_list.zig`
+- skipped tile-ref sorting in `engine/src/render/stages/screen_binning_stage.zig` when draw packets are already in monotonic sort-key order
+- kept the staged Suzanne mesh route on the triangle-oriented path, with measured steady-state scene timings in the rough range:
+  - `clear ~0.07-0.14 ms`
+  - `build ~0.028-0.049 ms`
+  - `compile ~0.076-0.139 ms`
+  - `bin ~0.023-0.049 ms`
+  - `raster ~0.77-1.29 ms`
+  - `shade ~0.15-0.24 ms`
+
+### Gouraud On The Staged Mesh Scene Path
+
+- enabled Gouraud batch lighting for staged mesh scenes in `engine/src/render/backends/direct_backend.zig` by applying `engine/src/render/kernels/gouraud_kernel.zig` before draw-list compile on `renderSceneMesh(...)`
+- added a backend test proving the staged mesh path now emits triangle `vertex_colors` and prepared Gouraud setup before raster
+- widened prepared Gouraud color interpolation in `engine/src/render/direct_primitives.zig` from 32-bit to 64-bit fixed-point vector state so the Suzanne staged path no longer overflows in the prepared Gouraud fast path
+- kept the prepared Gouraud raster fast path active on the staged Suzanne route instead of disabling Gouraud for safety
+- after enabling Gouraud on the staged Suzanne mesh path, measured scene timings shifted roughly to:
+  - `compile ~0.19-0.28 ms`
+  - `raster ~0.94-1.20 ms`
+  - `shade ~0.16-0.25 ms`
+
 ### Gouraud Hot-Path Optimization
 
 - added ECS-side direct timing logs in `engine/src/main.zig` so steady-state `clear`, `raster`, `shade`, and tile counts are visible on the Suzanne scene

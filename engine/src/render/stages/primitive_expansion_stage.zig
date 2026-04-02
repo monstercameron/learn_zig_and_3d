@@ -17,6 +17,18 @@ pub fn execute(
     job_sys: ?*JobSystem,
 ) !Result {
     batch.clearRetainingCapacity();
+    if (scene.items().len == 0) return .{ .primitive_count = 0 };
+
+    if (scene.items().len == 1 and scene.items()[0] == .mesh) {
+        const payload = scene.items()[0].mesh;
+        try batch.ensureCommandCapacity(payload.mesh.triangles.len);
+        try direct_mesh.appendMeshTriangles(batch, payload.mesh, .{
+            .transform = payload.transform,
+            .material_override = payload.material_override,
+        });
+        return .{ .primitive_count = batch.items().len };
+    }
+
     try batch.ensureCommandCapacity(estimatePrimitiveCapacity(scene));
     for (scene.items()) |packet| {
         switch (packet) {

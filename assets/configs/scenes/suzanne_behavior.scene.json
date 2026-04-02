@@ -4,8 +4,8 @@
     {
       "type": "camera",
       "cameraName": "suzanne_behavior_cam",
-      "cameraPosition": [0.0, 1.6, -8.5],
-      "cameraOrientation": [0.0, 0.0]
+      "cameraPosition": [0.0, 2.6, -12.5],
+      "cameraOrientation": [-8.0, 0.0]
     },
     {
       "type": "runtime",
@@ -33,22 +33,12 @@
     },
     {
       "type": "model",
-      "modelType": "obj",
-      "modelPath": "assets/models/box.obj",
-      "position": [0.0, -0.08, 0.0],
-      "rotationDeg": [0.0, 0.0, 0.0],
-      "scale": [12.0, 0.16, 12.0],
-      "physicsMotion": "static",
-      "textures": []
-    },
-    {
-      "type": "model",
       "id": "suzanne_actor",
       "modelType": "obj",
       "modelPath": "assets/models/suzanne.obj",
-      "position": [0.0, 1.15, 0.0],
-      "rotationDeg": [0.0, 0.0, 0.0],
-      "scale": [1.55, 1.55, 1.55],
+      "position": [0.0, 1.15, -6.0],
+      "rotationDeg": [16.0, 58.0, -12.0],
+      "scale": [1.15, 1.15, 1.15],
       "physicsMotion": "static",
       "scripts": [
         {

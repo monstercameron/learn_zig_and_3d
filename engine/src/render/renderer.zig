@@ -91,6 +91,7 @@ const frame_resources = @import("frame_resources.zig");
 const frame_setup_stage = @import("stages/frame_setup_stage.zig");
 const presentation_stage = @import("stages/presentation_stage.zig");
 const direct_backend = @import("backends/direct_backend.zig");
+const scene_tiled_backend = @import("backends/scene_tiled_backend.zig");
 const present_d3d11 = @import("present/present_d3d11.zig");
 const present_state = @import("present_state.zig");
 const TrianglePacket = WorkTypes.TrianglePacket;
@@ -1265,7 +1266,7 @@ const CompositeJobContext = struct {
     scene_normal: ?[]math.Vec3,
     scene_surface: ?[]TileRenderer.SurfaceHandle,
 
-    fn run(ctx_ptr: *anyopaque) void {
+    pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *CompositeJobContext = @ptrCast(@alignCast(ctx_ptr));
         TileRenderer.compositeTileToScreen(ctx.tile, ctx.tile_buffer, ctx.bitmap, ctx.scene_depth, ctx.scene_camera, ctx.scene_normal, ctx.scene_surface);
     }
@@ -1568,7 +1569,7 @@ pub const Renderer = struct {
         }
     }
 
-    fn syncLightCameraSoA(self: *Renderer, basis_right: math.Vec3, basis_up: math.Vec3, basis_forward: math.Vec3) void {
+    pub fn syncLightCameraSoA(self: *Renderer, basis_right: math.Vec3, basis_up: math.Vec3, basis_forward: math.Vec3) void {
         for (self.lights.items, 0..) |_, i| {
             const dir_x = self.light_soa.dir_x[i];
             const dir_y = self.light_soa.dir_y[i];
@@ -2052,7 +2053,7 @@ pub const Renderer = struct {
             .tile_buffers = tile_buffers,
             .single_texture_binding = .{null},
             .textures = &.{},
-            .use_tiled_rendering = false,
+            .use_tiled_rendering = true,
             .job_system = job_system,
             .tile_jobs_buffer = tile_jobs_buffer,
             .shadow_chunk_jobs_buffer = shadow_chunk_jobs_buffer,
@@ -2510,7 +2511,7 @@ pub const Renderer = struct {
         }
 
         /// renderTileJob renders Renderer output.
-        fn renderTileJob(ctx: *anyopaque) void {
+        pub fn renderTileJob(ctx: *anyopaque) void {
             const _z_renderTileJob = profiler.zone("renderTileJob");
             defer if (_z_renderTileJob) |z| z.end();
             const job: *TileRenderJob = @ptrCast(@alignCast(ctx));
@@ -2576,7 +2577,7 @@ pub const Renderer = struct {
 
         /// Applies meshlet shadows.
         /// Consumes the provided context pointer and updates owned state through explicit, localized side effects.
-        fn applyMeshletShadows(ctx: *anyopaque) void {
+        pub fn applyMeshletShadows(ctx: *anyopaque) void {
             const job: *TileRenderJob = @ptrCast(@alignCast(ctx));
             if (job.sys_shadows) |sys| {
                 const _z_meshletShadowTile = profiler.zone("meshletShadowTile");
@@ -5224,7 +5225,6 @@ pub const Renderer = struct {
         const _zone = profiler.zone("Renderer.render");
         defer if (_zone) |z| z.end();
 
-        @memset(self.bitmap.pixels, 0xFF0B1220);
         self.resetRenderPassTimings();
 
         const delta_seconds = self.beginFrame();
@@ -5310,59 +5310,64 @@ pub const Renderer = struct {
             .jitter_y = taa_jitter.y,
         };
         const taa_view = TemporalAAViewState.init(self.camera_position, right, up, forward, raster_projection);
+        const legacy_mesh_work_required = scene_tiled_backend.usesLegacyMeshWork();
+        var empty_mesh_work = MeshWork.init();
+        const mesh_work = blk: {
+            if (!legacy_mesh_work_required) break :blk &empty_mesh_work;
 
-        var cache = &self.mesh_work_cache;
-        try cache.ensureCapacity(self.allocator, mesh.vertices.len);
-        if (config.POST_TAA_ENABLED) try self.ensureTemporalMeshVertexCapacity(mesh.vertices.len);
+            var cache = &self.mesh_work_cache;
+            try cache.ensureCapacity(self.allocator, mesh.vertices.len);
 
-        // Recompute mesh work only when camera/light/projection dependencies diverge from cached keys.
-        const needs_update = cache.needsUpdate(
-            mesh,
-            self.camera_position,
-            right,
-            up,
-            forward,
-            light_dir,
-            cache_projection,
-        );
-        if (needs_update) {
-            const mesh_work_start = std.time.nanoTimestamp();
-            meshlet_logger.debugSub(
-                "work",
-                "refreshing mesh work cache (vertices={} triangles={})",
-                .{ mesh.vertices.len, mesh.triangles.len },
-            );
-            cache.beginUpdate();
-            try self.generateMeshWork(
+            // Recompute mesh work only when camera/light/projection dependencies diverge from cached keys.
+            const needs_update = cache.needsUpdate(
                 mesh,
-                cache.projected,
-                cache.transformed_vertices,
-                cache.vertex_ready,
+                self.camera_position,
                 right,
                 up,
                 forward,
-                cache_projection,
-                &cache.work,
                 light_dir,
+                cache_projection,
             );
-            // Capture the exact dependency snapshot that will be checked on the next frame.
-            cache.finalizeUpdate(mesh, self.camera_position, right, up, forward, light_dir, cache_projection);
-            self.recordRenderPassTiming("mesh_work_update", mesh_work_start);
-        } else {
-            meshlet_logger.debugSub("work", "reusing cached mesh work", .{});
-        }
+            if (needs_update) {
+                const mesh_work_start = std.time.nanoTimestamp();
+                meshlet_logger.debugSub(
+                    "work",
+                    "refreshing mesh work cache (vertices={} triangles={})",
+                    .{ mesh.vertices.len, mesh.triangles.len },
+                );
+                cache.beginUpdate();
+                try self.generateMeshWork(
+                    mesh,
+                    cache.projected,
+                    cache.transformed_vertices,
+                    cache.vertex_ready,
+                    right,
+                    up,
+                    forward,
+                    cache_projection,
+                    &cache.work,
+                    light_dir,
+                );
+                // Capture the exact dependency snapshot that will be checked on the next frame.
+                cache.finalizeUpdate(mesh, self.camera_position, right, up, forward, light_dir, cache_projection);
+                self.recordRenderPassTiming("mesh_work_update", mesh_work_start);
+            } else {
+                meshlet_logger.debugSub("work", "reusing cached mesh work", .{});
+            }
 
-        if (config.MESHLET_SHADOWS_ENABLED and mesh.meshlets.len > 0) {
-            _ = try self.sys_shadows.ensureBLAS(mesh);
-            var instances = [_]math.Mat4{math.Mat4.identity()};
-            try self.sys_shadows.ensureTLAS(&instances);
-        }
+            if (config.MESHLET_SHADOWS_ENABLED and mesh.meshlets.len > 0) {
+                _ = try self.sys_shadows.ensureBLAS(mesh);
+                var instances = [_]math.Mat4{math.Mat4.identity()};
+                try self.sys_shadows.ensureTLAS(&instances);
+            }
 
-        if (builtin.mode == .Debug and cache.full_vertex_cache_valid and cache.transformed_vertices.len == mesh.vertices.len) {
-            self.debugGroundPlane(mesh, cache.transformed_vertices, view_rotation);
-        }
+            if (builtin.mode == .Debug and cache.full_vertex_cache_valid and cache.transformed_vertices.len == mesh.vertices.len) {
+                self.debugGroundPlane(mesh, cache.transformed_vertices, view_rotation);
+            }
 
-        const mesh_work = &cache.work;
+            break :blk &cache.work;
+        };
+        if (config.POST_TAA_ENABLED) try self.ensureTemporalMeshVertexCapacity(mesh.vertices.len);
         const shadow_map_light_count = if (config.POST_SHADOW_ENABLED)
             self.countLightsWithShadowMode(.shadow_map)
         else
@@ -5409,7 +5414,7 @@ pub const Renderer = struct {
         const compiled_frame_plan = frame_pipeline.compileCachedFramePlan(&self.cached_frame_plan, .{
             .has_shadow_map_lights = shadow_map_light_count > 0,
             .backend = if (using_tiled_backend) .tiled else .direct,
-            .include_post_process = using_tiled_backend,
+            .include_post_process = false,
             .include_present = true,
         });
         const frame_exec_ctx = FrameExecutionContext{
@@ -6405,10 +6410,11 @@ pub const Renderer = struct {
         mesh_work: *const MeshWork,
     ) !void {
         const scene_pass_start = std.time.nanoTimestamp();
-        const tri_count = mesh_work.triangleSlice().len;
+        const tri_count = if (scene_tiled_backend.usesLegacyMeshWork()) mesh_work.triangleSlice().len else mesh.triangles.len;
+        const meshlet_count = if (scene_tiled_backend.usesLegacyMeshWork()) mesh_work.meshlet_len else mesh.meshlets.len;
         switch (backend) {
             .tiled => {
-                pipeline_logger.debugSub("dispatch", "rendering tiled path triangles={} meshlets={}", .{ tri_count, mesh_work.*.meshlet_len });
+                pipeline_logger.debugSub("dispatch", "rendering tiled path triangles={} meshlets={}", .{ tri_count, meshlet_count });
                 const shadow_pass_elapsed_ns = try self.renderTiled(mesh, view_rotation, light_dir, pump, raster_projection, mesh_work);
                 const scene_pass_elapsed_ns = std.time.nanoTimestamp() - scene_pass_start;
                 self.recordRenderPassDuration("meshlet_tiled", scene_pass_elapsed_ns - @as(i128, @intCast(shadow_pass_elapsed_ns)));
@@ -6417,7 +6423,7 @@ pub const Renderer = struct {
                 }
             },
             .direct => {
-                pipeline_logger.debugSub("dispatch", "rendering direct path triangles={} meshlets={}", .{ tri_count, mesh_work.*.meshlet_len });
+                pipeline_logger.debugSub("dispatch", "rendering direct path triangles={} meshlets={}", .{ tri_count, meshlet_count });
                 try self.renderDirect(mesh, view_rotation, light_dir, raster_projection, mesh_work);
                 self.recordRenderPassTiming("meshlet_direct", scene_pass_start);
             },
@@ -7332,7 +7338,7 @@ pub const Renderer = struct {
         return (bound_x + bound_y + bound_z) > 0.0;
     }
 
-    fn firstTileLightWithMode(self: *const Renderer, range: TileLightRange, mode: LightInfo.ShadowMode) ?usize {
+    pub fn firstTileLightWithMode(self: *const Renderer, range: TileLightRange, mode: LightInfo.ShadowMode) ?usize {
         var i: usize = 0;
         while (i < range.count) : (i += 1) {
             const light_index = self.tile_light_indices[range.offset + i];
@@ -7343,7 +7349,7 @@ pub const Renderer = struct {
     }
 
     /// buildTileLightLists builds data structures used by Renderer.
-    fn buildTileLightLists(
+    pub fn buildTileLightLists(
         self: *Renderer,
         active_tile_indices: []const usize,
         tile_lists: []const BinningStage.TileTriangleList,
@@ -7502,407 +7508,16 @@ pub const Renderer = struct {
         projection: ProjectionParams,
         mesh_work: *const MeshWork,
     ) !u64 {
-        const _z_renderTiled = profiler.zone("renderTiled");
-        defer if (_z_renderTiled) |z| z.end();
-        _ = light_dir;
-        self.meshlet_ray_tests_counter.store(0, .release);
-        self.meshlet_shadow_chunk_counter.store(0, .release);
-        self.meshlet_shadow_chunk_pixels_counter.store(0, .release);
-        self.meshlet_shadow_chunk_active_rays_counter.store(0, .release);
-        self.meshlet_shadow_packet_counter.store(0, .release);
-        self.meshlet_shadow_packet_skipped_counter.store(0, .release);
-        self.meshlet_shadow_packet_active_lanes_counter.store(0, .release);
-        self.meshlet_shadow_packet_occluded_lanes_counter.store(0, .release);
-        self.meshlet_shadow_trace_ns_counter.store(0, .release);
-        self.meshlet_shadow_apply_ns_counter.store(0, .release);
-        self.triangles_rasterized_counter.store(0, .release);
-        self.covered_pixels_counter.store(0, .release);
-        self.depth_tests_passed_counter.store(0, .release);
-        self.alpha_pixels_counter.store(0, .release);
-        const grid = self.tile_grid.?;
-        const tile_buffers = self.tile_buffers.?;
-        const tile_lists = self.tile_triangle_lists.?;
-        const active_flags = self.active_tile_flags.?;
-        const active_indices = self.active_tile_indices.?;
-        BinningStage.clearTileTriangleLists(tile_lists);
-        if (!self.scene_buffers_initialized) {
-            @memset(self.scene_depth, std.math.inf(f32));
-            @memset(self.scene_camera, math.Vec3.new(0.0, 0.0, 0.0));
-            @memset(self.scene_normal, math.Vec3.new(0.0, 0.0, 0.0));
-            @memset(self.scene_surface, TileRenderer.SurfaceHandle.invalid());
-            self.scene_buffers_initialized = true;
-        } else {
-            for (active_flags, 0..) |was_active, tile_idx| {
-                if (!was_active) continue;
-                self.clearSceneAttachmentsForTile(&grid.tiles[tile_idx]);
-            }
-        }
-        @memset(active_flags, false);
-
-        const triangles = mesh_work.triangleSlice();
-        self.meshlet_telemetry.touched_tiles = 0;
-
-        if (triangles.len == 0) {
-            pipeline_logger.debugSub("tiled", "no triangles; bitmap cleared", .{});
-            return 0;
-        }
-
-        if (self.job_system != null and mesh_work.*.meshlet_len != 0) {
-            self.populateTilesFromMeshlets(tile_lists, mesh_work);
-        } else {
-            BinningStage.binTrianglesRangeToTiles(triangles, 0, triangles.len, &grid, tile_lists) catch |err| {
-                pipeline_logger.errorSub("binning", "triangle binning failed: {s}", .{@errorName(err)});
-            };
-        }
-
-        const tile_jobs = self.tile_jobs_buffer.?;
-        const jobs = self.job_buffer.?;
-        std.debug.assert(tile_jobs.len == grid.tiles.len);
-        std.debug.assert(jobs.len == grid.tiles.len);
-        var active_tile_count: usize = 0;
-        for (tile_lists, 0..) |*tile_list, tile_idx| {
-            if (tile_list.count() == 0) continue;
-            active_flags[tile_idx] = true;
-            active_indices[active_tile_count] = tile_idx;
-            active_tile_count += 1;
-        }
-
-        const cam_right = math.Vec3.new(transform.data[0], transform.data[1], transform.data[2]);
-        const cam_up = math.Vec3.new(transform.data[4], transform.data[5], transform.data[6]);
-        const cam_fwd = math.Vec3.new(transform.data[8], transform.data[9], transform.data[10]);
-        self.syncLightCameraSoA(cam_right, cam_up, cam_fwd);
-
-        self.buildTileLightLists(
-            active_indices[0..active_tile_count],
-            tile_lists,
-            triangles,
+        return scene_tiled_backend.execute(
+            self,
+            mesh,
+            transform,
+            light_dir,
+            pump,
+            projection,
+            mesh_work,
+            noopRenderPassJob,
         );
-
-        for (active_indices[0..active_tile_count]) |tile_idx| {
-            if (pump) |p| {
-                if ((tile_idx & 7) == 0 and !p(self)) return error.RenderInterrupted;
-            }
-            const tile = &grid.tiles[tile_idx];
-            const tile_light_range = self.tile_light_ranges[tile_idx];
-            const meshlet_light_index_opt = self.firstTileLightWithMode(tile_light_range, .meshlet_ray);
-            const primary_light_index = if (meshlet_light_index_opt) |meshlet_light_index|
-                meshlet_light_index
-            else if (tile_light_range.count > 0)
-                self.tile_light_indices[tile_light_range.offset]
-            else
-                @as(usize, 0);
-            const primary_light_direction = if (primary_light_index < self.lights.items.len)
-                math.Vec3.new(
-                    self.light_soa.dir_x[primary_light_index],
-                    self.light_soa.dir_y[primary_light_index],
-                    self.light_soa.dir_z[primary_light_index],
-                )
-            else
-                math.Vec3.new(0, -1, 0);
-            tile_jobs[tile_idx] = TileRenderJob{
-                .tile = tile,
-                .tile_buffer = &tile_buffers[tile_idx],
-                .tri_list = &tile_lists[tile_idx],
-                .packets = triangles,
-                .draw_wireframe = self.show_wireframe,
-                .textures = self.textures,
-                .projection = projection,
-                .sys_shadows = if (config.MESHLET_SHADOWS_ENABLED and meshlet_light_index_opt != null) &self.sys_shadows else null,
-                .light_direction = primary_light_direction,
-                .mesh_ptr = mesh,
-                .cam_pos = self.camera_position,
-                .cam_right = cam_right,
-                .cam_up = cam_up,
-                .cam_fwd = cam_fwd,
-                .meshlet_ray_counter = &self.meshlet_ray_tests_counter,
-                .shadow_chunk_counter = &self.meshlet_shadow_chunk_counter,
-                .shadow_chunk_pixels_counter = &self.meshlet_shadow_chunk_pixels_counter,
-                .shadow_chunk_active_rays_counter = &self.meshlet_shadow_chunk_active_rays_counter,
-                .shadow_packet_counter = &self.meshlet_shadow_packet_counter,
-                .shadow_packet_skipped_counter = &self.meshlet_shadow_packet_skipped_counter,
-                .shadow_packet_active_lanes_counter = &self.meshlet_shadow_packet_active_lanes_counter,
-                .shadow_packet_occluded_lanes_counter = &self.meshlet_shadow_packet_occluded_lanes_counter,
-                .shadow_trace_ns_counter = &self.meshlet_shadow_trace_ns_counter,
-                .shadow_apply_ns_counter = &self.meshlet_shadow_apply_ns_counter,
-                .triangles_rasterized_counter = &self.triangles_rasterized_counter,
-                .covered_pixels_counter = &self.covered_pixels_counter,
-                .depth_tests_passed_counter = &self.depth_tests_passed_counter,
-                .alpha_pixels_counter = &self.alpha_pixels_counter,
-                .shadow_start_idx = 0,
-                .shadow_end_idx = 0,
-            };
-        }
-
-        // CPU load-balancing: heavy tiles first improves job queue saturation.
-        if (active_tile_count > 1) {
-            var i: usize = 1;
-            while (i < active_tile_count) : (i += 1) {
-                const key = active_indices[i];
-                const key_cost = tile_lists[key].count();
-                var j = i;
-                while (j > 0) {
-                    const prev = active_indices[j - 1];
-                    if (tile_lists[prev].count() >= key_cost) break;
-                    active_indices[j] = prev;
-                    j -= 1;
-                }
-                active_indices[j] = key;
-            }
-        }
-
-        if (active_tile_count == 0) {
-            pipeline_logger.debugSub("tiled", "triangles binned to zero active tiles", .{});
-            return 0;
-        }
-
-        if (self.job_system) |job_sys| {
-            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-            const main_tile_idx = active_indices[0];
-
-            for (active_indices[1..active_tile_count]) |tile_idx| {
-                jobs[tile_idx] = Job.init(
-                    TileRenderJob.renderTileJob,
-                    @ptrCast(&tile_jobs[tile_idx]),
-                    &parent_job,
-                );
-
-                if (!job_sys.submitJobWithClass(&jobs[tile_idx], .high)) {
-                    TileRenderJob.renderTileJob(@ptrCast(&tile_jobs[tile_idx]));
-                }
-            }
-
-            TileRenderJob.renderTileJob(@ptrCast(&tile_jobs[main_tile_idx]));
-            parent_job.complete();
-
-            if (pump) |p| {
-                var interrupted = false;
-                while (!parent_job.isComplete()) {
-                    if (!p(self)) interrupted = true;
-                    std.Thread.yield() catch {};
-                }
-                if (interrupted) return error.RenderInterrupted;
-            } else {
-                job_sys.waitFor(&parent_job);
-            }
-        } else {
-            for (active_indices[0..active_tile_count]) |tile_idx| {
-                TileRenderJob.renderTileJob(@ptrCast(&tile_jobs[tile_idx]));
-            }
-        }
-
-        var shadow_pass_elapsed_ns: u64 = 0;
-        const run_meshlet_shadows = config.MESHLET_SHADOWS_ENABLED and mesh.meshlets.len > 0;
-        if (run_meshlet_shadows) {
-            const shadow_pass_start = std.time.nanoTimestamp();
-            const shadow_chunk_jobs = self.shadow_chunk_jobs_buffer.?;
-            const shadow_jobs = self.shadow_job_buffer.?;
-            const shadow_chunk_pixels: usize = 2048;
-            const shadow_min_chunk_pixels: usize = 1024;
-            const shadow_split_tri_threshold: usize = 96;
-            const worker_count: usize = if (self.job_system) |js| @intCast(js.worker_count) else 1;
-            const high_parallelism = worker_count > 4;
-            const runtime_shadow_min_chunk_pixels: usize = if (high_parallelism) @max(@as(usize, 512), @divTrunc(shadow_min_chunk_pixels, 2)) else shadow_min_chunk_pixels;
-            const shadow_max_chunks_per_tile: usize = if (high_parallelism) 16 else 8;
-            var shadow_job_count: usize = 0;
-
-            for (active_indices[0..active_tile_count]) |tile_idx| {
-                const tile_light_range = self.tile_light_ranges[tile_idx];
-                if (tile_light_range.count == 0) continue;
-                const base_job = tile_jobs[tile_idx];
-                if (base_job.sys_shadows == null) continue;
-                const total_pixels = @as(usize, @intCast(base_job.tile.width)) * @as(usize, @intCast(base_job.tile.height));
-                const tri_cost = tile_lists[tile_idx].count();
-                const light_cost = @max(@as(usize, 1), tile_light_range.count);
-                const tri_weight = @max(@as(usize, 1), @divTrunc(tri_cost + shadow_split_tri_threshold - 1, shadow_split_tri_threshold));
-                // Cost model uses pixels plus tile-local geometric/light pressure to reduce long-tail chunk stragglers.
-                const estimated_work_units = total_pixels * tri_weight * light_cost;
-                const target_work_units = shadow_chunk_pixels * 2;
-                const desired_chunks_by_work = @max(@as(usize, 1), @divTrunc(estimated_work_units + target_work_units - 1, target_work_units));
-                const desired_chunks_by_pixels = @max(@as(usize, 1), @divTrunc(total_pixels + shadow_chunk_pixels - 1, shadow_chunk_pixels));
-                const max_chunks = @max(@as(usize, 1), @min(shadow_max_chunks_per_tile, worker_count * 2));
-                const should_split = worker_count > 2 and total_pixels >= runtime_shadow_min_chunk_pixels and tri_cost >= @divTrunc(shadow_split_tri_threshold, 2);
-                const desired_chunks_base: usize = if (should_split) @min(max_chunks, @max(desired_chunks_by_work, desired_chunks_by_pixels)) else 1;
-                const desired_chunks: usize = if (high_parallelism and should_split) @min(max_chunks, desired_chunks_base * 2) else desired_chunks_base;
-                const adaptive_chunk_pixels: usize = @max(runtime_shadow_min_chunk_pixels, @divTrunc(total_pixels + desired_chunks - 1, desired_chunks));
-
-                var start: usize = 0;
-                while (start < total_pixels and shadow_job_count < shadow_chunk_jobs.len) {
-                    const end = @min(total_pixels, start + (if (should_split) adaptive_chunk_pixels else total_pixels));
-                    var chunk_job = base_job;
-                    chunk_job.shadow_start_idx = start;
-                    chunk_job.shadow_end_idx = end;
-                    shadow_chunk_jobs[shadow_job_count] = chunk_job;
-                    shadow_job_count += 1;
-                    start = end;
-                }
-            }
-
-            if (shadow_job_count == 0) {
-                const shadow_elapsed_ns = std.time.nanoTimestamp() - shadow_pass_start;
-                if (shadow_elapsed_ns > 0) shadow_pass_elapsed_ns = @intCast(shadow_elapsed_ns);
-                return shadow_pass_elapsed_ns;
-            }
-
-            if (self.job_system) |job_sys| {
-                var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-                const main_job_idx: usize = 0;
-                var submit_idx: usize = 1;
-                while (submit_idx < shadow_job_count) : (submit_idx += 1) {
-                    shadow_jobs[submit_idx] = Job.init(
-                        TileRenderJob.applyMeshletShadows,
-                        @ptrCast(&shadow_chunk_jobs[submit_idx]),
-                        &parent_job,
-                    );
-
-                    if (!job_sys.submitJobWithClass(&shadow_jobs[submit_idx], .high)) {
-                        TileRenderJob.applyMeshletShadows(@ptrCast(&shadow_chunk_jobs[submit_idx]));
-                    }
-                }
-
-                TileRenderJob.applyMeshletShadows(@ptrCast(&shadow_chunk_jobs[main_job_idx]));
-                parent_job.complete();
-
-                if (pump) |p| {
-                    var interrupted = false;
-                    while (!parent_job.isComplete()) {
-                        if (!p(self)) interrupted = true;
-                        std.Thread.yield() catch {};
-                    }
-                    if (interrupted) return error.RenderInterrupted;
-                } else {
-                    job_sys.waitFor(&parent_job);
-                }
-            } else {
-                for (shadow_chunk_jobs[0..shadow_job_count]) |*chunk_job| {
-                    TileRenderJob.applyMeshletShadows(@ptrCast(chunk_job));
-                }
-            }
-
-            const shadow_elapsed_ns = std.time.nanoTimestamp() - shadow_pass_start;
-            if (shadow_elapsed_ns > 0) {
-                shadow_pass_elapsed_ns = @intCast(shadow_elapsed_ns);
-            }
-        }
-        self.light_work_stats.meshlet_ray_tests = self.meshlet_ray_tests_counter.load(.acquire);
-        self.light_work_stats.meshlet_shadow_chunks = self.meshlet_shadow_chunk_counter.load(.acquire);
-        self.light_work_stats.meshlet_shadow_chunk_pixels = self.meshlet_shadow_chunk_pixels_counter.load(.acquire);
-        self.light_work_stats.meshlet_shadow_chunk_active_rays = self.meshlet_shadow_chunk_active_rays_counter.load(.acquire);
-        self.light_work_stats.meshlet_shadow_packets = self.meshlet_shadow_packet_counter.load(.acquire);
-        self.light_work_stats.meshlet_shadow_packets_skipped = self.meshlet_shadow_packet_skipped_counter.load(.acquire);
-        self.light_work_stats.meshlet_shadow_packet_active_lanes = self.meshlet_shadow_packet_active_lanes_counter.load(.acquire);
-        self.light_work_stats.meshlet_shadow_packet_occluded_lanes = self.meshlet_shadow_packet_occluded_lanes_counter.load(.acquire);
-        self.light_work_stats.meshlet_shadow_trace_us = @divTrunc(self.meshlet_shadow_trace_ns_counter.load(.acquire), 1000);
-        self.light_work_stats.meshlet_shadow_apply_us = @divTrunc(self.meshlet_shadow_apply_ns_counter.load(.acquire), 1000);
-        self.light_work_stats.triangles_rasterized = self.triangles_rasterized_counter.load(.acquire);
-        self.light_work_stats.covered_pixels = self.covered_pixels_counter.load(.acquire);
-        self.light_work_stats.depth_tests_passed = self.depth_tests_passed_counter.load(.acquire);
-        self.light_work_stats.alpha_pixels = self.alpha_pixels_counter.load(.acquire);
-
-        // 4. Compositing: Copy the pixels from each completed tile buffer to the main screen bitmap.
-        // Each tile writes to non-overlapping screen regions, so dispatch in parallel when possible.
-        if (self.job_system) |job_sys| {
-            const comp_ctxs = self.composite_job_contexts.?;
-            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-
-            for (active_indices[0..active_tile_count]) |tile_idx| {
-                comp_ctxs[tile_idx] = .{
-                    .tile = &grid.tiles[tile_idx],
-                    .tile_buffer = &tile_buffers[tile_idx],
-                    .bitmap = &self.bitmap,
-                    .scene_depth = self.scene_depth,
-                    .scene_camera = self.scene_camera,
-                    .scene_normal = self.scene_normal,
-                    .scene_surface = self.scene_surface,
-                };
-            }
-
-            if (active_tile_count > 1) {
-                const main_tile_idx = active_indices[0];
-                for (active_indices[1..active_tile_count]) |tile_idx| {
-                    jobs[tile_idx] = Job.init(
-                        CompositeJobContext.run,
-                        @ptrCast(&comp_ctxs[tile_idx]),
-                        &parent_job,
-                    );
-                    if (!job_sys.submitJobWithClass(&jobs[tile_idx], .high)) {
-                        CompositeJobContext.run(@ptrCast(&comp_ctxs[tile_idx]));
-                    }
-                }
-                CompositeJobContext.run(@ptrCast(&comp_ctxs[main_tile_idx]));
-                parent_job.complete();
-                job_sys.waitFor(&parent_job);
-            } else if (active_tile_count == 1) {
-                const tile_idx = active_indices[0];
-                TileRenderer.compositeTileToScreen(&grid.tiles[tile_idx], &tile_buffers[tile_idx], &self.bitmap, self.scene_depth, self.scene_camera, self.scene_normal, self.scene_surface);
-            }
-        } else {
-            for (active_indices[0..active_tile_count]) |tile_idx| {
-                const tile = &grid.tiles[tile_idx];
-                TileRenderer.compositeTileToScreen(tile, &tile_buffers[tile_idx], &self.bitmap, self.scene_depth, self.scene_camera, self.scene_normal, self.scene_surface);
-            }
-        }
-
-        return shadow_pass_elapsed_ns;
-    }
-
-    fn clearSceneAttachmentsForTile(self: *Renderer, tile: *const TileRenderer.Tile) void {
-        var y: i32 = 0;
-        while (y < tile.height) : (y += 1) {
-            const row_start = @as(usize, @intCast((tile.y + y) * self.bitmap.width + tile.x));
-            const row_end = row_start + @as(usize, @intCast(tile.width));
-            @memset(self.scene_depth[row_start..row_end], std.math.inf(f32));
-            @memset(self.scene_camera[row_start..row_end], math.Vec3.new(0.0, 0.0, 0.0));
-            @memset(self.scene_normal[row_start..row_end], math.Vec3.new(0.0, 0.0, 0.0));
-            @memset(self.scene_surface[row_start..row_end], TileRenderer.SurfaceHandle.invalid());
-        }
-    }
-
-    fn populateTilesFromMeshlets(
-        self: *Renderer,
-        tile_lists: []BinningStage.TileTriangleList,
-        mesh_work: *const MeshWork,
-    ) void {
-        const _z_populateTilesFromMeshlets = profiler.zone("populateTilesFromMeshlets");
-        defer if (_z_populateTilesFromMeshlets) |z| z.end();
-        const meshlet_count = mesh_work.*.meshlet_len;
-        if (meshlet_count == 0) return;
-
-        const contributions = self.mesh_work_cache.meshlet_contributions;
-        if (contributions.len < meshlet_count) {
-            meshlet_logger.errorSub(
-                "contrib",
-                "meshlet contribution capacity {} insufficient for packets {}",
-                .{ contributions.len, meshlet_count },
-            );
-            return;
-        }
-
-        const triangles = mesh_work.triangleSlice();
-
-        for (contributions[0..meshlet_count]) |contrib| {
-            self.meshlet_telemetry.touched_tiles += contrib.active_count;
-            for (contrib.entries.items[0..contrib.active_count]) |entry| {
-                if (entry.tile_index >= tile_lists.len) {
-                    meshlet_logger.errorSub(
-                        "contrib",
-                        "meshlet contribution tile {} outside tile list {}",
-                        .{ entry.tile_index, tile_lists.len },
-                    );
-                    continue;
-                }
-
-                for (entry.triangles.items) |tri_idx| {
-                    if (tri_idx >= triangles.len) continue;
-                    tile_lists[entry.tile_index].append(tri_idx) catch |err| {
-                        meshlet_logger.errorSub(
-                            "contrib",
-                            "failed to append triangle {} to tile {}: {s}",
-                            .{ tri_idx, entry.tile_index, @errorName(err) },
-                        );
-                    };
-                }
-            }
-        }
     }
 
     fn generateMeshWork(
@@ -8252,12 +7867,7 @@ pub const Renderer = struct {
         projection: ProjectionParams,
         mesh_work: *const MeshWork,
     ) !void {
-        _ = mesh;
-        _ = light_dir;
-        _ = projection;
-        _ = mesh_work;
-        _ = transform;
-        try self.renderDirectPrimitiveShowcase();
+        _ = try self.renderTiled(mesh, transform, light_dir, null, projection, mesh_work);
     }
 
     fn clearDirectFrame(self: *Renderer, clear: direct_primitives.ClearConfig) void {
@@ -8288,7 +7898,7 @@ pub const Renderer = struct {
         );
     }
 
-    fn directFrameResources(self: *Renderer) frame_resources.FrameResources {
+    pub fn directFrameResources(self: *Renderer) frame_resources.FrameResources {
         return .{
             .target = .{
                 .width = self.bitmap.width,

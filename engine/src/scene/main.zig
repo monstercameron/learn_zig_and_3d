@@ -1312,6 +1312,7 @@ pub const SceneRuntime = struct {
         self.scripts.dispatchQueued(self.job_system, &self.world, &self.components, &self.script_input, &self.commands);
         self.unpinAssetsForUsage(.script_dispatch);
         self.applyDeferred();
+        try self.propagateWorldTransforms();
         self.endPhase(.script_events);
 
         self.beginPhase(.render_extraction);

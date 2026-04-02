@@ -103,6 +103,10 @@ pub const PrimitiveBatch = struct {
         try self.commands.append(self.allocator, command);
     }
 
+    pub fn appendAssumeCapacity(self: *PrimitiveBatch, command: DrawPacket) void {
+        self.commands.appendAssumeCapacity(command);
+    }
+
     pub fn appendLine(self: *PrimitiveBatch, line: WorldLine, material: StrokeMaterial) !void {
         try self.append(.{ .line = .{ .line = line, .material = material } });
     }
@@ -113,6 +117,14 @@ pub const PrimitiveBatch = struct {
 
     pub fn appendTriangleLit(self: *PrimitiveBatch, triangle: WorldTriangle, material: SurfaceMaterial, vertex_normals: [3]math.Vec3) !void {
         try self.append(.{ .triangle = .{
+            .triangle = triangle,
+            .material = material,
+            .vertex_normals = vertex_normals,
+        } });
+    }
+
+    pub fn appendTriangleLitAssumeCapacity(self: *PrimitiveBatch, triangle: WorldTriangle, material: SurfaceMaterial, vertex_normals: [3]math.Vec3) void {
+        self.appendAssumeCapacity(.{ .triangle = .{
             .triangle = triangle,
             .material = material,
             .vertex_normals = vertex_normals,
@@ -319,17 +331,29 @@ pub fn compileToDrawList(
 ) !void {
     draw_list.clearRetainingCapacity();
     if (width <= 0 or height <= 0) return;
+    const commands = batch.items();
+    if (commands.len == 0) return;
 
     var polygon_point_count: usize = 0;
-    for (batch.items()) |command| switch (command) {
-        .polygon => |payload| polygon_point_count += payload.polygon.point_count,
-        else => {},
+    var triangles_only = true;
+    for (commands) |command| switch (command) {
+        .triangle => {},
+        .polygon => |payload| {
+            triangles_only = false;
+            polygon_point_count += payload.polygon.point_count;
+        },
+        else => triangles_only = false,
     };
-    try draw_list.ensureCommandCapacity(batch.items().len);
+    try draw_list.ensureCommandCapacity(commands.len);
     try draw_list.ensurePolygonPointCapacity(polygon_point_count);
 
     const projector = Projector.init(camera, width, height);
-    for (batch.items(), 0..) |command, packet_index| {
+    if (triangles_only) {
+        try compileTrianglesOnlyToDrawList(commands, draw_list, projector);
+        return;
+    }
+
+    for (commands, 0..) |command, packet_index| {
         const sort_key = makeSortKey(command, packet_index);
         switch (command) {
             .line => |payload| {
@@ -396,6 +420,30 @@ pub fn compileToDrawList(
     }
 }
 
+fn compileTrianglesOnlyToDrawList(
+    commands: []const DrawPacket,
+    draw_list: *direct_draw_list.DrawList,
+    projector: Projector,
+) !void {
+    for (commands, 0..) |command, packet_index| {
+        const payload = command.triangle;
+        var projected: [3]direct_primitives.Point2i = undefined;
+        if (!projector.projectTriangle(payload.triangle.a, payload.triangle.b, payload.triangle.c, &projected)) continue;
+        if (!projectedTriangleFrontFacing(projected[0], projected[1], projected[2])) continue;
+        const projected_triangle: direct_primitives.Triangle2i = .{ .a = projected[0], .b = projected[1], .c = projected[2] };
+        draw_list.appendProjectedTriangleAssumeCapacity(
+            makeTriangleSortKey(payload.material.depth, packet_index),
+            payload.material,
+            projected_triangle,
+            payload.gouraud_colors,
+            if (payload.gouraud_colors) |vertex_colors|
+                direct_primitives.prepareGouraudTriangle(projected_triangle, vertex_colors)
+            else
+                null,
+        );
+    }
+}
+
 inline fn makeSortKey(command: DrawPacket, packet_index: usize) u64 {
     const depth_component: u32 = switch (command) {
         .line => |payload| encodeDepth(payload.material.depth),
@@ -404,6 +452,10 @@ inline fn makeSortKey(command: DrawPacket, packet_index: usize) u64 {
         .circle => |payload| encodeDepth(payload.material.depth),
     };
     return (@as(u64, depth_component) << 32) | @as(u64, @intCast(packet_index));
+}
+
+inline fn makeTriangleSortKey(depth: ?f32, packet_index: usize) u64 {
+    return (@as(u64, encodeDepth(depth)) << 32) | @as(u64, @intCast(packet_index));
 }
 
 inline fn projectedTriangleFrontFacing(a: direct_primitives.Point2i, b: direct_primitives.Point2i, c: direct_primitives.Point2i) bool {

@@ -906,7 +906,7 @@ pub fn main() !void {
             session.phase13_runtime.clearRendererCommands();
             syncFirstPersonMouseGrab(session.window, session.renderer, session.mouse_grabbed);
             applyPlatformCursor(session.renderer);
-            main_module.syncSceneMeshIfDirty(session.renderer, session.scene_resources, session.phase13_runtime);
+            main_module.syncSceneMeshForFrame(session.renderer, session.scene_resources, session.phase13_runtime);
 
             if (session.selected_scene_entity_pin.*) |pinned_entity| {
                 if (current_selected_entity == null or !pinned_entity.eql(current_selected_entity.?)) {
@@ -928,7 +928,7 @@ pub fn main() !void {
                     session.scene_resources,
                     move_request,
                 );
-                main_module.syncSceneMeshIfDirty(session.renderer, session.scene_resources, session.phase13_runtime);
+                main_module.syncSceneMeshForFrame(session.renderer, session.scene_resources, session.phase13_runtime);
             }
         }
 
@@ -1212,6 +1212,12 @@ fn syncSceneMeshIfDirty(renderer: *Renderer, scene_resources: *SceneMeshResource
     renderer.invalidateMeshWork();
 }
 
+fn syncSceneMeshForFrame(renderer: *Renderer, scene_resources: *SceneMeshResources, runtime: *scene_runtime.SceneRuntime) void {
+    syncSceneMeshFromRuntime(renderer, scene_resources, runtime);
+    scene_resources.mesh.refreshMeshlets();
+    renderer.invalidateMeshWork();
+}
+
 fn syncSceneMeshFromRuntime(renderer: ?*Renderer, scene_resources: *SceneMeshResources, runtime: *const scene_runtime.SceneRuntime) void {
     for (scene_resources.render_instances, 0..) |*instance, instance_index| {
         const transform = runtime.worldTransform(instance.entity) orelse continue;
@@ -1286,6 +1292,9 @@ fn loadSceneMeshResourcesWithProgress(
             .gltf => try loadGltfMeshAsset(allocator, asset),
             .obj => try loadObjMeshAsset(allocator, asset),
         };
+        if (asset.model_type == .obj and std.mem.endsWith(u8, asset.model_path, "suzanne.obj")) {
+            loaded_mesh.centerToOrigin();
+        }
         if (scene_desc.runtime == .gun_physics and asset_index == 0) loaded_mesh.centerToOrigin();
         const loaded_vertex_count = loaded_mesh.vertices.len;
         const loaded_triangle_count = loaded_mesh.triangles.len;

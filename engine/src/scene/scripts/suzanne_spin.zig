@@ -1,4 +1,4 @@
-//! Scene script: rotates Suzanne and applies a subtle breathing pulse.
+//! Scene script: rotates Suzanne around yaw only.
 
 const std = @import("std");
 const script_host = @import("../script_host.zig");
@@ -12,20 +12,12 @@ pub const vtable = script_host.ScriptModuleVTable{
     .on_event = onEvent,
 };
 
-const rotation_speed_deg_per_sec: f32 = 28.0;
-const breathing_cycles_per_sec: f32 = 0.42;
-const breathing_amplitude: f32 = 0.07;
-const tau: f32 = std.math.pi * 2.0;
-// Suzanne OBJ in this repo is not centered at origin; this is the model-space bounds center.
-const suzanne_mesh_center_local = scene_math.Vec3.new(-2.4940625, 1.251686, 4.1038925);
+const yaw_speed_deg_per_sec: f32 = 90.0;
 
 const SuzanneAnimState = struct {
     base_scale: scene_math.Vec3 = scene_math.Vec3.new(1.0, 1.0, 1.0),
     base_rotation: scene_math.Vec3 = scene_math.Vec3.new(0.0, 0.0, 0.0),
-    base_visual_center: scene_math.Vec3 = scene_math.Vec3.new(0.0, 0.0, 0.0),
     accumulated_yaw_deg: f32 = 0.0,
-    breathing_phase: f32 = 0.0,
-    initialized: bool = false,
 };
 
 fn onCreate(ctx: *script_host.ScriptCallbackContext) void {
@@ -52,34 +44,16 @@ fn onEvent(ctx: *script_host.ScriptCallbackContext) void {
 
 fn animate(ctx: *script_host.ScriptCallbackContext, state: *SuzanneAnimState, delta_seconds: f32) void {
     const clamped_dt = std.math.clamp(delta_seconds, 0.0, 0.05);
-
-    state.accumulated_yaw_deg += rotation_speed_deg_per_sec * clamped_dt;
+    state.accumulated_yaw_deg += yaw_speed_deg_per_sec * clamped_dt;
     if (state.accumulated_yaw_deg >= 360.0) state.accumulated_yaw_deg -= 360.0;
 
-    state.breathing_phase += tau * breathing_cycles_per_sec * clamped_dt;
-    if (state.breathing_phase >= tau) state.breathing_phase -= tau;
-
-    const breathing_factor = 1.0 + breathing_amplitude * @sin(state.breathing_phase);
-    const animated_scale = scene_math.Vec3.new(
-        state.base_scale.x * breathing_factor,
-        state.base_scale.y * breathing_factor,
-        state.base_scale.z * breathing_factor,
-    );
     const animated_rotation = scene_math.Vec3.new(
         state.base_rotation.x,
         state.base_rotation.y + state.accumulated_yaw_deg,
         state.base_rotation.z,
     );
-    const rotated_center_offset = rotateVector(mulComponents(suzanne_mesh_center_local, animated_scale), animated_rotation);
-    const animated_position = scene_math.Vec3.sub(state.base_visual_center, rotated_center_offset);
-
-    if (currentLocalPosition(ctx)) |position_now| {
-        const delta = scene_math.Vec3.sub(animated_position, position_now);
-        if (length(delta) > 1e-6) ctx.commands.queueTranslate(ctx.entity, delta) catch {};
-    }
-
-    ctx.commands.queueSetLocalScale(ctx.entity, animated_scale) catch {};
     ctx.commands.queueSetLocalRotationDeg(ctx.entity, animated_rotation) catch {};
+    ctx.commands.queueSetLocalScale(ctx.entity, state.base_scale) catch {};
 }
 
 fn captureBaseTransform(ctx: *script_host.ScriptCallbackContext, state: *SuzanneAnimState) void {
@@ -88,48 +62,10 @@ fn captureBaseTransform(ctx: *script_host.ScriptCallbackContext, state: *Suzanne
     const local = ctx.components.local_transforms.items[index] orelse return;
     state.base_scale = local.scale;
     state.base_rotation = local.rotation_deg;
-    state.base_visual_center = local.position;
     state.accumulated_yaw_deg = 0.0;
-    state.breathing_phase = 0.0;
-    state.initialized = true;
-}
-
-fn currentLocalPosition(ctx: *script_host.ScriptCallbackContext) ?scene_math.Vec3 {
-    const index: usize = @intCast(ctx.entity.index);
-    if (index >= ctx.components.local_transforms.items.len) return null;
-    const local = ctx.components.local_transforms.items[index] orelse return null;
-    return local.position;
 }
 
 fn getState(ctx: *script_host.ScriptCallbackContext) ?*SuzanneAnimState {
     const user_data = ctx.user_data orelse return null;
     return @ptrCast(@alignCast(user_data));
-}
-
-fn rotateVector(v: scene_math.Vec3, rotation_deg: scene_math.Vec3) scene_math.Vec3 {
-    const rad_scale = std.math.pi / 180.0;
-    const rx = rotation_deg.x * rad_scale;
-    const ry = rotation_deg.y * rad_scale;
-    const rz = rotation_deg.z * rad_scale;
-
-    const sx = @sin(rx);
-    const cx = @cos(rx);
-    const sy = @sin(ry);
-    const cy = @cos(ry);
-    const sz = @sin(rz);
-    const cz = @cos(rz);
-
-    var out = v;
-    out = scene_math.Vec3.new(out.x, out.y * cx - out.z * sx, out.y * sx + out.z * cx);
-    out = scene_math.Vec3.new(out.x * cy + out.z * sy, out.y, -out.x * sy + out.z * cy);
-    out = scene_math.Vec3.new(out.x * cz - out.y * sz, out.x * sz + out.y * cz, out.z);
-    return out;
-}
-
-fn mulComponents(a: scene_math.Vec3, b: scene_math.Vec3) scene_math.Vec3 {
-    return scene_math.Vec3.new(a.x * b.x, a.y * b.y, a.z * b.z);
-}
-
-fn length(v: scene_math.Vec3) f32 {
-    return @sqrt(scene_math.Vec3.dot(v, v));
 }

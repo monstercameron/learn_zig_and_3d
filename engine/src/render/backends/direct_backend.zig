@@ -28,6 +28,18 @@ pub const RenderConfig = struct {
     scene_kind: scene_submission_stage.SceneKind = .triangle,
 };
 
+pub const SceneMeshConfig = struct {
+    raster_mode: rasterization_stage.RasterMode = .worker_tiles,
+    transform: @import("../../core/math.zig").Mat4 = @import("../../core/math.zig").Mat4.identity(),
+    material_override: ?direct_batch.SurfaceMaterial = .{
+        .fill_color = 0xFFD8C3A5,
+        .outline_color = null,
+        .depth = 1.0,
+    },
+    clear_color: u32 = 0xFF0B1220,
+    enable_shading: bool = true,
+};
+
 pub const FrameTimings = struct {
     clear_ns: i128 = 0,
     build_batch_ns: i128 = 0,
@@ -356,6 +368,142 @@ pub const State = struct {
         } else null;
     }
 
+    pub fn renderSceneMesh(
+        self: *State,
+        resources: frame_resources.FrameResources,
+        camera: direct_batch.Camera,
+        mesh: *const direct_mesh.Mesh,
+        job_sys: ?*JobSystem,
+        config: SceneMeshConfig,
+    ) !void {
+        const width = resources.target.width;
+        const height = resources.target.height;
+        if (width <= 0 or height <= 0 or resources.target.color.len == 0) {
+            self.timings = .{};
+            return;
+        }
+
+        const build_start = std.time.nanoTimestamp();
+        const submission = try scene_submission_stage.executeMeshScene(
+            &self.scene_packets,
+            mesh,
+            config.transform,
+            config.material_override,
+        );
+        std.debug.assert(submission.packet_count == self.scene_packets.items().len);
+        _ = try visibility_culling_stage.execute(&self.scene_packets, &self.visible_scene, &self.visible_meshlets, camera);
+        const compile_job_system = if (config.raster_mode != .single_thread) job_sys else null;
+        const expansion = try primitive_expansion_stage.execute(&self.visible_scene, &self.batch, compile_job_system);
+        self.timings.build_batch_ns = @max(std.time.nanoTimestamp() - build_start, @as(i128, 0));
+        self.timings.primitive_count = expansion.primitive_count;
+
+        const compile_start = std.time.nanoTimestamp();
+        gouraud_kernel.applyBatchLighting(&self.batch, .{});
+        try direct_batch.compileToDrawList(&self.batch, &self.draw_list, camera, width, height);
+        self.timings.compile_draw_list_ns = @max(std.time.nanoTimestamp() - compile_start, @as(i128, 0));
+
+        self.timings.shading_ns = 0;
+        self.timings.composition_ns = 0;
+        self.timings.post_process_ns = 0;
+        self.previous_fast_path_bounds = null;
+        const previous_dirty_rect = self.present_dirty_rect;
+
+        if (self.draw_list.items().len == 0) {
+            const clear_start = std.time.nanoTimestamp();
+            if (previous_dirty_rect) |previous_rect| {
+                direct_primitives.clearRect(resources.target, dirtyRectToRect(previous_rect), .{
+                    .color = config.clear_color,
+                    .depth = std.math.inf(f32),
+                });
+            } else {
+                _ = frame_setup_stage.execute(resources, .{
+                    .clear_color = config.clear_color,
+                    .clear_depth = std.math.inf(f32),
+                    .clear_auxiliary = false,
+                });
+            }
+            self.timings.clear_ns = @max(std.time.nanoTimestamp() - clear_start, @as(i128, 0));
+            self.timings.binning_ns = 0;
+            self.timings.raster_ns = 0;
+            self.timings.touched_tiles = 0;
+            self.present_dirty_rect = null;
+            return;
+        }
+
+        const binning_start = std.time.nanoTimestamp();
+        const binning = try screen_binning_stage.execute(
+            self.allocator,
+            &self.draw_list,
+            width,
+            height,
+            &self.tile_counts,
+            &self.tile_cursors,
+            &self.tile_ranges,
+            &self.tile_command_indices,
+            &self.tile_spans,
+            &self.active_tile_indices,
+            &self.active_tile_command_counts,
+        );
+        self.timings.touched_tiles = binning.touched_tiles;
+        self.present_dirty_rect = binning.dirty_rect;
+        self.timings.binning_ns = @max(std.time.nanoTimestamp() - binning_start, @as(i128, 0));
+
+        const clear_start = std.time.nanoTimestamp();
+        const clear_config = direct_primitives.ClearConfig{
+            .color = config.clear_color,
+            .depth = std.math.inf(f32),
+        };
+        if (previous_dirty_rect) |previous_rect| {
+            if (binning.dirty_rect) |current_rect| {
+                direct_primitives.clearRect(resources.target, unionDirtyRects(previous_rect, current_rect), clear_config);
+            } else {
+                direct_primitives.clearRect(resources.target, dirtyRectToRect(previous_rect), clear_config);
+            }
+        } else {
+            _ = frame_setup_stage.execute(resources, .{
+                .clear_color = config.clear_color,
+                .clear_depth = clear_config.depth,
+                .clear_auxiliary = false,
+            });
+        }
+        self.timings.clear_ns = @max(std.time.nanoTimestamp() - clear_start, @as(i128, 0));
+
+        const raster_start = std.time.nanoTimestamp();
+        _ = try rasterization_stage.execute(.{
+            .allocator = self.allocator,
+            .tile_ranges = &self.tile_ranges,
+            .tile_command_indices = &self.tile_command_indices,
+            .active_tile_indices = &self.active_tile_indices,
+            .active_tile_command_counts = &self.active_tile_command_counts,
+            .tile_chunk_jobs = &self.tile_chunk_jobs,
+            .tile_chunk_job_contexts = &self.tile_chunk_job_contexts,
+        }, resources, &self.draw_list, width, height, if (config.raster_mode != .single_thread) job_sys else null, config.raster_mode);
+        self.timings.raster_ns = @max(std.time.nanoTimestamp() - raster_start, @as(i128, 0));
+
+        if (!config.enable_shading) {
+            self.present_dirty_rect = binning.dirty_rect;
+            return;
+        }
+
+        const shading_start = std.time.nanoTimestamp();
+        const shading = shading_stage.execute(resources, if (binning.dirty_rect) |rect| .{
+            .min_x = rect.min_x,
+            .min_y = rect.min_y,
+            .max_x = rect.max_x,
+            .max_y = rect.max_y,
+        } else null, .{
+            .clear_color = config.clear_color,
+            .enabled = config.enable_shading,
+        }, job_sys);
+        self.timings.shading_ns = @max(std.time.nanoTimestamp() - shading_start, @as(i128, 0));
+        self.present_dirty_rect = if (shading.shaded_rect) |rect| .{
+            .min_x = rect.min_x,
+            .min_y = rect.min_y,
+            .max_x = rect.max_x,
+            .max_y = rect.max_y,
+        } else null;
+    }
+
     fn canReuseStaticScene(
         self: *const State,
         config: RenderConfig,
@@ -567,4 +715,46 @@ test "direct backend single-thread and worker tiles produce identical color outp
 
     try std.testing.expectEqualSlices(u32, color_single[0..], color_worker[0..]);
     try std.testing.expect(countNonBackground(color_single[0..], 0xFF0B1220) > 0);
+}
+
+test "scene mesh path applies gouraud lighting before draw-list compile" {
+    var backend = State.init(std.testing.allocator);
+    defer backend.deinit();
+
+    var mesh = try direct_mesh.Mesh.triangle(std.testing.allocator);
+    defer mesh.deinit();
+
+    var color = [_]u32{0} ** (128 * 128);
+    var depth = [_]f32{0} ** (128 * 128);
+    var scene_camera = [_]@import("../../core/math.zig").Vec3{@import("../../core/math.zig").Vec3.new(0.0, 0.0, 0.0)} ** (128 * 128);
+    var scene_normal = [_]@import("../../core/math.zig").Vec3{@import("../../core/math.zig").Vec3.new(0.0, 0.0, 0.0)} ** (128 * 128);
+    var scene_surface = [_]TileRenderer.SurfaceHandle{TileRenderer.SurfaceHandle.invalid()} ** (128 * 128);
+
+    try backend.renderSceneMesh(.{
+        .target = .{
+            .width = 128,
+            .height = 128,
+            .color = color[0..],
+            .depth = depth[0..],
+        },
+        .aux = .{
+            .scene_camera = scene_camera[0..],
+            .scene_normal = scene_normal[0..],
+            .scene_surface = scene_surface[0..],
+        },
+    }, .{
+        .position = @import("../../core/math.zig").Vec3.new(0.0, 0.0, -3.0),
+        .yaw = 0.0,
+        .pitch = 0.0,
+        .fov_deg = 60.0,
+    }, &mesh, null, .{
+        .raster_mode = .single_thread,
+        .enable_shading = false,
+    });
+
+    try std.testing.expect(backend.draw_list.items().len > 0);
+    try std.testing.expect(backend.draw_list.items()[0].payload == .triangle);
+    try std.testing.expect(backend.draw_list.items()[0].payload.triangle.vertex_colors != null);
+    try std.testing.expect(backend.draw_list.items()[0].payload.triangle.gouraud_setup != null);
+    try std.testing.expect(backend.draw_list.preparedGouraud()[0] != null);
 }
