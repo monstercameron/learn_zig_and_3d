@@ -33,9 +33,9 @@
     },
     {
       "type": "model",
-      "id": "suzanne_actor",
+      "id": "box_actor",
       "modelType": "obj",
-      "modelPath": "assets/models/suzanne.obj",
+      "modelPath": "assets/models/box.obj",
       "position": [0.0, 1.15, -6.0],
       "rotationDeg": [16.0, 58.0, -12.0],
       "scale": [1.15, 1.15, 1.15],

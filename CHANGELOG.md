@@ -333,3 +333,13 @@
 
 - the direct raster backend is still a stub in `engine/src/render/renderer.zig`
 - stage and pass implementations still live primarily in `renderer.zig`; only orchestration has been extracted so far
+
+### Box Gouraud And Mesh Culling
+
+- switched the default ECS showcase model in `assets/configs/scenes/suzanne_behavior.scene.json` from Suzanne to `assets/models/box.obj` for a simpler staged mesh validation scene
+- fixed `engine/src/assets/obj_loader.zig` so OBJ meshes that omit `vn` normals now regenerate per-vertex normals automatically after triangle normals are built
+- added a regression test in `engine/src/assets/obj_loader.zig` that loads `assets/models/box.obj` and verifies generated vertex normals are present and nonzero
+- confirmed the staged mesh path already applies Gouraud lighting for ECS mesh scenes in `engine/src/render/backends/direct_backend.zig`, so the box scene now receives Gouraud shading correctly instead of zero-normal fallback behavior
+- added earlier world-space backface culling for depth-bearing triangles and polygons in `engine/src/render/direct_batch.zig`
+- kept projected winding culling as a second filter in `engine/src/render/direct_batch.zig` while leaving depthless/debug geometry unaffected
+- added `direct_batch` coverage proving backfacing depth triangles are culled while depthless triangles still compile

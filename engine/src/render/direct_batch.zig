@@ -368,6 +368,7 @@ pub fn compileToDrawList(
                 });
             },
             .triangle => |payload| {
+                if (payload.material.depth != null and !worldTriangleFrontFacing(payload.triangle, camera.position)) continue;
                 var projected: [3]direct_primitives.Point2i = undefined;
                 if (!projector.projectTriangle(payload.triangle.a, payload.triangle.b, payload.triangle.c, &projected)) continue;
                 if (!projectedTriangleFrontFacing(projected[0], projected[1], projected[2])) continue;
@@ -387,6 +388,7 @@ pub fn compileToDrawList(
                 });
             },
             .polygon => |payload| {
+                if (payload.material.depth != null and !worldPolygonFrontFacing(payload.polygon.slice(), camera.position)) continue;
                 var projected: [max_polygon_points]direct_primitives.Point2i = undefined;
                 const visible_count = payload.polygon.slice().len;
                 if (!projector.projectPoints(payload.polygon.slice(), projected[0..visible_count])) continue;
@@ -427,6 +429,7 @@ fn compileTrianglesOnlyToDrawList(
 ) !void {
     for (commands, 0..) |command, packet_index| {
         const payload = command.triangle;
+        if (payload.material.depth != null and !worldTriangleFrontFacing(payload.triangle, projector.camera.position)) continue;
         var projected: [3]direct_primitives.Point2i = undefined;
         if (!projector.projectTriangle(payload.triangle.a, payload.triangle.b, payload.triangle.c, &projected)) continue;
         if (!projectedTriangleFrontFacing(projected[0], projected[1], projected[2])) continue;
@@ -456,6 +459,23 @@ inline fn makeSortKey(command: DrawPacket, packet_index: usize) u64 {
 
 inline fn makeTriangleSortKey(depth: ?f32, packet_index: usize) u64 {
     return (@as(u64, encodeDepth(depth)) << 32) | @as(u64, @intCast(packet_index));
+}
+
+inline fn worldTriangleFrontFacing(triangle: WorldTriangle, camera_position: math.Vec3) bool {
+    const edge_ab = math.Vec3.sub(triangle.b, triangle.a);
+    const edge_ac = math.Vec3.sub(triangle.c, triangle.a);
+    const normal = math.Vec3.cross(edge_ab, edge_ac);
+    const view = math.Vec3.sub(camera_position, triangle.a);
+    return math.Vec3.dot(normal, view) < -1e-5;
+}
+
+fn worldPolygonFrontFacing(points: []const math.Vec3, camera_position: math.Vec3) bool {
+    if (points.len < 3) return false;
+    return worldTriangleFrontFacing(.{
+        .a = points[0],
+        .b = points[1],
+        .c = points[2],
+    }, camera_position);
 }
 
 inline fn projectedTriangleFrontFacing(a: direct_primitives.Point2i, b: direct_primitives.Point2i, c: direct_primitives.Point2i) bool {
@@ -546,4 +566,48 @@ test "compile world triangle into draw list" {
 
     try std.testing.expectEqual(@as(usize, 1), draw_list.items().len);
     try std.testing.expect(draw_list.items()[0].payload == .triangle);
+}
+
+test "compile culls backfacing world triangle for depth geometry" {
+    var batch = PrimitiveBatch.init(std.testing.allocator);
+    defer batch.deinit();
+    var draw_list = direct_draw_list.DrawList.init(std.testing.allocator);
+    defer draw_list.deinit();
+
+    try batch.appendTriangle(.{
+        .a = math.Vec3.new(0.0, 0.5, 0.0),
+        .b = math.Vec3.new(0.5, -0.5, 0.0),
+        .c = math.Vec3.new(-0.5, -0.5, 0.0),
+    }, .{ .fill_color = 0xFFFFFFFF, .depth = 1.0 });
+
+    try compileToDrawList(&batch, &draw_list, .{
+        .position = math.Vec3.new(0.0, 0.0, -3.0),
+        .yaw = 0.0,
+        .pitch = 0.0,
+        .fov_deg = 60.0,
+    }, 1280, 720);
+
+    try std.testing.expectEqual(@as(usize, 0), draw_list.items().len);
+}
+
+test "compile keeps depthless triangle regardless of world facing" {
+    var batch = PrimitiveBatch.init(std.testing.allocator);
+    defer batch.deinit();
+    var draw_list = direct_draw_list.DrawList.init(std.testing.allocator);
+    defer draw_list.deinit();
+
+    try batch.appendTriangle(.{
+        .a = math.Vec3.new(0.0, 0.5, 0.0),
+        .b = math.Vec3.new(0.5, -0.5, 0.0),
+        .c = math.Vec3.new(-0.5, -0.5, 0.0),
+    }, .{ .fill_color = 0xFFFFFFFF, .depth = null });
+
+    try compileToDrawList(&batch, &draw_list, .{
+        .position = math.Vec3.new(0.0, 0.0, -3.0),
+        .yaw = 0.0,
+        .pitch = 0.0,
+        .fov_deg = 60.0,
+    }, 1280, 720);
+
+    try std.testing.expectEqual(@as(usize, 1), draw_list.items().len);
 }

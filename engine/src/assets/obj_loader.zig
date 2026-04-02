@@ -72,6 +72,8 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
     var bounds_max = Vec3.new(0.0, 0.0, 0.0);
     var has_bounds = false;
     var mesh_center = Vec3.new(0.0, 0.0, 0.0);
+    var saw_any_face_normal = false;
+    var missing_any_face_normal = false;
 
     // Reusable face buffers hoisted out of the per-face loop to avoid
     // heap alloc/free on every face line (typical face has 3-4 vertices,
@@ -186,7 +188,12 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
                         const vn_usize = @as(usize, @intCast(vn_index - 1));
                         if (vn_usize >= normals.items.len) return error.NormalIndexOutOfRange;
                         normal_vec = normals.items[vn_usize];
+                        saw_any_face_normal = true;
+                    } else {
+                        missing_any_face_normal = true;
                     }
+                } else {
+                    missing_any_face_normal = true;
                 }
 
                 // This is the de-indexing step. We create a new, unique vertex in our final
@@ -286,6 +293,9 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
 
     // Now that we have the final triangles, calculate the face normals.
     mesh.recalculateNormals();
+    if (!saw_any_face_normal or missing_any_face_normal) {
+        mesh.recalculateVertexNormals();
+    }
 
     // Try to hydrate meshlets from disk cache before falling back to on-the-fly generation.
     const cache_hit = meshlet_cache.loadCachedMeshlets(allocator, &mesh, path) catch |err| blk: {
@@ -303,4 +313,16 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
     }
 
     return mesh;
+}
+
+test "obj loader generates vertex normals when obj file omits them" {
+    var mesh = try load(std.testing.allocator, "assets/models/box.obj");
+    defer mesh.deinit();
+
+    try std.testing.expect(mesh.vertices.len > 0);
+    try std.testing.expectEqual(mesh.vertices.len, mesh.vertex_normals.len);
+
+    for (mesh.vertex_normals) |normal| {
+        try std.testing.expect(math.Vec3.length(normal) > 0.5);
+    }
 }
