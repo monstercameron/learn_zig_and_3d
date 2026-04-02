@@ -3,7 +3,6 @@ const job_system = @import("job_system");
 const TileRenderer = @import("../core/tile_renderer.zig");
 const direct_batch = @import("../direct_batch.zig");
 const direct_draw_list = @import("../direct_draw_list.zig");
-const direct_packets = @import("../direct_packets.zig");
 const direct_scene_packets = @import("../direct_scene_packets.zig");
 const direct_meshlets = @import("../direct_meshlets.zig");
 const direct_primitives = @import("../direct_primitives.zig");
@@ -46,8 +45,11 @@ pub const State = struct {
     tile_cursors: std.ArrayListUnmanaged(usize) = .{},
     tile_ranges: std.ArrayListUnmanaged(screen_binning_stage.TileRange) = .{},
     tile_command_indices: std.ArrayListUnmanaged(usize) = .{},
-    tile_jobs: std.ArrayListUnmanaged(Job) = .{},
-    tile_job_contexts: std.ArrayListUnmanaged(rasterization_stage.RasterTileJobContext) = .{},
+    tile_spans: std.ArrayListUnmanaged(?screen_binning_stage.TileSpan) = .{},
+    active_tile_indices: std.ArrayListUnmanaged(usize) = .{},
+    active_tile_command_counts: std.ArrayListUnmanaged(usize) = .{},
+    tile_chunk_jobs: std.ArrayListUnmanaged(Job) = .{},
+    tile_chunk_job_contexts: std.ArrayListUnmanaged(rasterization_stage.RasterTileChunkJobContext) = .{},
     present_dirty_rect: ?screen_binning_stage.DirtyRect = null,
     previous_fast_path_bounds: ?direct_primitives.Rect2i = null,
     timings: FrameTimings = .{},
@@ -77,8 +79,11 @@ pub const State = struct {
         self.tile_cursors.deinit(self.allocator);
         self.tile_ranges.deinit(self.allocator);
         self.tile_command_indices.deinit(self.allocator);
-        self.tile_jobs.deinit(self.allocator);
-        self.tile_job_contexts.deinit(self.allocator);
+        self.tile_spans.deinit(self.allocator);
+        self.active_tile_indices.deinit(self.allocator);
+        self.active_tile_command_counts.deinit(self.allocator);
+        self.tile_chunk_jobs.deinit(self.allocator);
+        self.tile_chunk_job_contexts.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -108,7 +113,7 @@ pub const State = struct {
         const submission = try scene_submission_stage.execute(&self.scene_packets, &self.showcase_mesh, config.scene_kind);
         std.debug.assert(submission.packet_count == self.scene_packets.items().len);
         _ = try visibility_culling_stage.execute(&self.scene_packets, &self.visible_scene, &self.visible_meshlets, camera);
-        const compile_job_system = if (config.raster_mode == .worker_tiles) job_sys else null;
+        const compile_job_system = if (config.raster_mode != .single_thread) job_sys else null;
         const expansion = try primitive_expansion_stage.execute(&self.visible_scene, &self.batch, compile_job_system);
         self.timings.build_batch_ns = @max(std.time.nanoTimestamp() - build_start, @as(i128, 0));
         self.timings.primitive_count = expansion.primitive_count;
@@ -117,21 +122,26 @@ pub const State = struct {
         try direct_batch.compileToDrawList(&self.batch, &self.draw_list, camera, width, height);
         self.timings.compile_draw_list_ns = @max(std.time.nanoTimestamp() - compile_start, @as(i128, 0));
 
-        const fast_path = analyzeDirectFastPath(config, &self.draw_list, width, height);
-        if (fast_path.enabled) {
+        const raster_plan = rasterization_stage.analyze(&self.draw_list, .{
+            .allow_direct_fast_path = true,
+            .width = width,
+            .height = height,
+            .raster_mode = config.raster_mode,
+        });
+        if (raster_plan.mode == .direct) {
             const clear_start = std.time.nanoTimestamp();
             const clear_config = direct_primitives.ClearConfig{
                 .color = 0xFF0B1220,
                 .depth = null,
             };
-            if (fast_path.bounds) |current_bounds| {
+            if (raster_plan.bounds) |current_bounds| {
                 if (self.previous_fast_path_bounds) |previous_bounds| {
                     direct_primitives.clearRect(resources.target, direct_primitives.unionRect(previous_bounds, current_bounds), clear_config);
                 } else {
                     direct_primitives.clear(resources.target, clear_config);
                 }
                 self.previous_fast_path_bounds = current_bounds;
-                self.timings.touched_tiles = fast_path.touched_tiles;
+                self.timings.touched_tiles = raster_plan.touched_tiles;
             } else {
                 if (self.previous_fast_path_bounds) |previous_bounds| {
                     direct_primitives.clearRect(resources.target, previous_bounds, clear_config);
@@ -168,105 +178,28 @@ pub const State = struct {
             &self.tile_cursors,
             &self.tile_ranges,
             &self.tile_command_indices,
+            &self.tile_spans,
+            &self.active_tile_indices,
+            &self.active_tile_command_counts,
         );
         self.timings.touched_tiles = binning.touched_tiles;
         self.present_dirty_rect = binning.dirty_rect;
         self.timings.binning_ns = @max(std.time.nanoTimestamp() - binning_start, @as(i128, 0));
 
         const raster_start = std.time.nanoTimestamp();
-        const active_job_system = if (config.raster_mode == .worker_tiles) job_sys else null;
         const raster = try rasterization_stage.execute(.{
             .allocator = self.allocator,
             .tile_ranges = &self.tile_ranges,
             .tile_command_indices = &self.tile_command_indices,
-            .tile_jobs = &self.tile_jobs,
-            .tile_job_contexts = &self.tile_job_contexts,
-        }, resources, &self.draw_list, width, height, active_job_system, config.raster_mode);
+            .active_tile_indices = &self.active_tile_indices,
+            .active_tile_command_counts = &self.active_tile_command_counts,
+            .tile_chunk_jobs = &self.tile_chunk_jobs,
+            .tile_chunk_job_contexts = &self.tile_chunk_job_contexts,
+        }, resources, &self.draw_list, width, height, if (config.raster_mode != .single_thread) job_sys else null, config.raster_mode);
         _ = raster;
         self.timings.raster_ns = @max(std.time.nanoTimestamp() - raster_start, @as(i128, 0));
     }
 };
-
-const FastPathAnalysis = struct {
-    enabled: bool = false,
-    bounds: ?direct_primitives.Rect2i = null,
-    touched_tiles: usize = 0,
-};
-
-fn packetDepthValue(packet: direct_packets.DrawPacket) ?f32 {
-    return switch (packet.material) {
-        .stroke => |stroke| stroke.depth,
-        .surface => |surface| surface.depth,
-    };
-}
-
-fn analyzeDirectFastPath(
-    config: RenderConfig,
-    draw_list: *const direct_draw_list.DrawList,
-    width: i32,
-    height: i32,
-) FastPathAnalysis {
-    if (config.raster_mode != .single_thread) return .{};
-    const items = draw_list.items();
-    if (items.len > 8) return .{};
-    if (items.len == 0) return .{ .enabled = true };
-    if (items.len == 1) {
-        const packet = items[0];
-        if ((packet.flags.depth_test or packet.flags.depth_write) and packetDepthValue(packet) != null) return .{};
-        const bounds = direct_primitives.packetBounds(packet);
-        return .{
-            .enabled = true,
-            .bounds = bounds,
-            .touched_tiles = if (bounds) |rect| tileCoverageForRect(rect, width, height) else 0,
-        };
-    }
-
-    var bounds: ?direct_primitives.Rect2i = null;
-    for (items) |packet| {
-        if ((packet.flags.depth_test or packet.flags.depth_write) and packetDepthValue(packet) != null) {
-            return .{};
-        }
-        const packet_bounds = direct_primitives.packetBounds(packet) orelse continue;
-        bounds = if (bounds) |existing|
-            direct_primitives.unionRect(existing, packet_bounds)
-        else
-            packet_bounds;
-    }
-    return .{
-        .enabled = true,
-        .bounds = bounds,
-        .touched_tiles = if (bounds) |rect| tileCoverageForRect(rect, width, height) else 0,
-    };
-}
-
-fn tileCoverageForRect(rect: direct_primitives.Rect2i, width: i32, height: i32) usize {
-    if (width <= 0 or height <= 0) return 0;
-    const clamped = direct_primitives.intersectRect(rect, .{
-        .min_x = 0,
-        .min_y = 0,
-        .max_x = width - 1,
-        .max_y = height - 1,
-    }) orelse return 0;
-    const tile_size = TileRenderer.TILE_SIZE;
-    const min_col, const max_col, const min_row, const max_row = blk: {
-        const shift = comptime std.math.log2_int(u32, tile_size);
-        if (comptime std.math.isPowerOfTwo(tile_size)) {
-            break :blk .{
-                @as(i32, @intCast(@as(u32, @bitCast(clamped.min_x)) >> shift)),
-                @as(i32, @intCast(@as(u32, @bitCast(clamped.max_x)) >> shift)),
-                @as(i32, @intCast(@as(u32, @bitCast(clamped.min_y)) >> shift)),
-                @as(i32, @intCast(@as(u32, @bitCast(clamped.max_y)) >> shift)),
-            };
-        }
-        break :blk .{
-            @divTrunc(clamped.min_x, tile_size),
-            @divTrunc(clamped.max_x, tile_size),
-            @divTrunc(clamped.min_y, tile_size),
-            @divTrunc(clamped.max_y, tile_size),
-        };
-    };
-    return @as(usize, @intCast(max_col - min_col + 1)) * @as(usize, @intCast(max_row - min_row + 1));
-}
 
 fn countNonBackground(color: []const u32, background: u32) usize {
     var count: usize = 0;

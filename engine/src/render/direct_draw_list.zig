@@ -5,6 +5,7 @@ const direct_primitives = @import("direct_primitives.zig");
 pub const DrawList = struct {
     allocator: std.mem.Allocator,
     commands: std.ArrayListUnmanaged(direct_packets.DrawPacket) = .{},
+    command_bounds: std.ArrayListUnmanaged(?direct_primitives.Rect2i) = .{},
     polygon_points: std.ArrayListUnmanaged(direct_primitives.Point2i) = .{},
 
     pub fn init(allocator: std.mem.Allocator) DrawList {
@@ -13,17 +14,20 @@ pub const DrawList = struct {
 
     pub fn deinit(self: *DrawList) void {
         self.commands.deinit(self.allocator);
+        self.command_bounds.deinit(self.allocator);
         self.polygon_points.deinit(self.allocator);
         self.* = undefined;
     }
 
     pub fn clearRetainingCapacity(self: *DrawList) void {
         self.commands.clearRetainingCapacity();
+        self.command_bounds.clearRetainingCapacity();
         self.polygon_points.clearRetainingCapacity();
     }
 
     pub fn ensureCommandCapacity(self: *DrawList, count: usize) !void {
         try self.commands.ensureTotalCapacity(self.allocator, count);
+        try self.command_bounds.ensureTotalCapacity(self.allocator, count);
     }
 
     pub fn ensurePolygonPointCapacity(self: *DrawList, count: usize) !void {
@@ -34,8 +38,13 @@ pub const DrawList = struct {
         return self.commands.items;
     }
 
+    pub fn bounds(self: *const DrawList) []const ?direct_primitives.Rect2i {
+        return self.command_bounds.items;
+    }
+
     pub fn append(self: *DrawList, packet: direct_packets.DrawPacket) !void {
         try self.commands.append(self.allocator, packet);
+        try self.command_bounds.append(self.allocator, direct_primitives.packetBounds(packet));
     }
 
     pub fn appendLine(self: *DrawList, line: direct_primitives.Line2i, style: direct_primitives.LineStyle) !void {

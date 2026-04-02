@@ -164,6 +164,19 @@
 - added a meshlet-backed showcase cube on the direct path so the baseline now exercises initial mesh and meshlet submission instead of primitives only
 - updated `build.zig` to link the DX11 presentation dependencies needed by the new present backend on Windows
 
+### Tile Renderer Cache Pass
+
+- kept the live direct showcase on the extracted tile-render path by forcing the single-triangle scene through stage 5 binning and stage 6 worker-tile raster in `engine/src/render/renderer.zig`
+- cached per-command packet bounds in `engine/src/render/direct_draw_list.zig` so stage 5 binning can reuse frame-local bounds data instead of recomputing geometric bounds during tile setup
+- extended `engine/src/render/stages/screen_binning_stage.zig` to emit active tile indices, per-tile command counts, and cached tile spans, reducing duplicate tile-coordinate derivation between the count and write passes
+- upgraded `engine/src/render/stages/screen_binning_stage.zig` to use deterministic hybrid tile-ref sorting with insertion sort for tiny tile lists and block sort for larger tile lists
+- moved tile-execution policy fully into `engine/src/render/stages/rasterization_stage.zig`, including direct-versus-tiled analysis, active-tile scheduling, and density-aware worker chunking
+- changed stage 6 worker raster to consume active-tile outputs directly from stage 5 instead of rebuilding them locally
+- aligned raster chunk contexts for better cache-line behavior and reduced worker-side pointer chasing by carrying draw-item slices directly in `engine/src/render/stages/rasterization_stage.zig`
+- added prefetch on the tile command walk in `engine/src/render/stages/rasterization_stage.zig` so denser tile lists can pull upcoming draw packets toward cache earlier
+- added direct-backend storage for cached tile spans and active tile command counts in `engine/src/render/backends/direct_backend.zig`
+- validated the tile path with `zig build check`, `zig build test`, and live TTL runs on the single-triangle worker-tile scene
+
 ### Known Limits
 
 - the direct raster backend is still a stub in `engine/src/render/renderer.zig`

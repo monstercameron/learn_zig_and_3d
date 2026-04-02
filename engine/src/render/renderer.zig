@@ -8174,7 +8174,10 @@ pub const Renderer = struct {
             .yaw = self.rotation_angle,
             .pitch = self.rotation_x,
             .fov_deg = self.camera_fov_deg,
-        }, self.job_system, .{ .raster_mode = .single_thread });
+        }, self.job_system, .{
+            .raster_mode = .worker_tiles,
+            .scene_kind = .triangle,
+        });
     }
 
     fn directFrameResources(self: *Renderer) frame_resources.FrameResources {
