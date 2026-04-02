@@ -159,13 +159,7 @@ pub const State = struct {
             return;
         }
 
-        const clear_start = std.time.nanoTimestamp();
-        _ = frame_setup_stage.execute(resources, .{
-            .clear_color = 0xFF0B1220,
-            .clear_depth = if (config.scene_kind == .triangle) null else std.math.inf(f32),
-            .clear_auxiliary = false,
-        });
-        self.timings.clear_ns = @max(std.time.nanoTimestamp() - clear_start, @as(i128, 0));
+        const previous_dirty_rect = self.present_dirty_rect;
         self.previous_fast_path_bounds = null;
 
         const binning_start = std.time.nanoTimestamp();
@@ -185,6 +179,33 @@ pub const State = struct {
         self.timings.touched_tiles = binning.touched_tiles;
         self.present_dirty_rect = binning.dirty_rect;
         self.timings.binning_ns = @max(std.time.nanoTimestamp() - binning_start, @as(i128, 0));
+
+        const clear_start = std.time.nanoTimestamp();
+        const clear_config = direct_primitives.ClearConfig{
+            .color = 0xFF0B1220,
+            .depth = if (config.scene_kind == .triangle) null else std.math.inf(f32),
+        };
+        if (previous_dirty_rect) |previous_rect| {
+            if (binning.dirty_rect) |current_rect| {
+                direct_primitives.clearRect(resources.target, unionDirtyRects(previous_rect, current_rect), clear_config);
+            } else {
+                direct_primitives.clearRect(resources.target, dirtyRectToRect(previous_rect), clear_config);
+            }
+        } else if (binning.dirty_rect) |current_rect| {
+            _ = frame_setup_stage.execute(resources, .{
+                .clear_color = 0xFF0B1220,
+                .clear_depth = clear_config.depth,
+                .clear_auxiliary = false,
+            });
+            self.present_dirty_rect = current_rect;
+        } else {
+            _ = frame_setup_stage.execute(resources, .{
+                .clear_color = 0xFF0B1220,
+                .clear_depth = clear_config.depth,
+                .clear_auxiliary = false,
+            });
+        }
+        self.timings.clear_ns = @max(std.time.nanoTimestamp() - clear_start, @as(i128, 0));
 
         const raster_start = std.time.nanoTimestamp();
         const raster = try rasterization_stage.execute(.{
@@ -207,6 +228,19 @@ fn countNonBackground(color: []const u32, background: u32) usize {
         if (pixel != background) count += 1;
     }
     return count;
+}
+
+inline fn dirtyRectToRect(rect: screen_binning_stage.DirtyRect) direct_primitives.Rect2i {
+    return .{
+        .min_x = rect.min_x,
+        .min_y = rect.min_y,
+        .max_x = rect.max_x,
+        .max_y = rect.max_y,
+    };
+}
+
+inline fn unionDirtyRects(a: screen_binning_stage.DirtyRect, b: screen_binning_stage.DirtyRect) direct_primitives.Rect2i {
+    return direct_primitives.unionRect(dirtyRectToRect(a), dirtyRectToRect(b));
 }
 
 test "direct backend prepares tile bins for showcase" {

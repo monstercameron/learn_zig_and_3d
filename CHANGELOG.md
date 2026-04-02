@@ -177,6 +177,18 @@
 - added direct-backend storage for cached tile spans and active tile command counts in `engine/src/render/backends/direct_backend.zig`
 - validated the tile path with `zig build check`, `zig build test`, and live TTL runs on the single-triangle worker-tile scene
 
+### Multi-Primitive Tile Showcase Pass
+
+- switched the live direct showcase scene in `engine/src/render/renderer.zig` from the single-triangle benchmark back to the multi-primitive showcase while keeping stage 6 on `worker_tiles`
+- added a 15-second default renderer TTL in `engine/src/main.zig` when no explicit `ZIG_RENDER_TTL_SECONDS` or frame-based TTL is configured, while keeping explicit environment overrides authoritative
+- optimized `engine/src/render/direct_primitives.zig` line rendering for the tiled path by clipping segments to tile bounds before Bresenham and using a direct color-write path after clipping
+- optimized `engine/src/render/direct_batch.zig` compile-time projection by adding fixed-size line and triangle projection helpers, a small-point vector projection path, and a cheaper circle-radius projection path
+- added projected backface culling for triangles and polygons in `engine/src/render/direct_batch.zig` so hidden faces are dropped before stage 5 binning and stage 6 raster
+- added front-face helper reductions and hot inlining in `engine/src/render/direct_batch.zig` to keep compile-side helpers lean on the multi-primitive path
+- changed `engine/src/render/backends/direct_backend.zig` tiled clears to use the union of the previous and current dirty rects instead of clearing the whole frame every tiled frame
+- reduced showcase scene cost in `engine/src/render/stages/scene_submission_stage.zig` by removing the meshlet-cube outline override while preserving the filled cube in the scene
+- validated the multi-primitive worker-tile path with `zig build check`, `zig build test`, and repeated `zig build run` TTL runs, including a 15-second explicit TTL run showing `primitives=16`, `touched_tiles=89`, and raster around the low-2ms range
+
 ### Known Limits
 
 - the direct raster backend is still a stub in `engine/src/render/renderer.zig`

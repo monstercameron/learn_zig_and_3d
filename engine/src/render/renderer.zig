@@ -8176,7 +8176,7 @@ pub const Renderer = struct {
             .fov_deg = self.camera_fov_deg,
         }, self.job_system, .{
             .raster_mode = .worker_tiles,
-            .scene_kind = .triangle,
+            .scene_kind = .primitive_showcase,
         });
     }
 

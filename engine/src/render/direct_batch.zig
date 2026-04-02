@@ -223,17 +223,80 @@ const Projector = struct {
     }
 
     fn projectCircleRadius(self: *const Projector, center: math.Vec3, radius: f32) ?i32 {
-        const offset_world = math.Vec3.add(center, math.Vec3.scale(self.basis.right, radius));
-        const points = [_]math.Vec3{ center, offset_world };
-        var projected: [2]direct_primitives.Point2i = undefined;
-        if (!self.projectPoints(points[0..], projected[0..])) return null;
-        const center_screen = projected[0];
-        const edge_screen = projected[1];
-        const dx = edge_screen.x - center_screen.x;
-        const dy = edge_screen.y - center_screen.y;
-        const radius_px = @as(i32, @intFromFloat(std.math.sqrt(@as(f32, @floatFromInt(dx * dx + dy * dy)))));
+        const relative = math.Vec3.sub(center, self.camera.position);
+        const camera_z = math.Vec3.dot(relative, self.basis.forward);
+        if (camera_z <= near_plane) return null;
+        const radius_px = @as(i32, @intFromFloat(@abs((radius / camera_z) * self.projection.x_scale * self.projection.center_x)));
         if (radius_px <= 0) return null;
         return radius_px;
+    }
+
+    fn projectLine(self: *const Projector, start: math.Vec3, end: math.Vec3, out: *[2]direct_primitives.Point2i) bool {
+        const points = [_]math.Vec3{ start, end };
+        return self.projectSmallPoints(points[0..], out[0..], 2);
+    }
+
+    fn projectTriangle(self: *const Projector, a: math.Vec3, b: math.Vec3, c: math.Vec3, out: *[3]direct_primitives.Point2i) bool {
+        const points = [_]math.Vec3{ a, b, c };
+        return self.projectSmallPoints(points[0..], out[0..], 3);
+    }
+
+    fn projectSmallPoints(self: *const Projector, points: []const math.Vec3, out: []direct_primitives.Point2i, comptime count: usize) bool {
+        std.debug.assert(points.len == count);
+        std.debug.assert(out.len >= count);
+
+        if (comptime count == 0) return true;
+        if (comptime count >= 4) return self.projectPoints(points, out);
+
+        const Vec = @Vector(4, f32);
+        const pos_x: Vec = .{ self.camera.position.x, self.camera.position.x, self.camera.position.x, self.camera.position.x };
+        const pos_y: Vec = .{ self.camera.position.y, self.camera.position.y, self.camera.position.y, self.camera.position.y };
+        const pos_z: Vec = .{ self.camera.position.z, self.camera.position.z, self.camera.position.z, self.camera.position.z };
+        const right_x: Vec = @splat(self.basis.right.x);
+        const right_y: Vec = @splat(self.basis.right.y);
+        const right_z: Vec = @splat(self.basis.right.z);
+        const up_x: Vec = @splat(self.basis.up.x);
+        const up_y: Vec = @splat(self.basis.up.y);
+        const up_z: Vec = @splat(self.basis.up.z);
+        const forward_x: Vec = @splat(self.basis.forward.x);
+        const forward_y: Vec = @splat(self.basis.forward.y);
+        const forward_z: Vec = @splat(self.basis.forward.z);
+        const x_scale: Vec = @splat(self.projection.x_scale);
+        const y_scale: Vec = @splat(self.projection.y_scale);
+        const center_x: Vec = @splat(self.projection.center_x);
+        const center_y: Vec = @splat(self.projection.center_y);
+
+        var xs = [_]f32{ 0.0, 0.0, 0.0, 0.0 };
+        var ys = [_]f32{ 0.0, 0.0, 0.0, 0.0 };
+        var zs = [_]f32{ 0.0, 0.0, 0.0, 0.0 };
+        inline for (0..count) |index| {
+            xs[index] = points[index].x;
+            ys[index] = points[index].y;
+            zs[index] = points[index].z;
+        }
+
+        const rel_x: Vec = @as(Vec, @bitCast(xs)) - pos_x;
+        const rel_y: Vec = @as(Vec, @bitCast(ys)) - pos_y;
+        const rel_z: Vec = @as(Vec, @bitCast(zs)) - pos_z;
+        const camera_x = rel_x * right_x + rel_y * right_y + rel_z * right_z;
+        const camera_y = rel_x * up_x + rel_y * up_y + rel_z * up_z;
+        const camera_z = rel_x * forward_x + rel_y * forward_y + rel_z * forward_z;
+
+        inline for (0..count) |index| {
+            if (camera_z[index] <= near_plane) return false;
+        }
+
+        const inv_z = @as(Vec, @splat(1.0)) / camera_z;
+        const screen_x = center_x + (camera_x * inv_z) * x_scale * center_x;
+        const screen_y = center_y - (camera_y * inv_z) * y_scale * center_y;
+
+        inline for (0..count) |index| {
+            out[index] = .{
+                .x = @intFromFloat(screen_x[index]),
+                .y = @intFromFloat(screen_y[index]),
+            };
+        }
+        return true;
     }
 };
 
@@ -260,9 +323,8 @@ pub fn compileToDrawList(
         const sort_key = makeSortKey(command, packet_index);
         switch (command) {
             .line => |payload| {
-                const points = [_]math.Vec3{ payload.line.start, payload.line.end };
                 var projected: [2]direct_primitives.Point2i = undefined;
-                if (!projector.projectPoints(points[0..], projected[0..])) continue;
+                if (!projector.projectLine(payload.line.start, payload.line.end, &projected)) continue;
                 try draw_list.append(.{
                     .sort_key = sort_key,
                     .layer = .geometry,
@@ -272,9 +334,9 @@ pub fn compileToDrawList(
                 });
             },
             .triangle => |payload| {
-                const points = [_]math.Vec3{ payload.triangle.a, payload.triangle.b, payload.triangle.c };
                 var projected: [3]direct_primitives.Point2i = undefined;
-                if (!projector.projectPoints(points[0..], projected[0..])) continue;
+                if (!projector.projectTriangle(payload.triangle.a, payload.triangle.b, payload.triangle.c, &projected)) continue;
+                if (!projectedTriangleFrontFacing(projected[0], projected[1], projected[2])) continue;
                 try draw_list.append(.{
                     .sort_key = sort_key,
                     .layer = .geometry,
@@ -287,6 +349,7 @@ pub fn compileToDrawList(
                 var projected: [max_polygon_points]direct_primitives.Point2i = undefined;
                 const visible_count = payload.polygon.slice().len;
                 if (!projector.projectPoints(payload.polygon.slice(), projected[0..visible_count])) continue;
+                if (!projectedPolygonFrontFacing(projected[0..visible_count])) continue;
                 if (visible_count >= 3) {
                     const start = draw_list.polygon_points.items.len;
                     try draw_list.polygon_points.appendSlice(draw_list.allocator, projected[0..visible_count]);
@@ -316,7 +379,7 @@ pub fn compileToDrawList(
     }
 }
 
-fn makeSortKey(command: DrawPacket, packet_index: usize) u64 {
+inline fn makeSortKey(command: DrawPacket, packet_index: usize) u64 {
     const depth_component: u32 = switch (command) {
         .line => |payload| encodeDepth(payload.material.depth),
         .triangle => |payload| encodeDepth(payload.material.depth),
@@ -326,7 +389,68 @@ fn makeSortKey(command: DrawPacket, packet_index: usize) u64 {
     return (@as(u64, depth_component) << 32) | @as(u64, @intCast(packet_index));
 }
 
-fn encodeDepth(depth: ?f32) u32 {
+inline fn projectedTriangleFrontFacing(a: direct_primitives.Point2i, b: direct_primitives.Point2i, c: direct_primitives.Point2i) bool {
+    return signedArea2(a, b, c) < 0;
+}
+
+fn projectedPolygonFrontFacing(points: []const direct_primitives.Point2i) bool {
+    if (points.len < 3) return false;
+    var area2: i64 = 0;
+    const lanes = comptime std.simd.suggestVectorLength(i64) orelse 0;
+    const edge_count = points.len - 1;
+    if (lanes >= 4 and edge_count >= lanes) {
+        const Vec = @Vector(lanes, i64);
+        var index: usize = 0;
+        var cur_xs: [lanes]i64 = undefined;
+        var cur_ys: [lanes]i64 = undefined;
+        var next_xs: [lanes]i64 = undefined;
+        var next_ys: [lanes]i64 = undefined;
+
+        while (index + lanes <= edge_count) : (index += lanes) {
+            inline for (0..lanes) |lane| {
+                const current = points[index + lane];
+                const next = points[index + lane + 1];
+                cur_xs[lane] = current.x;
+                cur_ys[lane] = current.y;
+                next_xs[lane] = next.x;
+                next_ys[lane] = next.y;
+            }
+            const cur_x: Vec = @as(Vec, @bitCast(cur_xs));
+            const cur_y: Vec = @as(Vec, @bitCast(cur_ys));
+            const next_x: Vec = @as(Vec, @bitCast(next_xs));
+            const next_y: Vec = @as(Vec, @bitCast(next_ys));
+            const cross = cur_x * next_y - next_x * cur_y;
+            inline for (0..lanes) |lane| area2 += cross[lane];
+        }
+
+        for (index..edge_count) |tail_index| {
+            const point = points[tail_index];
+            const next = points[tail_index + 1];
+            area2 += @as(i64, point.x) * @as(i64, next.y) - @as(i64, next.x) * @as(i64, point.y);
+        }
+        const last = points[points.len - 1];
+        const first = points[0];
+        area2 += @as(i64, last.x) * @as(i64, first.y) - @as(i64, first.x) * @as(i64, last.y);
+        return area2 < 0;
+    }
+
+    for (0..edge_count) |index| {
+        const point = points[index];
+        const next = points[index + 1];
+        area2 += @as(i64, point.x) * @as(i64, next.y) - @as(i64, next.x) * @as(i64, point.y);
+    }
+    const last = points[points.len - 1];
+    const first = points[0];
+    area2 += @as(i64, last.x) * @as(i64, first.y) - @as(i64, first.x) * @as(i64, last.y);
+    return area2 < 0;
+}
+
+inline fn signedArea2(a: direct_primitives.Point2i, b: direct_primitives.Point2i, c: direct_primitives.Point2i) i64 {
+    return (@as(i64, b.x) - @as(i64, a.x)) * (@as(i64, c.y) - @as(i64, a.y)) -
+        (@as(i64, b.y) - @as(i64, a.y)) * (@as(i64, c.x) - @as(i64, a.x));
+}
+
+inline fn encodeDepth(depth: ?f32) u32 {
     if (depth == null) return 0;
     const scaled = std.math.clamp(depth.?, 0.0, 65535.0) * 1024.0;
     return @intFromFloat(scaled);

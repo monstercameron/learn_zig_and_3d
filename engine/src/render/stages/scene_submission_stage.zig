@@ -93,7 +93,7 @@ pub fn execute(
         ),
         .source = .{ .meshlets = .{
             .mesh = showcase_mesh,
-            .material_override = .{ .fill_color = 0xFFD9D3C7, .outline_color = 0xFF1F2937, .depth = 1.0 },
+            .material_override = .{ .fill_color = 0xFFD9D3C7, .outline_color = null, .depth = 1.0 },
         } },
     });
 

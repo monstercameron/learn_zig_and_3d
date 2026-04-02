@@ -209,27 +209,30 @@ pub fn drawMany(target: FrameTarget, commands: []const Command) void {
 }
 
 pub fn drawLine(target: FrameTarget, line: Line2i, style: LineStyle) void {
-    if (line.start.y == line.end.y) {
-        drawHorizontalLine(target, line.start.y, @min(line.start.x, line.end.x), @max(line.start.x, line.end.x), style.color);
+    const bounds = targetBounds(target);
+    const clipped = clipLineToRect(line, bounds) orelse return;
+
+    if (clipped.start.y == clipped.end.y) {
+        drawHorizontalLine(target, clipped.start.y, @min(clipped.start.x, clipped.end.x), @max(clipped.start.x, clipped.end.x), style.color);
         return;
     }
-    if (line.start.x == line.end.x) {
-        drawVerticalLine(target, line.start.x, @min(line.start.y, line.end.y), @max(line.start.y, line.end.y), style.color);
+    if (clipped.start.x == clipped.end.x) {
+        drawVerticalLine(target, clipped.start.x, @min(clipped.start.y, clipped.end.y), @max(clipped.start.y, clipped.end.y), style.color);
         return;
     }
 
-    var cx = line.start.x;
-    var cy = line.start.y;
+    var cx = clipped.start.x;
+    var cy = clipped.start.y;
 
-    const dx = if (line.end.x >= line.start.x) (line.end.x - line.start.x) else (line.start.x - line.end.x);
-    const dy = if (line.end.y >= line.start.y) (line.end.y - line.start.y) else (line.start.y - line.end.y);
-    const sx: i32 = if (line.start.x < line.end.x) 1 else -1;
-    const sy: i32 = if (line.start.y < line.end.y) 1 else -1;
+    const dx = if (clipped.end.x >= clipped.start.x) (clipped.end.x - clipped.start.x) else (clipped.start.x - clipped.end.x);
+    const dy = if (clipped.end.y >= clipped.start.y) (clipped.end.y - clipped.start.y) else (clipped.start.y - clipped.end.y);
+    const sx: i32 = if (clipped.start.x < clipped.end.x) 1 else -1;
+    const sy: i32 = if (clipped.start.y < clipped.end.y) 1 else -1;
     var err: i32 = dx - dy;
 
     while (true) {
-        setPixel(target, cx, cy, style.color, null);
-        if (cx == line.end.x and cy == line.end.y) break;
+        setPixelClippedColorOnly(target, cx, cy, style.color);
+        if (cx == clipped.end.x and cy == clipped.end.y) break;
 
         const doubled_err = err * 2;
         if (doubled_err > -dy) {
@@ -241,6 +244,64 @@ pub fn drawLine(target: FrameTarget, line: Line2i, style: LineStyle) void {
             cy += sy;
         }
     }
+}
+
+fn clipLineToRect(line: Line2i, rect: Rect2i) ?Line2i {
+    var x0 = @as(f32, @floatFromInt(line.start.x));
+    var y0 = @as(f32, @floatFromInt(line.start.y));
+    var x1 = @as(f32, @floatFromInt(line.end.x));
+    var y1 = @as(f32, @floatFromInt(line.end.y));
+
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+
+    var t0: f32 = 0.0;
+    var t1: f32 = 1.0;
+
+    if (!clipLineEdge(-dx, x0 - @as(f32, @floatFromInt(rect.min_x)), &t0, &t1)) return null;
+    if (!clipLineEdge(dx, @as(f32, @floatFromInt(rect.max_x)) - x0, &t0, &t1)) return null;
+    if (!clipLineEdge(-dy, y0 - @as(f32, @floatFromInt(rect.min_y)), &t0, &t1)) return null;
+    if (!clipLineEdge(dy, @as(f32, @floatFromInt(rect.max_y)) - y0, &t0, &t1)) return null;
+
+    if (t1 < t0) return null;
+
+    if (t1 < 1.0) {
+        x1 = x0 + t1 * dx;
+        y1 = y0 + t1 * dy;
+    }
+    if (t0 > 0.0) {
+        x0 += t0 * dx;
+        y0 += t0 * dy;
+    }
+
+    return .{
+        .start = .{
+            .x = @intFromFloat(@round(x0)),
+            .y = @intFromFloat(@round(y0)),
+        },
+        .end = .{
+            .x = @intFromFloat(@round(x1)),
+            .y = @intFromFloat(@round(y1)),
+        },
+    };
+}
+
+inline fn clipLineEdge(p: f32, q: f32, t0: *f32, t1: *f32) bool {
+    if (p == 0.0) return q >= 0.0;
+    const r = q / p;
+    if (p < 0.0) {
+        if (r > t1.*) return false;
+        if (r > t0.*) t0.* = r;
+        return true;
+    }
+    if (r < t0.*) return false;
+    if (r < t1.*) t1.* = r;
+    return true;
+}
+
+inline fn setPixelClippedColorOnly(target: FrameTarget, x: i32, y: i32, color: u32) void {
+    const idx = @as(usize, @intCast(y)) * @as(usize, @intCast(target.width)) + @as(usize, @intCast(x));
+    target.color[idx] = color;
 }
 
 pub fn drawSolidTriangle(target: FrameTarget, triangle: Triangle2i, color: u32, depth_value: ?f32) void {

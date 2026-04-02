@@ -450,7 +450,7 @@ pub fn main() !void {
     // that `gpa.deinit()` is called at the end of the `main` function, cleaning up the allocator.
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-    const renderer_ttl_ns = loadRendererTtlNs(allocator);
+    const requested_renderer_ttl_ns = loadRendererTtlNs(allocator);
     const renderer_ttl_frames = loadRendererTtlFrames(allocator);
     const profile_frame_target = loadProfileFrameTarget(allocator);
     const auto_profile_ttl_frames: ?u64 = if (renderer_ttl_frames == null and profile_frame_target != null)
@@ -458,6 +458,10 @@ pub fn main() !void {
     else
         null;
     const effective_ttl_frames = renderer_ttl_frames orelse auto_profile_ttl_frames;
+    const renderer_ttl_ns = requested_renderer_ttl_ns orelse if (effective_ttl_frames == null)
+        defaultRendererTtlNs()
+    else
+        null;
     const renderer_start_ns = std.time.nanoTimestamp();
 
     log.init(allocator);
@@ -1012,6 +1016,10 @@ fn loadRendererTtlNs(allocator: std.mem.Allocator) ?i128 {
 
     const ttl_ns_f64 = ttl_seconds * @as(f64, @floatFromInt(std.time.ns_per_s));
     return @as(i128, @intFromFloat(ttl_ns_f64));
+}
+
+fn defaultRendererTtlNs() i128 {
+    return 15 * std.time.ns_per_s;
 }
 
 /// Loads l oa dr en de re rt tl fr am es from external or cached data sources.
