@@ -121,6 +121,23 @@ const MinimalAppSession = struct {
     close_requested: bool = false,
 };
 
+fn logDirectFrameTimings(renderer: *Renderer, scope: []const u8) void {
+    const timings = renderer.lastDirectFrameTimings();
+    app_logger.infoSub(scope, "timings clear={d:.3}ms build={d:.3}ms compile={d:.3}ms bin={d:.3}ms raster={d:.3}ms shade={d:.3}ms compose={d:.3}ms post={d:.3}ms present={d:.3}ms primitives={d} touched_tiles={d}", .{
+        @as(f64, @floatFromInt(timings.clear_ns)) / 1_000_000.0,
+        @as(f64, @floatFromInt(timings.build_batch_ns)) / 1_000_000.0,
+        @as(f64, @floatFromInt(timings.compile_draw_list_ns)) / 1_000_000.0,
+        @as(f64, @floatFromInt(timings.binning_ns)) / 1_000_000.0,
+        @as(f64, @floatFromInt(timings.raster_ns)) / 1_000_000.0,
+        @as(f64, @floatFromInt(timings.shading_ns)) / 1_000_000.0,
+        @as(f64, @floatFromInt(timings.composition_ns)) / 1_000_000.0,
+        @as(f64, @floatFromInt(timings.post_process_ns)) / 1_000_000.0,
+        @as(f64, @floatFromInt(timings.present_ns)) / 1_000_000.0,
+        timings.primitive_count,
+        timings.touched_tiles,
+    });
+}
+
 fn toPlatformCursorStyle(style: CursorStyle) platform_loop.CursorStyle {
     return switch (style) {
         .arrow => .arrow,
@@ -662,20 +679,7 @@ pub fn main() !void {
                 if (frame_count <= 3) {
                     app_logger.debug("frame {} complete", .{frame_count});
                 } else if (frame_count % 300 == 0) {
-                    const timings = session.renderer.lastDirectFrameTimings();
-                    app_logger.infoSub("direct_demo", "timings clear={d:.3}ms build={d:.3}ms compile={d:.3}ms bin={d:.3}ms raster={d:.3}ms shade={d:.3}ms compose={d:.3}ms post={d:.3}ms present={d:.3}ms primitives={d} touched_tiles={d}", .{
-                        @as(f64, @floatFromInt(timings.clear_ns)) / 1_000_000.0,
-                        @as(f64, @floatFromInt(timings.build_batch_ns)) / 1_000_000.0,
-                        @as(f64, @floatFromInt(timings.compile_draw_list_ns)) / 1_000_000.0,
-                        @as(f64, @floatFromInt(timings.binning_ns)) / 1_000_000.0,
-                        @as(f64, @floatFromInt(timings.raster_ns)) / 1_000_000.0,
-                        @as(f64, @floatFromInt(timings.shading_ns)) / 1_000_000.0,
-                        @as(f64, @floatFromInt(timings.composition_ns)) / 1_000_000.0,
-                        @as(f64, @floatFromInt(timings.post_process_ns)) / 1_000_000.0,
-                        @as(f64, @floatFromInt(timings.present_ns)) / 1_000_000.0,
-                        timings.primitive_count,
-                        timings.touched_tiles,
-                    });
+                    logDirectFrameTimings(session.renderer, "direct_demo");
                 }
             }
         };
@@ -969,8 +973,12 @@ pub fn main() !void {
             }
         }
 
-        pub fn onFrameComplete(_: *AppSession, frame_count: u32) void {
-            if (frame_count <= 3) app_logger.debug("frame {} complete", .{frame_count});
+        pub fn onFrameComplete(session: *AppSession, frame_count: u32) void {
+            if (frame_count <= 3) {
+                app_logger.debug("frame {} complete", .{frame_count});
+            } else if (frame_count % 300 == 0) {
+                logDirectFrameTimings(session.renderer, "scene_render");
+            }
         }
     };
 

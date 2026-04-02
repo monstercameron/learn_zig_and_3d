@@ -33,6 +33,7 @@ pub const Payload = union(enum) {
     triangle: struct {
         triangle: direct_primitives.Triangle2i,
         vertex_colors: ?[3]u32 = null,
+        gouraud_setup: ?direct_primitives.PreparedGouraudTriangle = null,
     },
     polygon: direct_primitives.Polygon2i,
     circle: direct_primitives.Circle2i,

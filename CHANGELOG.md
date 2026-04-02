@@ -2,6 +2,38 @@
 
 ## 2026-04-02
 
+### Gouraud Hot-Path Optimization
+
+- added ECS-side direct timing logs in `engine/src/main.zig` so steady-state `clear`, `raster`, `shade`, and tile counts are visible on the Suzanne scene
+- extended `engine/src/render/direct_primitives.zig` so prepared Gouraud triangles cache more immutable raster state:
+  - unclipped bounds
+  - base edge values
+  - edge step values
+  - normalized winding convention
+- moved prepared Gouraud color interpolation to pre-normalized `Q16` fixed-point state in `engine/src/render/direct_primitives.zig` so the hot loop no longer does per-pixel reciprocal multiply normalization
+- unified prepared Gouraud raster around a single inside-test convention (`>= 0`) by flipping winding during setup in `engine/src/render/direct_primitives.zig`
+- added prepared Gouraud block entrypoints in `engine/src/render/direct_primitives.zig` for tile-local lit-triangle raster
+- upgraded the prepared Gouraud block kernel in `engine/src/render/direct_primitives.zig` with:
+  - span-seeking row walks
+  - 8-pixel burst writes
+  - 8-lane SIMD coverage mask qualification for burst spans
+- extended `engine/src/render/direct_draw_list.zig` with cached prepared-Gouraud side entries so stage 6 can reuse resolved lit-triangle payloads without repeatedly decoding packet/material unions
+- upgraded `engine/src/render/stages/rasterization_stage.zig` to batch prepared Gouraud triangles per tile into SoA-style local arrays and flush them through the dedicated block kernel instead of the generic packet path
+- extended `engine/src/render/stages/rasterization_stage.zig` so static-scene cache hits can consume cached per-tile prepared-Gouraud blocks directly
+- extended `engine/src/render/backends/direct_backend.zig` to cache per-tile prepared-Gouraud ranges, counts, triangles, setups, and depth values for the static Suzanne worker-tile path
+- added a full-tile prepared-Gouraud fast path in `engine/src/render/stages/rasterization_stage.zig` so tiles containing only prepared lit triangles skip the generic tile command walk entirely
+- kept fallback packet raster intact for non-Gouraud and mixed tiles so the specialization stays scoped to the hot Suzanne path
+
+### Measured Result
+
+- Suzanne ECS steady-state progressed from roughly `raster≈5.0ms` before the recent hot-path work down to roughly `raster≈4.11-4.19ms` on the better frames after the prepared-Gouraud caching, block-kernel, tile-cache, and burst-path changes
+
+### Validation
+
+- `zig build check`
+- `zig build test`
+- `$env:ZIG_RENDER_TTL_SECONDS='15'; zig build run`
+
 ### ECS Suzanne Scene And Behavior
 
 - added `assets/configs/scenes/suzanne_behavior.scene.json` as a real ECS-backed scene with Suzanne, a floor, lights, and a native behavior script

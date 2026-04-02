@@ -355,6 +355,10 @@ pub fn compileToDrawList(
                     .payload = .{ .triangle = .{
                         .triangle = .{ .a = projected[0], .b = projected[1], .c = projected[2] },
                         .vertex_colors = payload.gouraud_colors,
+                        .gouraud_setup = if (payload.gouraud_colors) |vertex_colors|
+                            direct_primitives.prepareGouraudTriangle(.{ .a = projected[0], .b = projected[1], .c = projected[2] }, vertex_colors)
+                        else
+                            null,
                     } },
                 });
             },

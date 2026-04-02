@@ -10,11 +10,12 @@ pub const LightConfig = struct {
 
 pub fn applyBatchLighting(batch: *direct_batch.PrimitiveBatch, config: LightConfig) void {
     const light_dir = normalize(config.light_dir);
+    const packed_config = PackedLightConfig.init(light_dir, config);
     for (batch.commands.items) |*command| {
         switch (command.*) {
             .triangle => |*payload| {
                 const vertex_normals = payload.vertex_normals orelse continue;
-                payload.gouraud_colors = shadeTriangle(payload.material.fill_color, vertex_normals, light_dir, config);
+                payload.gouraud_colors = shadeTriangle(payload.material.fill_color, vertex_normals, packed_config);
             },
             else => {},
         }
@@ -41,49 +42,73 @@ inline fn shadeColor(base_color: u32, normal: math.Vec3, light_dir: math.Vec3, c
     return a | (r << 16) | (g << 8) | b;
 }
 
-inline fn shadeTriangle(base_color: u32, normals: [3]math.Vec3, light_dir: math.Vec3, config: LightConfig) [3]u32 {
+inline fn shadeTriangle(base_color: u32, normals: [3]math.Vec3, packed_config: PackedLightConfig) [3]u32 {
     const channels = unpackBaseColor(base_color);
     const Vec = @Vector(4, f32);
     const nx: Vec = .{ normals[0].x, normals[1].x, normals[2].x, 0.0 };
     const ny: Vec = .{ normals[0].y, normals[1].y, normals[2].y, 0.0 };
     const nz: Vec = .{ normals[0].z, normals[1].z, normals[2].z, 1.0 };
-    const len_sq = nx * nx + ny * ny + nz * nz;
+    const normalized = normalizeTriangleNormals(nx, ny, nz);
+    return shadeTriangleColors(channels, triangleShadeFactors(normalized.x, normalized.y, normalized.z, packed_config));
+}
 
-    var normalized_x = nx;
-    var normalized_y = ny;
-    var normalized_z = nz;
-    inline for (0..3) |lane| {
-        const lane_len_sq = len_sq[lane];
-        if (lane_len_sq <= 1e-8) {
-            normalized_x[lane] = 0.0;
-            normalized_y[lane] = 0.0;
-            normalized_z[lane] = 1.0;
-        } else if (@abs(lane_len_sq - 1.0) > 1e-4) {
-            const inv_len = 1.0 / std.math.sqrt(lane_len_sq);
-            normalized_x[lane] *= inv_len;
-            normalized_y[lane] *= inv_len;
-            normalized_z[lane] *= inv_len;
-        }
+const PackedLightConfig = struct {
+    light_x: @Vector(4, f32),
+    light_y: @Vector(4, f32),
+    light_z: @Vector(4, f32),
+    ambient: @Vector(4, f32),
+    diffuse_scale: @Vector(4, f32),
+
+    inline fn init(light_dir: math.Vec3, config: LightConfig) PackedLightConfig {
+        return .{
+            .light_x = @splat(light_dir.x),
+            .light_y = @splat(light_dir.y),
+            .light_z = @splat(light_dir.z),
+            .ambient = @splat(config.ambient),
+            .diffuse_scale = @splat(config.diffuse),
+        };
     }
+};
 
-    const light_x: Vec = @splat(light_dir.x);
-    const light_y: Vec = @splat(light_dir.y);
-    const light_z: Vec = @splat(light_dir.z);
-    const ambient: Vec = @splat(config.ambient);
-    const diffuse_scale: Vec = @splat(config.diffuse);
+const PackedNormals = struct {
+    x: @Vector(4, f32),
+    y: @Vector(4, f32),
+    z: @Vector(4, f32),
+};
+
+inline fn normalizeTriangleNormals(nx: @Vector(4, f32), ny: @Vector(4, f32), nz: @Vector(4, f32)) PackedNormals {
+    const Vec = @Vector(4, f32);
+    const eps: Vec = @splat(1e-8);
+    const one: Vec = @splat(1.0);
+    const zero: Vec = @splat(0.0);
+    const len_sq = nx * nx + ny * ny + nz * nz;
+    const safe_len_sq = @max(len_sq, eps);
+    const inv_len = one / @sqrt(safe_len_sq);
+    const zero_mask = len_sq <= eps;
+    const unit_mask = @abs(len_sq - one) <= @as(Vec, @splat(1e-4));
+    const scaled_x = nx * inv_len;
+    const scaled_y = ny * inv_len;
+    const scaled_z = nz * inv_len;
+    const candidate_x = @select(f32, unit_mask, nx, scaled_x);
+    const candidate_y = @select(f32, unit_mask, ny, scaled_y);
+    const candidate_z = @select(f32, unit_mask, nz, scaled_z);
+    return .{
+        .x = @select(f32, zero_mask, zero, candidate_x),
+        .y = @select(f32, zero_mask, zero, candidate_y),
+        .z = @select(f32, zero_mask, one, candidate_z),
+    };
+}
+
+inline fn triangleShadeFactors(nx: @Vector(4, f32), ny: @Vector(4, f32), nz: @Vector(4, f32), packed_config: PackedLightConfig) @Vector(4, u32) {
+    const Vec = @Vector(4, f32);
     const zero: Vec = @splat(0.0);
     const one: Vec = @splat(1.0);
     const factor_scale: Vec = @splat(255.0);
+    const bias: Vec = @splat(0.5);
 
-    const diffuse = @min(@max(normalized_x * light_x + normalized_y * light_y + normalized_z * light_z, zero), one);
-    const intensity = @min(@max(ambient + diffuse_scale * diffuse, zero), one);
-    const factors = intensity * factor_scale + @as(Vec, @splat(0.5));
-
-    return .{
-        shadeColorWithFactor(channels, @intFromFloat(factors[0])),
-        shadeColorWithFactor(channels, @intFromFloat(factors[1])),
-        shadeColorWithFactor(channels, @intFromFloat(factors[2])),
-    };
+    const diffuse = @min(@max(nx * packed_config.light_x + ny * packed_config.light_y + nz * packed_config.light_z, zero), one);
+    const intensity = @min(@max(packed_config.ambient + packed_config.diffuse_scale * diffuse, zero), one);
+    return @intFromFloat(intensity * factor_scale + bias);
 }
 
 const BaseColor = struct {
@@ -102,11 +127,19 @@ inline fn unpackBaseColor(base_color: u32) BaseColor {
     };
 }
 
-inline fn shadeColorWithFactor(base_color: BaseColor, factor: u32) u32 {
-    const r = ((base_color.r * factor) + 127) / 255;
-    const g = ((base_color.g * factor) + 127) / 255;
-    const b = ((base_color.b * factor) + 127) / 255;
-    return base_color.a | (r << 16) | (g << 8) | b;
+inline fn shadeTriangleColors(base_color: BaseColor, factors: @Vector(4, u32)) [3]u32 {
+    const Vec = @Vector(4, u32);
+    const bias: Vec = @splat(127);
+    const scale: Vec = @splat(257);
+    const shift: Vec = @splat(16);
+    const r = (((@as(Vec, @splat(base_color.r)) * factors + bias) * scale) >> shift);
+    const g = (((@as(Vec, @splat(base_color.g)) * factors + bias) * scale) >> shift);
+    const b = (((@as(Vec, @splat(base_color.b)) * factors + bias) * scale) >> shift);
+    return .{
+        base_color.a | (r[0] << 16) | (g[0] << 8) | b[0],
+        base_color.a | (r[1] << 16) | (g[1] << 8) | b[1],
+        base_color.a | (r[2] << 16) | (g[2] << 8) | b[2],
+    };
 }
 
 test "gouraud kernel shades per-vertex colors" {

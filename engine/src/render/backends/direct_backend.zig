@@ -56,6 +56,11 @@ pub const State = struct {
     tile_ranges: std.ArrayListUnmanaged(screen_binning_stage.TileRange) = .{},
     tile_command_indices: std.ArrayListUnmanaged(usize) = .{},
     tile_spans: std.ArrayListUnmanaged(?screen_binning_stage.TileSpan) = .{},
+    cached_prepared_tile_ranges: std.ArrayListUnmanaged(screen_binning_stage.TileRange) = .{},
+    cached_prepared_tile_counts: std.ArrayListUnmanaged(usize) = .{},
+    cached_prepared_triangles: std.ArrayListUnmanaged(direct_primitives.Triangle2i) = .{},
+    cached_prepared_setups: std.ArrayListUnmanaged(direct_primitives.PreparedGouraudTriangle) = .{},
+    cached_prepared_depths: std.ArrayListUnmanaged(?f32) = .{},
     active_tile_indices: std.ArrayListUnmanaged(usize) = .{},
     active_tile_command_counts: std.ArrayListUnmanaged(usize) = .{},
     tile_chunk_jobs: std.ArrayListUnmanaged(Job) = .{},
@@ -107,6 +112,11 @@ pub const State = struct {
         self.tile_ranges.deinit(self.allocator);
         self.tile_command_indices.deinit(self.allocator);
         self.tile_spans.deinit(self.allocator);
+        self.cached_prepared_tile_ranges.deinit(self.allocator);
+        self.cached_prepared_tile_counts.deinit(self.allocator);
+        self.cached_prepared_triangles.deinit(self.allocator);
+        self.cached_prepared_setups.deinit(self.allocator);
+        self.cached_prepared_depths.deinit(self.allocator);
         self.active_tile_indices.deinit(self.allocator);
         self.active_tile_command_counts.deinit(self.allocator);
         self.tile_chunk_jobs.deinit(self.allocator);
@@ -299,6 +309,11 @@ pub const State = struct {
             .allocator = self.allocator,
             .tile_ranges = &self.tile_ranges,
             .tile_command_indices = &self.tile_command_indices,
+            .cached_prepared_tile_ranges = if (static_cache_hit) &self.cached_prepared_tile_ranges else null,
+            .cached_prepared_tile_counts = if (static_cache_hit) &self.cached_prepared_tile_counts else null,
+            .cached_prepared_triangles = if (static_cache_hit) &self.cached_prepared_triangles else null,
+            .cached_prepared_setups = if (static_cache_hit) &self.cached_prepared_setups else null,
+            .cached_prepared_depths = if (static_cache_hit) &self.cached_prepared_depths else null,
             .active_tile_indices = &self.active_tile_indices,
             .active_tile_command_counts = &self.active_tile_command_counts,
             .tile_chunk_jobs = &self.tile_chunk_jobs,
@@ -374,6 +389,23 @@ pub const State = struct {
         self.cached_static_dirty_rect = binning.dirty_rect;
         self.cached_static_primitive_count = self.timings.primitive_count;
         self.cached_static_touched_tiles = binning.touched_tiles;
+        rebuildCachedPreparedTileBlocks(
+            self.allocator,
+            &self.cached_prepared_tile_ranges,
+            &self.cached_prepared_tile_counts,
+            &self.cached_prepared_triangles,
+            &self.cached_prepared_setups,
+            &self.cached_prepared_depths,
+            &self.draw_list,
+            &self.tile_ranges,
+            &self.tile_command_indices,
+        ) catch {
+            self.cached_prepared_tile_ranges.clearRetainingCapacity();
+            self.cached_prepared_tile_counts.clearRetainingCapacity();
+            self.cached_prepared_triangles.clearRetainingCapacity();
+            self.cached_prepared_setups.clearRetainingCapacity();
+            self.cached_prepared_depths.clearRetainingCapacity();
+        };
     }
 };
 
@@ -405,6 +437,44 @@ inline fn dirtyRectToRect(rect: screen_binning_stage.DirtyRect) direct_primitive
 
 inline fn unionDirtyRects(a: screen_binning_stage.DirtyRect, b: screen_binning_stage.DirtyRect) direct_primitives.Rect2i {
     return direct_primitives.unionRect(dirtyRectToRect(a), dirtyRectToRect(b));
+}
+
+fn rebuildCachedPreparedTileBlocks(
+    allocator: std.mem.Allocator,
+    cached_tile_ranges: *std.ArrayListUnmanaged(screen_binning_stage.TileRange),
+    cached_tile_counts: *std.ArrayListUnmanaged(usize),
+    cached_triangles: *std.ArrayListUnmanaged(direct_primitives.Triangle2i),
+    cached_setups: *std.ArrayListUnmanaged(direct_primitives.PreparedGouraudTriangle),
+    cached_depths: *std.ArrayListUnmanaged(?f32),
+    draw_list: *const direct_draw_list.DrawList,
+    tile_ranges: *const std.ArrayListUnmanaged(screen_binning_stage.TileRange),
+    tile_command_indices: *const std.ArrayListUnmanaged(usize),
+) !void {
+    cached_tile_ranges.clearRetainingCapacity();
+    cached_tile_counts.clearRetainingCapacity();
+    cached_triangles.clearRetainingCapacity();
+    cached_setups.clearRetainingCapacity();
+    cached_depths.clearRetainingCapacity();
+    try cached_tile_ranges.resize(allocator, tile_ranges.items.len);
+    try cached_tile_counts.resize(allocator, tile_ranges.items.len);
+    const prepared = draw_list.preparedGouraud();
+    for (tile_ranges.items, 0..) |range, tile_index| {
+        const start = cached_triangles.items.len;
+        var prepared_count: usize = 0;
+        const command_indices = tile_command_indices.items[range.start .. range.start + range.len];
+        for (command_indices) |command_index| {
+            const entry = prepared[command_index] orelse continue;
+            try cached_triangles.append(allocator, entry.triangle);
+            try cached_setups.append(allocator, entry.prepared);
+            try cached_depths.append(allocator, entry.depth_value);
+            prepared_count += 1;
+        }
+        cached_tile_ranges.items[tile_index] = .{
+            .start = start,
+            .len = cached_triangles.items.len - start,
+        };
+        cached_tile_counts.items[tile_index] = prepared_count;
+    }
 }
 
 test "direct backend prepares tile bins for showcase" {

@@ -3,9 +3,16 @@ const direct_packets = @import("direct_packets.zig");
 const direct_primitives = @import("direct_primitives.zig");
 
 pub const DrawList = struct {
+    pub const PreparedGouraudEntry = struct {
+        triangle: direct_primitives.Triangle2i,
+        prepared: direct_primitives.PreparedGouraudTriangle,
+        depth_value: ?f32,
+    };
+
     allocator: std.mem.Allocator,
     commands: std.ArrayListUnmanaged(direct_packets.DrawPacket) = .{},
     command_bounds: std.ArrayListUnmanaged(?direct_primitives.Rect2i) = .{},
+    prepared_gouraud: std.ArrayListUnmanaged(?PreparedGouraudEntry) = .{},
     polygon_points: std.ArrayListUnmanaged(direct_primitives.Point2i) = .{},
 
     pub fn init(allocator: std.mem.Allocator) DrawList {
@@ -15,6 +22,7 @@ pub const DrawList = struct {
     pub fn deinit(self: *DrawList) void {
         self.commands.deinit(self.allocator);
         self.command_bounds.deinit(self.allocator);
+        self.prepared_gouraud.deinit(self.allocator);
         self.polygon_points.deinit(self.allocator);
         self.* = undefined;
     }
@@ -22,12 +30,14 @@ pub const DrawList = struct {
     pub fn clearRetainingCapacity(self: *DrawList) void {
         self.commands.clearRetainingCapacity();
         self.command_bounds.clearRetainingCapacity();
+        self.prepared_gouraud.clearRetainingCapacity();
         self.polygon_points.clearRetainingCapacity();
     }
 
     pub fn ensureCommandCapacity(self: *DrawList, count: usize) !void {
         try self.commands.ensureTotalCapacity(self.allocator, count);
         try self.command_bounds.ensureTotalCapacity(self.allocator, count);
+        try self.prepared_gouraud.ensureTotalCapacity(self.allocator, count);
     }
 
     pub fn ensurePolygonPointCapacity(self: *DrawList, count: usize) !void {
@@ -42,9 +52,14 @@ pub const DrawList = struct {
         return self.command_bounds.items;
     }
 
+    pub fn preparedGouraud(self: *const DrawList) []const ?PreparedGouraudEntry {
+        return self.prepared_gouraud.items;
+    }
+
     pub fn append(self: *DrawList, packet: direct_packets.DrawPacket) !void {
         try self.commands.append(self.allocator, packet);
         try self.command_bounds.append(self.allocator, direct_primitives.packetBounds(packet));
+        try self.prepared_gouraud.append(self.allocator, cachePreparedGouraud(packet));
     }
 
     pub fn appendLine(self: *DrawList, line: direct_primitives.Line2i, style: direct_primitives.LineStyle) !void {
@@ -91,6 +106,20 @@ pub const DrawList = struct {
         });
     }
 };
+
+inline fn cachePreparedGouraud(packet: direct_packets.DrawPacket) ?DrawList.PreparedGouraudEntry {
+    if (packet.payload != .triangle or packet.material != .surface) return null;
+    const payload = packet.payload.triangle;
+    const surface = packet.material.surface;
+    const prepared = payload.gouraud_setup orelse return null;
+    if (surface.outline_color != null) return null;
+    if (!packet.flags.depth_write and !packet.flags.depth_test) return null;
+    return .{
+        .triangle = payload.triangle,
+        .prepared = prepared,
+        .depth_value = if (packet.flags.depth_write) surface.depth else null,
+    };
+}
 
 test "draw list appends typed commands" {
     var draw_list = DrawList.init(std.testing.allocator);
