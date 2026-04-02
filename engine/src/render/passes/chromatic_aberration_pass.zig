@@ -69,7 +69,7 @@ pub fn runPipeline(
             @ptrCast(&self.chromatic_aberration_job_contexts[stripe_index]),
             &parent_job,
         );
-        if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+        if (!self.job_system.?.submitJobWithClass(&self.color_grade_jobs[stripe_index], .background)) {
             CtxType.run(@ptrCast(&self.chromatic_aberration_job_contexts[stripe_index]));
         }
     }

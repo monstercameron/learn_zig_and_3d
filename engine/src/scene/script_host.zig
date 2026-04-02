@@ -4,6 +4,7 @@
 const std = @import("std");
 const platform_input = @import("platform_input");
 const input_actions = @import("input_actions");
+const job_system = @import("job_system");
 const handles = @import("entity.zig");
 const AssetRegistry = @import("asset_registry.zig").AssetRegistry;
 const ComponentStore = @import("components.zig").ComponentStore;
@@ -240,26 +241,17 @@ pub const ScriptHost = struct {
         try self.queued_events.append(self.allocator, .{ .entity = entity, .event = event });
     }
 
-    /// dispatchQueued dispatches Script Host jobs across workers.
-    pub fn dispatchQueued(self: *ScriptHost, world: *World, components: *const ComponentStore, input: *const ScriptInputState, commands: *Commands) void {
+    /// dispatchQueued processes queued script events, using the job system for larger dispatch batches.
+    pub fn dispatchQueued(
+        self: *ScriptHost,
+        job_sys: *job_system.JobSystem,
+        world: *World,
+        components: *const ComponentStore,
+        input: *const ScriptInputState,
+        commands: *Commands,
+    ) void {
         for (self.queued_events.items) |queued| {
-            for (self.instances.items) |*instance| {
-                if (!instance.entity.eql(queued.entity)) continue;
-                if (!shouldDispatchQueuedEvent(instance.*, queued.event)) continue;
-                const module_record = self.findModule(instance.module) orelse continue;
-                var ctx = ScriptCallbackContext{
-                    .allocator = self.allocator,
-                    .world = world,
-                    .components = components,
-                    .commands = commands,
-                    .entity = queued.entity,
-                    .user_data = instance.user_data,
-                    .user_data_slot = &instance.user_data,
-                    .input = input,
-                    .event = queued.event,
-                };
-                module_record.vtable.on_event(&ctx);
-            }
+            self.dispatchQueuedEvent(job_sys, world, components, input, commands, queued);
         }
         self.queued_events.clearRetainingCapacity();
     }
@@ -372,7 +364,157 @@ pub const ScriptHost = struct {
         };
         module_record.vtable.on_event(&ctx);
     }
+
+    fn dispatchQueuedEvent(
+        self: *ScriptHost,
+        job_sys: *job_system.JobSystem,
+        world: *World,
+        components: *const ComponentStore,
+        input: *const ScriptInputState,
+        commands: *Commands,
+        queued: QueuedScriptEvent,
+    ) void {
+        const match_count = self.countMatchingInstances(queued);
+        if (match_count == 0) return;
+
+        const chunk_size = preferredDispatchChunkSize(job_sys.worker_count, match_count);
+        if (match_count <= chunk_size or job_sys.worker_count <= 1) {
+            self.dispatchQueuedEventSync(world, components, input, commands, queued);
+            return;
+        }
+
+        const max_chunk_count = (match_count + chunk_size - 1) / chunk_size;
+        const match_indices = self.allocator.alloc(usize, match_count) catch {
+            self.dispatchQueuedEventSync(world, components, input, commands, queued);
+            return;
+        };
+        defer self.allocator.free(match_indices);
+        const jobs = self.allocator.alloc(job_system.Job, max_chunk_count) catch {
+            self.dispatchQueuedEventSync(world, components, input, commands, queued);
+            return;
+        };
+        defer self.allocator.free(jobs);
+        const work_items = self.allocator.alloc(ScriptDispatchJob, max_chunk_count) catch {
+            self.dispatchQueuedEventSync(world, components, input, commands, queued);
+            return;
+        };
+        defer self.allocator.free(work_items);
+        var match_write: usize = 0;
+        const ordered_commands = self.allocator.alloc(Commands, match_count) catch {
+            self.dispatchQueuedEventSync(world, components, input, commands, queued);
+            return;
+        };
+        defer {
+            for (ordered_commands[0..match_write]) |*local| local.deinit();
+            self.allocator.free(ordered_commands);
+        }
+
+        for (self.instances.items, 0..) |instance, instance_index| {
+            if (!instance.entity.eql(queued.entity)) continue;
+            if (!shouldDispatchQueuedEvent(instance, queued.event)) continue;
+            if (self.findModule(instance.module) == null) continue;
+            match_indices[match_write] = instance_index;
+            match_write += 1;
+        }
+
+        if (match_write == 0) return;
+        for (ordered_commands[0..match_write]) |*local| {
+            local.* = Commands.init(self.allocator);
+        }
+
+        var parent_job = job_system.Job.init(noopScriptDispatchJob, @ptrFromInt(1), null);
+        parent_job.setClass(.high);
+        var job_count: usize = 0;
+        var start_index: usize = 0;
+        while (start_index < match_write) : (start_index += chunk_size) {
+            const end_index = @min(match_write, start_index + chunk_size);
+            work_items[job_count] = .{
+                .host = self,
+                .world = world,
+                .components = components,
+                .input = input,
+                .queued = queued,
+                .match_indices = match_indices[start_index..end_index],
+                .command_buffers = ordered_commands[start_index..end_index],
+            };
+            jobs[job_count] = job_system.Job.init(runScriptDispatchJob, @ptrCast(&work_items[job_count]), &parent_job);
+            jobs[job_count].setClass(.high);
+            if (!job_sys.submitJobWithClass(&jobs[job_count], .high)) {
+                runScriptDispatchJob(@ptrCast(&work_items[job_count]));
+            }
+            job_count += 1;
+        }
+
+        parent_job.complete();
+        job_sys.waitFor(&parent_job);
+
+        for (ordered_commands[0..match_write]) |*local| {
+            commands.appendFrom(local) catch {};
+        }
+    }
+
+    fn dispatchQueuedEventSync(
+        self: *ScriptHost,
+        world: *World,
+        components: *const ComponentStore,
+        input: *const ScriptInputState,
+        commands: *Commands,
+        queued: QueuedScriptEvent,
+    ) void {
+        for (self.instances.items) |*instance| {
+            if (!instance.entity.eql(queued.entity)) continue;
+            if (!shouldDispatchQueuedEvent(instance.*, queued.event)) continue;
+            const module_record = self.findModule(instance.module) orelse continue;
+            self.dispatchImmediate(module_record, world, components, input, commands, queued.entity, &instance.user_data, queued.event);
+        }
+    }
+
+    fn countMatchingInstances(self: *const ScriptHost, queued: QueuedScriptEvent) usize {
+        var count: usize = 0;
+        for (self.instances.items) |instance| {
+            if (!instance.entity.eql(queued.entity)) continue;
+            if (!shouldDispatchQueuedEvent(instance, queued.event)) continue;
+            if (self.findModule(instance.module) == null) continue;
+            count += 1;
+        }
+        return count;
+    }
 };
+
+const ScriptDispatchJob = struct {
+    host: *ScriptHost,
+    world: *World,
+    components: *const ComponentStore,
+    input: *const ScriptInputState,
+    queued: QueuedScriptEvent,
+    match_indices: []const usize,
+    command_buffers: []Commands,
+};
+
+fn preferredDispatchChunkSize(worker_count: u32, match_count: usize) usize {
+    const desired_jobs = @max(@as(usize, 1), @as(usize, @intCast(worker_count)) * 2);
+    return @max(@as(usize, 1), (match_count + desired_jobs - 1) / desired_jobs);
+}
+
+fn runScriptDispatchJob(ctx: *anyopaque) void {
+    const job: *ScriptDispatchJob = @ptrCast(@alignCast(ctx));
+    for (job.match_indices, 0..) |instance_index, local_index| {
+        const instance = &job.host.instances.items[instance_index];
+        const module_record = job.host.findModule(instance.module) orelse continue;
+        job.host.dispatchImmediate(
+            module_record,
+            job.world,
+            job.components,
+            job.input,
+            &job.command_buffers[local_index],
+            job.queued.entity,
+            &instance.user_data,
+            job.queued.event,
+        );
+    }
+}
+
+fn noopScriptDispatchJob(_: *anyopaque) void {}
 
 fn shouldDispatchQueuedEvent(instance: ScriptInstance, event: ScriptEvent) bool {
     return switch (event) {

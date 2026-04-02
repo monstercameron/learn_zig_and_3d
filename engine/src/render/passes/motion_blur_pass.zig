@@ -178,7 +178,7 @@ pub fn runPipeline(self: anytype, current_view: anytype, height: usize, width: u
             @ptrCast(&self.moblur_job_contexts[stripe_index]),
             &parent_job,
         );
-        if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+        if (!self.job_system.?.submitJobWithClass(&self.color_grade_jobs[stripe_index], .normal)) {
             CtxType.run(@ptrCast(&self.moblur_job_contexts[stripe_index]));
         }
     }

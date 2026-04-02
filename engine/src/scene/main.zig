@@ -20,6 +20,7 @@ const loader_module = @import("loader.zig");
 const physics_utils = @import("physics_utils");
 const platform_input_module = @import("platform_input");
 const input_actions_module = @import("input_actions");
+const job_system_module = @import("job_system");
 
 pub const EntityId = handles.EntityId;
 pub const AssetHandle = handles.AssetHandle;
@@ -52,6 +53,7 @@ pub const ScriptEvent = script_host_module.ScriptEvent;
 pub const ScriptInputState = script_host_module.ScriptInputState;
 pub const platform_input = platform_input_module;
 pub const input_actions = input_actions_module;
+pub const JobSystem = job_system_module.JobSystem;
 pub const ScriptModuleVTable = script_host_module.ScriptModuleVTable;
 pub const ScriptCallbackContext = script_host_module.ScriptCallbackContext;
 pub const ScriptHostAbiVersion = script_host_module.abi_version;
@@ -632,6 +634,7 @@ pub const SceneRuntime = struct {
     dependencies: DependencyGraph,
     assets: AssetRegistry,
     residency: ResidencyManager,
+    job_system: *JobSystem,
     scripts: ScriptHost,
     authored_entity_lookup: std.StringHashMapUnmanaged(EntityId),
     renderable_entities: std.ArrayList(EntityId),
@@ -657,6 +660,7 @@ pub const SceneRuntime = struct {
             .dependencies = DependencyGraph.init(allocator),
             .assets = AssetRegistry.init(allocator),
             .residency = try ResidencyManager.init(allocator, bounds, 4),
+            .job_system = try JobSystem.init(allocator),
             .scripts = ScriptHost.init(allocator),
             .authored_entity_lookup = .{},
             .renderable_entities = .{},
@@ -678,6 +682,7 @@ pub const SceneRuntime = struct {
         self.execution.deinit(self.allocator);
         self.pending_renderer_commands.deinit(self.allocator);
         self.scripts.deinit();
+        self.job_system.deinit();
         self.residency.deinit();
         self.assets.deinit();
         self.dependencies.deinit();
@@ -1275,7 +1280,7 @@ pub const SceneRuntime = struct {
         try self.scripts.queueUpdateForAll(&self.world, delta_seconds);
         try self.scripts.queueFixedUpdateForAll(&self.world, fixedStepSeconds, fixed_step_count);
         try self.scripts.queueLateUpdateForAll(&self.world, delta_seconds);
-        self.scripts.dispatchQueued(&self.world, &self.components, &self.script_input, &self.commands);
+        self.scripts.dispatchQueued(self.job_system, &self.world, &self.components, &self.script_input, &self.commands);
         self.unpinAssetsForUsage(.script_dispatch);
         self.applyDeferred();
         self.endPhase(.script_events);

@@ -236,6 +236,33 @@ const LifecycleRecorder = struct {
     }
 };
 
+const OrderedCommandRecorder = struct {
+    var next_index = std.atomic.Value(u32).init(1);
+
+    fn reset() void {
+        next_index.store(1, .release);
+    }
+
+    fn onCreate(ctx: *scene_main.ScriptCallbackContext) void {
+        const index = next_index.fetchAdd(1, .acq_rel);
+        ctx.user_data_slot.* = @ptrFromInt(index);
+    }
+
+    fn onDestroy(ctx: *scene_main.ScriptCallbackContext) void {
+        _ = ctx;
+    }
+
+    fn onEvent(ctx: *scene_main.ScriptCallbackContext) void {
+        switch (ctx.event) {
+            .update => {
+                const slot_ptr = ctx.user_data orelse return;
+                ctx.commands.queueAdjustCameraFov(@floatFromInt(@intFromPtr(slot_ptr))) catch {};
+            },
+            else => {},
+        }
+    }
+};
+
 test "smoke: test harness boots" {
     try std.testing.expect(true);
 }
@@ -978,14 +1005,14 @@ test "scene script lifecycle emits disable end-play enable and begin-play transi
     const entity = runtime.lookupEntityByAuthoredId("prop.lifecycle").?;
     try runtime.commands.queueSetEnabled(entity, false);
     runtime.applyDeferred();
-    runtime.scripts.dispatchQueued(&runtime.world, &runtime.components, &scene_main.ScriptInputState{}, &runtime.commands);
+    runtime.scripts.dispatchQueued(runtime.job_system, &runtime.world, &runtime.components, &scene_main.ScriptInputState{}, &runtime.commands);
 
     try std.testing.expectEqual(@as(u32, 1), LifecycleRecorder.disable_count);
     try std.testing.expectEqual(@as(u32, 1), LifecycleRecorder.end_play_count);
 
     try runtime.commands.queueSetEnabled(entity, true);
     runtime.applyDeferred();
-    runtime.scripts.dispatchQueued(&runtime.world, &runtime.components, &scene_main.ScriptInputState{}, &runtime.commands);
+    runtime.scripts.dispatchQueued(runtime.job_system, &runtime.world, &runtime.components, &scene_main.ScriptInputState{}, &runtime.commands);
 
     try std.testing.expectEqual(@as(u32, 1), LifecycleRecorder.enable_count);
     try std.testing.expectEqual(@as(u32, 2), LifecycleRecorder.begin_play_count);
@@ -1023,15 +1050,62 @@ test "scene runtime attachScriptToEntity queues begin-play once after startup" {
     try std.testing.expectEqual(@as(u32, 1), LifecycleRecorder.attach_count);
     try std.testing.expectEqual(@as(u32, 0), LifecycleRecorder.begin_play_count);
 
-    runtime.scripts.dispatchQueued(&runtime.world, &runtime.components, &scene_main.ScriptInputState{}, &runtime.commands);
+    runtime.scripts.dispatchQueued(runtime.job_system, &runtime.world, &runtime.components, &scene_main.ScriptInputState{}, &runtime.commands);
     try std.testing.expectEqual(@as(u32, 1), LifecycleRecorder.begin_play_count);
 
-    runtime.scripts.dispatchQueued(&runtime.world, &runtime.components, &scene_main.ScriptInputState{}, &runtime.commands);
+    runtime.scripts.dispatchQueued(runtime.job_system, &runtime.world, &runtime.components, &scene_main.ScriptInputState{}, &runtime.commands);
     try std.testing.expectEqual(@as(u32, 1), LifecycleRecorder.begin_play_count);
 
     snapshot = try runtime.updateFrame(.{ .x = 0.0, .y = 1.0, .z = -4.0 }, 0.0, 0.0, 32.0, 64.0, 2, 1.0 / 60.0);
     snapshot.deinit();
     try std.testing.expectEqual(@as(u32, 1), LifecycleRecorder.begin_play_count);
+}
+
+test "parallel script dispatch preserves callback command order" {
+    OrderedCommandRecorder.reset();
+
+    var runtime = try scene_main.SceneRuntime.init(std.testing.allocator, .{
+        .min = .{ .x = -16.0, .y = -16.0, .z = -16.0 },
+        .max = .{ .x = 16.0, .y = 16.0, .z = 16.0 },
+    });
+    defer runtime.deinit();
+
+    try runtime.bootstrapFromDescription(.{
+        .camera = .{
+            .position = .{ .x = 0.0, .y = 1.0, .z = -4.0 },
+            .pitch = 0.0,
+            .yaw = 0.0,
+            .fov_deg = 60.0,
+        },
+        .lights = &.{},
+        .assets = &.{},
+    });
+
+    const entity = try runtime.createEntity();
+    const script_instance_count: usize = 4;
+    for (0..script_instance_count) |script_index| {
+        var name_buf: [64]u8 = undefined;
+        const module_name = try std.fmt.bufPrint(&name_buf, "test.ordered_commands.{d}", .{script_index});
+        _ = try runtime.scripts.registerNativeModule(&runtime.assets, module_name, .{
+            .on_create = OrderedCommandRecorder.onCreate,
+            .on_destroy = OrderedCommandRecorder.onDestroy,
+            .on_event = OrderedCommandRecorder.onEvent,
+        });
+        try std.testing.expect(try runtime.attachScriptToEntity(entity, module_name));
+    }
+
+    try runtime.scripts.queueEvent(entity, .{ .update = 1.0 / 60.0 });
+    runtime.scripts.dispatchQueued(runtime.job_system, &runtime.world, &runtime.components, &scene_main.ScriptInputState{}, &runtime.commands);
+    runtime.applyDeferred();
+
+    const renderer_commands = runtime.rendererCommands();
+    try std.testing.expectEqual(script_instance_count, renderer_commands.len);
+    for (renderer_commands, 0..) |command, index| {
+        switch (command) {
+            .adjust_camera_fov => |payload| try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(index + 1)), payload.delta, 1e-6),
+            else => return error.TestUnexpectedResult,
+        }
+    }
 }
 
 test "scene script lifecycle emits update fixed-update and late-update events" {
@@ -1164,7 +1238,7 @@ test "scene script lifecycle emits asset ready and lost events" {
     const entity = runtime.lookupEntityByAuthoredId("prop.lifecycle").?;
     const mesh_handle = runtime.components.renderables.items[@intCast(entity.index)].?.mesh;
     try std.testing.expect(try runtime.setAssetState(mesh_handle, .evict_pending));
-    runtime.scripts.dispatchQueued(&runtime.world, &runtime.components, &scene_main.ScriptInputState{}, &runtime.commands);
+    runtime.scripts.dispatchQueued(runtime.job_system, &runtime.world, &runtime.components, &scene_main.ScriptInputState{}, &runtime.commands);
 
     try std.testing.expectEqual(@as(u32, 1), LifecycleRecorder.asset_lost_count);
 }

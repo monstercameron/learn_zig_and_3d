@@ -5,7 +5,7 @@ const std = @import("std");
 const compute = @import("compute.zig");
 const Vec2u = compute.Vec2u;
 const ComputeContext = compute.ComputeContext;
-const job_system = @import("../../core/job_system.zig");
+const job_system = @import("job_system");
 
 const GroupDispatchJobContext = struct {
     ctx_base: ComputeContext,
@@ -106,7 +106,7 @@ pub fn dispatchKernel(comptime K: type, allocator: std.mem.Allocator, job_sys: *
                 @ptrCast(&contexts[index]),
                 &parent_job,
             );
-            if (!job_sys.submitJobAuto(&jobs[job_index])) {
+            if (!job_sys.submitJobWithClass(&jobs[job_index], .normal)) {
                 // Fallback preserves forward progress without failing dispatch.
                 Dispatch.run(@ptrCast(&contexts[index]));
             }

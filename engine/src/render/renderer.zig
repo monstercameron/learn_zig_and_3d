@@ -1109,7 +1109,7 @@ const TileRenderer = @import("core/tile_renderer.zig");
 const TileGrid = TileRenderer.TileGrid;
 const TileBuffer = TileRenderer.TileBuffer;
 const BinningStage = @import("core/binning_stage.zig");
-const job_system_module = @import("../core/job_system.zig");
+const job_system_module = @import("job_system");
 const JobSystem = job_system_module.JobSystem;
 const Job = job_system_module.Job;
 
@@ -7713,7 +7713,7 @@ pub const Renderer = struct {
                     &parent_job,
                 );
 
-                if (!job_sys.submitJobAuto(&jobs[tile_idx])) {
+                if (!job_sys.submitJobWithClass(&jobs[tile_idx], .high)) {
                     TileRenderJob.renderTileJob(@ptrCast(&tile_jobs[tile_idx]));
                 }
             }
@@ -7801,7 +7801,7 @@ pub const Renderer = struct {
                         &parent_job,
                     );
 
-                    if (!job_sys.submitJobAuto(&shadow_jobs[submit_idx])) {
+                    if (!job_sys.submitJobWithClass(&shadow_jobs[submit_idx], .high)) {
                         TileRenderJob.applyMeshletShadows(@ptrCast(&shadow_chunk_jobs[submit_idx]));
                     }
                 }
@@ -7871,7 +7871,7 @@ pub const Renderer = struct {
                         @ptrCast(&comp_ctxs[tile_idx]),
                         &parent_job,
                     );
-                    if (!job_sys.submitJobAuto(&jobs[tile_idx])) {
+                    if (!job_sys.submitJobWithClass(&jobs[tile_idx], .high)) {
                         CompositeJobContext.run(@ptrCast(&comp_ctxs[tile_idx]));
                     }
                 }
@@ -8063,7 +8063,7 @@ pub const Renderer = struct {
                         .projection = projection,
                     };
                     jobs[job_idx] = Job.init(MeshletCullJob.run, @ptrCast(&cull_jobs[job_idx]), &parent_job);
-                    if (!js.submitJobAuto(&jobs[job_idx])) {
+                    if (!js.submitJobWithClass(&jobs[job_idx], .normal)) {
                         cull_jobs[job_idx].process();
                     }
                 }
@@ -8204,7 +8204,7 @@ pub const Renderer = struct {
                     .contribution = &contributions[job_idx],
                 };
                 jobs[job_idx] = Job.init(MeshletRenderJob.run, @ptrCast(&meshlet_jobs[job_idx]), &parent_job);
-                if (!js.submitJobAuto(&jobs[job_idx])) {
+                if (!js.submitJobWithClass(&jobs[job_idx], .high)) {
                     meshlet_logger.errorSub("dispatch", "meshlet job {} failed to submit", .{job_idx});
                     meshlet_jobs[job_idx].process();
                 }

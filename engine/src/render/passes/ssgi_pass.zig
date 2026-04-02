@@ -64,7 +64,7 @@ pub fn runPipeline(self: anytype, height: usize, comptime noop_job_fn: fn (*anyo
             @ptrCast(&self.ssgi_job_contexts[stripe_index]),
             &parent_job,
         );
-        if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+        if (!self.job_system.?.submitJobWithClass(&self.color_grade_jobs[stripe_index], .normal)) {
             CtxType.run(@ptrCast(&self.ssgi_job_contexts[stripe_index]));
         }
     }

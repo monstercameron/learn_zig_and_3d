@@ -49,6 +49,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const job_system_module = b.createModule(.{
+        .root_source_file = b.path("engine/src/core/job_system.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const input_actions_module = b.createModule(.{
         .root_source_file = b.path("engine/src/input/actions.zig"),
         .target = target,
@@ -64,10 +69,13 @@ pub fn build(b: *std.Build) void {
     engine_main_module.addImport("scene_main", scene_main_module);
     engine_main_module.addImport("platform_input", platform_input_module);
     engine_main_module.addImport("input_actions", input_actions_module);
+    engine_main_module.addImport("job_system", job_system_module);
     scene_main_module.addImport("zphysics", zphysics_dep.module("root"));
     scene_main_module.addImport("physics_utils", physics_utils_module);
     scene_main_module.addImport("platform_input", platform_input_module);
     scene_main_module.addImport("input_actions", input_actions_module);
+    scene_main_module.addImport("job_system", job_system_module);
+    render_main_module.addImport("job_system", job_system_module);
     physics_utils_module.addImport("zphysics", zphysics_dep.module("root"));
     input_actions_module.addImport("platform_input", platform_input_module);
 

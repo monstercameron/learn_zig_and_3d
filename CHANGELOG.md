@@ -67,6 +67,17 @@
 - rewired `engine/src/render/renderer.zig` to delegate pacing math and policy to the new render-side pacing module
 - unified presented-frame bookkeeping so loading-overlay frames and normal present frames keep counters and deadlines consistent
 
+### Job System Upgrade
+
+- upgraded `engine/src/core/job_system.zig` from mutex-based worker queues to Chase-Lev worker-local deques with lock-free injected submission stacks for cross-thread work
+- added explicit `JobClass` scheduling with `high`, `normal`, and `background` classes plus priority-aware injected draining
+- rewired render job submissions across `engine/src/render/renderer.zig`, `engine/src/render/passes`, and `engine/src/render/kernels/dispatcher.zig` to use explicit submission classes instead of relying on implicit default priority
+- moved scene script dispatch onto the job system in `engine/src/scene/script_host.zig` and threaded the scene-owned job system through `engine/src/scene/main.zig`
+- changed parallel script dispatch to use per-instance command buffers so merged commands preserve original callback order instead of chunk order
+- added `Commands.appendFrom` in `engine/src/scene/world.zig` for deterministic ordered command merging
+- expanded unit and smoke coverage for queue growth, priority preference, parent-child completion, and parallel script command ordering
+- normalized `job_system` as an imported build module in `build.zig` so render and scene code can share the scheduler without fragile relative imports
+
 ### Known Limits
 
 - the direct raster backend is still a stub in `engine/src/render/renderer.zig`

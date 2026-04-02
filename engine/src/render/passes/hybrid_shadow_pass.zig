@@ -437,7 +437,7 @@ pub fn runPipeline(
                 @ptrCast(&shadow_jobs[tile_index]),
                 &parent_job,
             );
-            if (!job_sys.submitJobAuto(&jobs[tile_index])) {
+            if (!job_sys.submitJobWithClass(&jobs[tile_index], .high)) {
                 ShadowCtxType.run(@ptrCast(&shadow_jobs[tile_index]));
             }
         }
