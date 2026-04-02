@@ -152,13 +152,17 @@ pub fn draw(target: FrameTarget, command: Command) void {
 pub fn drawPacket(target: FrameTarget, packet: direct_packets.DrawPacket) void {
     switch (packet.payload) {
         .line => |line| drawLine(target, line, .{ .color = packet.material.stroke.color }),
-        .triangle => |triangle| {
+        .triangle => |payload| {
             const style = packet.material.surface;
-            drawSolidTriangle(target, triangle, style.fill_color, if (packet.flags.depth_write) style.depth else null);
+            if (payload.vertex_colors) |vertex_colors| {
+                drawGouraudTriangle(target, payload.triangle, vertex_colors, if (packet.flags.depth_write) style.depth else null);
+            } else {
+                drawSolidTriangle(target, payload.triangle, style.fill_color, if (packet.flags.depth_write) style.depth else null);
+            }
             if (style.outline_color) |outline_color| {
-                drawLine(target, .{ .start = triangle.a, .end = triangle.b }, .{ .color = outline_color });
-                drawLine(target, .{ .start = triangle.b, .end = triangle.c }, .{ .color = outline_color });
-                drawLine(target, .{ .start = triangle.c, .end = triangle.a }, .{ .color = outline_color });
+                drawLine(target, .{ .start = payload.triangle.a, .end = payload.triangle.b }, .{ .color = outline_color });
+                drawLine(target, .{ .start = payload.triangle.b, .end = payload.triangle.c }, .{ .color = outline_color });
+                drawLine(target, .{ .start = payload.triangle.c, .end = payload.triangle.a }, .{ .color = outline_color });
             }
         },
         .polygon => |polygon| {
@@ -188,11 +192,11 @@ pub fn packetBounds(packet: direct_packets.DrawPacket) ?Rect2i {
             .max_x = @max(line.start.x, line.end.x),
             .max_y = @max(line.start.y, line.end.y),
         },
-        .triangle => |triangle| .{
-            .min_x = @min(triangle.a.x, @min(triangle.b.x, triangle.c.x)),
-            .min_y = @min(triangle.a.y, @min(triangle.b.y, triangle.c.y)),
-            .max_x = @max(triangle.a.x, @max(triangle.b.x, triangle.c.x)),
-            .max_y = @max(triangle.a.y, @max(triangle.b.y, triangle.c.y)),
+        .triangle => |payload| .{
+            .min_x = @min(payload.triangle.a.x, @min(payload.triangle.b.x, payload.triangle.c.x)),
+            .min_y = @min(payload.triangle.a.y, @min(payload.triangle.b.y, payload.triangle.c.y)),
+            .max_x = @max(payload.triangle.a.x, @max(payload.triangle.b.x, payload.triangle.c.x)),
+            .max_y = @max(payload.triangle.a.y, @max(payload.triangle.b.y, payload.triangle.c.y)),
         },
         .polygon => |polygon| polygonBounds(polygon.points),
         .circle => |circle| .{
@@ -202,6 +206,285 @@ pub fn packetBounds(packet: direct_packets.DrawPacket) ?Rect2i {
             .max_y = circle.center.y + circle.radius,
         },
     };
+}
+
+pub fn drawGouraudTriangle(target: FrameTarget, triangle: Triangle2i, vertex_colors: [3]u32, depth_value: ?f32) void {
+    if (vertex_colors[0] == vertex_colors[1] and vertex_colors[1] == vertex_colors[2]) {
+        drawSolidTriangle(target, triangle, vertex_colors[0], depth_value);
+        return;
+    }
+    if (target.width <= 0 or target.height <= 0) return;
+    const bounds = targetBounds(target);
+    const min_x = scanline.clampI32(scanline.minI32(triangle.a.x, scanline.minI32(triangle.b.x, triangle.c.x)), bounds.min_x, bounds.max_x);
+    const max_x = scanline.clampI32(scanline.maxI32(triangle.a.x, scanline.maxI32(triangle.b.x, triangle.c.x)), bounds.min_x, bounds.max_x);
+    const min_y = scanline.clampI32(scanline.minI32(triangle.a.y, scanline.minI32(triangle.b.y, triangle.c.y)), bounds.min_y, bounds.max_y);
+    const max_y = scanline.clampI32(scanline.maxI32(triangle.a.y, scanline.maxI32(triangle.b.y, triangle.c.y)), bounds.min_y, bounds.max_y);
+    const area = edgeFunction(triangle.a, triangle.b, triangle.c.x, triangle.c.y);
+    if (area == 0) return;
+
+    const colors = unpackGouraudColors(vertex_colors);
+    const channel_steps = colorChannelSteps(colors, triangle);
+    const stride: usize = @intCast(target.width);
+
+    const step_w0_x = edgeStepX(triangle.b, triangle.c);
+    const step_w1_x = edgeStepX(triangle.c, triangle.a);
+    const step_w2_x = edgeStepX(triangle.a, triangle.b);
+    const step_w0_y = edgeStepY(triangle.b, triangle.c);
+    const step_w1_y = edgeStepY(triangle.c, triangle.a);
+    const step_w2_y = edgeStepY(triangle.a, triangle.b);
+    var row_w0 = edgeFunction(triangle.b, triangle.c, min_x, min_y);
+    var row_w1 = edgeFunction(triangle.c, triangle.a, min_x, min_y);
+    var row_w2 = edgeFunction(triangle.a, triangle.b, min_x, min_y);
+    var row_r = colors.r0 * row_w0 + colors.r1 * row_w1 + colors.r2 * row_w2;
+    var row_g = colors.g0 * row_w0 + colors.g1 * row_w1 + colors.g2 * row_w2;
+    var row_b = colors.b0 * row_w0 + colors.b1 * row_w1 + colors.b2 * row_w2;
+
+    const alpha = colors.alpha;
+    const depth = depth_value orelse 0.0;
+    const area_abs: i64 = if (area < 0) -area else area;
+    const recip = reciprocalQ24(area_abs);
+    var y = min_y;
+    if (depth_value == null) {
+        if (area > 0) {
+            while (y <= max_y) : (y += 1) {
+                const row_start = @as(usize, @intCast(y)) * stride;
+                var w0 = row_w0;
+                var w1 = row_w1;
+                var w2 = row_w2;
+                var accum_r = row_r;
+                var accum_g = row_g;
+                var accum_b = row_b;
+                var x = min_x;
+                while (x + 1 <= max_x) : (x += 2) {
+                    if (w0 >= 0 and w1 >= 0 and w2 >= 0) {
+                        const idx0 = row_start + @as(usize, @intCast(x));
+                        target.color[idx0] = packInterpolatedColor(alpha, accum_r, accum_g, accum_b, recip);
+                    }
+                    const next_w0 = w0 + step_w0_x;
+                    const next_w1 = w1 + step_w1_x;
+                    const next_w2 = w2 + step_w2_x;
+                    const next_r = accum_r + channel_steps.r_x;
+                    const next_g = accum_g + channel_steps.g_x;
+                    const next_b = accum_b + channel_steps.b_x;
+                    if (next_w0 >= 0 and next_w1 >= 0 and next_w2 >= 0) {
+                        const idx1 = row_start + @as(usize, @intCast(x + 1));
+                        target.color[idx1] = packInterpolatedColor(alpha, next_r, next_g, next_b, recip);
+                    }
+                    w0 = next_w0 + step_w0_x;
+                    w1 = next_w1 + step_w1_x;
+                    w2 = next_w2 + step_w2_x;
+                    accum_r = next_r + channel_steps.r_x;
+                    accum_g = next_g + channel_steps.g_x;
+                    accum_b = next_b + channel_steps.b_x;
+                }
+                while (x <= max_x) : (x += 1) {
+                    if (w0 >= 0 and w1 >= 0 and w2 >= 0) {
+                        const idx = row_start + @as(usize, @intCast(x));
+                        target.color[idx] = packInterpolatedColor(alpha, accum_r, accum_g, accum_b, recip);
+                    }
+                    w0 += step_w0_x;
+                    w1 += step_w1_x;
+                    w2 += step_w2_x;
+                    accum_r += channel_steps.r_x;
+                    accum_g += channel_steps.g_x;
+                    accum_b += channel_steps.b_x;
+                }
+                row_w0 += step_w0_y;
+                row_w1 += step_w1_y;
+                row_w2 += step_w2_y;
+                row_r += channel_steps.r_y;
+                row_g += channel_steps.g_y;
+                row_b += channel_steps.b_y;
+            }
+            return;
+        }
+
+        while (y <= max_y) : (y += 1) {
+            const row_start = @as(usize, @intCast(y)) * stride;
+            var w0 = row_w0;
+            var w1 = row_w1;
+            var w2 = row_w2;
+            var accum_r = row_r;
+            var accum_g = row_g;
+            var accum_b = row_b;
+            var x = min_x;
+            while (x + 1 <= max_x) : (x += 2) {
+                if (w0 <= 0 and w1 <= 0 and w2 <= 0) {
+                    const idx0 = row_start + @as(usize, @intCast(x));
+                    target.color[idx0] = packInterpolatedColor(alpha, accum_r, accum_g, accum_b, recip);
+                }
+                const next_w0 = w0 + step_w0_x;
+                const next_w1 = w1 + step_w1_x;
+                const next_w2 = w2 + step_w2_x;
+                const next_r = accum_r + channel_steps.r_x;
+                const next_g = accum_g + channel_steps.g_x;
+                const next_b = accum_b + channel_steps.b_x;
+                if (next_w0 <= 0 and next_w1 <= 0 and next_w2 <= 0) {
+                    const idx1 = row_start + @as(usize, @intCast(x + 1));
+                    target.color[idx1] = packInterpolatedColor(alpha, next_r, next_g, next_b, recip);
+                }
+                w0 = next_w0 + step_w0_x;
+                w1 = next_w1 + step_w1_x;
+                w2 = next_w2 + step_w2_x;
+                accum_r = next_r + channel_steps.r_x;
+                accum_g = next_g + channel_steps.g_x;
+                accum_b = next_b + channel_steps.b_x;
+            }
+            while (x <= max_x) : (x += 1) {
+                if (w0 <= 0 and w1 <= 0 and w2 <= 0) {
+                    const idx = row_start + @as(usize, @intCast(x));
+                    target.color[idx] = packInterpolatedColor(alpha, accum_r, accum_g, accum_b, recip);
+                }
+                w0 += step_w0_x;
+                w1 += step_w1_x;
+                w2 += step_w2_x;
+                accum_r += channel_steps.r_x;
+                accum_g += channel_steps.g_x;
+                accum_b += channel_steps.b_x;
+            }
+            row_w0 += step_w0_y;
+            row_w1 += step_w1_y;
+            row_w2 += step_w2_y;
+            row_r += channel_steps.r_y;
+            row_g += channel_steps.g_y;
+            row_b += channel_steps.b_y;
+        }
+        return;
+    }
+
+    const depth_buffer = target.depth.?;
+    if (area > 0) {
+        while (y <= max_y) : (y += 1) {
+            const row_start = @as(usize, @intCast(y)) * stride;
+            var w0 = row_w0;
+            var w1 = row_w1;
+            var w2 = row_w2;
+            var accum_r = row_r;
+            var accum_g = row_g;
+            var accum_b = row_b;
+            var x = min_x;
+            while (x <= max_x) : (x += 1) {
+                if (w0 >= 0 and w1 >= 0 and w2 >= 0) {
+                    const idx = row_start + @as(usize, @intCast(x));
+                    target.color[idx] = packInterpolatedColor(alpha, accum_r, accum_g, accum_b, recip);
+                    depth_buffer[idx] = depth;
+                }
+                w0 += step_w0_x;
+                w1 += step_w1_x;
+                w2 += step_w2_x;
+                accum_r += channel_steps.r_x;
+                accum_g += channel_steps.g_x;
+                accum_b += channel_steps.b_x;
+            }
+            row_w0 += step_w0_y;
+            row_w1 += step_w1_y;
+            row_w2 += step_w2_y;
+            row_r += channel_steps.r_y;
+            row_g += channel_steps.g_y;
+            row_b += channel_steps.b_y;
+        }
+        return;
+    }
+
+    while (y <= max_y) : (y += 1) {
+        const row_start = @as(usize, @intCast(y)) * stride;
+        var w0 = row_w0;
+        var w1 = row_w1;
+        var w2 = row_w2;
+        var accum_r = row_r;
+        var accum_g = row_g;
+        var accum_b = row_b;
+        var x = min_x;
+        while (x <= max_x) : (x += 1) {
+            if (w0 <= 0 and w1 <= 0 and w2 <= 0) {
+                const idx = row_start + @as(usize, @intCast(x));
+                target.color[idx] = packInterpolatedColor(alpha, accum_r, accum_g, accum_b, recip);
+                depth_buffer[idx] = depth;
+            }
+            w0 += step_w0_x;
+            w1 += step_w1_x;
+            w2 += step_w2_x;
+            accum_r += channel_steps.r_x;
+            accum_g += channel_steps.g_x;
+            accum_b += channel_steps.b_x;
+        }
+        row_w0 += step_w0_y;
+        row_w1 += step_w1_y;
+        row_w2 += step_w2_y;
+        row_r += channel_steps.r_y;
+        row_g += channel_steps.g_y;
+        row_b += channel_steps.b_y;
+    }
+}
+
+const GouraudColorComponents = struct {
+    alpha: u32,
+    r0: i64,
+    r1: i64,
+    r2: i64,
+    g0: i64,
+    g1: i64,
+    g2: i64,
+    b0: i64,
+    b1: i64,
+    b2: i64,
+};
+
+const GouraudChannelSteps = struct {
+    r_x: i64,
+    r_y: i64,
+    g_x: i64,
+    g_y: i64,
+    b_x: i64,
+    b_y: i64,
+};
+
+inline fn unpackGouraudColors(colors: [3]u32) GouraudColorComponents {
+    return .{
+        .alpha = (colors[0] >> 24) & 0xFF,
+        .r0 = @as(i64, (colors[0] >> 16) & 0xFF),
+        .r1 = @as(i64, (colors[1] >> 16) & 0xFF),
+        .r2 = @as(i64, (colors[2] >> 16) & 0xFF),
+        .g0 = @as(i64, (colors[0] >> 8) & 0xFF),
+        .g1 = @as(i64, (colors[1] >> 8) & 0xFF),
+        .g2 = @as(i64, (colors[2] >> 8) & 0xFF),
+        .b0 = @as(i64, colors[0] & 0xFF),
+        .b1 = @as(i64, colors[1] & 0xFF),
+        .b2 = @as(i64, colors[2] & 0xFF),
+    };
+}
+
+inline fn colorChannelSteps(colors: GouraudColorComponents, triangle: Triangle2i) GouraudChannelSteps {
+    const w0_x = edgeStepX(triangle.b, triangle.c);
+    const w1_x = edgeStepX(triangle.c, triangle.a);
+    const w2_x = edgeStepX(triangle.a, triangle.b);
+    const w0_y = edgeStepY(triangle.b, triangle.c);
+    const w1_y = edgeStepY(triangle.c, triangle.a);
+    const w2_y = edgeStepY(triangle.a, triangle.b);
+    return .{
+        .r_x = colors.r0 * w0_x + colors.r1 * w1_x + colors.r2 * w2_x,
+        .r_y = colors.r0 * w0_y + colors.r1 * w1_y + colors.r2 * w2_y,
+        .g_x = colors.g0 * w0_x + colors.g1 * w1_x + colors.g2 * w2_x,
+        .g_y = colors.g0 * w0_y + colors.g1 * w1_y + colors.g2 * w2_y,
+        .b_x = colors.b0 * w0_x + colors.b1 * w1_x + colors.b2 * w2_x,
+        .b_y = colors.b0 * w0_y + colors.b1 * w1_y + colors.b2 * w2_y,
+    };
+}
+
+inline fn packInterpolatedColor(alpha: u32, r_num: i64, g_num: i64, b_num: i64, recip_q24: i64) u32 {
+    const r = normalizedChannel(r_num, recip_q24);
+    const g = normalizedChannel(g_num, recip_q24);
+    const b = normalizedChannel(b_num, recip_q24);
+    return (alpha << 24) | (r << 16) | (g << 8) | b;
+}
+
+inline fn reciprocalQ24(area_abs: i64) i64 {
+    return @divTrunc((@as(i64, 1) << 24) + @divTrunc(area_abs, 2), area_abs);
+}
+
+inline fn normalizedChannel(value_num: i64, recip_q24: i64) u32 {
+    const scaled = (value_num * recip_q24 + (@as(i64, 1) << 23)) >> 24;
+    return @as(u32, @intCast(@max(@as(i64, 0), @min(@as(i64, 255), scaled))));
 }
 
 pub fn drawMany(target: FrameTarget, commands: []const Command) void {

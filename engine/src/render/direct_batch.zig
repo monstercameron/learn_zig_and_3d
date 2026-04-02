@@ -61,6 +61,8 @@ pub const DrawPacket = union(enum) {
     triangle: struct {
         triangle: WorldTriangle,
         material: SurfaceMaterial,
+        vertex_normals: ?[3]math.Vec3 = null,
+        gouraud_colors: ?[3]u32 = null,
     },
     polygon: struct {
         polygon: WorldPolygon,
@@ -107,6 +109,14 @@ pub const PrimitiveBatch = struct {
 
     pub fn appendTriangle(self: *PrimitiveBatch, triangle: WorldTriangle, material: SurfaceMaterial) !void {
         try self.append(.{ .triangle = .{ .triangle = triangle, .material = material } });
+    }
+
+    pub fn appendTriangleLit(self: *PrimitiveBatch, triangle: WorldTriangle, material: SurfaceMaterial, vertex_normals: [3]math.Vec3) !void {
+        try self.append(.{ .triangle = .{
+            .triangle = triangle,
+            .material = material,
+            .vertex_normals = vertex_normals,
+        } });
     }
 
     pub fn appendPolygon(self: *PrimitiveBatch, points: []const math.Vec3, material: SurfaceMaterial) !void {
@@ -342,7 +352,10 @@ pub fn compileToDrawList(
                     .layer = .geometry,
                     .flags = .{},
                     .material = .{ .surface = payload.material },
-                    .payload = .{ .triangle = .{ .a = projected[0], .b = projected[1], .c = projected[2] } },
+                    .payload = .{ .triangle = .{
+                        .triangle = .{ .a = projected[0], .b = projected[1], .c = projected[2] },
+                        .vertex_colors = payload.gouraud_colors,
+                    } },
                 });
             },
             .polygon => |payload| {

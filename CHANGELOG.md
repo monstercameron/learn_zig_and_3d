@@ -2,6 +2,40 @@
 
 ## 2026-04-02
 
+### Suzanne Showcase And Gouraud Shading
+
+- added `engine/src/render/direct_showcase.zig` and moved direct showcase scene selection, raster mode policy, and Suzanne-specific camera framing out of `engine/src/render/renderer.zig`
+- added a bounds-based Suzanne fit camera in `engine/src/render/direct_showcase.zig` instead of relying on guessed world transforms
+- added `suzanne_showcase` scene submission in `engine/src/render/stages/scene_submission_stage.zig`
+- loaded `assets/models/suzanne.obj` into the direct backend and centered the mesh to origin in `engine/src/render/backends/direct_backend.zig`
+- added static-scene caching for the Suzanne worker-tile path in `engine/src/render/backends/direct_backend.zig` so unchanged camera and viewport reuse compiled and binned state
+- added an identity-transform fast path in `engine/src/render/direct_mesh.zig` so identity mesh instances skip unnecessary per-vertex transform work
+- extended `engine/src/render/core/mesh.zig` with per-vertex normals and updated mesh construction/destruction to own that data
+- preserved OBJ vertex normals in `engine/src/assets/obj_loader.zig`
+- extended `engine/src/render/direct_batch.zig` and `engine/src/render/direct_packets.zig` so triangle packets can carry vertex normals and optional Gouraud vertex colors
+- added `engine/src/render/kernels/gouraud_kernel.zig` as a dedicated extracted Gouraud lighting kernel
+- applied Gouraud lighting to triangle batches before compile in `engine/src/render/backends/direct_backend.zig`
+- upgraded `engine/src/render/direct_primitives.zig` with a Gouraud triangle raster path that consumes per-vertex colors
+- replaced the first float-heavy Gouraud raster path with incremental edge stepping, integer channel accumulators, precomputed fixed-point reciprocals, and partial row unrolling
+- added uniform-color collapse so Gouraud triangles fall back to the solid-triangle fast path when all three lit colors match
+- tightened Gouraud setup by vectorizing the three-vertex light evaluation, caching unpacked base-color channels, and skipping unnecessary normal renormalization
+
+### Later Direct Stages
+
+- added extracted stage files for the later direct pipeline:
+  - `engine/src/render/stages/shading_stage.zig`
+  - `engine/src/render/stages/composition_stage.zig`
+  - `engine/src/render/stages/post_process_stage.zig`
+  - `engine/src/render/stages/presentation_stage.zig`
+- rewired the direct backend so stages 7 through 10 are represented in extracted files instead of inline renderer code
+- kept stage 8 and stage 9 on identity or lightweight fast paths for the current direct scenes while stage 10 remains the real DX11 handoff
+
+### Validation
+
+- `zig build check`
+- `zig build test`
+- `$env:ZIG_RENDER_TTL_SECONDS='15'; zig build run`
+
 ### Staged Direct Pipeline
 
 - added a typed full-image pipeline scaffold in `engine/src/render/full_pipeline.zig`

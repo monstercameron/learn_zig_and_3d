@@ -30,7 +30,10 @@ pub const PacketMaterial = union(enum) {
 
 pub const Payload = union(enum) {
     line: direct_primitives.Line2i,
-    triangle: direct_primitives.Triangle2i,
+    triangle: struct {
+        triangle: direct_primitives.Triangle2i,
+        vertex_colors: ?[3]u32 = null,
+    },
     polygon: direct_primitives.Polygon2i,
     circle: direct_primitives.Circle2i,
 };

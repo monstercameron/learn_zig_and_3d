@@ -62,6 +62,8 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
     defer final_vertices.deinit(allocator);
     var final_texcoords = std.ArrayList(Vec2){};
     defer final_texcoords.deinit(allocator);
+    var final_vertex_normals = std.ArrayList(Vec3){};
+    defer final_vertex_normals.deinit(allocator);
     var triangles = std.ArrayList(Triangle){};
     defer triangles.deinit(allocator);
 
@@ -191,6 +193,7 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
                 // list for each `v/vt/vn` combination.
                 try final_vertices.append(allocator, pos);
                 try final_texcoords.append(allocator, uv);
+                try final_vertex_normals.append(allocator, normal_vec);
                 try face_indices.append(allocator, final_vertices.items.len - 1);
                 try face_normals.append(allocator, normal_vec);
             }
@@ -263,6 +266,8 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
     errdefer allocator.free(vertex_slice);
     const texcoord_slice = try final_texcoords.toOwnedSlice(allocator);
     errdefer allocator.free(texcoord_slice);
+    const vertex_normal_slice = try final_vertex_normals.toOwnedSlice(allocator);
+    errdefer allocator.free(vertex_normal_slice);
     const triangle_slice = try triangles.toOwnedSlice(allocator);
     errdefer allocator.free(triangle_slice);
 
@@ -270,6 +275,7 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
         .vertices = vertex_slice,
         .triangles = triangle_slice,
         .normals = try allocator.alloc(Vec3, triangle_slice.len), // Will be calculated next.
+        .vertex_normals = vertex_normal_slice,
         .tex_coords = texcoord_slice,
         .meshlets = &[_]MeshModule.Meshlet{},
         .meshlet_vertices = &[_]usize{},

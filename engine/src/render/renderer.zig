@@ -86,8 +86,10 @@ const texture = @import("../assets/texture.zig");
 const WorkTypes = @import("core/mesh_work_types.zig");
 const direct_primitives = @import("direct_primitives.zig");
 const direct_demo = @import("direct_demo.zig");
+const direct_showcase = @import("direct_showcase.zig");
 const frame_resources = @import("frame_resources.zig");
 const frame_setup_stage = @import("stages/frame_setup_stage.zig");
+const presentation_stage = @import("stages/presentation_stage.zig");
 const direct_backend = @import("backends/direct_backend.zig");
 const present_d3d11 = @import("present/present_d3d11.zig");
 const present_state = @import("present_state.zig");
@@ -4725,12 +4727,33 @@ pub const Renderer = struct {
         const now = std.time.nanoTimestamp();
         self.current_frame_start_time = now;
         try self.renderDirectPrimitiveShowcase();
-        const present_start = std.time.nanoTimestamp();
-        self.drawBitmap();
-        const present_end = std.time.nanoTimestamp();
-        self.direct_backend.notePresentTime(present_end - present_start);
-        self.notePresentedFrame(present_end);
-        self.finalizeFrame(present_end);
+        const present = try self.presentDirectPrimitiveFrame();
+        self.direct_backend.notePresentTime(present.present_ns);
+        self.notePresentedFrame(std.time.nanoTimestamp());
+        self.finalizeFrame(std.time.nanoTimestamp());
+    }
+
+    fn presentDirectPrimitiveFrame(self: *Renderer) !presentation_stage.Result {
+        if (self.hdc_mem) |hdc_mem| {
+            if (self.show_render_overlay or self.hybrid_shadow_debug.enabled or self.scene_item_gizmo.enabled or self.loading_overlay.enabled) {
+                self.drawRenderPassOverlay(hdc_mem);
+            }
+            if (self.show_frame_pacing_overlay) {
+                self.drawFramePacingPanel(hdc_mem);
+            }
+        }
+        return presentation_stage.execute(
+            &self.present_backend,
+            &self.present_state,
+            &self.bitmap,
+            config.WINDOW_VSYNC,
+            if (self.direct_backend.lastDirtyRect()) |rect| .{
+                .min_x = rect.min_x,
+                .min_y = rect.min_y,
+                .max_x = rect.max_x,
+                .max_y = rect.max_y,
+            } else null,
+        ) catch .{};
     }
 
     /// Moves data for copy text truncate.
@@ -6773,21 +6796,11 @@ pub const Renderer = struct {
     }
 
     fn drawBitmap(self: *Renderer) void {
-        if (!self.present_state.canPresent()) return;
-        if (self.hdc_mem) |hdc_mem| {
-            if (self.show_render_overlay or self.hybrid_shadow_debug.enabled or self.scene_item_gizmo.enabled or self.loading_overlay.enabled) {
-                self.drawRenderPassOverlay(hdc_mem);
-            }
-            if (self.show_frame_pacing_overlay) {
-                self.drawFramePacingPanel(hdc_mem);
-            }
-
-            self.present_backend.present(&self.bitmap, config.WINDOW_VSYNC, null) catch {
-                // The renderer should remain operational even if a present fails transiently.
-            };
-            if (config.WINDOW_VSYNC) {
-                _ = DwmFlush();
-            }
+        _ = self.presentDirectPrimitiveFrame() catch {
+            // The renderer should remain operational even if a present fails transiently.
+        };
+        if (config.WINDOW_VSYNC and self.present_state.canPresent()) {
+            _ = DwmFlush();
         }
     }
 
@@ -8169,15 +8182,24 @@ pub const Renderer = struct {
     }
 
     fn renderDirectPrimitiveShowcase(self: *Renderer) !void {
-        try self.direct_backend.renderPrimitiveShowcase(self.directFrameResources(), .{
-            .position = self.camera_position,
-            .yaw = self.rotation_angle,
-            .pitch = self.rotation_x,
-            .fov_deg = self.camera_fov_deg,
-        }, self.job_system, .{
-            .raster_mode = .worker_tiles,
-            .scene_kind = .primitive_showcase,
-        });
+        const plan = direct_showcase.defaultPlan(
+            self.camera_position,
+            self.rotation_angle,
+            self.rotation_x,
+            self.camera_fov_deg,
+            self.bitmap.width,
+            self.bitmap.height,
+            &self.direct_backend.suzanne_mesh,
+        );
+        try self.direct_backend.renderPrimitiveShowcase(
+            self.directFrameResources(),
+            plan.camera,
+            self.job_system,
+            .{
+                .raster_mode = plan.raster_mode,
+                .scene_kind = plan.scene_kind,
+            },
+        );
     }
 
     fn directFrameResources(self: *Renderer) frame_resources.FrameResources {

@@ -139,6 +139,8 @@ pub const Mesh = struct {
     /// The list of face normals. Each normal corresponds to a triangle in the `triangles` array
     /// and represents the direction that triangle is facing. Used for lighting.
     normals: []Vec3,
+    /// Optional per-vertex normals used for smooth shading paths such as Gouraud.
+    vertex_normals: []Vec3,
     /// The list of 2D texture coordinates (UVs). Each entry corresponds to a vertex.
     tex_coords: []Vec2,
     /// Meshlets generated for this mesh. Empty until meshlet generation runs.
@@ -156,6 +158,7 @@ pub const Mesh = struct {
             .vertices = &[_]Vec3{},
             .triangles = &[_]Triangle{},
             .normals = &[_]Vec3{},
+            .vertex_normals = &[_]Vec3{},
             .tex_coords = &[_]Vec2{},
             .meshlets = &[_]Meshlet{},
             .meshlet_vertices = &[_]usize{},
@@ -219,6 +222,7 @@ pub const Mesh = struct {
             .vertices = vertices,
             .triangles = triangles,
             .normals = try allocator.alloc(Vec3, 12),
+            .vertex_normals = try allocator.alloc(Vec3, 8),
             .tex_coords = tex_coords,
             .meshlets = &[_]Meshlet{},
             .meshlet_vertices = &[_]usize{},
@@ -227,6 +231,9 @@ pub const Mesh = struct {
         };
 
         mesh.recalculateNormals();
+        for (mesh.vertices, 0..) |vertex, index| {
+            mesh.vertex_normals[index] = vertex.normalize();
+        }
         return mesh;
     }
 
@@ -247,6 +254,7 @@ pub const Mesh = struct {
             .vertices = vertices,
             .triangles = triangles,
             .normals = try allocator.alloc(Vec3, 1),
+            .vertex_normals = try allocator.alloc(Vec3, 3),
             .tex_coords = tex_coords,
             .meshlets = &[_]Meshlet{},
             .meshlet_vertices = &[_]usize{},
@@ -255,6 +263,7 @@ pub const Mesh = struct {
         };
 
         mesh.recalculateNormals();
+        @memset(mesh.vertex_normals, Vec3.new(0.0, 0.0, 1.0));
         return mesh;
     }
 
@@ -264,6 +273,7 @@ pub const Mesh = struct {
         self.allocator.free(self.vertices);
         self.allocator.free(self.triangles);
         self.allocator.free(self.normals);
+        self.allocator.free(self.vertex_normals);
         self.allocator.free(self.tex_coords);
     }
 

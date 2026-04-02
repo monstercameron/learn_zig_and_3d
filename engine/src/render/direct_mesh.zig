@@ -16,13 +16,24 @@ pub fn appendMeshTriangles(
     mesh: *const Mesh,
     instance: MeshInstance,
 ) !void {
+    const identity_transform = isIdentityTransform(instance.transform);
     for (mesh.triangles) |triangle| {
-        try batch.appendTriangle(.{
-            .a = instance.transform.mulVec3(mesh.vertices[triangle.v0]),
-            .b = instance.transform.mulVec3(mesh.vertices[triangle.v1]),
-            .c = instance.transform.mulVec3(mesh.vertices[triangle.v2]),
-        }, resolveTriangleMaterial(triangle, instance.material_override));
+        const world_triangle: direct_batch.WorldTriangle = .{
+            .a = if (identity_transform) mesh.vertices[triangle.v0] else instance.transform.mulVec3(mesh.vertices[triangle.v0]),
+            .b = if (identity_transform) mesh.vertices[triangle.v1] else instance.transform.mulVec3(mesh.vertices[triangle.v1]),
+            .c = if (identity_transform) mesh.vertices[triangle.v2] else instance.transform.mulVec3(mesh.vertices[triangle.v2]),
+        };
+        const vertex_normals = [_]math.Vec3{
+            mesh.vertex_normals[triangle.v0],
+            mesh.vertex_normals[triangle.v1],
+            mesh.vertex_normals[triangle.v2],
+        };
+        try batch.appendTriangleLit(world_triangle, resolveTriangleMaterial(triangle, instance.material_override), vertex_normals);
     }
+}
+
+inline fn isIdentityTransform(transform: math.Mat4) bool {
+    return std.mem.eql(f32, transform.data[0..], math.Mat4.identity().data[0..]);
 }
 
 fn resolveTriangleMaterial(
