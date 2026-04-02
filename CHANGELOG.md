@@ -78,6 +78,19 @@
 - expanded unit and smoke coverage for queue growth, priority preference, parent-child completion, and parallel script command ordering
 - normalized `job_system` as an imported build module in `build.zig` so render and scene code can share the scheduler without fragile relative imports
 
+### Camera System Cleanup
+
+- extracted renderer camera runtime behavior into `engine/src/render/camera_runtime.zig`
+- centralized scene-side camera defaults and normalization in `engine/src/scene/camera_state.zig`
+- moved duplicated script camera movement and look code into `engine/src/scene/scripts/camera_motion.zig`
+- preserved authored camera FOV through scene loading and bootstrap in `engine/src/scene/loader.zig` and `engine/src/main.zig`
+- made scene camera FOV scene-authoritative end-to-end and removed the old renderer FOV-delta forwarding path
+- added a typed `camera_state.State` boundary and rewired scene update and render extraction through it
+- strengthened active-camera management in `engine/src/scene/main.zig` with typed active camera queries, cycling, and normalization of invalid multi-active state
+- moved more camera-mode and cursor-style policy out of `engine/src/render/renderer.zig` into `engine/src/render/camera_runtime.zig`
+- removed the deprecated scalar `updateFrameWithCameraState` API so `updateFrameWithCamera` is the only camera-state update path
+- expanded smoke coverage for authored camera FOV, normalized typed camera updates, active-camera cycling, and the no-forwarded-FOV-command regression
+
 ### Known Limits
 
 - the direct raster backend is still a stub in `engine/src/render/renderer.zig`

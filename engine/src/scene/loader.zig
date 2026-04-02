@@ -4,6 +4,7 @@
 const std = @import("std");
 const scene_math = @import("math.zig");
 const components = @import("components.zig");
+const camera_state = @import("camera_state.zig");
 
 pub const SceneIndexEntry = struct {
     key: []const u8,
@@ -43,6 +44,7 @@ pub const SceneAssetConfigEntry = struct {
     runtimeName: ?[]const u8 = null,
     cameraPosition: ?[3]f32 = null,
     cameraOrientation: ?[2]f32 = null,
+    cameraFovDeg: ?f32 = null,
     cameraName: ?[]const u8 = null,
     lightColor: ?[3]f32 = null,
     lightDistance: ?f32 = null,
@@ -126,6 +128,7 @@ pub const SceneDescription = struct {
     camera_position: scene_math.Vec3,
     camera_orientation_pitch: f32,
     camera_orientation_yaw: f32,
+    camera_fov_deg: f32,
 
     pub fn deinit(self: *SceneDescription, allocator: std.mem.Allocator) void {
         for (self.assets) |asset| {
@@ -160,6 +163,7 @@ pub fn buildSceneDescription(
     var camera_position = scene_math.Vec3.new(0.0, 2.0, -6.5);
     var camera_orientation_pitch: f32 = 0.0;
     var camera_orientation_yaw: f32 = 0.0;
+    var camera_fov_deg: f32 = camera_state.default_fov_deg;
     var camera_authored_id: ?[]const u8 = null;
     var camera_parent_authored_id: ?[]const u8 = null;
     var camera_scripts: []ScriptAttachmentDefinition = &.{};
@@ -190,6 +194,9 @@ pub fn buildSceneDescription(
             if (asset.cameraOrientation) |angles| {
                 camera_orientation_pitch = angles[0];
                 camera_orientation_yaw = angles[1];
+            }
+            if (asset.cameraFovDeg) |fov_deg| {
+                camera_fov_deg = fov_deg;
             }
             camera_authored_id = authored_id;
             camera_parent_authored_id = asset.parent;
@@ -287,6 +294,7 @@ pub fn buildSceneDescription(
         .camera_position = camera_position,
         .camera_orientation_pitch = camera_orientation_pitch,
         .camera_orientation_yaw = camera_orientation_yaw,
+        .camera_fov_deg = camera_fov_deg,
     };
 }
 

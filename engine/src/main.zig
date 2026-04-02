@@ -309,7 +309,7 @@ fn populateSceneRuntimeBootstrap(runtime: *scene_runtime.SceneRuntime, scene_des
             .position = .{ .x = scene_desc.camera_position.x, .y = scene_desc.camera_position.y, .z = scene_desc.camera_position.z },
             .pitch = scene_desc.camera_orientation_pitch,
             .yaw = scene_desc.camera_orientation_yaw,
-            .fov_deg = config.CAMERA_FOV_INITIAL,
+            .fov_deg = scene_desc.camera_fov_deg,
         },
         .lights = bootstrap_lights,
         .assets = bootstrap_assets,
@@ -347,8 +347,9 @@ fn selectionIdToEntity(selection_id: u64) scene_runtime.EntityId {
 
 fn syncRendererFromSceneSnapshot(renderer: *Renderer, snapshot: *const scene_runtime.RenderSnapshot) !void {
     if (snapshot.active_camera) |camera| {
-        renderer.setCameraPosition(toRenderVec3(camera.position));
-        renderer.setCameraOrientation(camera.pitch, camera.yaw);
+        renderer.setCameraPosition(toRenderVec3(camera.state.position));
+        renderer.setCameraOrientation(camera.state.pitch, camera.state.yaw);
+        renderer.setCameraFov(camera.state.fov_deg);
     }
 
     try renderer.setLightCapacity(snapshot.lights.items.len);
@@ -367,7 +368,6 @@ fn syncRendererFromSceneSnapshot(renderer: *Renderer, snapshot: *const scene_run
 
 fn applySceneRendererCommand(renderer: *Renderer, command: scene_runtime.Command) void {
     switch (command) {
-        .adjust_camera_fov => |payload| renderer.requestCameraFovDelta(payload.delta),
         .set_camera_mode => |mode| renderer.applyCameraModeCommand(@intFromEnum(mode)),
         .toggle_scene_item_gizmo => renderer.toggleSceneItemGizmo(),
         .toggle_light_gizmo => renderer.toggleLightGizmo(),
@@ -377,6 +377,7 @@ fn applySceneRendererCommand(renderer: *Renderer, command: scene_runtime.Command
         .toggle_render_overlay => renderer.toggleRenderOverlay(),
         .toggle_shadow_debug => renderer.toggleHybridShadowDebug(),
         .advance_shadow_debug => renderer.advanceHybridShadowDebug(),
+        .adjust_camera_fov => {},
         else => {},
     }
 }
@@ -630,6 +631,7 @@ pub fn main() !void {
 
     renderer.setCameraPosition(toRenderVec3(scene_desc.camera_position));
     renderer.setCameraOrientation(scene_desc.camera_orientation_pitch, scene_desc.camera_orientation_yaw);
+    renderer.setCameraFov(scene_desc.camera_fov_deg);
     renderer.setSceneCameraScriptActive(true);
     var mouse_grabbed = false;
     var selected_scene_entity_pin: ?scene_runtime.EntityId = null;
@@ -696,19 +698,16 @@ pub fn main() !void {
                 },
             });
 
-            var phase13_snapshot = session.phase13_runtime.updateFrame(
-                .{
+            var phase13_snapshot = session.phase13_runtime.updateFrameWithCamera(.{
+                .position = .{
                     .x = session.renderer.camera_position.x,
                     .y = session.renderer.camera_position.y,
                     .z = session.renderer.camera_position.z,
                 },
-                session.renderer.rotation_x,
-                session.renderer.rotation_angle,
-                48.0,
-                96.0,
-                frame_count,
-                runtime_delta_seconds,
-            ) catch |err| {
+                .pitch = session.renderer.rotation_x,
+                .yaw = session.renderer.rotation_angle,
+                .fov_deg = session.renderer.camera_fov_deg,
+            }, 48.0, 96.0, frame_count, runtime_delta_seconds) catch |err| {
                 app_logger.warn("phase13 runtime update failed: {}", .{err});
                 return;
             };

@@ -256,7 +256,7 @@ const OrderedCommandRecorder = struct {
         switch (ctx.event) {
             .update => {
                 const slot_ptr = ctx.user_data orelse return;
-                ctx.commands.queueAdjustCameraFov(@floatFromInt(@intFromPtr(slot_ptr))) catch {};
+                ctx.commands.queueNudgeActiveGizmo(@floatFromInt(@intFromPtr(slot_ptr))) catch {};
             },
             else => {},
         }
@@ -491,11 +491,12 @@ test "render snapshot carries active camera and light settings" {
     defer snapshot.deinit();
 
     try std.testing.expect(snapshot.active_camera != null);
-    try std.testing.expectApproxEqAbs(@as(f32, 4.0), snapshot.active_camera.?.position.x, 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f32, 5.0), snapshot.active_camera.?.position.y, 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f32, 6.0), snapshot.active_camera.?.position.z, 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.4), snapshot.active_camera.?.pitch, 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.8), snapshot.active_camera.?.yaw, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), snapshot.active_camera.?.state.position.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), snapshot.active_camera.?.state.position.y, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 6.0), snapshot.active_camera.?.state.position.z, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), snapshot.active_camera.?.state.pitch, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.8), snapshot.active_camera.?.state.yaw, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 72.0), snapshot.active_camera.?.state.fov_deg, 1e-6);
 
     try std.testing.expectEqual(@as(usize, 1), snapshot.lights.items.len);
     const light = snapshot.lights.items[0];
@@ -504,6 +505,92 @@ test "render snapshot carries active camera and light settings" {
     try std.testing.expectEqual(@as(usize, 1024), light.shadow_map_size);
     try std.testing.expectApproxEqAbs(@as(f32, 2.5), light.glow_radius, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 1.25), light.glow_intensity, 1e-6);
+}
+
+test "scene loader preserves authored camera fov" {
+    var assets = [_]scene_main.SceneAssetConfigEntry{
+        .{
+            .type = "camera",
+            .id = "cam.main",
+            .cameraPosition = .{ 0.0, 2.0, -6.0 },
+            .cameraOrientation = .{ 0.25, 1.5 },
+            .cameraFovDeg = 77.0,
+        },
+    };
+    const scene_file = scene_main.SceneFile{
+        .key = "camera-fov",
+        .assets = assets[0..],
+    };
+
+    var desc = try scene_main.buildSceneDescription(std.testing.allocator, scene_file, true, true, 512);
+    defer desc.deinit(std.testing.allocator);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 77.0), desc.camera_fov_deg, 1e-6);
+}
+
+test "scene runtime normalizes renderer-driven camera pose and fov" {
+    var runtime = try scene_main.SceneRuntime.init(std.testing.allocator, .{
+        .min = .{ .x = -32.0, .y = -32.0, .z = -32.0 },
+        .max = .{ .x = 32.0, .y = 32.0, .z = 32.0 },
+    });
+    defer runtime.deinit();
+
+    try runtime.bootstrapFromDescription(.{
+        .camera = .{
+            .position = .{ .x = 1.0, .y = 2.0, .z = 3.0 },
+            .pitch = 0.0,
+            .yaw = 0.0,
+            .fov_deg = 60.0,
+        },
+        .lights = &.{},
+        .assets = &.{},
+    });
+
+    var snapshot = try runtime.updateFrameWithCamera(.{
+        .position = .{ .x = 4.0, .y = 5.0, .z = 6.0 },
+        .pitch = 4.0,
+        .yaw = 10.0,
+        .fov_deg = 200.0,
+    }, 32.0, 48.0, 12, 1.0 / 60.0);
+    defer snapshot.deinit();
+
+    try std.testing.expect(snapshot.active_camera != null);
+    try std.testing.expectApproxEqAbs(scene_main.camera_utils.clampPitch(4.0), snapshot.active_camera.?.state.pitch, 1e-6);
+    try std.testing.expectApproxEqAbs(scene_main.camera_utils.wrapYaw(10.0), snapshot.active_camera.?.state.yaw, 1e-6);
+    try std.testing.expectApproxEqAbs(scene_main.camera_utils.normalizeFov(200.0), snapshot.active_camera.?.state.fov_deg, 1e-6);
+}
+
+test "scene runtime can cycle active camera and expose typed active camera state" {
+    var runtime = try scene_main.SceneRuntime.init(std.testing.allocator, .{
+        .min = .{ .x = -16.0, .y = -16.0, .z = -16.0 },
+        .max = .{ .x = 16.0, .y = 16.0, .z = 16.0 },
+    });
+    defer runtime.deinit();
+
+    try runtime.bootstrapFromDescription(.{
+        .camera = .{
+            .position = .{ .x = 0.0, .y = 1.0, .z = -4.0 },
+            .pitch = 0.1,
+            .yaw = 0.2,
+            .fov_deg = 70.0,
+        },
+        .lights = &.{},
+        .assets = &.{},
+    });
+
+    const second_camera = try runtime.createEntity();
+    const second_index: usize = @intCast(second_camera.index);
+    runtime.components.local_transforms.items[second_index] = .{ .position = .{ .x = 3.0, .y = 4.0, .z = 5.0 } };
+    runtime.components.world_transforms.items[second_index] = .{ .position = .{ .x = 3.0, .y = 4.0, .z = 5.0 } };
+    runtime.components.cameras.items[second_index] = .{ .pitch = 0.3, .yaw = 0.4, .fov_deg = 80.0, .active = false };
+
+    const initial_active = runtime.activeCameraEntity() orelse return error.TestUnexpectedResult;
+    const cycled = runtime.cycleActiveCamera() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(initial_active.index != cycled.index);
+
+    const active_state = runtime.activeCameraState() orelse return error.TestUnexpectedResult;
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), active_state.position.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 80.0), active_state.fov_deg, 1e-6);
 }
 
 test "scene loader rejects duplicate authored ids" {
@@ -1102,10 +1189,38 @@ test "parallel script dispatch preserves callback command order" {
     try std.testing.expectEqual(script_instance_count, renderer_commands.len);
     for (renderer_commands, 0..) |command, index| {
         switch (command) {
-            .adjust_camera_fov => |payload| try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(index + 1)), payload.delta, 1e-6),
+            .nudge_active_gizmo => |payload| try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(index + 1)), payload.delta, 1e-6),
             else => return error.TestUnexpectedResult,
         }
     }
+}
+
+test "scene camera fov adjusts without forwarding renderer delta commands" {
+    var runtime = try scene_main.SceneRuntime.init(std.testing.allocator, .{
+        .min = .{ .x = -16.0, .y = -16.0, .z = -16.0 },
+        .max = .{ .x = 16.0, .y = 16.0, .z = 16.0 },
+    });
+    defer runtime.deinit();
+
+    try runtime.bootstrapFromDescription(.{
+        .camera = .{
+            .position = .{ .x = 0.0, .y = 1.0, .z = -4.0 },
+            .pitch = 0.0,
+            .yaw = 0.0,
+            .fov_deg = 60.0,
+        },
+        .lights = &.{},
+        .assets = &.{},
+    });
+
+    const active_camera = runtime.activeCameraEntity() orelse return error.TestUnexpectedResult;
+    const active_index: usize = @intCast(active_camera.index);
+
+    try runtime.commands.queueAdjustCameraFov(5.0);
+    runtime.applyDeferred();
+
+    try std.testing.expectApproxEqAbs(@as(f32, 65.0), runtime.components.cameras.items[active_index].?.fov_deg, 1e-6);
+    try std.testing.expectEqual(@as(usize, 0), runtime.rendererCommands().len);
 }
 
 test "scene script lifecycle emits update fixed-update and late-update events" {

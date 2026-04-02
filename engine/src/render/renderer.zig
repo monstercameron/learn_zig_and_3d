@@ -70,6 +70,7 @@ const frame_hooks = @import("frame_hooks.zig");
 const render_utils = @import("core/utils.zig");
 const scene_item_gizmo = @import("scene_item_gizmo.zig");
 const camera_controller = @import("camera_controller.zig");
+const camera_runtime = @import("camera_runtime.zig");
 const frame_pacing_hud = @import("frame_pacing_hud.zig");
 const frame_pacing = @import("frame_pacing.zig");
 const shadow_raster_kernel = @import("kernels/shadow_raster_kernel.zig");
@@ -529,11 +530,11 @@ const FrameViewCache = struct {
     light_distance: f32 = 0.0,
     state: DerivedFrameViewState = undefined,
 
-    fn invalidate(self: *FrameViewCache) void {
+    pub fn invalidate(self: *FrameViewCache) void {
         self.valid = false;
     }
 
-    fn needsUpdate(
+    pub fn needsUpdate(
         self: *const FrameViewCache,
         camera_position: math.Vec3,
         rotation_angle: f32,
@@ -557,7 +558,7 @@ const FrameViewCache = struct {
     }
 
     /// update updates Renderer state for the current tick/frame.
-    fn update(
+    pub fn update(
         self: *FrameViewCache,
         camera_position: math.Vec3,
         rotation_angle: f32,
@@ -4126,7 +4127,7 @@ pub const Renderer = struct {
     /// Returns whether i sf ir st pe rs on mo de.
     /// The check is side-effect free so callers can gate expensive follow-up work cheaply.
     pub fn isFirstPersonMode(self: *const Renderer) bool {
-        return self.camera_control_mode == .first_person;
+        return camera_runtime.wantsHiddenCursor(self);
     }
 
     /// Returns whether i ss ce ne it em dr ag ac ti ve.
@@ -4139,22 +4140,9 @@ pub const Renderer = struct {
         self.scene_camera_script_active = active;
     }
 
-    pub fn requestCameraFovDelta(self: *Renderer, delta: f32) void {
-        if (!camera_controller.isHoldZoomHeld(&self.fps_zoom_state)) {
-            self.pending_fov_delta += delta;
-        }
-    }
-
     pub fn applyCameraModeCommand(self: *Renderer, mode_tag: u8) void {
-        switch (mode_tag) {
-            2 => {
-                const next_mode: CameraControlMode = if (self.camera_control_mode == .first_person) .editor else .first_person;
-                self.setCameraControlMode(next_mode);
-            },
-            0 => self.setCameraControlMode(.editor),
-            1 => self.setCameraControlMode(.first_person),
-            else => {},
-        }
+        const next_mode = camera_runtime.resolveCameraModeCommand(self.camera_control_mode, mode_tag) orelse return;
+        self.setCameraControlMode(next_mode);
     }
 
     pub fn toggleSceneItemGizmo(self: *Renderer) void {
@@ -4300,25 +4288,14 @@ pub const Renderer = struct {
     /// Handles handle raw mouse delta.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleRawMouseDelta(self: *Renderer, delta_x: i32, delta_y: i32) void {
-        _ = self.mouse_input.addRawDelta(delta_x, delta_y);
-        if (self.camera_control_mode != .first_person) return;
-        camera_controller.accumulateFirstPersonDelta(
-            &self.mouse_state,
-            math.Vec2.new(
-                @as(f32, @floatFromInt(delta_x)),
-                @as(f32, @floatFromInt(delta_y)),
-            ),
-        );
+        camera_runtime.handleRawMouseDelta(self, delta_x, delta_y);
     }
 
     /// Handles handle mouse left click.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleMouseLeftClick(self: *Renderer, x: i32, y: i32) void {
         _ = self.mouse_input.setButton(.left, true);
-        if (self.camera_control_mode == .first_person) {
-            camera_controller.beginHoldZoom(&self.fps_zoom_state, self.camera_fov_deg, .left_button);
-            return;
-        }
+        if (camera_runtime.handleFirstPersonLeftPress(self)) return;
         const pointer_view = self.computePointerViewState();
         if (self.beginLightGizmoDrag(x, y, pointer_view)) return;
         var pointer_ctx = SceneItemGizmoDrawContext{
@@ -4347,10 +4324,7 @@ pub const Renderer = struct {
         _ = self.mouse_input.setButton(.left, false);
         _ = x;
         _ = y;
-        if (self.camera_control_mode == .first_person) {
-            camera_controller.endHoldZoom(&self.fps_zoom_state, self.camera_fov_deg, .left_button);
-            return;
-        }
+        if (camera_runtime.handleFirstPersonLeftRelease(self)) return;
         self.scene_item_gizmo.handlePointerUp();
         self.clearLightGizmoInteraction();
     }
@@ -4361,8 +4335,7 @@ pub const Renderer = struct {
         _ = self.mouse_input.setButton(.right, true);
         _ = x;
         _ = y;
-        if (self.camera_control_mode != .first_person) return;
-        camera_controller.beginHoldZoom(&self.fps_zoom_state, self.camera_fov_deg, .right_button);
+        _ = camera_runtime.handleFirstPersonRightPress(self);
     }
 
     /// Handles handle mouse right release.
@@ -4371,36 +4344,39 @@ pub const Renderer = struct {
         _ = self.mouse_input.setButton(.right, false);
         _ = x;
         _ = y;
-        camera_controller.endHoldZoom(&self.fps_zoom_state, self.camera_fov_deg, .right_button);
+        _ = camera_runtime.handleFirstPersonRightRelease(self);
     }
 
     /// Handles handle focus lost.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleFocusLost(self: *Renderer) void {
-        self.keys_pressed.clear();
-        self.mouse_input.clear();
         self.scene_item_gizmo.handlePointerUp();
         self.clearLightGizmoInteraction();
-        camera_controller.cancelHoldZoom(&self.fps_zoom_state, &self.camera_fov_deg, true);
-        self.last_reported_fov_deg = self.camera_fov_deg;
-        camera_controller.setJumpHeldState(&self.fps_body_state, false);
-        camera_controller.resetForModeToggle(&self.mouse_state);
+        camera_runtime.handleFocusLost(self);
     }
 
     /// Handles handle focus gained.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleFocusGained(self: *Renderer) void {
-        camera_controller.resetForModeToggle(&self.mouse_state);
+        camera_runtime.handleFocusGained(self);
     }
 
     /// Performs desired cursor style.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn desiredCursorStyle(self: *const Renderer) CursorStyle {
-        if (self.camera_control_mode == .first_person) return .hidden;
-        const item_hint = self.scene_item_gizmo.cursorHint();
-        if (item_hint == .grabbing or self.light_gizmo.drag_axis != null) return .grabbing;
-        if (item_hint == .grab or self.light_gizmo.hover_axis != null) return .grab;
-        return .arrow;
+        return camera_runtime.desiredCursorStyle(
+            CursorStyle,
+            scene_item_gizmo.CursorHint,
+            LightGizmoAxis,
+            self,
+            self.scene_item_gizmo.cursorHint(),
+            self.light_gizmo.drag_axis,
+            self.light_gizmo.hover_axis,
+            .arrow,
+            .grab,
+            .grabbing,
+            .hidden,
+        );
     }
 
     /// Sets s et sc en ei te mb in di ng s.
@@ -4434,17 +4410,17 @@ pub const Renderer = struct {
     /// Sets s et ca me ra po si ti on.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setCameraPosition(self: *Renderer, position: math.Vec3) void {
-        self.camera_position = position;
-        if (!self.scene_camera_script_active) {
-            camera_controller.resetFpsBody(&self.fps_body_state, self.camera_position, fps_camera_floor_y, fps_camera_eye_height);
-        }
+        camera_runtime.setCameraPosition(self, position);
     }
 
     /// Sets s et ca me ra or ie nt at io n.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setCameraOrientation(self: *Renderer, pitch: f32, yaw: f32) void {
-        self.rotation_x = camera_controller.clampPitch(pitch);
-        self.rotation_angle = yaw;
+        camera_runtime.setCameraOrientation(self, pitch, yaw);
+    }
+
+    pub fn setCameraFov(self: *Renderer, fov_deg: f32) void {
+        camera_runtime.setCameraFov(self, fov_deg);
     }
 
     /// Marks cached/derived data stale so it is recomputed on the next usage.
@@ -4487,8 +4463,7 @@ pub const Renderer = struct {
     }
 
     pub fn consumeSceneCameraLookDelta(self: *Renderer, frame_dt_seconds: f32) math.Vec2 {
-        if (!self.scene_camera_script_active or self.camera_control_mode != .first_person) return math.Vec2.new(0.0, 0.0);
-        return self.consumeMouseDelta(frame_dt_seconds);
+        return camera_runtime.consumeSceneCameraLookDelta(self, frame_dt_seconds);
     }
 
     fn effectiveMouseSensitivity(self: *const Renderer) f32 {
@@ -4523,7 +4498,7 @@ pub const Renderer = struct {
         };
     }
 
-    fn clearLightGizmoInteraction(self: *Renderer) void {
+    pub fn clearLightGizmoInteraction(self: *Renderer) void {
         self.light_gizmo.hover_axis = null;
         self.light_gizmo.drag_axis = null;
         self.light_gizmo.drag_last_pointer = null;
@@ -4867,22 +4842,7 @@ pub const Renderer = struct {
     }
 
     fn setCameraControlMode(self: *Renderer, next_mode: CameraControlMode) void {
-        if (self.camera_control_mode == next_mode) return;
-        self.camera_control_mode = next_mode;
-        if (self.camera_control_mode == .first_person) {
-            self.scene_item_gizmo.cancelInteraction();
-            self.clearLightGizmoInteraction();
-            if (!self.scene_camera_script_active) {
-                camera_controller.resetFpsBody(&self.fps_body_state, self.camera_position, fps_camera_floor_y, fps_camera_eye_height);
-                const jump_down = self.keys_pressed.isDown(.space);
-                camera_controller.setJumpHeldState(&self.fps_body_state, jump_down);
-            }
-            camera_controller.onEnterFirstPerson(&self.fps_zoom_state, self.camera_fov_deg);
-        } else {
-            camera_controller.cancelHoldZoom(&self.fps_zoom_state, &self.camera_fov_deg, true);
-            self.last_reported_fov_deg = self.camera_fov_deg;
-        }
-        camera_controller.resetForModeToggle(&self.mouse_state);
+        if (!camera_runtime.setCameraControlMode(self, next_mode)) return;
         renderer_logger.infoSub(
             "camera_mode",
             "mode={s}",
@@ -5138,34 +5098,6 @@ pub const Renderer = struct {
             },
         );
 
-        if (!self.scene_camera_script_active) {
-            const rotation_speed = 2.0;
-            if (self.keys_pressed.isDown(.left)) self.rotation_angle -= rotation_speed * simulation_delta_seconds;
-            if (self.keys_pressed.isDown(.right)) self.rotation_angle += rotation_speed * simulation_delta_seconds;
-            if (self.keys_pressed.isDown(.up)) self.rotation_x -= rotation_speed * simulation_delta_seconds;
-            if (self.keys_pressed.isDown(.down)) self.rotation_x += rotation_speed * simulation_delta_seconds;
-        }
-
-        const mouse_delta = if (self.scene_camera_script_active)
-            math.Vec2.new(0.0, 0.0)
-        else
-            self.consumeMouseDelta(delta_seconds);
-        if (self.camera_control_mode == .first_person and !self.scene_camera_script_active) {
-            const mouse_sensitivity = self.effectiveMouseSensitivity();
-            camera_controller.applyFirstPersonLook(
-                &self.rotation_angle,
-                &self.rotation_x,
-                mouse_delta,
-                mouse_sensitivity,
-            );
-        }
-        self.rotation_x = camera_controller.clampPitch(self.rotation_x);
-
-        const fov_delta = self.consumePendingFovDelta();
-        if (fov_delta != 0.0) self.adjustCameraFov(fov_delta);
-        camera_controller.updateHoldZoom(&self.fps_zoom_state, &self.camera_fov_deg, delta_seconds);
-        self.last_reported_fov_deg = self.camera_fov_deg;
-
         const sweep_half_angle = std.math.pi / 2.0;
         for (self.lights.items) |*light| {
             if (!light.manual_direction) {
@@ -5187,82 +5119,10 @@ pub const Renderer = struct {
             math.Vec3.new(self.light_soa.dir_x[0], self.light_soa.dir_y[0], self.light_soa.dir_z[0])
         else
             math.Vec3.new(0, -1, 0);
-
-        const frame_view = if (self.frame_view_cache.needsUpdate(
-            self.camera_position,
-            self.rotation_angle,
-            self.rotation_x,
-            self.camera_fov_deg,
-            self.bitmap.width,
-            self.bitmap.height,
-            light_dir_world,
-            light_distance_0,
-        ))
-            self.frame_view_cache.update(
-                self.camera_position,
-                self.rotation_angle,
-                self.rotation_x,
-                self.camera_fov_deg,
-                self.bitmap.width,
-                self.bitmap.height,
-                light_dir_world,
-                light_distance_0,
-            )
-        else
-            self.frame_view_cache.state;
-
-        const right = frame_view.right;
-        const up = frame_view.up;
-        const forward = frame_view.forward;
-        if (self.camera_control_mode == .first_person) {
-            if (!self.scene_camera_script_active) {
-                const basis = camera_controller.ViewBasis{
-                    .right = right,
-                    .up = up,
-                    .forward = forward,
-                };
-                const fps_params = camera_controller.FpsStepParams{
-                    .dt = simulation_delta_seconds,
-                    .move_speed = self.camera_move_speed,
-                    .floor_y = fps_camera_floor_y,
-                    .eye_height = fps_camera_eye_height,
-                };
-                camera_controller.stepFpsBody(&self.fps_body_state, &self.camera_position, basis, self.keys_pressed, fps_params);
-            }
-        } else if (!self.scene_camera_script_active) {
-            const world_up = math.Vec3.new(0.0, 1.0, 0.0);
-
-            var forward_flat = math.Vec3.new(forward.x, 0.0, forward.z);
-            const forward_flat_len = math.Vec3.length(forward_flat);
-            if (forward_flat_len > 0.0001) {
-                forward_flat = math.Vec3.scale(forward_flat, 1.0 / forward_flat_len);
-            } else {
-                forward_flat = math.Vec3.new(0.0, 0.0, 0.0);
-            }
-
-            var right_flat = math.Vec3.new(right.x, 0.0, right.z);
-            const right_flat_len = math.Vec3.length(right_flat);
-            if (right_flat_len > 0.0001) {
-                right_flat = math.Vec3.scale(right_flat, 1.0 / right_flat_len);
-            } else {
-                right_flat = math.Vec3.new(0.0, 0.0, 0.0);
-            }
-
-            var movement_dir = math.Vec3.new(0.0, 0.0, 0.0);
-            if (self.keys_pressed.isDown(.w)) movement_dir = math.Vec3.add(movement_dir, forward_flat);
-            if (self.keys_pressed.isDown(.s)) movement_dir = math.Vec3.sub(movement_dir, forward_flat);
-            if (self.keys_pressed.isDown(.d)) movement_dir = math.Vec3.add(movement_dir, right_flat);
-            if (self.keys_pressed.isDown(.a)) movement_dir = math.Vec3.sub(movement_dir, right_flat);
-            if (self.keys_pressed.isDown(.space)) movement_dir = math.Vec3.add(movement_dir, world_up);
-            if (self.keys_pressed.isDown(.ctrl)) movement_dir = math.Vec3.sub(movement_dir, world_up);
-
-            const movement_mag = math.Vec3.length(movement_dir);
-            if (movement_mag > 0.0001) {
-                const normalized_move = math.Vec3.scale(movement_dir, 1.0 / movement_mag);
-                const move_step = math.Vec3.scale(normalized_move, self.camera_move_speed * simulation_delta_seconds);
-                self.camera_position = math.Vec3.add(self.camera_position, move_step);
-            }
-        }
+        camera_runtime.prepareCameraForFrame(self, delta_seconds, simulation_delta_seconds, light_dir_world, light_distance_0);
+        const right = self.frame_view_cache.state.right;
+        const up = self.frame_view_cache.state.up;
+        const forward = self.frame_view_cache.state.forward;
 
         const resolved_frame_view = if (self.frame_view_cache.needsUpdate(
             self.camera_position,
@@ -5559,20 +5419,6 @@ pub const Renderer = struct {
                     self.hybrid_shadow_stats.final_candidate_count,
                 },
             );
-        }
-    }
-
-    fn consumePendingFovDelta(self: *Renderer) f32 {
-        const delta = self.pending_fov_delta;
-        self.pending_fov_delta = 0.0;
-        return delta;
-    }
-
-    fn adjustCameraFov(self: *Renderer, delta: f32) void {
-        const new_fov = std.math.clamp(self.camera_fov_deg + delta, config.CAMERA_FOV_MIN, config.CAMERA_FOV_MAX);
-        if (!std.math.approxEqAbs(f32, new_fov, self.camera_fov_deg, 0.0001)) {
-            self.camera_fov_deg = new_fov;
-            self.last_reported_fov_deg = new_fov;
         }
     }
 
