@@ -1,38 +1,6 @@
 const std = @import("std");
 const math = @import("../core/math.zig");
-const TileRenderer = @import("core/tile_renderer.zig");
 const direct_batch = @import("direct_batch.zig");
-const direct_primitives = @import("direct_primitives.zig");
-const direct_draw_list = @import("direct_draw_list.zig");
-
-pub const AuxiliaryBuffers = struct {
-    scene_camera: []math.Vec3,
-    scene_normal: []math.Vec3,
-    scene_surface: []TileRenderer.SurfaceHandle,
-};
-
-pub const FrameResources = struct {
-    target: direct_primitives.FrameTarget,
-    aux: AuxiliaryBuffers,
-};
-
-pub const FrameTimings = struct {
-    clear_ns: i128 = 0,
-    build_batch_ns: i128 = 0,
-    compile_draw_list_ns: i128 = 0,
-    raster_ns: i128 = 0,
-    present_ns: i128 = 0,
-};
-
-pub fn clearFrame(
-    resources: FrameResources,
-    clear: direct_primitives.ClearConfig,
-) void {
-    direct_primitives.clear(resources.target, clear);
-    @memset(resources.aux.scene_camera, math.Vec3.new(0.0, 0.0, 0.0));
-    @memset(resources.aux.scene_normal, math.Vec3.new(0.0, 0.0, 0.0));
-    @memset(resources.aux.scene_surface, TileRenderer.SurfaceHandle.invalid());
-}
 
 pub fn buildPrimitiveShowcase(
     batch: *direct_batch.PrimitiveBatch,
@@ -64,10 +32,6 @@ pub fn buildPrimitiveShowcase(
         .center = math.Vec3.new(1.65, -1.15, 0.0),
         .radius = 0.72,
     }, .{ .fill_color = 0xFFB95CFF, .outline_color = 0xFFFFFFFF, .depth = 1.0 });
-}
-
-pub fn rasterize(resources: FrameResources, draw_list: *const direct_draw_list.DrawList) void {
-    direct_primitives.drawMany(resources.target, draw_list.items());
 }
 
 test "primitive showcase builds expected command mix" {

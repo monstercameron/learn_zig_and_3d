@@ -31,6 +31,10 @@ pub const VisibleMeshlets = struct {
     pub fn clearRetainingCapacity(self: *VisibleMeshlets) void {
         self.indices.clearRetainingCapacity();
     }
+
+    pub fn ensureCapacity(self: *VisibleMeshlets, count: usize) !void {
+        try self.indices.ensureTotalCapacity(self.allocator, count);
+    }
 };
 
 pub fn ensureMeshlets(mesh: *Mesh, allocator: std.mem.Allocator) !void {
@@ -45,6 +49,7 @@ pub fn cullVisibleMeshlets(
     camera: direct_batch.Camera,
 ) !void {
     out_visible.clearRetainingCapacity();
+    try out_visible.ensureCapacity(mesh.meshlets.len);
     for (mesh.meshlets, 0..) |*meshlet, meshlet_index| {
         if (meshletVisible(meshlet, instance.transform, camera)) {
             try out_visible.indices.append(out_visible.allocator, meshlet_index);
@@ -103,6 +108,7 @@ pub fn appendVisibleMeshletsToBatchParallel(
             .visible_indices = visible.indices.items[start..end],
             .instance = instance,
         };
+        try chunk_batches[chunk_index].ensureCommandCapacity(estimateVisiblePrimitiveCount(mesh, visible.indices.items[start..end]));
         if (active_chunks == 0) {
             main_chunk = chunk_index;
             active_chunks += 1;
@@ -124,6 +130,14 @@ pub fn appendVisibleMeshletsToBatchParallel(
             try batch.append(packet);
         }
     }
+}
+
+fn estimateVisiblePrimitiveCount(mesh: *const Mesh, visible_indices: []const usize) usize {
+    var count: usize = 0;
+    for (visible_indices) |meshlet_index| {
+        count += mesh.meshletPrimitiveSlice(&mesh.meshlets[meshlet_index]).len;
+    }
+    return count;
 }
 
 fn meshletVisible(meshlet: *const Meshlet, transform: math.Mat4, camera: direct_batch.Camera) bool {

@@ -1,11 +1,8 @@
 const std = @import("std");
 const math = @import("../core/math.zig");
-const job_system = @import("job_system");
 const direct_batch = @import("direct_batch.zig");
 const direct_mesh = @import("direct_mesh.zig");
 const direct_meshlets = @import("direct_meshlets.zig");
-
-const JobSystem = job_system.JobSystem;
 
 pub const WorldPacket = struct {
     layer: @import("direct_packets.zig").RenderLayer = .geometry,
@@ -58,6 +55,10 @@ pub const PacketList = struct {
         self.packets.clearRetainingCapacity();
     }
 
+    pub fn ensureCapacity(self: *PacketList, count: usize) !void {
+        try self.packets.ensureTotalCapacity(self.allocator, count);
+    }
+
     pub fn items(self: *const PacketList) []const WorldPacket {
         return self.packets.items;
     }
@@ -66,71 +67,6 @@ pub const PacketList = struct {
         try self.packets.append(self.allocator, packet);
     }
 };
-
-pub fn compileToPrimitiveBatch(
-    list: *PacketList,
-    batch: *direct_batch.PrimitiveBatch,
-    camera: direct_batch.Camera,
-    visible_meshlets: *direct_meshlets.VisibleMeshlets,
-    job_sys: ?*JobSystem,
-) !void {
-    batch.clearRetainingCapacity();
-    for (list.items()) |packet| {
-        switch (packet.source) {
-            .line => |payload| {
-                try batch.appendLine(.{
-                    .start = packet.transform.mulVec3(payload.line.start),
-                    .end = packet.transform.mulVec3(payload.line.end),
-                }, payload.material);
-            },
-            .triangle => |payload| {
-                try batch.appendTriangle(.{
-                    .a = packet.transform.mulVec3(payload.triangle.a),
-                    .b = packet.transform.mulVec3(payload.triangle.b),
-                    .c = packet.transform.mulVec3(payload.triangle.c),
-                }, payload.material);
-            },
-            .polygon => |payload| {
-                var transformed: [direct_batch.max_polygon_points]math.Vec3 = undefined;
-                const points = payload.polygon.slice();
-                for (points, 0..) |point, index| {
-                    transformed[index] = packet.transform.mulVec3(point);
-                }
-                try batch.appendPolygon(transformed[0..points.len], payload.material);
-            },
-            .circle => |payload| {
-                try batch.appendCircle(.{
-                    .center = packet.transform.mulVec3(payload.circle.center),
-                    .radius = payload.circle.radius,
-                }, payload.material);
-            },
-            .mesh => |payload| {
-                try direct_mesh.appendMeshTriangles(batch, payload.mesh, .{
-                    .transform = packet.transform,
-                    .material_override = payload.material_override,
-                });
-            },
-            .meshlets => |payload| {
-                try direct_meshlets.ensureMeshlets(payload.mesh, list.allocator);
-                try direct_meshlets.cullVisibleMeshlets(visible_meshlets, payload.mesh, .{
-                    .transform = packet.transform,
-                    .material_override = payload.material_override,
-                }, camera);
-                if (job_sys) |js| {
-                    try direct_meshlets.appendVisibleMeshletsToBatchParallel(batch, payload.mesh, visible_meshlets, .{
-                        .transform = packet.transform,
-                        .material_override = payload.material_override,
-                    }, list.allocator, js);
-                } else {
-                    try direct_meshlets.appendVisibleMeshletsToBatch(batch, payload.mesh, visible_meshlets, .{
-                        .transform = packet.transform,
-                        .material_override = payload.material_override,
-                    });
-                }
-            },
-        }
-    }
-}
 
 test "scene packet list can append primitive and mesh sources" {
     var list = PacketList.init(std.testing.allocator);

@@ -86,6 +86,8 @@ const texture = @import("../assets/texture.zig");
 const WorkTypes = @import("core/mesh_work_types.zig");
 const direct_primitives = @import("direct_primitives.zig");
 const direct_demo = @import("direct_demo.zig");
+const frame_resources = @import("frame_resources.zig");
+const frame_setup_stage = @import("stages/frame_setup_stage.zig");
 const direct_backend = @import("backends/direct_backend.zig");
 const present_d3d11 = @import("present/present_d3d11.zig");
 const present_state = @import("present_state.zig");
@@ -1870,23 +1872,23 @@ pub const Renderer = struct {
         errdefer allocator.free(dof_job_contexts);
         const color_grade_jobs = try allocator.alloc(Job, color_grade_job_count);
         errdefer allocator.free(color_grade_jobs);
-        const scene_depth = try allocator.alloc(f32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const scene_depth = try allocator.alignedAlloc(f32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(scene_depth);
-        const scene_camera = try allocator.alloc(math.Vec3, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const scene_camera = try allocator.alignedAlloc(math.Vec3, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(scene_camera);
-        const scene_normal = try allocator.alloc(math.Vec3, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const scene_normal = try allocator.alignedAlloc(math.Vec3, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(scene_normal);
-        const scene_surface = try allocator.alloc(TileRenderer.SurfaceHandle, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const scene_surface = try allocator.alignedAlloc(TileRenderer.SurfaceHandle, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(scene_surface);
-        const taa_history_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const taa_history_pixels = try allocator.alignedAlloc(u32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(taa_history_pixels);
-        const taa_resolve_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const taa_resolve_pixels = try allocator.alignedAlloc(u32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(taa_resolve_pixels);
-        const taa_history_depth = try allocator.alloc(f32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const taa_history_depth = try allocator.alignedAlloc(f32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(taa_history_depth);
-        const taa_history_surface_tags = try allocator.alloc(u64, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const taa_history_surface_tags = try allocator.alignedAlloc(u64, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(taa_history_surface_tags);
-        const taa_history_normals = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const taa_history_normals = try allocator.alignedAlloc(u32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(taa_history_normals);
         const hybrid_shadow_coarse_downsample = @max(1, config.POST_HYBRID_SHADOW_COARSE_DOWNSAMPLE);
         const hybrid_shadow_coarse_cache_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + hybrid_shadow_coarse_downsample - 1, hybrid_shadow_coarse_downsample))));
@@ -6780,7 +6782,7 @@ pub const Renderer = struct {
                 self.drawFramePacingPanel(hdc_mem);
             }
 
-            self.present_backend.present(&self.bitmap, config.WINDOW_VSYNC) catch {
+            self.present_backend.present(&self.bitmap, config.WINDOW_VSYNC, null) catch {
                 // The renderer should remain operational even if a present fails transiently.
             };
             if (config.WINDOW_VSYNC) {
@@ -8160,7 +8162,10 @@ pub const Renderer = struct {
     }
 
     fn clearDirectFrame(self: *Renderer, clear: direct_primitives.ClearConfig) void {
-        direct_demo.clearFrame(self.directFrameResources(), clear);
+        _ = frame_setup_stage.execute(self.directFrameResources(), .{
+            .clear_color = clear.color,
+            .clear_depth = clear.depth orelse std.math.inf(f32),
+        });
     }
 
     fn renderDirectPrimitiveShowcase(self: *Renderer) !void {
@@ -8172,7 +8177,7 @@ pub const Renderer = struct {
         }, self.job_system, .{ .raster_mode = .single_thread });
     }
 
-    fn directFrameResources(self: *Renderer) direct_demo.FrameResources {
+    fn directFrameResources(self: *Renderer) frame_resources.FrameResources {
         return .{
             .target = .{
                 .width = self.bitmap.width,

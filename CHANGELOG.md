@@ -1,5 +1,59 @@
 # Changelog
 
+## 2026-04-02
+
+### Staged Direct Pipeline
+
+- added a typed full-image pipeline scaffold in `engine/src/render/full_pipeline.zig`
+- extracted direct-frame resources into `engine/src/render/frame_resources.zig`
+- implemented and extracted direct stages under `engine/src/render/stages`
+- added `frame_setup_stage.zig` for direct-frame clears, buffer reset policy, and frame setup metadata
+- added `scene_submission_stage.zig` for world-side direct scene packet submission
+- added `visibility_culling_stage.zig` for visible packet selection and meshlet visibility filtering
+- added `primitive_expansion_stage.zig` for expansion from visible scene data into `PrimitiveBatch`
+- added `screen_binning_stage.zig` for deterministic tile bin construction and touched-tile stats
+- added `rasterization_stage.zig` for single-thread and worker-tile raster execution
+- added `visible_scene.zig` as a typed boundary between visibility and expansion
+- rewired `engine/src/render/backends/direct_backend.zig` to orchestrate the extracted direct stages instead of owning inline stage logic
+- kept the direct path able to render the known-good single triangle through the staged pipeline
+
+### Direct Path Optimization Passes
+
+- narrowed the minimal benchmark to a true one-triangle scene so benchmark results reflect the renderer instead of showcase scene complexity
+- skipped auxiliary scene-buffer clears for the direct benchmark path in `frame_setup_stage.zig`
+- added targeted rect clears for the generic direct fast path in `engine/src/render/backends/direct_backend.zig`
+- generalized the direct fast path so it applies to small single-thread non-depth draw lists instead of a hardcoded demo scene
+- added explicit `0`-packet and `1`-packet fast paths in `engine/src/render/stages/rasterization_stage.zig`
+- bypassed stage-5 tile binning for the one-packet single-thread fast path while keeping the tiled path for the general backend
+- added reusable bounds helpers and rect clear helpers in `engine/src/render/direct_primitives.zig`
+- optimized line raster with horizontal and vertical span fast paths in `engine/src/render/direct_primitives.zig`
+- optimized triangle raster with incremental edge stepping in both the color-only and depth-writing paths
+- split triangle fill into positive-area and negative-area loops to remove per-pixel winding branches
+- added a direct color-only triangle fill path so no-depth packets avoid slower generic pixel writes
+- optimized fill-only circles with a midpoint scanline fill path instead of per-row `sqrt`
+- optimized triangle packet dispatch so fill and optional outline are emitted directly without rebuilding temporary style structs
+- added SIMD clear helpers and vector-width-guided buffer fill paths in `engine/src/render/direct_primitives.zig`
+- added SIMD point projection and vectorized projection rejection in `engine/src/render/direct_batch.zig`
+- added SIMD polygon-bounds reduction in `engine/src/render/direct_primitives.zig`
+- aligned hot renderer-owned frame buffers to 64-byte boundaries in `engine/src/render/renderer.zig`
+- pre-reserved packet, visible-scene, meshlet, primitive-batch, draw-command, and polygon-point capacities across the direct callstack to reduce allocator churn
+- reduced redundant direct-backend scans by analyzing fast-path eligibility, bounds, and tile estimate in one pass
+- added power-of-two shift coverage math for direct fast-path tile estimates where possible
+
+### DX11 Presentation Optimization
+
+- switched the DX11 swap chain in `engine/src/render/present/present_d3d11.zig` to `DXGI_SWAP_EFFECT_FLIP_DISCARD`
+- cached present row pitch in the DX11 backend instead of recomputing it on every present
+- added early returns for empty-frame present attempts in the DX11 present path
+- validated that partial dirty-rect updates directly to the swap-chain backbuffer were unsafe and reverted that path after it produced stale-rect artifacts
+- kept DX11 presentation as the remaining dominant cost after the CPU-side direct render optimizations
+
+### Validation
+
+- `zig build check`
+- `zig build test`
+- `ZIG_RENDER_TTL_SECONDS=30 zig build run`
+
 ## 2026-04-01
 
 ### Render Core Redesign

@@ -22,6 +22,14 @@ pub const DrawList = struct {
         self.polygon_points.clearRetainingCapacity();
     }
 
+    pub fn ensureCommandCapacity(self: *DrawList, count: usize) !void {
+        try self.commands.ensureTotalCapacity(self.allocator, count);
+    }
+
+    pub fn ensurePolygonPointCapacity(self: *DrawList, count: usize) !void {
+        try self.polygon_points.ensureTotalCapacity(self.allocator, count);
+    }
+
     pub fn items(self: *const DrawList) []const direct_packets.DrawPacket {
         return self.commands.items;
     }

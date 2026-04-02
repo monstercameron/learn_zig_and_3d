@@ -9,7 +9,7 @@ const HMODULE = windows.HMODULE;
 
 const DXGI_FORMAT_B8G8R8A8_UNORM: UINT = 87;
 const DXGI_USAGE_RENDER_TARGET_OUTPUT: UINT = 0x20;
-const DXGI_SWAP_EFFECT_DISCARD: UINT = 0;
+const DXGI_SWAP_EFFECT_FLIP_DISCARD: UINT = 4;
 const D3D_DRIVER_TYPE_HARDWARE: UINT = 1;
 const D3D11_SDK_VERSION: UINT = 7;
 
@@ -175,6 +175,7 @@ pub const Backend = struct {
     backbuffer: ?*ID3D11Resource = null,
     width: i32,
     height: i32,
+    row_pitch: UINT,
     hwnd: windows.HWND,
 
     pub fn init(hwnd: windows.HWND, width: i32, height: i32) !Backend {
@@ -196,7 +197,7 @@ pub const Backend = struct {
             .BufferCount = 2,
             .OutputWindow = hwnd,
             .Windowed = windows.TRUE,
-            .SwapEffect = DXGI_SWAP_EFFECT_DISCARD,
+            .SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD,
             .Flags = 0,
         };
 
@@ -228,6 +229,7 @@ pub const Backend = struct {
             .backbuffer = null,
             .width = width,
             .height = height,
+            .row_pitch = @intCast(width * @as(i32, @intCast(@sizeOf(u32)))),
             .hwnd = hwnd,
         };
         try backend.acquireBackbuffer();
@@ -242,21 +244,58 @@ pub const Backend = struct {
         self.* = undefined;
     }
 
-    pub fn present(self: *Backend, bitmap: *const Bitmap, vsync: bool) !void {
+    pub const DirtyRect = struct {
+        min_x: i32,
+        min_y: i32,
+        max_x: i32,
+        max_y: i32,
+    };
+
+    pub fn present(self: *Backend, bitmap: *const Bitmap, vsync: bool, dirty_rect: ?DirtyRect) !void {
+        if (bitmap.width <= 0 or bitmap.height <= 0 or bitmap.pixels.len == 0) return;
         if (bitmap.width != self.width or bitmap.height != self.height) {
             try self.resize(bitmap.width, bitmap.height);
         }
         const ctx = self.context orelse return error.D3D11PresentContextMissing;
         const backbuffer = self.backbuffer orelse return error.D3D11PresentBackbufferMissing;
-        ctx.lpVtbl.UpdateSubresource(
-            ctx,
-            backbuffer,
-            0,
-            null,
-            bitmap.pixels.ptr,
-            @as(UINT, @intCast(bitmap.width * @sizeOf(u32))),
-            0,
-        );
+        if (dirty_rect) |rect| {
+            const clipped = DirtyRect{
+                .min_x = std.math.clamp(rect.min_x, 0, bitmap.width - 1),
+                .min_y = std.math.clamp(rect.min_y, 0, bitmap.height - 1),
+                .max_x = std.math.clamp(rect.max_x, 0, bitmap.width - 1),
+                .max_y = std.math.clamp(rect.max_y, 0, bitmap.height - 1),
+            };
+            if (clipped.min_x <= clipped.max_x and clipped.min_y <= clipped.max_y) {
+                const src_offset: usize = @intCast(clipped.min_y * bitmap.width + clipped.min_x);
+                const box = D3D11_BOX{
+                    .left = @intCast(clipped.min_x),
+                    .top = @intCast(clipped.min_y),
+                    .front = 0,
+                    .right = @intCast(clipped.max_x + 1),
+                    .bottom = @intCast(clipped.max_y + 1),
+                    .back = 1,
+                };
+                ctx.lpVtbl.UpdateSubresource(
+                    ctx,
+                    backbuffer,
+                    0,
+                    &box,
+                    bitmap.pixels.ptr + src_offset,
+                    self.row_pitch,
+                    0,
+                );
+            }
+        } else {
+            ctx.lpVtbl.UpdateSubresource(
+                ctx,
+                backbuffer,
+                0,
+                null,
+                bitmap.pixels.ptr,
+                self.row_pitch,
+                0,
+            );
+        }
         const sc = self.swap_chain orelse return error.D3D11PresentSwapChainMissing;
         const hr = sc.lpVtbl.Present(sc, if (vsync) 1 else 0, 0);
         if (hr < 0) return error.D3D11PresentFailed;
@@ -273,6 +312,7 @@ pub const Backend = struct {
         if (hr < 0) return error.D3D11PresentResizeFailed;
         self.width = width;
         self.height = height;
+        self.row_pitch = @intCast(width * @as(i32, @intCast(@sizeOf(u32))));
         try self.acquireBackbuffer();
     }
 

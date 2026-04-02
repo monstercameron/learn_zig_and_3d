@@ -89,6 +89,10 @@ pub const PrimitiveBatch = struct {
         self.commands.clearRetainingCapacity();
     }
 
+    pub fn ensureCommandCapacity(self: *PrimitiveBatch, count: usize) !void {
+        try self.commands.ensureTotalCapacity(self.allocator, count);
+    }
+
     pub fn items(self: *const PrimitiveBatch) []const DrawPacket {
         return self.commands.items;
     }
@@ -149,10 +153,82 @@ const Projector = struct {
         };
     }
 
+    fn projectPoints(self: *const Projector, points: []const math.Vec3, out: []direct_primitives.Point2i) bool {
+        std.debug.assert(out.len >= points.len);
+        const lanes = comptime std.simd.suggestVectorLength(f32) orelse 0;
+        if (lanes < 4 or points.len < 4) {
+            for (points, 0..) |point, index| {
+                out[index] = self.project(point) orelse return false;
+            }
+            return true;
+        }
+
+        const Vec = @Vector(lanes, f32);
+        const pos_x: Vec = @splat(self.camera.position.x);
+        const pos_y: Vec = @splat(self.camera.position.y);
+        const pos_z: Vec = @splat(self.camera.position.z);
+        const right_x: Vec = @splat(self.basis.right.x);
+        const right_y: Vec = @splat(self.basis.right.y);
+        const right_z: Vec = @splat(self.basis.right.z);
+        const up_x: Vec = @splat(self.basis.up.x);
+        const up_y: Vec = @splat(self.basis.up.y);
+        const up_z: Vec = @splat(self.basis.up.z);
+        const forward_x: Vec = @splat(self.basis.forward.x);
+        const forward_y: Vec = @splat(self.basis.forward.y);
+        const forward_z: Vec = @splat(self.basis.forward.z);
+        const x_scale: Vec = @splat(self.projection.x_scale);
+        const y_scale: Vec = @splat(self.projection.y_scale);
+        const center_x: Vec = @splat(self.projection.center_x);
+        const center_y: Vec = @splat(self.projection.center_y);
+
+        var index: usize = 0;
+        while (index + lanes <= points.len) : (index += lanes) {
+            var xs: [lanes]f32 = undefined;
+            var ys: [lanes]f32 = undefined;
+            var zs: [lanes]f32 = undefined;
+            inline for (0..lanes) |lane| {
+                const point = points[index + lane];
+                xs[lane] = point.x;
+                ys[lane] = point.y;
+                zs[lane] = point.z;
+            }
+
+            const rel_x: Vec = @as(Vec, @bitCast(xs)) - pos_x;
+            const rel_y: Vec = @as(Vec, @bitCast(ys)) - pos_y;
+            const rel_z: Vec = @as(Vec, @bitCast(zs)) - pos_z;
+            const camera_x = rel_x * right_x + rel_y * right_y + rel_z * right_z;
+            const camera_y = rel_x * up_x + rel_y * up_y + rel_z * up_z;
+            const camera_z = rel_x * forward_x + rel_y * forward_y + rel_z * forward_z;
+            inline for (0..lanes) |lane| {
+                if (camera_z[lane] <= near_plane) return false;
+            }
+            const inv_z = @as(Vec, @splat(1.0)) / camera_z;
+            const ndc_x = (camera_x * inv_z) * x_scale;
+            const ndc_y = (camera_y * inv_z) * y_scale;
+            const screen_x = center_x + ndc_x * center_x;
+            const screen_y = center_y - ndc_y * center_y;
+
+            inline for (0..lanes) |lane| {
+                out[index + lane] = .{
+                    .x = @intFromFloat(screen_x[lane]),
+                    .y = @intFromFloat(screen_y[lane]),
+                };
+            }
+        }
+
+        while (index < points.len) : (index += 1) {
+            out[index] = self.project(points[index]) orelse return false;
+        }
+        return true;
+    }
+
     fn projectCircleRadius(self: *const Projector, center: math.Vec3, radius: f32) ?i32 {
-        const center_screen = self.project(center) orelse return null;
         const offset_world = math.Vec3.add(center, math.Vec3.scale(self.basis.right, radius));
-        const edge_screen = self.project(offset_world) orelse return null;
+        const points = [_]math.Vec3{ center, offset_world };
+        var projected: [2]direct_primitives.Point2i = undefined;
+        if (!self.projectPoints(points[0..], projected[0..])) return null;
+        const center_screen = projected[0];
+        const edge_screen = projected[1];
         const dx = edge_screen.x - center_screen.x;
         const dy = edge_screen.y - center_screen.y;
         const radius_px = @as(i32, @intFromFloat(std.math.sqrt(@as(f32, @floatFromInt(dx * dx + dy * dy)))));
@@ -171,44 +247,46 @@ pub fn compileToDrawList(
     draw_list.clearRetainingCapacity();
     if (width <= 0 or height <= 0) return;
 
+    var polygon_point_count: usize = 0;
+    for (batch.items()) |command| switch (command) {
+        .polygon => |payload| polygon_point_count += payload.polygon.point_count,
+        else => {},
+    };
+    try draw_list.ensureCommandCapacity(batch.items().len);
+    try draw_list.ensurePolygonPointCapacity(polygon_point_count);
+
     const projector = Projector.init(camera, width, height);
     for (batch.items(), 0..) |command, packet_index| {
         const sort_key = makeSortKey(command, packet_index);
         switch (command) {
             .line => |payload| {
-                const start = projector.project(payload.line.start) orelse continue;
-                const end = projector.project(payload.line.end) orelse continue;
+                const points = [_]math.Vec3{ payload.line.start, payload.line.end };
+                var projected: [2]direct_primitives.Point2i = undefined;
+                if (!projector.projectPoints(points[0..], projected[0..])) continue;
                 try draw_list.append(.{
                     .sort_key = sort_key,
                     .layer = .geometry,
                     .flags = .{ .depth_test = false, .depth_write = false },
                     .material = .{ .stroke = payload.material },
-                    .payload = .{ .line = .{ .start = start, .end = end } },
+                    .payload = .{ .line = .{ .start = projected[0], .end = projected[1] } },
                 });
             },
             .triangle => |payload| {
-                const a = projector.project(payload.triangle.a) orelse continue;
-                const b = projector.project(payload.triangle.b) orelse continue;
-                const c = projector.project(payload.triangle.c) orelse continue;
+                const points = [_]math.Vec3{ payload.triangle.a, payload.triangle.b, payload.triangle.c };
+                var projected: [3]direct_primitives.Point2i = undefined;
+                if (!projector.projectPoints(points[0..], projected[0..])) continue;
                 try draw_list.append(.{
                     .sort_key = sort_key,
                     .layer = .geometry,
                     .flags = .{},
                     .material = .{ .surface = payload.material },
-                    .payload = .{ .triangle = .{ .a = a, .b = b, .c = c } },
+                    .payload = .{ .triangle = .{ .a = projected[0], .b = projected[1], .c = projected[2] } },
                 });
             },
             .polygon => |payload| {
                 var projected: [max_polygon_points]direct_primitives.Point2i = undefined;
-                var visible_count: usize = 0;
-                for (payload.polygon.slice()) |point| {
-                    const projected_point = projector.project(point) orelse {
-                        visible_count = 0;
-                        break;
-                    };
-                    projected[visible_count] = projected_point;
-                    visible_count += 1;
-                }
+                const visible_count = payload.polygon.slice().len;
+                if (!projector.projectPoints(payload.polygon.slice(), projected[0..visible_count])) continue;
                 if (visible_count >= 3) {
                     const start = draw_list.polygon_points.items.len;
                     try draw_list.polygon_points.appendSlice(draw_list.allocator, projected[0..visible_count]);

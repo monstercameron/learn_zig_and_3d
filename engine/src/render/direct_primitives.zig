@@ -43,7 +43,7 @@ pub const FrameTarget = struct {
 };
 
 pub const ClearConfig = struct {
-    color: u32,
+    color: ?u32 = null,
     depth: ?f32 = null,
 };
 
@@ -89,10 +89,34 @@ pub const Command = union(enum) {
 };
 
 pub fn clear(target: FrameTarget, config: ClearConfig) void {
-    @memset(target.color, config.color);
+    if (config.color) |color| fillU32(target.color, color);
     if (config.depth) |depth_value| {
         if (target.depth) |depth_buffer| {
-            for (depth_buffer) |*depth| depth.* = depth_value;
+            fillF32(depth_buffer, depth_value);
+        }
+    }
+}
+
+pub fn clearRect(target: FrameTarget, rect: Rect2i, config: ClearConfig) void {
+    const bounds = intersectRect(targetBounds(target), rect) orelse return;
+    const stride: usize = @intCast(target.width);
+
+    if (config.color) |color| {
+        var y = bounds.min_y;
+        while (y <= bounds.max_y) : (y += 1) {
+            const row_start = @as(usize, @intCast(y)) * stride + @as(usize, @intCast(bounds.min_x));
+            const row_end = row_start + @as(usize, @intCast(bounds.max_x - bounds.min_x + 1));
+            fillU32(target.color[row_start..row_end], color);
+        }
+    }
+    if (config.depth) |depth_value| {
+        if (target.depth) |depth_buffer| {
+            var y = bounds.min_y;
+            while (y <= bounds.max_y) : (y += 1) {
+                const row_start = @as(usize, @intCast(y)) * stride + @as(usize, @intCast(bounds.min_x));
+                const row_end = row_start + @as(usize, @intCast(bounds.max_x - bounds.min_x + 1));
+                fillF32(depth_buffer[row_start..row_end], depth_value);
+            }
         }
     }
 }
@@ -130,11 +154,12 @@ pub fn drawPacket(target: FrameTarget, packet: direct_packets.DrawPacket) void {
         .line => |line| drawLine(target, line, .{ .color = packet.material.stroke.color }),
         .triangle => |triangle| {
             const style = packet.material.surface;
-            drawTriangle(target, triangle, .{
-                .fill_color = style.fill_color,
-                .outline_color = style.outline_color,
-                .depth = if (packet.flags.depth_write) style.depth else null,
-            });
+            drawSolidTriangle(target, triangle, style.fill_color, if (packet.flags.depth_write) style.depth else null);
+            if (style.outline_color) |outline_color| {
+                drawLine(target, .{ .start = triangle.a, .end = triangle.b }, .{ .color = outline_color });
+                drawLine(target, .{ .start = triangle.b, .end = triangle.c }, .{ .color = outline_color });
+                drawLine(target, .{ .start = triangle.c, .end = triangle.a }, .{ .color = outline_color });
+            }
         },
         .polygon => |polygon| {
             const style = packet.material.surface;
@@ -155,11 +180,44 @@ pub fn drawPacket(target: FrameTarget, packet: direct_packets.DrawPacket) void {
     }
 }
 
+pub fn packetBounds(packet: direct_packets.DrawPacket) ?Rect2i {
+    return switch (packet.payload) {
+        .line => |line| .{
+            .min_x = @min(line.start.x, line.end.x),
+            .min_y = @min(line.start.y, line.end.y),
+            .max_x = @max(line.start.x, line.end.x),
+            .max_y = @max(line.start.y, line.end.y),
+        },
+        .triangle => |triangle| .{
+            .min_x = @min(triangle.a.x, @min(triangle.b.x, triangle.c.x)),
+            .min_y = @min(triangle.a.y, @min(triangle.b.y, triangle.c.y)),
+            .max_x = @max(triangle.a.x, @max(triangle.b.x, triangle.c.x)),
+            .max_y = @max(triangle.a.y, @max(triangle.b.y, triangle.c.y)),
+        },
+        .polygon => |polygon| polygonBounds(polygon.points),
+        .circle => |circle| .{
+            .min_x = circle.center.x - circle.radius,
+            .min_y = circle.center.y - circle.radius,
+            .max_x = circle.center.x + circle.radius,
+            .max_y = circle.center.y + circle.radius,
+        },
+    };
+}
+
 pub fn drawMany(target: FrameTarget, commands: []const Command) void {
     for (commands) |command| draw(target, command);
 }
 
 pub fn drawLine(target: FrameTarget, line: Line2i, style: LineStyle) void {
+    if (line.start.y == line.end.y) {
+        drawHorizontalLine(target, line.start.y, @min(line.start.x, line.end.x), @max(line.start.x, line.end.x), style.color);
+        return;
+    }
+    if (line.start.x == line.end.x) {
+        drawVerticalLine(target, line.start.x, @min(line.start.y, line.end.y), @max(line.start.y, line.end.y), style.color);
+        return;
+    }
+
     var cx = line.start.x;
     var cy = line.start.y;
 
@@ -197,21 +255,133 @@ pub fn drawSolidTriangle(target: FrameTarget, triangle: Triangle2i, color: u32, 
     const area = edgeFunction(triangle.a, triangle.b, triangle.c.x, triangle.c.y);
     if (area == 0) return;
 
+    if (depth_value == null) {
+        drawSolidTriangleColorOnly(target, triangle, color, min_x, max_x, min_y, max_y, area);
+        return;
+    }
+
+    const stride: usize = @intCast(target.width);
+    const step_w0_x = edgeStepX(triangle.b, triangle.c);
+    const step_w1_x = edgeStepX(triangle.c, triangle.a);
+    const step_w2_x = edgeStepX(triangle.a, triangle.b);
+    const step_w0_y = edgeStepY(triangle.b, triangle.c);
+    const step_w1_y = edgeStepY(triangle.c, triangle.a);
+    const step_w2_y = edgeStepY(triangle.a, triangle.b);
+    var row_w0 = edgeFunction(triangle.b, triangle.c, min_x, min_y);
+    var row_w1 = edgeFunction(triangle.c, triangle.a, min_x, min_y);
+    var row_w2 = edgeFunction(triangle.a, triangle.b, min_x, min_y);
+    const depth_buffer = target.depth.?;
     var y = min_y;
+    const depth = depth_value.?;
+    if (area > 0) {
+        while (y <= max_y) : (y += 1) {
+            const row_start = @as(usize, @intCast(y)) * stride;
+            var w0 = row_w0;
+            var w1 = row_w1;
+            var w2 = row_w2;
+            var x = min_x;
+            while (x <= max_x) : (x += 1) {
+                if (w0 >= 0 and w1 >= 0 and w2 >= 0) {
+                    const idx = row_start + @as(usize, @intCast(x));
+                    target.color[idx] = color;
+                    depth_buffer[idx] = depth;
+                }
+                w0 += step_w0_x;
+                w1 += step_w1_x;
+                w2 += step_w2_x;
+            }
+            row_w0 += step_w0_y;
+            row_w1 += step_w1_y;
+            row_w2 += step_w2_y;
+        }
+        return;
+    }
+
     while (y <= max_y) : (y += 1) {
+        const row_start = @as(usize, @intCast(y)) * stride;
+        var w0 = row_w0;
+        var w1 = row_w1;
+        var w2 = row_w2;
         var x = min_x;
         while (x <= max_x) : (x += 1) {
-            const w0 = edgeFunction(triangle.b, triangle.c, x, y);
-            const w1 = edgeFunction(triangle.c, triangle.a, x, y);
-            const w2 = edgeFunction(triangle.a, triangle.b, x, y);
-            const inside = if (area > 0)
-                (w0 >= 0 and w1 >= 0 and w2 >= 0)
-            else
-                (w0 <= 0 and w1 <= 0 and w2 <= 0);
-            if (!inside) continue;
-
-            setPixel(target, x, y, color, depth_value);
+            if (w0 <= 0 and w1 <= 0 and w2 <= 0) {
+                const idx = row_start + @as(usize, @intCast(x));
+                target.color[idx] = color;
+                depth_buffer[idx] = depth;
+            }
+            w0 += step_w0_x;
+            w1 += step_w1_x;
+            w2 += step_w2_x;
         }
+        row_w0 += step_w0_y;
+        row_w1 += step_w1_y;
+        row_w2 += step_w2_y;
+    }
+}
+
+fn drawSolidTriangleColorOnly(
+    target: FrameTarget,
+    triangle: Triangle2i,
+    color: u32,
+    min_x: i32,
+    max_x: i32,
+    min_y: i32,
+    max_y: i32,
+    area: i64,
+) void {
+    const stride: usize = @intCast(target.width);
+    const step_w0_x = edgeStepX(triangle.b, triangle.c);
+    const step_w1_x = edgeStepX(triangle.c, triangle.a);
+    const step_w2_x = edgeStepX(triangle.a, triangle.b);
+    const step_w0_y = edgeStepY(triangle.b, triangle.c);
+    const step_w1_y = edgeStepY(triangle.c, triangle.a);
+    const step_w2_y = edgeStepY(triangle.a, triangle.b);
+
+    var row_w0 = edgeFunction(triangle.b, triangle.c, min_x, min_y);
+    var row_w1 = edgeFunction(triangle.c, triangle.a, min_x, min_y);
+    var row_w2 = edgeFunction(triangle.a, triangle.b, min_x, min_y);
+    var y = min_y;
+    if (area > 0) {
+        while (y <= max_y) : (y += 1) {
+            const row_start = @as(usize, @intCast(y)) * stride;
+            var w0 = row_w0;
+            var w1 = row_w1;
+            var w2 = row_w2;
+            var x = min_x;
+            while (x <= max_x) : (x += 1) {
+                if (w0 >= 0 and w1 >= 0 and w2 >= 0) {
+                    const idx = row_start + @as(usize, @intCast(x));
+                    target.color[idx] = color;
+                }
+                w0 += step_w0_x;
+                w1 += step_w1_x;
+                w2 += step_w2_x;
+            }
+            row_w0 += step_w0_y;
+            row_w1 += step_w1_y;
+            row_w2 += step_w2_y;
+        }
+        return;
+    }
+
+    while (y <= max_y) : (y += 1) {
+        const row_start = @as(usize, @intCast(y)) * stride;
+        var w0 = row_w0;
+        var w1 = row_w1;
+        var w2 = row_w2;
+        var x = min_x;
+        while (x <= max_x) : (x += 1) {
+            if (w0 <= 0 and w1 <= 0 and w2 <= 0) {
+                const idx = row_start + @as(usize, @intCast(x));
+                target.color[idx] = color;
+            }
+            w0 += step_w0_x;
+            w1 += step_w1_x;
+            w2 += step_w2_x;
+        }
+        row_w0 += step_w0_y;
+        row_w1 += step_w1_y;
+        row_w2 += step_w2_y;
     }
 }
 
@@ -254,6 +424,11 @@ pub fn drawCircle(target: FrameTarget, circle: Circle2i, style: CircleStyle) voi
     const inner_radius = @max(circle.radius - 1, 0);
     const inner_radius_sq: i64 = @as(i64, inner_radius) * @as(i64, inner_radius);
 
+    if (style.depth == null and style.fill_color != null and style.outline_color == null) {
+        drawFilledCircleColorOnly(target, circle, style.fill_color.?, min_x, max_x, min_y, max_y, radius_sq);
+        return;
+    }
+
     var y = min_y;
     while (y <= max_y) : (y += 1) {
         var x = min_x;
@@ -277,6 +452,96 @@ pub fn drawCircle(target: FrameTarget, circle: Circle2i, style: CircleStyle) voi
     }
 }
 
+fn drawHorizontalLine(target: FrameTarget, y: i32, min_x: i32, max_x: i32, color: u32) void {
+    if (y < 0 or y >= target.height or min_x > max_x) return;
+    const bounds = targetBounds(target);
+    if (y < bounds.min_y or y > bounds.max_y) return;
+    const clamped_min_x = @max(min_x, bounds.min_x);
+    const clamped_max_x = @min(max_x, bounds.max_x);
+    if (clamped_min_x > clamped_max_x) return;
+    const stride: usize = @intCast(target.width);
+    const row_start = @as(usize, @intCast(y)) * stride + @as(usize, @intCast(clamped_min_x));
+    const row_end = row_start + @as(usize, @intCast(clamped_max_x - clamped_min_x + 1));
+    fillU32(target.color[row_start..row_end], color);
+}
+
+fn drawVerticalLine(target: FrameTarget, x: i32, min_y: i32, max_y: i32, color: u32) void {
+    if (x < 0 or x >= target.width or min_y > max_y) return;
+    const bounds = targetBounds(target);
+    if (x < bounds.min_x or x > bounds.max_x) return;
+    const clamped_min_y = @max(min_y, bounds.min_y);
+    const clamped_max_y = @min(max_y, bounds.max_y);
+    if (clamped_min_y > clamped_max_y) return;
+    const stride: usize = @intCast(target.width);
+    var y = clamped_min_y;
+    while (y <= clamped_max_y) : (y += 1) {
+        const idx = @as(usize, @intCast(y)) * stride + @as(usize, @intCast(x));
+        target.color[idx] = color;
+    }
+}
+
+fn drawFilledCircleColorOnly(
+    target: FrameTarget,
+    circle: Circle2i,
+    color: u32,
+    min_x: i32,
+    max_x: i32,
+    min_y: i32,
+    max_y: i32,
+    radius_sq: i64,
+) void {
+    _ = min_y;
+    _ = max_y;
+    _ = radius_sq;
+    var x = circle.radius;
+    var y: i32 = 0;
+    var decision: i32 = 1 - circle.radius;
+
+    while (y <= x) : (y += 1) {
+        drawHorizontalLine(
+            target,
+            circle.center.y + y,
+            @max(min_x, circle.center.x - x),
+            @min(max_x, circle.center.x + x),
+            color,
+        );
+        if (y != 0) {
+            drawHorizontalLine(
+                target,
+                circle.center.y - y,
+                @max(min_x, circle.center.x - x),
+                @min(max_x, circle.center.x + x),
+                color,
+            );
+        }
+        if (x != y) {
+            drawHorizontalLine(
+                target,
+                circle.center.y + x,
+                @max(min_x, circle.center.x - y),
+                @min(max_x, circle.center.x + y),
+                color,
+            );
+            if (x != 0) {
+                drawHorizontalLine(
+                    target,
+                    circle.center.y - x,
+                    @max(min_x, circle.center.x - y),
+                    @min(max_x, circle.center.x + y),
+                    color,
+                );
+            }
+        }
+
+        if (decision < 0) {
+            decision += (2 * y) + 3;
+        } else {
+            decision += (2 * (y - x)) + 5;
+            x -= 1;
+        }
+    }
+}
+
 pub fn edgeFunction(a: Point2i, b: Point2i, px: i32, py: i32) i64 {
     const ax: i64 = a.x;
     const ay: i64 = a.y;
@@ -285,6 +550,14 @@ pub fn edgeFunction(a: Point2i, b: Point2i, px: i32, py: i32) i64 {
     const x: i64 = px;
     const y: i64 = py;
     return (x - ax) * (by - ay) - (y - ay) * (bx - ax);
+}
+
+fn edgeStepX(a: Point2i, b: Point2i) i64 {
+    return @as(i64, b.y) - @as(i64, a.y);
+}
+
+fn edgeStepY(a: Point2i, b: Point2i) i64 {
+    return @as(i64, a.x) - @as(i64, b.x);
 }
 
 fn setPixel(target: FrameTarget, x: i32, y: i32, color: u32, depth_value: ?f32) void {
@@ -318,6 +591,132 @@ fn targetBounds(target: FrameTarget) Rect2i {
         };
     }
     return screen;
+}
+
+fn polygonBounds(points: []const Point2i) ?Rect2i {
+    if (points.len == 0) return null;
+    const lanes = comptime std.simd.suggestVectorLength(i32) orelse 0;
+    var min_x = points[0].x;
+    var min_y = points[0].y;
+    var max_x = points[0].x;
+    var max_y = points[0].y;
+
+    if (lanes >= 4 and points.len >= lanes) {
+        const Vec = @Vector(lanes, i32);
+        var index: usize = 0;
+        var xs: [lanes]i32 = undefined;
+        var ys: [lanes]i32 = undefined;
+        inline for (0..lanes) |lane| {
+            xs[lane] = points[lane].x;
+            ys[lane] = points[lane].y;
+        }
+        var min_x_vec: Vec = @as(Vec, @bitCast(xs));
+        var min_y_vec: Vec = @as(Vec, @bitCast(ys));
+        var max_x_vec = min_x_vec;
+        var max_y_vec = min_y_vec;
+        index = lanes;
+
+        while (index + lanes <= points.len) : (index += lanes) {
+            inline for (0..lanes) |lane| {
+                xs[lane] = points[index + lane].x;
+                ys[lane] = points[index + lane].y;
+            }
+            const x_vec: Vec = @as(Vec, @bitCast(xs));
+            const y_vec: Vec = @as(Vec, @bitCast(ys));
+            min_x_vec = @min(min_x_vec, x_vec);
+            min_y_vec = @min(min_y_vec, y_vec);
+            max_x_vec = @max(max_x_vec, x_vec);
+            max_y_vec = @max(max_y_vec, y_vec);
+        }
+
+        inline for (0..lanes) |lane| {
+            min_x = @min(min_x, min_x_vec[lane]);
+            min_y = @min(min_y, min_y_vec[lane]);
+            max_x = @max(max_x, max_x_vec[lane]);
+            max_y = @max(max_y, max_y_vec[lane]);
+        }
+
+        for (points[index..]) |point| {
+            min_x = @min(min_x, point.x);
+            min_y = @min(min_y, point.y);
+            max_x = @max(max_x, point.x);
+            max_y = @max(max_y, point.y);
+        }
+    } else {
+        for (points[1..]) |point| {
+            min_x = @min(min_x, point.x);
+            min_y = @min(min_y, point.y);
+            max_x = @max(max_x, point.x);
+            max_y = @max(max_y, point.y);
+        }
+    }
+
+    return .{
+        .min_x = min_x,
+        .min_y = min_y,
+        .max_x = max_x,
+        .max_y = max_y,
+    };
+}
+
+pub fn unionRect(a: Rect2i, b: Rect2i) Rect2i {
+    return .{
+        .min_x = @min(a.min_x, b.min_x),
+        .min_y = @min(a.min_y, b.min_y),
+        .max_x = @max(a.max_x, b.max_x),
+        .max_y = @max(a.max_y, b.max_y),
+    };
+}
+
+pub fn intersectRect(a: Rect2i, b: Rect2i) ?Rect2i {
+    const result = Rect2i{
+        .min_x = @max(a.min_x, b.min_x),
+        .min_y = @max(a.min_y, b.min_y),
+        .max_x = @min(a.max_x, b.max_x),
+        .max_y = @min(a.max_y, b.max_y),
+    };
+    if (result.min_x > result.max_x or result.min_y > result.max_y) return null;
+    return result;
+}
+
+fn fillU32(dst: []u32, value: u32) void {
+    const lanes = comptime std.simd.suggestVectorLength(u32) orelse 0;
+    if (lanes >= 4) {
+        fillVectorU32(lanes, dst, value);
+        return;
+    }
+    @memset(dst, value);
+}
+
+fn fillF32(dst: []f32, value: f32) void {
+    const lanes = comptime std.simd.suggestVectorLength(f32) orelse 0;
+    if (lanes >= 4) {
+        fillVectorF32(lanes, dst, value);
+        return;
+    }
+    @memset(dst, value);
+}
+
+fn fillVectorU32(comptime lanes: usize, dst: []u32, value: u32) void {
+    const Vec = @Vector(lanes, u32);
+    const fill: Vec = @splat(value);
+    var index: usize = 0;
+    while (index + lanes <= dst.len) : (index += lanes) {
+        const vec_ptr: *align(1) Vec = @ptrCast(dst[index..].ptr);
+        vec_ptr.* = fill;
+    }
+    if (index < dst.len) @memset(dst[index..], value);
+}
+
+fn fillVectorF32(comptime lanes: usize, dst: []f32, value: f32) void {
+    const Vec = @Vector(lanes, f32);
+    const fill: Vec = @splat(value);
+    var index: usize = 0;
+    while (index + lanes <= dst.len) : (index += lanes) {
+        const vec_ptr: *align(1) Vec = @ptrCast(dst[index..].ptr);
+        vec_ptr.* = fill;
+    }
+    if (index < dst.len) @memset(dst[index..], value);
 }
 
 test "centered triangle lands around screen center" {
