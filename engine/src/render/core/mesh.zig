@@ -184,6 +184,33 @@ pub const Mesh = struct {
         }
     }
 
+    /// Calculates averaged per-vertex normals from the current triangle set.
+    pub fn recalculateVertexNormals(self: *Mesh) void {
+        if (self.vertex_normals.len != self.vertices.len) return;
+        @memset(self.vertex_normals, Vec3.new(0.0, 0.0, 0.0));
+        for (self.triangles, 0..) |tri, i| {
+            const face_normal = if (i < self.normals.len) self.normals[i] else blk: {
+                const v0 = self.vertices[tri.v0];
+                const v1 = self.vertices[tri.v1];
+                const v2 = self.vertices[tri.v2];
+                const edge1 = Vec3.sub(v1, v0);
+                const edge2 = Vec3.sub(v2, v0);
+                break :blk Vec3.cross(edge1, edge2).normalize();
+            };
+            self.vertex_normals[tri.v0] = Vec3.add(self.vertex_normals[tri.v0], face_normal);
+            self.vertex_normals[tri.v1] = Vec3.add(self.vertex_normals[tri.v1], face_normal);
+            self.vertex_normals[tri.v2] = Vec3.add(self.vertex_normals[tri.v2], face_normal);
+        }
+        for (self.vertex_normals) |*normal| {
+            const len = Vec3.length(normal.*);
+            if (len > 1e-6) {
+                normal.* = Vec3.scale(normal.*, 1.0 / len);
+            } else {
+                normal.* = Vec3.new(0.0, 0.0, 1.0);
+            }
+        }
+    }
+
     /// A factory function to create a simple 2x2x2 cube mesh, centered at the origin.
     pub fn cube(allocator: std.mem.Allocator) !Mesh {
         // 8 vertices for the corners of the cube.
@@ -231,9 +258,7 @@ pub const Mesh = struct {
         };
 
         mesh.recalculateNormals();
-        for (mesh.vertices, 0..) |vertex, index| {
-            mesh.vertex_normals[index] = vertex.normalize();
-        }
+        mesh.recalculateVertexNormals();
         return mesh;
     }
 
@@ -263,7 +288,7 @@ pub const Mesh = struct {
         };
 
         mesh.recalculateNormals();
-        @memset(mesh.vertex_normals, Vec3.new(0.0, 0.0, 1.0));
+        mesh.recalculateVertexNormals();
         return mesh;
     }
 

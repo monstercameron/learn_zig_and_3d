@@ -9,12 +9,23 @@ pub const Window = struct {
 
     pub fn init(desc: platform_types.WindowDesc) !Window {
         const hinstance = GetModuleHandleW(null);
+        ensureDpiAwarenessConfigured();
 
         var title_wide: [256:0]u16 = undefined;
         const title_len = std.unicode.utf8ToUtf16Le(&title_wide, desc.title) catch return error.InvalidTitle;
         title_wide[title_len] = 0;
 
         try ensureWindowClassRegistered(hinstance);
+
+        var window_rect = windows.RECT{
+            .left = 0,
+            .top = 0,
+            .right = desc.width,
+            .bottom = desc.height,
+        };
+        if (AdjustWindowRectEx(&window_rect, WS_OVERLAPPEDWINDOW, windows.FALSE, 0) == 0) {
+            return error.WindowCreationFailed;
+        }
 
         const hwnd = CreateWindowExW(
             0,
@@ -23,8 +34,8 @@ pub const Window = struct {
             WS_OVERLAPPEDWINDOW,
             100,
             100,
-            desc.width,
-            desc.height,
+            window_rect.right - window_rect.left,
+            window_rect.bottom - window_rect.top,
             null,
             null,
             hinstance,
@@ -74,6 +85,7 @@ const WNDCLASSW = extern struct {
 
 extern "user32" fn RegisterClassW(lpWndClass: *const WNDCLASSW) u16;
 extern "user32" fn CreateWindowExW(dwExStyle: u32, lpClassName: [*:0]const u16, lpWindowName: [*:0]const u16, dwStyle: u32, x: i32, y: i32, nWidth: i32, nHeight: i32, hWndParent: ?windows.HWND, hMenu: ?windows.HMENU, hInstance: windows.HINSTANCE, lpParam: ?*anyopaque) ?windows.HWND;
+extern "user32" fn AdjustWindowRectEx(lpRect: *windows.RECT, dwStyle: u32, bMenu: windows.BOOL, dwExStyle: u32) windows.BOOL;
 extern "user32" fn ShowWindow(hWnd: windows.HWND, nCmdShow: i32) i32;
 extern "user32" fn UpdateWindow(hWnd: windows.HWND) i32;
 extern "user32" fn DestroyWindow(hWnd: windows.HWND) i32;
@@ -83,10 +95,14 @@ extern "user32" fn SetWindowTextW(hWnd: windows.HWND, lpString: [*:0]const u16) 
 extern "user32" fn SetForegroundWindow(hWnd: windows.HWND) bool;
 extern "user32" fn SetFocus(hWnd: windows.HWND) ?windows.HWND;
 extern "user32" fn IsWindow(hWnd: windows.HWND) windows.BOOL;
+extern "user32" fn SetProcessDPIAware() windows.BOOL;
+extern "user32" fn SetProcessDpiAwarenessContext(value: ?*anyopaque) windows.BOOL;
 extern "kernel32" fn GetModuleHandleW(lpModuleName: ?[*:0]const u16) windows.HINSTANCE;
 extern "kernel32" fn GetLastError() windows.DWORD;
 
 var window_class_registered = false;
+var dpi_awareness_configured = false;
+const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: ?*anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, -4))));
 
 export fn WindowProc(hwnd: windows.HWND, msg: u32, wParam: windows.WPARAM, lParam: windows.LPARAM) windows.LRESULT {
     return switch (msg) {
@@ -110,4 +126,12 @@ fn ensureWindowClassRegistered(hinstance: windows.HINSTANCE) !void {
         return error.ClassRegistrationFailed;
     }
     window_class_registered = true;
+}
+
+fn ensureDpiAwarenessConfigured() void {
+    if (dpi_awareness_configured) return;
+    dpi_awareness_configured = true;
+
+    if (SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) != 0) return;
+    _ = SetProcessDPIAware();
 }

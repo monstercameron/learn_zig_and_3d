@@ -58,7 +58,7 @@ const main_module = @This();
 const app_logger = log.get("app.main");
 const scenes_index_path = "assets/configs/scenes/index.json";
 const scene_texture_slots_capacity: usize = scene_runtime.max_texture_slots;
-const minimal_triangle_demo_enabled = true;
+const minimal_triangle_demo_enabled = false;
 
 const SceneModelType = scene_runtime.LoadedSceneModelType;
 const SceneAssetConfigEntry = scene_runtime.SceneAssetConfigEntry;
@@ -1422,14 +1422,18 @@ fn appendMesh(allocator: std.mem.Allocator, target: *mesh_module.Mesh, source: *
     errdefer allocator.free(new_triangles);
     const new_normals = try allocator.alloc(math.Vec3, new_triangle_count);
     errdefer allocator.free(new_normals);
+    const new_vertex_normals = try allocator.alloc(math.Vec3, new_vertex_count);
+    errdefer allocator.free(new_vertex_normals);
 
     std.mem.copyForwards(math.Vec3, new_vertices[0..old_vertex_count], target.vertices);
     std.mem.copyForwards(math.Vec2, new_tex_coords[0..old_vertex_count], target.tex_coords);
     std.mem.copyForwards(mesh_module.Triangle, new_triangles[0..old_triangle_count], target.triangles);
     std.mem.copyForwards(math.Vec3, new_normals[0..old_triangle_count], target.normals);
+    std.mem.copyForwards(math.Vec3, new_vertex_normals[0..old_vertex_count], target.vertex_normals);
 
     std.mem.copyForwards(math.Vec3, new_vertices[old_vertex_count..], source.vertices);
     std.mem.copyForwards(math.Vec2, new_tex_coords[old_vertex_count..], source.tex_coords);
+    std.mem.copyForwards(math.Vec3, new_vertex_normals[old_vertex_count..], source.vertex_normals);
     for (source.triangles, 0..) |tri, i| {
         var shifted = tri;
         shifted.v0 += old_vertex_count;
@@ -1443,10 +1447,12 @@ fn appendMesh(allocator: std.mem.Allocator, target: *mesh_module.Mesh, source: *
     allocator.free(target.tex_coords);
     allocator.free(target.triangles);
     allocator.free(target.normals);
+    allocator.free(target.vertex_normals);
     target.vertices = new_vertices;
     target.tex_coords = new_tex_coords;
     target.triangles = new_triangles;
     target.normals = new_normals;
+    target.vertex_normals = new_vertex_normals;
     target.clearMeshlets();
 }
 

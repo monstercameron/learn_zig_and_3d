@@ -1,5 +1,5 @@
 {
-  "defaultScene": "gun_physics",
+  "defaultScene": "suzanne_behavior",
   "loadingScene": "loading_neutral",
   "loadingFrames": 45,
   "scenes": [
@@ -10,6 +10,7 @@
     { "key": "mixed_shadows", "file": "assets/configs/scenes/mixed_shadows.scene.json" },
     { "key": "mixed_shadows_static", "file": "assets/configs/scenes/mixed_shadows_static.scene.json" },
     { "key": "monkey_two_lights", "file": "assets/configs/scenes/monkey_two_lights.scene.json" },
+    { "key": "suzanne_behavior", "file": "assets/configs/scenes/suzanne_behavior.scene.json" },
     { "key": "wolf", "file": "assets/configs/scenes/wolf.scene.json" },
     { "key": "shadow_tuning", "file": "assets/configs/scenes/shadow_tuning.scene.json" },
     { "key": "shadow_single_model", "file": "assets/configs/scenes/shadow_single_model.scene.json" }

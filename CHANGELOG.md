@@ -2,6 +2,25 @@
 
 ## 2026-04-02
 
+### ECS Suzanne Scene And Behavior
+
+- added `assets/configs/scenes/suzanne_behavior.scene.json` as a real ECS-backed scene with Suzanne, a floor, lights, and a native behavior script
+- made `suzanne_behavior` the default launch scene in `assets/configs/scenes/index.json`
+- disabled the old direct-demo boot shortcut in `engine/src/main.zig` so the app boots through `SceneRuntime` by default again
+- added `engine/src/scene/scripts/suzanne_spin.zig` and registered it in `engine/src/scene/script_registry.zig`
+- fixed mesh-normal ownership and propagation for scene-loaded meshes by updating `engine/src/render/core/mesh.zig`, `engine/src/assets/gltf_loader.zig`, and merged-mesh assembly in `engine/src/main.zig`
+- fixed ECS scene shutdown script cleanup in `engine/src/scene/main.zig` so native scene scripts do not leak state on exit
+
+### Window Resize And Present Fixes
+
+- added renderer-owned rebuild-on-resize handling in `engine/src/render/renderer.zig` so window resize recreates size-dependent CPU surfaces instead of only mutating `present_state`
+- preserved camera state, camera mode, and key render toggles across renderer resize rebuilds in `engine/src/render/renderer.zig`
+- enabled DPI awareness in `engine/src/platform/windows/window_win32.zig`
+- changed Win32 window creation in `engine/src/platform/windows/window_win32.zig` to use `AdjustWindowRectEx(...)` so requested dimensions target the actual client area
+- fixed the full ECS/full-pipeline present path in `engine/src/render/renderer.zig` so it no longer uses the direct demo dirty rect when presenting the full bitmap
+- kept dirty-rect presentation only on the direct showcase path and full-frame presentation on the main ECS/full-pipeline path
+- aligned tile-buffer clear color and frame clear/background behavior across `engine/src/render/core/tile_renderer.zig` and `engine/src/render/renderer.zig` so the scene background no longer reads as a stale inset present region
+
 ### Suzanne Showcase And Gouraud Shading
 
 - added `engine/src/render/direct_showcase.zig` and moved direct showcase scene selection, raster mode policy, and Suzanne-specific camera framing out of `engine/src/render/renderer.zig`

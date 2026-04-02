@@ -683,6 +683,12 @@ pub const SceneRuntime = struct {
     pub fn deinit(self: *SceneRuntime) void {
         self.execution.deinit(self.allocator);
         self.pending_renderer_commands.deinit(self.allocator);
+        var index: usize = 0;
+        while (index < self.world.slotCount()) : (index += 1) {
+            const entity = EntityId.init(@intCast(index), self.world.generations.items[index]);
+            if (!self.world.isAlive(entity)) continue;
+            self.scripts.destroyInstancesForEntity(&self.world, &self.components, &self.commands, entity);
+        }
         self.scripts.deinit();
         self.job_system.deinit();
         self.residency.deinit();

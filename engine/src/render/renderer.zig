@@ -4433,7 +4433,33 @@ pub const Renderer = struct {
     }
 
     pub fn setPresentSize(self: *Renderer, width: i32, height: i32) void {
-        self.present_state.applyResize(width, height);
+        if (width <= 0 or height <= 0) return;
+        if (self.present_state.width == width and self.present_state.height == height) return;
+
+        const saved = ResizeStateSnapshot{
+            .camera_position = self.camera_position,
+            .camera_pitch = self.rotation_x,
+            .camera_yaw = self.rotation_angle,
+            .camera_fov_deg = self.camera_fov_deg,
+            .camera_control_mode = self.camera_control_mode,
+            .scene_camera_script_active = self.scene_camera_script_active,
+            .show_tile_borders = self.show_tile_borders,
+            .show_wireframe = self.show_wireframe,
+            .show_light_orb = self.show_light_orb,
+            .cull_light_orb = self.cull_light_orb,
+            .use_tiled_rendering = self.use_tiled_rendering,
+            .show_frame_pacing_overlay = self.show_frame_pacing_overlay,
+            .show_render_overlay = self.show_render_overlay,
+            .present_minimized = self.present_state.minimized,
+        };
+
+        self.recreateForPresentSize(width, height, saved) catch |err| {
+            renderer_logger.errorSub("resize", "failed to resize renderer to {d}x{d}: {s}", .{
+                width,
+                height,
+                @errorName(err),
+            });
+        };
     }
 
     pub fn setPresentMinimized(self: *Renderer, minimized: bool) void {
@@ -4462,6 +4488,63 @@ pub const Renderer = struct {
         self.taa_previous_mesh_vertex_count = 0;
         self.taa_previous_mesh_triangle_count = 0;
         self.taa_previous_mesh_valid = false;
+    }
+
+    const ResizeStateSnapshot = struct {
+        camera_position: math.Vec3,
+        camera_pitch: f32,
+        camera_yaw: f32,
+        camera_fov_deg: f32,
+        camera_control_mode: CameraControlMode,
+        scene_camera_script_active: bool,
+        show_tile_borders: bool,
+        show_wireframe: bool,
+        show_light_orb: bool,
+        cull_light_orb: bool,
+        use_tiled_rendering: bool,
+        show_frame_pacing_overlay: bool,
+        show_render_overlay: bool,
+        present_minimized: bool,
+    };
+
+    fn recreateForPresentSize(self: *Renderer, present_width: i32, present_height: i32, saved: ResizeStateSnapshot) !void {
+        const scale_percent: i32 = @intCast(@max(config.RENDER_RESOLUTION_SCALE_PERCENT, 1));
+        const render_width = @max(1, @divTrunc(present_width * scale_percent, 100));
+        const render_height = @max(1, @divTrunc(present_height * scale_percent, 100));
+
+        if (self.bitmap.width == render_width and self.bitmap.height == render_height) {
+            self.present_state.applyResize(present_width, present_height);
+            return;
+        }
+
+        renderer_logger.infoSub("resize", "recreating renderer surfaces present={d}x{d} render={d}x{d}", .{
+            present_width,
+            present_height,
+            render_width,
+            render_height,
+        });
+
+        var replacement = try Renderer.init(self.hwnd, render_width, render_height, self.allocator);
+        errdefer replacement.deinit();
+
+        replacement.setCameraPosition(saved.camera_position);
+        replacement.setCameraOrientation(saved.camera_pitch, saved.camera_yaw);
+        replacement.setCameraFov(saved.camera_fov_deg);
+        replacement.camera_control_mode = saved.camera_control_mode;
+        replacement.scene_camera_script_active = saved.scene_camera_script_active;
+        replacement.show_tile_borders = saved.show_tile_borders;
+        replacement.show_wireframe = saved.show_wireframe;
+        replacement.show_light_orb = saved.show_light_orb;
+        replacement.cull_light_orb = saved.cull_light_orb;
+        replacement.use_tiled_rendering = saved.use_tiled_rendering;
+        replacement.show_frame_pacing_overlay = saved.show_frame_pacing_overlay;
+        replacement.show_render_overlay = saved.show_render_overlay;
+        replacement.present_state.applyResize(present_width, present_height);
+        replacement.present_state.setMinimized(saved.present_minimized);
+
+        var old = self.*;
+        self.* = replacement;
+        old.deinit();
     }
 
     /// Performs capture temporal mesh state.
@@ -4727,13 +4810,13 @@ pub const Renderer = struct {
         const now = std.time.nanoTimestamp();
         self.current_frame_start_time = now;
         try self.renderDirectPrimitiveShowcase();
-        const present = try self.presentDirectPrimitiveFrame();
+        const present = try self.presentFrame(true);
         self.direct_backend.notePresentTime(present.present_ns);
         self.notePresentedFrame(std.time.nanoTimestamp());
         self.finalizeFrame(std.time.nanoTimestamp());
     }
 
-    fn presentDirectPrimitiveFrame(self: *Renderer) !presentation_stage.Result {
+    fn presentFrame(self: *Renderer, use_direct_dirty_rect: bool) !presentation_stage.Result {
         if (self.hdc_mem) |hdc_mem| {
             if (self.show_render_overlay or self.hybrid_shadow_debug.enabled or self.scene_item_gizmo.enabled or self.loading_overlay.enabled) {
                 self.drawRenderPassOverlay(hdc_mem);
@@ -4747,12 +4830,15 @@ pub const Renderer = struct {
             &self.present_state,
             &self.bitmap,
             config.WINDOW_VSYNC,
-            if (self.direct_backend.lastDirtyRect()) |rect| .{
-                .min_x = rect.min_x,
-                .min_y = rect.min_y,
-                .max_x = rect.max_x,
-                .max_y = rect.max_y,
-            } else null,
+            if (use_direct_dirty_rect)
+                if (self.direct_backend.lastDirtyRect()) |rect| .{
+                    .min_x = rect.min_x,
+                    .min_y = rect.min_y,
+                    .max_x = rect.max_x,
+                    .max_y = rect.max_y,
+                } else null
+            else
+                null,
         ) catch .{};
     }
 
@@ -5138,7 +5224,7 @@ pub const Renderer = struct {
         const _zone = profiler.zone("Renderer.render");
         defer if (_zone) |z| z.end();
 
-        @memset(self.bitmap.pixels, 0xFF000000);
+        @memset(self.bitmap.pixels, 0xFF0B1220);
         self.resetRenderPassTimings();
 
         const delta_seconds = self.beginFrame();
@@ -6796,7 +6882,7 @@ pub const Renderer = struct {
     }
 
     fn drawBitmap(self: *Renderer) void {
-        _ = self.presentDirectPrimitiveFrame() catch {
+        _ = self.presentFrame(false) catch {
             // The renderer should remain operational even if a present fails transiently.
         };
         if (config.WINDOW_VSYNC and self.present_state.canPresent()) {

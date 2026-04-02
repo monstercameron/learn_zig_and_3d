@@ -183,6 +183,7 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
         .vertices = vertex_slice,
         .triangles = triangle_slice,
         .normals = try allocator.alloc(Vec3, triangle_slice.len),
+        .vertex_normals = try allocator.alloc(Vec3, vertex_slice.len),
         .tex_coords = texcoord_slice,
         .meshlets = &[_]MeshModule.Meshlet{},
         .meshlet_vertices = &[_]usize{},
@@ -191,6 +192,7 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
     };
     errdefer mesh.deinit();
     mesh.recalculateNormals();
+    mesh.recalculateVertexNormals();
 
     const cache_hit = meshlet_cache.loadCachedMeshlets(allocator, &mesh, path) catch |err| brk: {
         std.log.warn("Meshlet cache load failed for {s}: {s}", .{ path, @errorName(err) });
