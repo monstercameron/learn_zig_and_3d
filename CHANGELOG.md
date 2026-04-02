@@ -2,6 +2,51 @@
 
 ## 2026-04-02
 
+### Cornell Scene Cleanup And Correct Gouraud Scene Path
+
+- switched the default launch scene in `assets/configs/scenes/index.json` to `cornell`
+- rebuilt `assets/configs/scenes/cornell.scene.json` into a stable static Cornell baseline with:
+  - centered camera framing
+  - the Cornell room shell
+  - two interior `box.obj` props
+  - a ceiling light
+- added `smoothNormals` scene config support in `engine/src/scene/loader.zig` and `engine/src/main.zig`
+- applied hard-edged normals to the Cornell room and box props while keeping scene mesh loading on the staged mesh path
+- updated Cornell mesh loading in `engine/src/main.zig` so OBJ/GLTF scene assets can request flat or smooth normals explicitly
+- extended `engine/src/render/core/mesh.zig` and `engine/src/render/direct_mesh.zig` with mesh-triangle shading metadata:
+  - `flat_shaded`
+  - `double_sided`
+  - face-normal resolution for flat-shaded triangles
+- updated `engine/src/main.zig` Cornell palette handling so room triangles are flagged `double_sided`
+- removed the beige global material override from the ECS/tiled scene backend in `engine/src/render/backends/scene_tiled_backend.zig` so scene props keep their authored materials
+- disabled the old screen-space stage-7 darkening pass on the Cornell staged mesh scene route in `engine/src/render/backends/scene_tiled_backend.zig` because the scene is already Gouraud-lit before raster
+- fixed staged-mesh Gouraud lighting in `engine/src/render/kernels/gouraud_kernel.zig` and `engine/src/render/backends/direct_backend.zig` by passing camera position into the kernel and face-forwarding normals for double-sided triangles
+
+### Cornell Depth And Culling Fixes
+
+- extended staged mesh triangles with per-vertex camera-space depth in:
+  - `engine/src/render/direct_packets.zig`
+  - `engine/src/render/direct_draw_list.zig`
+  - `engine/src/render/direct_batch.zig`
+  - `engine/src/render/backends/direct_backend.zig`
+  - `engine/src/render/stages/rasterization_stage.zig`
+- upgraded `engine/src/render/direct_primitives.zig` to use interpolated per-pixel triangle depth on the staged mesh path instead of a single averaged depth per triangle
+- fixed the prepared Gouraud burst path in `engine/src/render/direct_primitives.zig` so depth writes only happen after a passing depth comparison
+- fixed generic pixel writes in `engine/src/render/direct_primitives.zig` so they no longer overwrite depth unconditionally
+- changed staged mesh backface culling in `engine/src/render/direct_batch.zig` to use camera-facing world-space triangle orientation for depth geometry while leaving double-sided room triangles uncullable
+- lifted the Cornell interior box props slightly off the floor in `assets/configs/scenes/cornell.scene.json` to reduce floor/prop z-fighting at their bottom faces
+
+### Cornell Debugging Support
+
+- added optional framebuffer dumping via `ZIG_DUMP_FRAMEBUFFER_PPM` in `engine/src/main.zig` for direct inspection of staged scene output during Cornell debugging
+
+### Cornell Validation
+
+- `zig build check`
+- `zig build test`
+- `$env:ZIG_RENDER_TTL_SECONDS='15'; zig build run`
+- `$env:ZIG_RENDER_TTL_SECONDS='3'; $env:ZIG_DUMP_FRAMEBUFFER_PPM='artifacts/cornell_floor_offset.ppm'; zig build run`
+
 ### ECS Suzanne Staged Mesh Pipeline
 
 - extracted the ECS tiled scene renderer into `engine/src/render/backends/scene_tiled_backend.zig`

@@ -39,13 +39,9 @@ pub fn execute(
         .{
             .raster_mode = .worker_tiles,
             .transform = math.Mat4.identity(),
-            .material_override = .{
-                .fill_color = 0xFFD8C3A5,
-                .outline_color = null,
-                .depth = 1.0,
-            },
+            .material_override = null,
             .clear_color = 0xFF0B1220,
-            .enable_shading = true,
+            .enable_shading = false,
         },
     );
 

@@ -73,6 +73,7 @@ pub const State = struct {
     cached_prepared_triangles: std.ArrayListUnmanaged(direct_primitives.Triangle2i) = .{},
     cached_prepared_setups: std.ArrayListUnmanaged(direct_primitives.PreparedGouraudTriangle) = .{},
     cached_prepared_depths: std.ArrayListUnmanaged(?f32) = .{},
+    cached_prepared_vertex_depths: std.ArrayListUnmanaged(?[3]f32) = .{},
     active_tile_indices: std.ArrayListUnmanaged(usize) = .{},
     active_tile_command_counts: std.ArrayListUnmanaged(usize) = .{},
     tile_chunk_jobs: std.ArrayListUnmanaged(Job) = .{},
@@ -129,6 +130,7 @@ pub const State = struct {
         self.cached_prepared_triangles.deinit(self.allocator);
         self.cached_prepared_setups.deinit(self.allocator);
         self.cached_prepared_depths.deinit(self.allocator);
+        self.cached_prepared_vertex_depths.deinit(self.allocator);
         self.active_tile_indices.deinit(self.allocator);
         self.active_tile_command_counts.deinit(self.allocator);
         self.tile_chunk_jobs.deinit(self.allocator);
@@ -183,7 +185,7 @@ pub const State = struct {
             self.timings.primitive_count = expansion.primitive_count;
 
             const compile_start = std.time.nanoTimestamp();
-            gouraud_kernel.applyBatchLighting(&self.batch, .{});
+            gouraud_kernel.applyBatchLighting(&self.batch, .{ .camera_position = camera.position });
             try direct_batch.compileToDrawList(&self.batch, &self.draw_list, camera, width, height);
             self.timings.compile_draw_list_ns = @max(std.time.nanoTimestamp() - compile_start, @as(i128, 0));
 
@@ -326,6 +328,7 @@ pub const State = struct {
             .cached_prepared_triangles = if (static_cache_hit) &self.cached_prepared_triangles else null,
             .cached_prepared_setups = if (static_cache_hit) &self.cached_prepared_setups else null,
             .cached_prepared_depths = if (static_cache_hit) &self.cached_prepared_depths else null,
+            .cached_prepared_vertex_depths = if (static_cache_hit) &self.cached_prepared_vertex_depths else null,
             .active_tile_indices = &self.active_tile_indices,
             .active_tile_command_counts = &self.active_tile_command_counts,
             .tile_chunk_jobs = &self.tile_chunk_jobs,
@@ -398,7 +401,7 @@ pub const State = struct {
         self.timings.primitive_count = expansion.primitive_count;
 
         const compile_start = std.time.nanoTimestamp();
-        gouraud_kernel.applyBatchLighting(&self.batch, .{});
+        gouraud_kernel.applyBatchLighting(&self.batch, .{ .camera_position = camera.position });
         try direct_batch.compileToDrawList(&self.batch, &self.draw_list, camera, width, height);
         self.timings.compile_draw_list_ns = @max(std.time.nanoTimestamp() - compile_start, @as(i128, 0));
 
@@ -544,6 +547,7 @@ pub const State = struct {
             &self.cached_prepared_triangles,
             &self.cached_prepared_setups,
             &self.cached_prepared_depths,
+            &self.cached_prepared_vertex_depths,
             &self.draw_list,
             &self.tile_ranges,
             &self.tile_command_indices,
@@ -553,6 +557,7 @@ pub const State = struct {
             self.cached_prepared_triangles.clearRetainingCapacity();
             self.cached_prepared_setups.clearRetainingCapacity();
             self.cached_prepared_depths.clearRetainingCapacity();
+            self.cached_prepared_vertex_depths.clearRetainingCapacity();
         };
     }
 };
@@ -594,6 +599,7 @@ fn rebuildCachedPreparedTileBlocks(
     cached_triangles: *std.ArrayListUnmanaged(direct_primitives.Triangle2i),
     cached_setups: *std.ArrayListUnmanaged(direct_primitives.PreparedGouraudTriangle),
     cached_depths: *std.ArrayListUnmanaged(?f32),
+    cached_vertex_depths: *std.ArrayListUnmanaged(?[3]f32),
     draw_list: *const direct_draw_list.DrawList,
     tile_ranges: *const std.ArrayListUnmanaged(screen_binning_stage.TileRange),
     tile_command_indices: *const std.ArrayListUnmanaged(usize),
@@ -603,6 +609,7 @@ fn rebuildCachedPreparedTileBlocks(
     cached_triangles.clearRetainingCapacity();
     cached_setups.clearRetainingCapacity();
     cached_depths.clearRetainingCapacity();
+    cached_vertex_depths.clearRetainingCapacity();
     try cached_tile_ranges.resize(allocator, tile_ranges.items.len);
     try cached_tile_counts.resize(allocator, tile_ranges.items.len);
     const prepared = draw_list.preparedGouraud();
@@ -615,6 +622,7 @@ fn rebuildCachedPreparedTileBlocks(
             try cached_triangles.append(allocator, entry.triangle);
             try cached_setups.append(allocator, entry.prepared);
             try cached_depths.append(allocator, entry.depth_value);
+            try cached_vertex_depths.append(allocator, entry.vertex_depths);
             prepared_count += 1;
         }
         cached_tile_ranges.items[tile_index] = .{

@@ -70,6 +70,8 @@ pub const Triangle = struct {
     v1: usize, // Index of the second vertex.
     v2: usize, // Index of the third vertex.
     cull_flags: TriangleCullFlags = .{}, // Flags for rendering.
+    flat_shaded: bool = false,
+    double_sided: bool = false,
     base_color: u32 = default_color,
     texture_index: u16 = no_texture_index,
 
@@ -84,6 +86,8 @@ pub const Triangle = struct {
             .v1 = v1,
             .v2 = v2,
             .cull_flags = .{},
+            .flat_shaded = false,
+            .double_sided = false,
             .base_color = default_color,
             .texture_index = no_texture_index,
         };
@@ -97,6 +101,8 @@ pub const Triangle = struct {
             .v1 = v1,
             .v2 = v2,
             .cull_flags = .{ .cull_fill = cull_fill, .cull_wireframe = cull_wireframe },
+            .flat_shaded = false,
+            .double_sided = false,
             .base_color = default_color,
             .texture_index = no_texture_index,
         };
@@ -110,6 +116,8 @@ pub const Triangle = struct {
             .v1 = v1,
             .v2 = v2,
             .cull_flags = .{},
+            .flat_shaded = false,
+            .double_sided = false,
             .base_color = color,
             .texture_index = no_texture_index,
         };
@@ -123,6 +131,8 @@ pub const Triangle = struct {
             .v1 = v1,
             .v2 = v2,
             .cull_flags = .{ .cull_fill = cull_fill, .cull_wireframe = cull_wireframe },
+            .flat_shaded = false,
+            .double_sided = false,
             .base_color = color,
             .texture_index = no_texture_index,
         };
@@ -208,6 +218,24 @@ pub const Mesh = struct {
             } else {
                 normal.* = Vec3.new(0.0, 0.0, 1.0);
             }
+        }
+    }
+
+    pub fn recalculateFlatVertexNormals(self: *Mesh) void {
+        if (self.vertex_normals.len != self.vertices.len) return;
+        @memset(self.vertex_normals, Vec3.new(0.0, 0.0, 0.0));
+        for (self.triangles, 0..) |tri, i| {
+            const face_normal = if (i < self.normals.len) self.normals[i] else blk: {
+                const v0 = self.vertices[tri.v0];
+                const v1 = self.vertices[tri.v1];
+                const v2 = self.vertices[tri.v2];
+                const edge1 = Vec3.sub(v1, v0);
+                const edge2 = Vec3.sub(v2, v0);
+                break :blk Vec3.cross(edge1, edge2).normalize();
+            };
+            self.vertex_normals[tri.v0] = face_normal;
+            self.vertex_normals[tri.v1] = face_normal;
+            self.vertex_normals[tri.v2] = face_normal;
         }
     }
 

@@ -6,6 +6,7 @@ pub const LightConfig = struct {
     ambient: f32 = 0.18,
     diffuse: f32 = 0.82,
     light_dir: math.Vec3 = math.Vec3.new(-0.35, -0.45, 0.82),
+    camera_position: ?math.Vec3 = null,
 };
 
 pub fn applyBatchLighting(batch: *direct_batch.PrimitiveBatch, config: LightConfig) void {
@@ -15,12 +16,30 @@ pub fn applyBatchLighting(batch: *direct_batch.PrimitiveBatch, config: LightConf
     for (batch.commands.items) |*command| {
         switch (command.*) {
             .triangle => |*payload| {
-                const vertex_normals = payload.vertex_normals orelse continue;
+                var vertex_normals = payload.vertex_normals orelse continue;
+                if (!payload.material.cull_backfaces) {
+                    if (config.camera_position) |camera_position| {
+                        vertex_normals = faceForwardNormals(payload.triangle, vertex_normals, camera_position);
+                    }
+                }
                 payload.gouraud_colors = shadeTriangle(payload.material.fill_color, vertex_normals, packed_config);
             },
             else => {},
         }
     }
+}
+
+inline fn faceForwardNormals(triangle: direct_batch.WorldTriangle, normals: [3]math.Vec3, camera_position: math.Vec3) [3]math.Vec3 {
+    const edge_ab = math.Vec3.sub(triangle.b, triangle.a);
+    const edge_ac = math.Vec3.sub(triangle.c, triangle.a);
+    const face_normal = math.Vec3.cross(edge_ab, edge_ac);
+    const view = math.Vec3.sub(camera_position, triangle.a);
+    if (math.Vec3.dot(face_normal, view) >= 0.0) return normals;
+    return .{
+        math.Vec3.scale(normals[0], -1.0),
+        math.Vec3.scale(normals[1], -1.0),
+        math.Vec3.scale(normals[2], -1.0),
+    };
 }
 
 inline fn normalize(v: math.Vec3) math.Vec3 {

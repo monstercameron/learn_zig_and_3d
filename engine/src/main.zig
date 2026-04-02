@@ -79,6 +79,7 @@ const SceneMeshResources = struct {
         for (self.render_instances) |instance| {
             allocator.free(instance.local_vertices);
             allocator.free(instance.local_normals);
+            allocator.free(instance.local_vertex_normals);
         }
         self.mesh.deinit();
         allocator.free(self.render_instances);
@@ -98,6 +99,7 @@ const SceneRenderInstance = struct {
     bounds_max: math.Vec3,
     local_vertices: []math.Vec3,
     local_normals: []math.Vec3,
+    local_vertex_normals: []math.Vec3,
 };
 
 const AppSession = struct {
@@ -979,6 +981,11 @@ pub fn main() !void {
             } else if (frame_count % 300 == 0) {
                 logDirectFrameTimings(session.renderer, "scene_render");
             }
+            if (frame_count == 60) {
+                dumpFramebufferIfRequested(session.renderer) catch |err| {
+                    app_logger.warn("framebuffer dump failed: {s}", .{@errorName(err)});
+                };
+            }
         }
     };
 
@@ -1027,6 +1034,35 @@ fn loadRendererTtlNs(allocator: std.mem.Allocator) ?i128 {
 
     const ttl_ns_f64 = ttl_seconds * @as(f64, @floatFromInt(std.time.ns_per_s));
     return @as(i128, @intFromFloat(ttl_ns_f64));
+}
+
+fn dumpFramebufferIfRequested(renderer: *Renderer) !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const path = std.process.getEnvVarOwned(allocator, "ZIG_DUMP_FRAMEBUFFER_PPM") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return,
+        else => return err,
+    };
+    defer allocator.free(path);
+
+    try writeBitmapPpm(path, renderer.bitmap.width, renderer.bitmap.height, renderer.bitmap.pixels);
+    app_logger.info("wrote framebuffer dump to {s}", .{path});
+}
+
+fn writeBitmapPpm(path: []const u8, width: i32, height: i32, pixels: []const u32) !void {
+    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    var header_buf: [64]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buf, "P6\n{} {}\n255\n", .{ width, height });
+    try file.writeAll(header);
+    var rgb: [3]u8 = undefined;
+    for (pixels) |pixel| {
+        rgb[0] = @intCast((pixel >> 16) & 0xFF);
+        rgb[1] = @intCast((pixel >> 8) & 0xFF);
+        rgb[2] = @intCast(pixel & 0xFF);
+        try file.writeAll(&rgb);
+    }
 }
 
 fn defaultRendererTtlNs() i128 {
@@ -1246,6 +1282,9 @@ fn syncSceneMeshFromRuntime(renderer: ?*Renderer, scene_resources: *SceneMeshRes
         for (scene_resources.mesh.normals[instance.triangle_start .. instance.triangle_start + instance.triangle_count], instance.local_normals) |*normal, local_normal| {
             normal.* = rotateVector(local_normal, rotation).normalize();
         }
+        for (scene_resources.mesh.vertex_normals[instance.vertex_start .. instance.vertex_start + instance.vertex_count], instance.local_vertex_normals) |*normal, local_normal| {
+            normal.* = rotateVector(local_normal, rotation).normalize();
+        }
         if (initialized) {
             instance.bounds_min = bounds_min;
             instance.bounds_max = bounds_max;
@@ -1302,6 +1341,8 @@ fn loadSceneMeshResourcesWithProgress(
         errdefer allocator.free(local_vertices);
         const local_normals = try allocator.dupe(math.Vec3, loaded_mesh.normals);
         errdefer allocator.free(local_normals);
+        const local_vertex_normals = try allocator.dupe(math.Vec3, loaded_mesh.vertex_normals);
+        errdefer allocator.free(local_vertex_normals);
         var bounds_min = local_vertices[0];
         var bounds_max = local_vertices[0];
         for (local_vertices[1..]) |v| {
@@ -1335,6 +1376,7 @@ fn loadSceneMeshResourcesWithProgress(
             .bounds_max = bounds_max,
             .local_vertices = local_vertices,
             .local_normals = local_normals,
+            .local_vertex_normals = local_vertex_normals,
         };
         instance_count += 1;
 
@@ -1405,13 +1447,16 @@ fn loadSceneTexturesWithProgress(
 
 fn loadGltfMeshAsset(allocator: std.mem.Allocator, asset: LoadedSceneAsset) !mesh_module.Mesh {
     if (gltf_loader.load(allocator, asset.model_path)) |mesh| {
+        var resolved_mesh = mesh;
+        applyRequestedNormalMode(&resolved_mesh, asset.smooth_normals);
         app_logger.infoSub("assets", "loaded gltf asset from {s}", .{asset.model_path});
-        return mesh;
+        return resolved_mesh;
     } else |err| {
         app_logger.warn("scene gltf load failed for {s}: {s}", .{ asset.model_path, @errorName(err) });
     }
     if (asset.fallback_model_path) |fallback_path| {
-        const fallback_mesh = try obj_loader.load(allocator, fallback_path);
+        var fallback_mesh = try obj_loader.load(allocator, fallback_path);
+        applyRequestedNormalMode(&fallback_mesh, asset.smooth_normals);
         app_logger.infoSub("assets", "loaded fallback obj from {s}", .{fallback_path});
         return fallback_mesh;
     }
@@ -1421,8 +1466,20 @@ fn loadGltfMeshAsset(allocator: std.mem.Allocator, asset: LoadedSceneAsset) !mes
 fn loadObjMeshAsset(allocator: std.mem.Allocator, asset: LoadedSceneAsset) !mesh_module.Mesh {
     var mesh = try obj_loader.load(allocator, asset.model_path);
     if (asset.apply_cornell_palette) applyCornellColors(&mesh);
+    applyRequestedNormalMode(&mesh, asset.smooth_normals);
     app_logger.infoSub("assets", "loaded obj asset from {s}", .{asset.model_path});
     return mesh;
+}
+
+fn applyRequestedNormalMode(mesh: *mesh_module.Mesh, smooth_normals: ?bool) void {
+    const requested = smooth_normals orelse return;
+    mesh.recalculateNormals();
+    for (mesh.triangles) |*tri| tri.flat_shaded = !requested;
+    if (requested) {
+        mesh.recalculateVertexNormals();
+    } else {
+        mesh.recalculateFlatVertexNormals();
+    }
 }
 
 fn appendMesh(allocator: std.mem.Allocator, target: *mesh_module.Mesh, source: *const mesh_module.Mesh) !void {
@@ -1523,6 +1580,7 @@ fn applyCornellColors(mesh: *mesh_module.Mesh) void {
             white
         else
             white;
+        tri.double_sided = true;
     }
 
     const flip_count: usize = @min(mesh.normals.len, 12);

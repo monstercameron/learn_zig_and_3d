@@ -25,6 +25,7 @@ pub const TileRasterState = struct {
     cached_prepared_triangles: ?*const std.ArrayListUnmanaged(direct_primitives.Triangle2i) = null,
     cached_prepared_setups: ?*const std.ArrayListUnmanaged(direct_primitives.PreparedGouraudTriangle) = null,
     cached_prepared_depths: ?*const std.ArrayListUnmanaged(?f32) = null,
+    cached_prepared_vertex_depths: ?*const std.ArrayListUnmanaged(?[3]f32) = null,
     active_tile_indices: *const std.ArrayListUnmanaged(usize),
     active_tile_command_counts: *const std.ArrayListUnmanaged(usize),
     tile_chunk_jobs: *std.ArrayListUnmanaged(Job),
@@ -149,6 +150,7 @@ pub fn execute(
                 .cached_prepared_triangles = if (state.cached_prepared_triangles) |items| items.items else null,
                 .cached_prepared_setups = if (state.cached_prepared_setups) |items| items.items else null,
                 .cached_prepared_depths = if (state.cached_prepared_depths) |items| items.items else null,
+                .cached_prepared_vertex_depths = if (state.cached_prepared_vertex_depths) |items| items.items else null,
                 .tile_ranges = state.tile_ranges.items,
                 .tile_command_indices = state.tile_command_indices.items,
                 .active_tile_indices = active_tiles,
@@ -185,6 +187,7 @@ pub fn execute(
             .cached_prepared_triangles = if (state.cached_prepared_triangles) |items| items.items else null,
             .cached_prepared_setups = if (state.cached_prepared_setups) |items| items.items else null,
             .cached_prepared_depths = if (state.cached_prepared_depths) |items| items.items else null,
+            .cached_prepared_vertex_depths = if (state.cached_prepared_vertex_depths) |items| items.items else null,
             .tile_ranges = state.tile_ranges.items,
             .tile_command_indices = state.tile_command_indices.items,
             .tile_index = tile_index,
@@ -242,6 +245,7 @@ pub const RasterTileJobContext = struct {
     cached_prepared_triangles: ?[]const direct_primitives.Triangle2i = null,
     cached_prepared_setups: ?[]const direct_primitives.PreparedGouraudTriangle = null,
     cached_prepared_depths: ?[]const ?f32 = null,
+    cached_prepared_vertex_depths: ?[]const ?[3]f32 = null,
     tile_ranges: []const screen_binning_stage.TileRange,
     tile_command_indices: []const usize,
     tile_index: usize,
@@ -258,6 +262,7 @@ pub const RasterTileChunkJobContext = struct {
     cached_prepared_triangles: ?[]const direct_primitives.Triangle2i = null,
     cached_prepared_setups: ?[]const direct_primitives.PreparedGouraudTriangle = null,
     cached_prepared_depths: ?[]const ?f32 = null,
+    cached_prepared_vertex_depths: ?[]const ?[3]f32 = null,
     tile_ranges: []const screen_binning_stage.TileRange,
     tile_command_indices: []const usize,
     active_tile_indices: []const usize,
@@ -273,6 +278,7 @@ const TilePreparedGouraudBatch = struct {
     triangles: [max_tile_gouraud_batch]direct_primitives.Triangle2i = undefined,
     prepared_setups: [max_tile_gouraud_batch]direct_primitives.PreparedGouraudTriangle = undefined,
     depth_values: [max_tile_gouraud_batch]?f32 = undefined,
+    vertex_depths: [max_tile_gouraud_batch]?[3]f32 = undefined,
     len: usize = 0,
 
     inline fn clear(self: *TilePreparedGouraudBatch) void {
@@ -289,6 +295,10 @@ const TilePreparedGouraudBatch = struct {
 
     inline fn depthSlice(self: *const TilePreparedGouraudBatch) []const ?f32 {
         return self.depth_values[0..self.len];
+    }
+
+    inline fn vertexDepthSlice(self: *const TilePreparedGouraudBatch) []const ?[3]f32 {
+        return self.vertex_depths[0..self.len];
     }
 };
 
@@ -316,6 +326,7 @@ fn rasterTileChunk(ctx: *const RasterTileChunkJobContext) void {
             .cached_prepared_triangles = ctx.cached_prepared_triangles,
             .cached_prepared_setups = ctx.cached_prepared_setups,
             .cached_prepared_depths = ctx.cached_prepared_depths,
+            .cached_prepared_vertex_depths = ctx.cached_prepared_vertex_depths,
             .tile_ranges = ctx.tile_ranges,
             .tile_command_indices = ctx.tile_command_indices,
             .tile_index = ctx.active_tile_indices[index],
@@ -336,6 +347,7 @@ fn rasterTileWithItems(ctx: *const RasterTileJobContext, draw_items: []const dir
                 ctx.cached_prepared_triangles.?[range.start .. range.start + range.len],
                 ctx.cached_prepared_setups.?[range.start .. range.start + range.len],
                 ctx.cached_prepared_depths.?[range.start .. range.start + range.len],
+                ctx.cached_prepared_vertex_depths.?[range.start .. range.start + range.len],
             );
         }
         if (ctx.cached_prepared_tile_counts.?[ctx.tile_index] == ctx.tile_ranges[ctx.tile_index].len) return;
@@ -362,6 +374,7 @@ inline fn tryAppendPreparedGouraud(batch: *TilePreparedGouraudBatch, prepared_en
     batch.triangles[batch.len] = entry.triangle;
     batch.prepared_setups[batch.len] = entry.prepared;
     batch.depth_values[batch.len] = entry.depth_value;
+    batch.vertex_depths[batch.len] = entry.vertex_depths;
     batch.len += 1;
     return true;
 }
@@ -370,7 +383,7 @@ inline fn flushPreparedGouraudBatch(
     target: direct_primitives.FrameTarget,
     batch: *TilePreparedGouraudBatch,
 ) void {
-    direct_primitives.drawPreparedGouraudTriangleBlock(target, batch.triangleSlice(), batch.preparedSlice(), batch.depthSlice());
+    direct_primitives.drawPreparedGouraudTriangleBlock(target, batch.triangleSlice(), batch.preparedSlice(), batch.depthSlice(), batch.vertexDepthSlice());
     batch.clear();
 }
 

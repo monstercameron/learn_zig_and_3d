@@ -155,11 +155,11 @@ pub fn drawPacket(target: FrameTarget, packet: direct_packets.DrawPacket) void {
         .triangle => |payload| {
             const style = packet.material.surface;
             if (payload.gouraud_setup) |setup| {
-                drawPreparedGouraudTrianglePrepared(target, payload.triangle, setup, if (packet.flags.depth_write) style.depth else null);
+                drawPreparedGouraudTrianglePreparedWithDepths(target, payload.triangle, setup, if (packet.flags.depth_write) style.depth else null, payload.vertex_depths);
             } else if (payload.vertex_colors) |vertex_colors| {
-                drawGouraudTriangle(target, payload.triangle, vertex_colors, if (packet.flags.depth_write) style.depth else null);
+                drawGouraudTriangleWithDepths(target, payload.triangle, vertex_colors, if (packet.flags.depth_write) style.depth else null, payload.vertex_depths);
             } else {
-                drawSolidTriangle(target, payload.triangle, style.fill_color, if (packet.flags.depth_write) style.depth else null);
+                drawSolidTriangleWithDepths(target, payload.triangle, style.fill_color, if (packet.flags.depth_write) style.depth else null, payload.vertex_depths);
             }
             if (style.outline_color) |outline_color| {
                 drawLine(target, .{ .start = payload.triangle.a, .end = payload.triangle.b }, .{ .color = outline_color });
@@ -230,6 +230,28 @@ pub const PreparedGouraudTriangle = struct {
     row_rgb: @Vector(4, i64),
 };
 
+const PreparedDepthPlane = struct {
+    step_x: f32,
+    step_y: f32,
+    base_depth: f32,
+};
+
+inline fn prepareDepthPlane(triangle: Triangle2i, vertex_depths: [3]f32) ?PreparedDepthPlane {
+    const dx1 = @as(f32, @floatFromInt(triangle.b.x - triangle.a.x));
+    const dy1 = @as(f32, @floatFromInt(triangle.b.y - triangle.a.y));
+    const dx2 = @as(f32, @floatFromInt(triangle.c.x - triangle.a.x));
+    const dy2 = @as(f32, @floatFromInt(triangle.c.y - triangle.a.y));
+    const det = dx1 * dy2 - dy1 * dx2;
+    if (@abs(det) <= 1e-6) return null;
+    const dz1 = vertex_depths[1] - vertex_depths[0];
+    const dz2 = vertex_depths[2] - vertex_depths[0];
+    return .{
+        .step_x = (dz1 * dy2 - dy1 * dz2) / det,
+        .step_y = (dx1 * dz2 - dz1 * dx2) / det,
+        .base_depth = vertex_depths[0],
+    };
+}
+
 pub inline fn prepareGouraudTriangle(triangle: Triangle2i, vertex_colors: [3]u32) PreparedGouraudTriangle {
     const colors = unpackGouraudColors(vertex_colors);
     const area = edgeFunction(triangle.a, triangle.b, triangle.c.x, triangle.c.y);
@@ -291,14 +313,34 @@ pub inline fn prepareGouraudTriangle(triangle: Triangle2i, vertex_colors: [3]u32
 }
 
 pub fn drawGouraudTriangle(target: FrameTarget, triangle: Triangle2i, vertex_colors: [3]u32, depth_value: ?f32) void {
-    if (vertex_colors[0] == vertex_colors[1] and vertex_colors[1] == vertex_colors[2]) {
-        drawSolidTriangle(target, triangle, vertex_colors[0], depth_value);
-        return;
-    }
-    drawPreparedGouraudTrianglePrepared(target, triangle, prepareGouraudTriangle(triangle, vertex_colors), depth_value);
+    drawGouraudTriangleWithDepths(target, triangle, vertex_colors, depth_value, null);
 }
 
 pub fn drawPreparedGouraudTrianglePrepared(target: FrameTarget, triangle: Triangle2i, prepared: PreparedGouraudTriangle, depth_value: ?f32) void {
+    drawPreparedGouraudTrianglePreparedWithDepths(target, triangle, prepared, depth_value, null);
+}
+
+fn drawGouraudTriangleWithDepths(
+    target: FrameTarget,
+    triangle: Triangle2i,
+    vertex_colors: [3]u32,
+    depth_value: ?f32,
+    vertex_depths: ?[3]f32,
+) void {
+    if (vertex_colors[0] == vertex_colors[1] and vertex_colors[1] == vertex_colors[2]) {
+        drawSolidTriangleWithDepths(target, triangle, vertex_colors[0], depth_value, vertex_depths);
+        return;
+    }
+    drawPreparedGouraudTrianglePreparedWithDepths(target, triangle, prepareGouraudTriangle(triangle, vertex_colors), depth_value, vertex_depths);
+}
+
+fn drawPreparedGouraudTrianglePreparedWithDepths(
+    target: FrameTarget,
+    triangle: Triangle2i,
+    prepared: PreparedGouraudTriangle,
+    depth_value: ?f32,
+    vertex_depths: ?[3]f32,
+) void {
     if (target.width <= 0 or target.height <= 0) return;
     if (prepared.is_degenerate) return;
     const bounds = targetBounds(target);
@@ -315,7 +357,12 @@ pub fn drawPreparedGouraudTrianglePrepared(target: FrameTarget, triangle: Triang
     const row_rgb = prepared.row_rgb +
         @as(@Vector(4, i64), @splat(offset_x)) * prepared.channel_steps.x +
         @as(@Vector(4, i64), @splat(offset_y)) * prepared.channel_steps.y;
-    drawPreparedGouraudTriangleInner(target, prepared, depth_value, min_x, max_x, min_y, max_y, row_w0, row_w1, row_w2, row_rgb);
+    const depth_plane = if (vertex_depths) |depths| prepareDepthPlane(triangle, depths) else null;
+    const row_depth = if (depth_plane) |plane|
+        plane.base_depth + @as(f32, @floatFromInt(offset_x)) * plane.step_x + @as(f32, @floatFromInt(offset_y)) * plane.step_y
+    else
+        0.0;
+    drawPreparedGouraudTriangleInner(target, prepared, depth_value, depth_plane, min_x, max_x, min_y, max_y, row_w0, row_w1, row_w2, row_rgb, row_depth);
 }
 
 pub fn drawPreparedGouraudTriangleBlock(
@@ -323,15 +370,17 @@ pub fn drawPreparedGouraudTriangleBlock(
     triangles: []const Triangle2i,
     prepared_setups: []const PreparedGouraudTriangle,
     depth_values: []const ?f32,
+    vertex_depths: []const ?[3]f32,
 ) void {
     std.debug.assert(triangles.len == prepared_setups.len);
     std.debug.assert(triangles.len == depth_values.len);
-    for (triangles, prepared_setups, depth_values) |triangle, prepared, depth_value| {
-        drawPreparedGouraudTriangleBlockPrepared(target, triangle, prepared, depth_value);
+    std.debug.assert(triangles.len == vertex_depths.len);
+    for (triangles, prepared_setups, depth_values, vertex_depths) |triangle, prepared, depth_value, tri_depths| {
+        drawPreparedGouraudTriangleBlockPrepared(target, triangle, prepared, depth_value, tri_depths);
     }
 }
 
-fn drawPreparedGouraudTriangleBlockPrepared(target: FrameTarget, triangle: Triangle2i, prepared: PreparedGouraudTriangle, depth_value: ?f32) void {
+fn drawPreparedGouraudTriangleBlockPrepared(target: FrameTarget, triangle: Triangle2i, prepared: PreparedGouraudTriangle, depth_value: ?f32, vertex_depths: ?[3]f32) void {
     if (target.width <= 0 or target.height <= 0) return;
     if (prepared.is_degenerate) return;
     const bounds = targetBounds(target);
@@ -348,13 +397,19 @@ fn drawPreparedGouraudTriangleBlockPrepared(target: FrameTarget, triangle: Trian
     const row_rgb = prepared.row_rgb +
         @as(@Vector(4, i64), @splat(offset_x)) * prepared.channel_steps.x +
         @as(@Vector(4, i64), @splat(offset_y)) * prepared.channel_steps.y;
-    drawPreparedGouraudTriangleBlockInner(target, prepared, depth_value, min_x, max_x, min_y, max_y, row_w0, row_w1, row_w2, row_rgb);
+    const depth_plane = if (vertex_depths) |depths| prepareDepthPlane(triangle, depths) else null;
+    const row_depth = if (depth_plane) |plane|
+        plane.base_depth + @as(f32, @floatFromInt(offset_x)) * plane.step_x + @as(f32, @floatFromInt(offset_y)) * plane.step_y
+    else
+        0.0;
+    drawPreparedGouraudTriangleBlockInner(target, prepared, depth_value, depth_plane, min_x, max_x, min_y, max_y, row_w0, row_w1, row_w2, row_rgb, row_depth);
 }
 
 fn drawPreparedGouraudTriangleBlockInner(
     target: FrameTarget,
     prepared: PreparedGouraudTriangle,
     depth_value: ?f32,
+    depth_plane: ?PreparedDepthPlane,
     min_x: i32,
     max_x: i32,
     min_y: i32,
@@ -363,6 +418,7 @@ fn drawPreparedGouraudTriangleBlockInner(
     row_w1_init: i32,
     row_w2_init: i32,
     row_rgb_init: @Vector(4, i64),
+    row_depth_init: f32,
 ) void {
     const stride: usize = @intCast(target.width);
     const alpha = prepared.alpha;
@@ -441,6 +497,47 @@ fn drawPreparedGouraudTriangleBlockInner(
     }
 
     const depth_buffer = target.depth.?;
+    if (depth_plane) |plane| {
+        while (y <= max_y) : (y += 1) {
+            const row_start = @as(usize, @intCast(y)) * stride;
+            const row_color = target.color[row_start .. row_start + stride];
+            const row_depth = depth_buffer[row_start .. row_start + stride];
+            var w0 = row_w0;
+            var w1 = row_w1;
+            var w2 = row_w2;
+            var accum_rgb = row_rgb;
+            var current_depth = row_depth_init + @as(f32, @floatFromInt(y - min_y)) * plane.step_y;
+            var x = min_x;
+            var idx: usize = @intCast(x);
+
+            while (x <= max_x and (w0 < 0 or w1 < 0 or w2 < 0)) : (x += 1) {
+                w0 += step_w0_x;
+                w1 += step_w1_x;
+                w2 += step_w2_x;
+                accum_rgb += step_rgb;
+                current_depth += plane.step_x;
+                idx += 1;
+            }
+            while (x <= max_x and w0 >= 0 and w1 >= 0 and w2 >= 0) : (x += 1) {
+                if (current_depth <= row_depth[idx]) {
+                    row_color[idx] = packInterpolatedColorQ16(alpha, accum_rgb);
+                    row_depth[idx] = current_depth;
+                }
+                w0 += step_w0_x;
+                w1 += step_w1_x;
+                w2 += step_w2_x;
+                accum_rgb += step_rgb;
+                current_depth += plane.step_x;
+                idx += 1;
+            }
+
+            row_w0 += step_w0_y;
+            row_w1 += step_w1_y;
+            row_w2 += step_w2_y;
+            row_rgb += prepared.channel_steps.y;
+        }
+        return;
+    }
     while (y <= max_y) : (y += 1) {
         const row_start = @as(usize, @intCast(y)) * stride;
         const row_color = target.color[row_start .. row_start + stride];
@@ -468,22 +565,38 @@ fn drawPreparedGouraudTriangleBlockInner(
             const rgb5 = rgb4 + step_rgb;
             const rgb6 = rgb5 + step_rgb;
             const rgb7 = rgb6 + step_rgb;
-            row_color[idx] = packInterpolatedColorQ16(alpha, accum_rgb);
-            row_color[idx + 1] = packInterpolatedColorQ16(alpha, rgb1);
-            row_color[idx + 2] = packInterpolatedColorQ16(alpha, rgb2);
-            row_color[idx + 3] = packInterpolatedColorQ16(alpha, rgb3);
-            row_color[idx + 4] = packInterpolatedColorQ16(alpha, rgb4);
-            row_color[idx + 5] = packInterpolatedColorQ16(alpha, rgb5);
-            row_color[idx + 6] = packInterpolatedColorQ16(alpha, rgb6);
-            row_color[idx + 7] = packInterpolatedColorQ16(alpha, rgb7);
-            row_depth[idx] = depth;
-            row_depth[idx + 1] = depth;
-            row_depth[idx + 2] = depth;
-            row_depth[idx + 3] = depth;
-            row_depth[idx + 4] = depth;
-            row_depth[idx + 5] = depth;
-            row_depth[idx + 6] = depth;
-            row_depth[idx + 7] = depth;
+            if (depth <= row_depth[idx]) {
+                row_color[idx] = packInterpolatedColorQ16(alpha, accum_rgb);
+                row_depth[idx] = depth;
+            }
+            if (depth <= row_depth[idx + 1]) {
+                row_color[idx + 1] = packInterpolatedColorQ16(alpha, rgb1);
+                row_depth[idx + 1] = depth;
+            }
+            if (depth <= row_depth[idx + 2]) {
+                row_color[idx + 2] = packInterpolatedColorQ16(alpha, rgb2);
+                row_depth[idx + 2] = depth;
+            }
+            if (depth <= row_depth[idx + 3]) {
+                row_color[idx + 3] = packInterpolatedColorQ16(alpha, rgb3);
+                row_depth[idx + 3] = depth;
+            }
+            if (depth <= row_depth[idx + 4]) {
+                row_color[idx + 4] = packInterpolatedColorQ16(alpha, rgb4);
+                row_depth[idx + 4] = depth;
+            }
+            if (depth <= row_depth[idx + 5]) {
+                row_color[idx + 5] = packInterpolatedColorQ16(alpha, rgb5);
+                row_depth[idx + 5] = depth;
+            }
+            if (depth <= row_depth[idx + 6]) {
+                row_color[idx + 6] = packInterpolatedColorQ16(alpha, rgb6);
+                row_depth[idx + 6] = depth;
+            }
+            if (depth <= row_depth[idx + 7]) {
+                row_color[idx + 7] = packInterpolatedColorQ16(alpha, rgb7);
+                row_depth[idx + 7] = depth;
+            }
             w0 += step_w0_x * 8;
             w1 += step_w1_x * 8;
             w2 += step_w2_x * 8;
@@ -491,8 +604,10 @@ fn drawPreparedGouraudTriangleBlockInner(
             idx += 8;
         }
         while (x <= max_x and w0 >= 0 and w1 >= 0 and w2 >= 0) : (x += 1) {
-            row_color[idx] = packInterpolatedColorQ16(alpha, accum_rgb);
-            row_depth[idx] = depth;
+            if (depth <= row_depth[idx]) {
+                row_color[idx] = packInterpolatedColorQ16(alpha, accum_rgb);
+                row_depth[idx] = depth;
+            }
             w0 += step_w0_x;
             w1 += step_w1_x;
             w2 += step_w2_x;
@@ -534,6 +649,7 @@ fn drawPreparedGouraudTriangleInner(
     target: FrameTarget,
     prepared: PreparedGouraudTriangle,
     depth_value: ?f32,
+    depth_plane: ?PreparedDepthPlane,
     min_x: i32,
     max_x: i32,
     min_y: i32,
@@ -542,6 +658,7 @@ fn drawPreparedGouraudTriangleInner(
     row_w1_init: i32,
     row_w2_init: i32,
     row_rgb_init: @Vector(4, i64),
+    row_depth_init: f32,
 ) void {
     const stride: usize = @intCast(target.width);
     const alpha = prepared.alpha;
@@ -607,6 +724,66 @@ fn drawPreparedGouraudTriangleInner(
     }
 
     const depth_buffer = target.depth.?;
+    if (depth_plane) |plane| {
+        var depth_row = row_depth_init;
+        while (y <= max_y) : (y += 1) {
+            const row_start = @as(usize, @intCast(y)) * stride;
+            const row_color = target.color[row_start .. row_start + stride];
+            const row_depth = depth_buffer[row_start .. row_start + stride];
+            var w0 = row_w0;
+            var w1 = row_w1;
+            var w2 = row_w2;
+            var accum_rgb = row_rgb;
+            var current_depth = depth_row;
+            var x = min_x;
+            var idx: usize = @intCast(x);
+            while (x + 1 <= max_x) : (x += 2) {
+                if (w0 >= 0 and w1 >= 0 and w2 >= 0) {
+                    if (current_depth <= row_depth[idx]) {
+                        row_color[idx] = packInterpolatedColorQ16(alpha, accum_rgb);
+                        row_depth[idx] = current_depth;
+                    }
+                }
+                const next_w0 = w0 + step_w0_x;
+                const next_w1 = w1 + step_w1_x;
+                const next_w2 = w2 + step_w2_x;
+                const next_rgb = accum_rgb + prepared.channel_steps.x;
+                const next_depth = current_depth + plane.step_x;
+                if (next_w0 >= 0 and next_w1 >= 0 and next_w2 >= 0) {
+                    if (next_depth <= row_depth[idx + 1]) {
+                        row_color[idx + 1] = packInterpolatedColorQ16(alpha, next_rgb);
+                        row_depth[idx + 1] = next_depth;
+                    }
+                }
+                w0 += step_w0_x2;
+                w1 += step_w1_x2;
+                w2 += step_w2_x2;
+                accum_rgb += step_rgb_x2;
+                current_depth += plane.step_x + plane.step_x;
+                idx += 2;
+            }
+            while (x <= max_x) : (x += 1) {
+                if (w0 >= 0 and w1 >= 0 and w2 >= 0) {
+                    if (current_depth <= row_depth[idx]) {
+                        row_color[idx] = packInterpolatedColorQ16(alpha, accum_rgb);
+                        row_depth[idx] = current_depth;
+                    }
+                }
+                w0 += step_w0_x;
+                w1 += step_w1_x;
+                w2 += step_w2_x;
+                accum_rgb += prepared.channel_steps.x;
+                current_depth += plane.step_x;
+                idx += 1;
+            }
+            row_w0 += step_w0_y;
+            row_w1 += step_w1_y;
+            row_w2 += step_w2_y;
+            row_rgb += prepared.channel_steps.y;
+            depth_row += plane.step_y;
+        }
+        return;
+    }
     while (y <= max_y) : (y += 1) {
         const row_start = @as(usize, @intCast(y)) * stride;
         const row_color = target.color[row_start .. row_start + stride];
@@ -619,16 +796,20 @@ fn drawPreparedGouraudTriangleInner(
         var idx: usize = @intCast(x);
         while (x + 1 <= max_x) : (x += 2) {
             if (w0 >= 0 and w1 >= 0 and w2 >= 0) {
-                row_color[idx] = packInterpolatedColorQ16(alpha, accum_rgb);
-                row_depth[idx] = depth;
+                if (depth <= row_depth[idx]) {
+                    row_color[idx] = packInterpolatedColorQ16(alpha, accum_rgb);
+                    row_depth[idx] = depth;
+                }
             }
             const next_w0 = w0 + step_w0_x;
             const next_w1 = w1 + step_w1_x;
             const next_w2 = w2 + step_w2_x;
             const next_rgb = accum_rgb + prepared.channel_steps.x;
             if (next_w0 >= 0 and next_w1 >= 0 and next_w2 >= 0) {
-                row_color[idx + 1] = packInterpolatedColorQ16(alpha, next_rgb);
-                row_depth[idx + 1] = depth;
+                if (depth <= row_depth[idx + 1]) {
+                    row_color[idx + 1] = packInterpolatedColorQ16(alpha, next_rgb);
+                    row_depth[idx + 1] = depth;
+                }
             }
             w0 += step_w0_x2;
             w1 += step_w1_x2;
@@ -638,8 +819,10 @@ fn drawPreparedGouraudTriangleInner(
         }
         while (x <= max_x) : (x += 1) {
             if (w0 >= 0 and w1 >= 0 and w2 >= 0) {
-                row_color[idx] = packInterpolatedColorQ16(alpha, accum_rgb);
-                row_depth[idx] = depth;
+                if (depth <= row_depth[idx]) {
+                    row_color[idx] = packInterpolatedColorQ16(alpha, accum_rgb);
+                    row_depth[idx] = depth;
+                }
             }
             w0 += step_w0_x;
             w1 += step_w1_x;
@@ -822,6 +1005,16 @@ inline fn setPixelClippedColorOnly(target: FrameTarget, x: i32, y: i32, color: u
 }
 
 pub fn drawSolidTriangle(target: FrameTarget, triangle: Triangle2i, color: u32, depth_value: ?f32) void {
+    drawSolidTriangleWithDepths(target, triangle, color, depth_value, null);
+}
+
+fn drawSolidTriangleWithDepths(
+    target: FrameTarget,
+    triangle: Triangle2i,
+    color: u32,
+    depth_value: ?f32,
+    vertex_depths: ?[3]f32,
+) void {
     if (target.width <= 0 or target.height <= 0) return;
 
     const bounds = targetBounds(target);
@@ -851,26 +1044,37 @@ pub fn drawSolidTriangle(target: FrameTarget, triangle: Triangle2i, color: u32, 
     const depth_buffer = target.depth.?;
     var y = min_y;
     const depth = depth_value.?;
+    const depth_plane = if (vertex_depths) |depths| prepareDepthPlane(triangle, depths) else null;
+    const depth_row_start = if (depth_plane) |plane|
+        plane.base_depth + @as(f32, @floatFromInt(min_x - triangle.a.x)) * plane.step_x + @as(f32, @floatFromInt(min_y - triangle.a.y)) * plane.step_y
+    else
+        depth;
+    var row_depth_value = depth_row_start;
     if (area > 0) {
         while (y <= max_y) : (y += 1) {
             const row_start = @as(usize, @intCast(y)) * stride;
             var w0 = row_w0;
             var w1 = row_w1;
             var w2 = row_w2;
+            var pixel_depth = row_depth_value;
             var x = min_x;
             while (x <= max_x) : (x += 1) {
                 if (w0 >= 0 and w1 >= 0 and w2 >= 0) {
                     const idx = row_start + @as(usize, @intCast(x));
-                    target.color[idx] = color;
-                    depth_buffer[idx] = depth;
+                    if (pixel_depth <= depth_buffer[idx]) {
+                        target.color[idx] = color;
+                        depth_buffer[idx] = pixel_depth;
+                    }
                 }
                 w0 += step_w0_x;
                 w1 += step_w1_x;
                 w2 += step_w2_x;
+                if (depth_plane) |plane| pixel_depth += plane.step_x;
             }
             row_w0 += step_w0_y;
             row_w1 += step_w1_y;
             row_w2 += step_w2_y;
+            if (depth_plane) |plane| row_depth_value += plane.step_y;
         }
         return;
     }
@@ -880,20 +1084,25 @@ pub fn drawSolidTriangle(target: FrameTarget, triangle: Triangle2i, color: u32, 
         var w0 = row_w0;
         var w1 = row_w1;
         var w2 = row_w2;
+        var pixel_depth = row_depth_value;
         var x = min_x;
         while (x <= max_x) : (x += 1) {
             if (w0 <= 0 and w1 <= 0 and w2 <= 0) {
                 const idx = row_start + @as(usize, @intCast(x));
-                target.color[idx] = color;
-                depth_buffer[idx] = depth;
+                if (pixel_depth <= depth_buffer[idx]) {
+                    target.color[idx] = color;
+                    depth_buffer[idx] = pixel_depth;
+                }
             }
             w0 += step_w0_x;
             w1 += step_w1_x;
             w2 += step_w2_x;
+            if (depth_plane) |plane| pixel_depth += plane.step_x;
         }
         row_w0 += step_w0_y;
         row_w1 += step_w1_y;
         row_w2 += step_w2_y;
+        if (depth_plane) |plane| row_depth_value += plane.step_y;
     }
 }
 
@@ -1145,12 +1354,14 @@ fn setPixel(target: FrameTarget, x: i32, y: i32, color: u32, depth_value: ?f32) 
     }
     const idx = @as(usize, @intCast(y)) * @as(usize, @intCast(target.width)) + @as(usize, @intCast(x));
     if (idx >= target.color.len) return;
-    target.color[idx] = color;
     if (depth_value) |depth| {
         if (target.depth) |depth_buffer| {
-            if (idx < depth_buffer.len) depth_buffer[idx] = depth;
+            if (idx >= depth_buffer.len) return;
+            if (depth > depth_buffer[idx]) return;
+            depth_buffer[idx] = depth;
         }
     }
+    target.color[idx] = color;
 }
 
 fn targetBounds(target: FrameTarget) Rect2i {

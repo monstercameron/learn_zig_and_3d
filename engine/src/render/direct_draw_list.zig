@@ -7,6 +7,7 @@ pub const DrawList = struct {
         triangle: direct_primitives.Triangle2i,
         prepared: direct_primitives.PreparedGouraudTriangle,
         depth_value: ?f32,
+        vertex_depths: ?[3]f32,
     };
 
     allocator: std.mem.Allocator,
@@ -77,6 +78,7 @@ pub const DrawList = struct {
         material: direct_packets.SurfaceMaterial,
         triangle: direct_primitives.Triangle2i,
         vertex_colors: ?[3]u32,
+        vertex_depths: ?[3]f32,
         gouraud_setup: ?direct_primitives.PreparedGouraudTriangle,
     ) !void {
         const packet: direct_packets.DrawPacket = .{
@@ -87,6 +89,7 @@ pub const DrawList = struct {
             .payload = .{ .triangle = .{
                 .triangle = triangle,
                 .vertex_colors = vertex_colors,
+                .vertex_depths = vertex_depths,
                 .gouraud_setup = gouraud_setup,
             } },
         };
@@ -102,6 +105,7 @@ pub const DrawList = struct {
                 .triangle = triangle,
                 .prepared = gouraud_setup.?,
                 .depth_value = material.depth,
+                .vertex_depths = vertex_depths,
             }
         else
             null);
@@ -113,6 +117,7 @@ pub const DrawList = struct {
         material: direct_packets.SurfaceMaterial,
         triangle: direct_primitives.Triangle2i,
         vertex_colors: ?[3]u32,
+        vertex_depths: ?[3]f32,
         gouraud_setup: ?direct_primitives.PreparedGouraudTriangle,
     ) void {
         const packet: direct_packets.DrawPacket = .{
@@ -123,6 +128,7 @@ pub const DrawList = struct {
             .payload = .{ .triangle = .{
                 .triangle = triangle,
                 .vertex_colors = vertex_colors,
+                .vertex_depths = vertex_depths,
                 .gouraud_setup = gouraud_setup,
             } },
         };
@@ -138,6 +144,7 @@ pub const DrawList = struct {
                 .triangle = triangle,
                 .prepared = gouraud_setup.?,
                 .depth_value = material.depth,
+                .vertex_depths = vertex_depths,
             }
         else
             null);
@@ -199,6 +206,7 @@ inline fn cachePreparedGouraud(packet: direct_packets.DrawPacket) ?DrawList.Prep
         .triangle = payload.triangle,
         .prepared = prepared,
         .depth_value = if (packet.flags.depth_write) surface.depth else null,
+        .vertex_depths = payload.vertex_depths,
     };
 }
 

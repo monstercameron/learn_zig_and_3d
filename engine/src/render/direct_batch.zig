@@ -175,6 +175,47 @@ const Projector = struct {
         };
     }
 
+    fn cameraDepth(self: *const Projector, point: math.Vec3) ?f32 {
+        const relative = math.Vec3.sub(point, self.camera.position);
+        const camera_z = math.Vec3.dot(relative, self.basis.forward);
+        if (camera_z <= near_plane) return null;
+        return camera_z;
+    }
+
+    fn lineDepth(self: *const Projector, line: WorldLine) ?f32 {
+        const start_z = self.cameraDepth(line.start) orelse return null;
+        const end_z = self.cameraDepth(line.end) orelse return null;
+        return (start_z + end_z) * 0.5;
+    }
+
+    fn triangleDepth(self: *const Projector, triangle: WorldTriangle) ?f32 {
+        const a_z = self.cameraDepth(triangle.a) orelse return null;
+        const b_z = self.cameraDepth(triangle.b) orelse return null;
+        const c_z = self.cameraDepth(triangle.c) orelse return null;
+        return (a_z + b_z + c_z) / 3.0;
+    }
+
+    fn triangleVertexDepths(self: *const Projector, triangle: WorldTriangle) ?[3]f32 {
+        return .{
+            self.cameraDepth(triangle.a) orelse return null,
+            self.cameraDepth(triangle.b) orelse return null,
+            self.cameraDepth(triangle.c) orelse return null,
+        };
+    }
+
+    fn polygonDepth(self: *const Projector, points: []const math.Vec3) ?f32 {
+        if (points.len == 0) return null;
+        var sum: f32 = 0.0;
+        for (points) |point| {
+            sum += self.cameraDepth(point) orelse return null;
+        }
+        return sum / @as(f32, @floatFromInt(points.len));
+    }
+
+    fn circleDepth(self: *const Projector, circle: WorldCircle) ?f32 {
+        return self.cameraDepth(circle.center);
+    }
+
     fn projectPoints(self: *const Projector, points: []const math.Vec3, out: []direct_primitives.Point2i) bool {
         std.debug.assert(out.len >= points.len);
         const lanes = comptime std.simd.suggestVectorLength(f32) orelse 0;
@@ -354,53 +395,68 @@ pub fn compileToDrawList(
     }
 
     for (commands, 0..) |command, packet_index| {
-        const sort_key = makeSortKey(command, packet_index);
         switch (command) {
             .line => |payload| {
                 var projected: [2]direct_primitives.Point2i = undefined;
                 if (!projector.projectLine(payload.line.start, payload.line.end, &projected)) continue;
+                const resolved_depth = if (payload.material.depth != null) projector.lineDepth(payload.line) else null;
+                var resolved_material = payload.material;
+                resolved_material.depth = resolved_depth;
                 try draw_list.append(.{
-                    .sort_key = sort_key,
+                    .sort_key = makeLineSortKey(resolved_depth, packet_index),
                     .layer = .geometry,
                     .flags = .{ .depth_test = false, .depth_write = false },
-                    .material = .{ .stroke = payload.material },
+                    .material = .{ .stroke = resolved_material },
                     .payload = .{ .line = .{ .start = projected[0], .end = projected[1] } },
                 });
             },
             .triangle => |payload| {
-                if (payload.material.depth != null and !worldTriangleFrontFacing(payload.triangle, camera.position)) continue;
                 var projected: [3]direct_primitives.Point2i = undefined;
                 if (!projector.projectTriangle(payload.triangle.a, payload.triangle.b, payload.triangle.c, &projected)) continue;
-                if (!projectedTriangleFrontFacing(projected[0], projected[1], projected[2])) continue;
+                if (payload.material.cull_backfaces and !worldTriangleFrontFacing(payload.triangle, projector.camera.position)) continue;
+                if (signedArea2(projected[0], projected[1], projected[2]) == 0) continue;
+                const resolved_vertex_depths = if (payload.material.depth != null) projector.triangleVertexDepths(payload.triangle) else null;
+                const resolved_depth = if (resolved_vertex_depths) |depths|
+                    (depths[0] + depths[1] + depths[2]) / 3.0
+                else
+                    null;
+                const resolved_material = surfaceWithResolvedDepth(payload.material, resolved_depth);
+                const gouraud_setup = if (resolved_vertex_depths == null)
+                    if (payload.gouraud_colors) |vertex_colors|
+                        direct_primitives.prepareGouraudTriangle(.{ .a = projected[0], .b = projected[1], .c = projected[2] }, vertex_colors)
+                    else
+                        null
+                else
+                    null;
                 try draw_list.append(.{
-                    .sort_key = sort_key,
+                    .sort_key = makeTriangleSortKey(resolved_depth, packet_index),
                     .layer = .geometry,
                     .flags = .{},
-                    .material = .{ .surface = payload.material },
+                    .material = .{ .surface = resolved_material },
                     .payload = .{ .triangle = .{
                         .triangle = .{ .a = projected[0], .b = projected[1], .c = projected[2] },
                         .vertex_colors = payload.gouraud_colors,
-                        .gouraud_setup = if (payload.gouraud_colors) |vertex_colors|
-                            direct_primitives.prepareGouraudTriangle(.{ .a = projected[0], .b = projected[1], .c = projected[2] }, vertex_colors)
-                        else
-                            null,
+                        .vertex_depths = resolved_vertex_depths,
+                        .gouraud_setup = gouraud_setup,
                     } },
                 });
             },
             .polygon => |payload| {
-                if (payload.material.depth != null and !worldPolygonFrontFacing(payload.polygon.slice(), camera.position)) continue;
                 var projected: [max_polygon_points]direct_primitives.Point2i = undefined;
                 const visible_count = payload.polygon.slice().len;
                 if (!projector.projectPoints(payload.polygon.slice(), projected[0..visible_count])) continue;
-                if (!projectedPolygonFrontFacing(projected[0..visible_count])) continue;
+                if (payload.material.cull_backfaces and !worldPolygonFrontFacing(payload.polygon.slice(), projector.camera.position)) continue;
+                if (projectedPolygonSignedArea2(projected[0..visible_count]) == 0) continue;
                 if (visible_count >= 3) {
+                    const resolved_depth = if (payload.material.depth != null) projector.polygonDepth(payload.polygon.slice()) else null;
+                    const resolved_material = surfaceWithResolvedDepth(payload.material, resolved_depth);
                     const start = draw_list.polygon_points.items.len;
                     try draw_list.polygon_points.appendSlice(draw_list.allocator, projected[0..visible_count]);
                     try draw_list.append(.{
-                        .sort_key = sort_key,
+                        .sort_key = makeSurfaceSortKey(resolved_depth, packet_index),
                         .layer = .geometry,
                         .flags = .{},
-                        .material = .{ .surface = payload.material },
+                        .material = .{ .surface = resolved_material },
                         .payload = .{ .polygon = .{
                             .points = draw_list.polygon_points.items[start .. start + visible_count],
                         } },
@@ -410,11 +466,13 @@ pub fn compileToDrawList(
             .circle => |payload| {
                 const center = projector.project(payload.circle.center) orelse continue;
                 const radius = projector.projectCircleRadius(payload.circle.center, payload.circle.radius) orelse continue;
+                const resolved_depth = if (payload.material.depth != null) projector.circleDepth(payload.circle) else null;
+                const resolved_material = surfaceWithResolvedDepth(payload.material, resolved_depth);
                 try draw_list.append(.{
-                    .sort_key = sort_key,
+                    .sort_key = makeSurfaceSortKey(resolved_depth, packet_index),
                     .layer = .geometry,
                     .flags = .{},
-                    .material = .{ .surface = payload.material },
+                    .material = .{ .surface = resolved_material },
                     .payload = .{ .circle = .{ .center = center, .radius = radius } },
                 });
             },
@@ -429,22 +487,38 @@ fn compileTrianglesOnlyToDrawList(
 ) !void {
     for (commands, 0..) |command, packet_index| {
         const payload = command.triangle;
-        if (payload.material.depth != null and !worldTriangleFrontFacing(payload.triangle, projector.camera.position)) continue;
         var projected: [3]direct_primitives.Point2i = undefined;
         if (!projector.projectTriangle(payload.triangle.a, payload.triangle.b, payload.triangle.c, &projected)) continue;
-        if (!projectedTriangleFrontFacing(projected[0], projected[1], projected[2])) continue;
+        if (payload.material.cull_backfaces and !worldTriangleFrontFacing(payload.triangle, projector.camera.position)) continue;
+        if (signedArea2(projected[0], projected[1], projected[2]) == 0) continue;
+        const resolved_vertex_depths = if (payload.material.depth != null) projector.triangleVertexDepths(payload.triangle) else null;
+        const resolved_depth = if (resolved_vertex_depths) |depths|
+            (depths[0] + depths[1] + depths[2]) / 3.0
+        else
+            null;
         const projected_triangle: direct_primitives.Triangle2i = .{ .a = projected[0], .b = projected[1], .c = projected[2] };
-        draw_list.appendProjectedTriangleAssumeCapacity(
-            makeTriangleSortKey(payload.material.depth, packet_index),
-            payload.material,
-            projected_triangle,
-            payload.gouraud_colors,
+        const gouraud_setup = if (resolved_vertex_depths == null)
             if (payload.gouraud_colors) |vertex_colors|
                 direct_primitives.prepareGouraudTriangle(projected_triangle, vertex_colors)
             else
-                null,
+                null
+        else
+            null;
+        draw_list.appendProjectedTriangleAssumeCapacity(
+            makeTriangleSortKey(resolved_depth, packet_index),
+            surfaceWithResolvedDepth(payload.material, resolved_depth),
+            projected_triangle,
+            payload.gouraud_colors,
+            resolved_vertex_depths,
+            gouraud_setup,
         );
     }
+}
+
+inline fn surfaceWithResolvedDepth(material: SurfaceMaterial, resolved_depth: ?f32) SurfaceMaterial {
+    var resolved = material;
+    resolved.depth = if (material.depth != null) resolved_depth else null;
+    return resolved;
 }
 
 inline fn makeSortKey(command: DrawPacket, packet_index: usize) u64 {
@@ -461,12 +535,20 @@ inline fn makeTriangleSortKey(depth: ?f32, packet_index: usize) u64 {
     return (@as(u64, encodeDepth(depth)) << 32) | @as(u64, @intCast(packet_index));
 }
 
+inline fn makeLineSortKey(depth: ?f32, packet_index: usize) u64 {
+    return (@as(u64, encodeDepth(depth)) << 32) | @as(u64, @intCast(packet_index));
+}
+
+inline fn makeSurfaceSortKey(depth: ?f32, packet_index: usize) u64 {
+    return (@as(u64, encodeDepth(depth)) << 32) | @as(u64, @intCast(packet_index));
+}
+
 inline fn worldTriangleFrontFacing(triangle: WorldTriangle, camera_position: math.Vec3) bool {
     const edge_ab = math.Vec3.sub(triangle.b, triangle.a);
     const edge_ac = math.Vec3.sub(triangle.c, triangle.a);
     const normal = math.Vec3.cross(edge_ab, edge_ac);
     const view = math.Vec3.sub(camera_position, triangle.a);
-    return math.Vec3.dot(normal, view) < -1e-5;
+    return math.Vec3.dot(normal, view) > 1e-5;
 }
 
 fn worldPolygonFrontFacing(points: []const math.Vec3, camera_position: math.Vec3) bool {
@@ -478,12 +560,8 @@ fn worldPolygonFrontFacing(points: []const math.Vec3, camera_position: math.Vec3
     }, camera_position);
 }
 
-inline fn projectedTriangleFrontFacing(a: direct_primitives.Point2i, b: direct_primitives.Point2i, c: direct_primitives.Point2i) bool {
-    return signedArea2(a, b, c) < 0;
-}
-
-fn projectedPolygonFrontFacing(points: []const direct_primitives.Point2i) bool {
-    if (points.len < 3) return false;
+fn projectedPolygonSignedArea2(points: []const direct_primitives.Point2i) i64 {
+    if (points.len < 3) return 0;
     var area2: i64 = 0;
     const lanes = comptime std.simd.suggestVectorLength(i64) orelse 0;
     const edge_count = points.len - 1;
@@ -520,7 +598,7 @@ fn projectedPolygonFrontFacing(points: []const direct_primitives.Point2i) bool {
         const last = points[points.len - 1];
         const first = points[0];
         area2 += @as(i64, last.x) * @as(i64, first.y) - @as(i64, first.x) * @as(i64, last.y);
-        return area2 < 0;
+        return area2;
     }
 
     for (0..edge_count) |index| {
@@ -531,7 +609,7 @@ fn projectedPolygonFrontFacing(points: []const direct_primitives.Point2i) bool {
     const last = points[points.len - 1];
     const first = points[0];
     area2 += @as(i64, last.x) * @as(i64, first.y) - @as(i64, first.x) * @as(i64, last.y);
-    return area2 < 0;
+    return area2;
 }
 
 inline fn signedArea2(a: direct_primitives.Point2i, b: direct_primitives.Point2i, c: direct_primitives.Point2i) i64 {
@@ -576,6 +654,28 @@ test "compile culls backfacing world triangle for depth geometry" {
 
     try batch.appendTriangle(.{
         .a = math.Vec3.new(0.0, 0.5, 0.0),
+        .b = math.Vec3.new(-0.5, -0.5, 0.0),
+        .c = math.Vec3.new(0.5, -0.5, 0.0),
+    }, .{ .fill_color = 0xFFFFFFFF, .depth = 1.0 });
+
+    try compileToDrawList(&batch, &draw_list, .{
+        .position = math.Vec3.new(0.0, 0.0, -3.0),
+        .yaw = 0.0,
+        .pitch = 0.0,
+        .fov_deg = 60.0,
+    }, 1280, 720);
+
+    try std.testing.expectEqual(@as(usize, 0), draw_list.items().len);
+}
+
+test "compile keeps frontfacing world triangle for depth geometry" {
+    var batch = PrimitiveBatch.init(std.testing.allocator);
+    defer batch.deinit();
+    var draw_list = direct_draw_list.DrawList.init(std.testing.allocator);
+    defer draw_list.deinit();
+
+    try batch.appendTriangle(.{
+        .a = math.Vec3.new(0.0, 0.5, 0.0),
         .b = math.Vec3.new(0.5, -0.5, 0.0),
         .c = math.Vec3.new(-0.5, -0.5, 0.0),
     }, .{ .fill_color = 0xFFFFFFFF, .depth = 1.0 });
@@ -587,7 +687,7 @@ test "compile culls backfacing world triangle for depth geometry" {
         .fov_deg = 60.0,
     }, 1280, 720);
 
-    try std.testing.expectEqual(@as(usize, 0), draw_list.items().len);
+    try std.testing.expectEqual(@as(usize, 1), draw_list.items().len);
 }
 
 test "compile keeps depthless triangle regardless of world facing" {
@@ -610,4 +710,35 @@ test "compile keeps depthless triangle regardless of world facing" {
     }, 1280, 720);
 
     try std.testing.expectEqual(@as(usize, 1), draw_list.items().len);
+}
+
+test "compile resolves geometric depth for mesh triangles" {
+    var batch = PrimitiveBatch.init(std.testing.allocator);
+    defer batch.deinit();
+    var draw_list = direct_draw_list.DrawList.init(std.testing.allocator);
+    defer draw_list.deinit();
+
+    try batch.appendTriangle(.{
+        .a = math.Vec3.new(-0.5, 0.5, 2.0),
+        .b = math.Vec3.new(0.5, 0.5, 2.0),
+        .c = math.Vec3.new(0.0, -0.5, 2.0),
+    }, .{ .fill_color = 0xFFFFFFFF, .depth = 1.0 });
+    try batch.appendTriangle(.{
+        .a = math.Vec3.new(-0.5, 0.5, 5.0),
+        .b = math.Vec3.new(0.5, 0.5, 5.0),
+        .c = math.Vec3.new(0.0, -0.5, 5.0),
+    }, .{ .fill_color = 0xFFFFFFFF, .depth = 1.0 });
+
+    try compileToDrawList(&batch, &draw_list, .{
+        .position = math.Vec3.new(0.0, 0.0, 0.0),
+        .yaw = 0.0,
+        .pitch = 0.0,
+        .fov_deg = 60.0,
+    }, 1280, 720);
+
+    try std.testing.expectEqual(@as(usize, 2), draw_list.items().len);
+    const near_depth = draw_list.items()[0].material.surface.depth.?;
+    const far_depth = draw_list.items()[1].material.surface.depth.?;
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), near_depth, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), far_depth, 0.0001);
 }

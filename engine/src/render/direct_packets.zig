@@ -21,6 +21,7 @@ pub const SurfaceMaterial = struct {
     fill_color: u32,
     outline_color: ?u32 = null,
     depth: ?f32 = null,
+    cull_backfaces: bool = true,
 };
 
 pub const PacketMaterial = union(enum) {
@@ -33,6 +34,7 @@ pub const Payload = union(enum) {
     triangle: struct {
         triangle: direct_primitives.Triangle2i,
         vertex_colors: ?[3]u32 = null,
+        vertex_depths: ?[3]f32 = null,
         gouraud_setup: ?direct_primitives.PreparedGouraudTriangle = null,
     },
     polygon: direct_primitives.Polygon2i,

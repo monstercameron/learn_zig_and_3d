@@ -1,5 +1,5 @@
 {
-  "defaultScene": "suzanne_behavior",
+  "defaultScene": "cornell",
   "loadingScene": "loading_neutral",
   "loadingFrames": 45,
   "scenes": [
