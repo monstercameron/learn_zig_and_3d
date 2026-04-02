@@ -91,6 +91,25 @@
 - removed the deprecated scalar `updateFrameWithCameraState` API so `updateFrameWithCamera` is the only camera-state update path
 - expanded smoke coverage for authored camera FOV, normalized typed camera updates, active-camera cycling, and the no-forwarded-FOV-command regression
 
+### Direct Render Foundation
+
+- added a dedicated DX11 present backend in `engine/src/render/present/present_d3d11.zig` and moved CPU-framebuffer presentation out of the old GDI window blit path
+- introduced an explicit present-state boundary in `engine/src/render/present_state.zig`
+- extracted direct primitive raster operations into `engine/src/render/direct_primitives.zig`
+- added typed compiled draw packets in `engine/src/render/direct_packets.zig`
+- added compiled draw-list ownership in `engine/src/render/direct_draw_list.zig`
+- added world-space primitive compilation in `engine/src/render/direct_batch.zig`
+- added unified world-side submission packets for primitives, meshes, and meshlets in `engine/src/render/direct_scene_packets.zig`
+- added direct mesh ingestion helpers in `engine/src/render/direct_mesh.zig`
+- added direct meshlet ingestion, culling, and parallel batch emission in `engine/src/render/direct_meshlets.zig`
+- extracted the direct backend into `engine/src/render/backends/direct_backend.zig`
+- rewired `engine/src/render/renderer.zig` to delegate direct rendering to the new backend and present modules instead of owning the inline showcase path
+- rewired minimal showcase startup in `engine/src/main.zig` so it uses the stripped direct path as the known-good baseline
+- added deterministic tile-ref sorting, single-thread versus worker parity coverage, and non-background framebuffer assertions for the direct path
+- added direct frame diagnostics for `clear`, `build`, `compile`, `bin`, `raster`, `present`, `primitive_count`, and `touched_tiles`
+- added a meshlet-backed showcase cube on the direct path so the baseline now exercises initial mesh and meshlet submission instead of primitives only
+- updated `build.zig` to link the DX11 presentation dependencies needed by the new present backend on Windows
+
 ### Known Limits
 
 - the direct raster backend is still a stub in `engine/src/render/renderer.zig`

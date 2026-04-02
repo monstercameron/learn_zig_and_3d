@@ -90,6 +90,8 @@ pub fn build(b: *std.Build) void {
         exe.linkSystemLibrary("kernel32");
         exe.linkSystemLibrary("winmm");
         exe.linkSystemLibrary("dwmapi");
+        exe.linkSystemLibrary("d3d11");
+        exe.linkSystemLibrary("dxgi");
     }
     exe.root_module.addImport("zphysics", zphysics_dep.module("root"));
     exe.linkLibrary(zphysics_dep.artifact("joltc"));
@@ -129,6 +131,15 @@ pub fn build(b: *std.Build) void {
     const unit_tests = b.addTest(.{
         .root_module = test_module,
     });
+    if (target.result.os.tag == .windows) {
+        unit_tests.linkSystemLibrary("user32");
+        unit_tests.linkSystemLibrary("gdi32");
+        unit_tests.linkSystemLibrary("kernel32");
+        unit_tests.linkSystemLibrary("winmm");
+        unit_tests.linkSystemLibrary("dwmapi");
+        unit_tests.linkSystemLibrary("d3d11");
+        unit_tests.linkSystemLibrary("dxgi");
+    }
     unit_tests.root_module.addImport("zphysics", zphysics_dep.module("root"));
     unit_tests.linkLibrary(zphysics_dep.artifact("joltc"));
     const test_step = b.step("test", "Run unit tests");

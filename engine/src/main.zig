@@ -58,6 +58,7 @@ const main_module = @This();
 const app_logger = log.get("app.main");
 const scenes_index_path = "assets/configs/scenes/index.json";
 const scene_texture_slots_capacity: usize = scene_runtime.max_texture_slots;
+const minimal_triangle_demo_enabled = true;
 
 const SceneModelType = scene_runtime.LoadedSceneModelType;
 const SceneAssetConfigEntry = scene_runtime.SceneAssetConfigEntry;
@@ -104,9 +105,18 @@ const AppSession = struct {
     renderer: *Renderer,
     phase13_runtime: *scene_runtime.SceneRuntime,
     scene_resources: *SceneMeshResources,
+    minimal_demo: bool = false,
     mouse_grabbed: *bool,
     selected_scene_entity_pin: *?scene_runtime.EntityId,
     last_runtime_update_ns: i128,
+    minimized: bool = false,
+    close_requested: bool = false,
+};
+
+const MinimalAppSession = struct {
+    window: *Window,
+    renderer: *Renderer,
+    mouse_grabbed: *bool,
     minimized: bool = false,
     close_requested: bool = false,
 };
@@ -181,13 +191,16 @@ fn consumePlatformEvent(session: *AppSession, event: platform_loop.PlatformEvent
             if (size.width > 0 and size.height > 0) {
                 config.WINDOW_WIDTH = @intCast(size.width);
                 config.WINDOW_HEIGHT = @intCast(size.height);
+                renderer.setPresentSize(size.width, size.height);
             }
         },
         .minimized => {
             session.minimized = true;
+            renderer.setPresentMinimized(true);
         },
         .restored => {
             session.minimized = false;
+            renderer.setPresentMinimized(false);
         },
         .close_requested => {
             session.close_requested = true;
@@ -437,13 +450,6 @@ pub fn main() !void {
     // that `gpa.deinit()` is called at the end of the `main` function, cleaning up the allocator.
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-    try zphysics.init(allocator, .{});
-    defer zphysics.deinit();
-    var phase13_runtime = try scene_runtime.SceneRuntime.init(allocator, .{
-        .min = .{ .x = -512.0, .y = -512.0, .z = -512.0 },
-        .max = .{ .x = 512.0, .y = 512.0, .z = 512.0 },
-    });
-    defer phase13_runtime.deinit();
     const renderer_ttl_ns = loadRendererTtlNs(allocator);
     const renderer_ttl_frames = loadRendererTtlFrames(allocator);
     const profile_frame_target = loadProfileFrameTarget(allocator);
@@ -533,107 +539,266 @@ pub fn main() !void {
     app_logger.infoSub("bootstrap", "renderer initialized backbuffer={d}x{d}", .{ renderer.bitmap.width, renderer.bitmap.height });
 
     var running = true;
-
-    const scene_index_bytes = try std.fs.cwd().readFileAlloc(allocator, scenes_index_path, 1024 * 1024);
-    defer allocator.free(scene_index_bytes);
-    const parsed_scene_index = try std.json.parseFromSlice(SceneIndexFile, allocator, scene_index_bytes, .{ .ignore_unknown_fields = true });
-    defer parsed_scene_index.deinit();
-
-    const selected_scene_key = try resolveLaunchSceneKey(allocator, parsed_scene_index.value);
-    const selected_scene_file_path = try resolveSceneFilePath(parsed_scene_index.value, selected_scene_key);
-    const scene_file_bytes = try std.fs.cwd().readFileAlloc(allocator, selected_scene_file_path, 1024 * 1024);
-    defer allocator.free(scene_file_bytes);
-    const parsed_scene_file = try std.json.parseFromSlice(SceneFile, allocator, scene_file_bytes, .{ .ignore_unknown_fields = true });
-    defer parsed_scene_file.deinit();
-
-    var scene_desc = try scene_runtime.buildSceneDescription(
-        allocator,
-        parsed_scene_file.value,
-        config.MESHLET_SHADOWS_ENABLED,
-        config.POST_SHADOW_ENABLED,
-        config.POST_SHADOW_MAP_SIZE,
-    );
-    defer scene_desc.deinit(allocator);
-
-    try populateSceneRuntimeBootstrap(&phase13_runtime, scene_desc);
-    app_logger.infoSub("bootstrap", "launch scene: {s}", .{scene_desc.key});
-    try renderer.setLightCapacity(scene_desc.lights.len);
-    var scene_loading_progress: ?SceneLoadingProgress = null;
-    var scene_loading_overlay_active = false;
-    defer if (scene_loading_overlay_active) renderer.endSceneLoadingOverlay();
-
-    if (parsed_scene_index.value.loadingScene) |loading_key| {
-        const loading_file_path = resolveSceneFilePath(parsed_scene_index.value, loading_key) catch null;
-        if (loading_file_path != null) {
-            const total_steps = sceneLoadingTotalSteps(scene_desc);
-            renderer.beginSceneLoadingOverlay(scene_desc.key, total_steps);
-            scene_loading_overlay_active = true;
-            scene_loading_progress = .{
-                .renderer = &renderer,
-                .running = &running,
-                .pump = pumpRendererEvents,
-                .total_steps = total_steps,
-            };
-            if (scene_loading_progress) |*progress| startSceneLoadingProgress(progress);
-        }
-    }
-
-    var scene_textures = [_]?texture.Texture{null} ** scene_texture_slots_capacity;
-    defer for (&scene_textures) |*tex| {
-        if (tex.*) |*loaded| loaded.deinit();
-    };
-    var material_textures = [_]?*const texture.Texture{null} ** scene_texture_slots_capacity;
-
-    var scene_resources = try loadSceneMeshResourcesWithProgress(allocator, scene_desc, if (scene_loading_progress) |*progress| progress else null);
-    defer scene_resources.deinit(allocator);
-    assignSceneRenderEntities(&scene_resources, &phase13_runtime);
-    syncSceneMeshFromRuntime(null, &scene_resources, &phase13_runtime);
-    const runtime_renderables = try buildRuntimeRenderableSetups(allocator, &scene_resources);
-    defer allocator.free(runtime_renderables);
-    try phase13_runtime.configureExecution(scene_desc.runtime, runtime_renderables);
-    syncSceneMeshFromRuntime(null, &scene_resources, &phase13_runtime);
-    try configureSceneItemBindings(allocator, &renderer, &scene_resources, &phase13_runtime);
-    if (scene_desc.textureSlotCount() > 0) {
-        try loadSceneTexturesWithProgress(
-            allocator,
-            scene_desc.assets,
-            &scene_textures,
-            &material_textures,
-            if (scene_loading_progress) |*progress| progress else null,
-        );
-        renderer.setTextures(material_textures[0..]);
-    }
-    if (scene_desc.hdri_path) |hdri_path| {
-        if (texture.loadHdrRaw(allocator, hdri_path)) |env_map| {
-            app_logger.infoSub("assets", "loaded HDRI env map", .{});
-            renderer.setHdriMap(env_map);
-        } else |err| {
-            app_logger.warn("failed to load HDRI {s}: {s}", .{ hdri_path, @errorName(err) });
-        }
-    }
-    try renderer.setLightCapacity(scene_desc.lights.len);
-    try configureSceneLights(&renderer, scene_desc.lights);
-
-    // TEMP: skip meshlet generation to diagnose rendering
-    const meshlet_builder = @import("render/core/meshlets/meshlet_builder.zig");
-    advanceSceneLoadingProgress(if (scene_loading_progress) |*progress| progress else null, "Building meshlets");
-    try meshlet_builder.buildMeshlets(allocator, &scene_resources.mesh, .{});
-
-    app_logger.infoSub(
-        "assets",
-        "loaded scene mesh vertices={} triangles={} meshlets={}",
-        .{ scene_resources.mesh.vertices.len, scene_resources.mesh.triangles.len, scene_resources.mesh.meshlets.len },
-    );
-    if (scene_loading_overlay_active) {
-        renderer.endSceneLoadingOverlay();
-        scene_loading_overlay_active = false;
-    }
-
-    renderer.setCameraPosition(toRenderVec3(scene_desc.camera_position));
-    renderer.setCameraOrientation(scene_desc.camera_orientation_pitch, scene_desc.camera_orientation_yaw);
-    renderer.setCameraFov(scene_desc.camera_fov_deg);
-    renderer.setSceneCameraScriptActive(true);
     var mouse_grabbed = false;
+
+    if (minimal_triangle_demo_enabled) {
+        try renderer.setLightCapacity(0);
+        renderer.show_light_orb = false;
+        renderer.show_frame_pacing_overlay = false;
+        renderer.show_render_overlay = false;
+        renderer.setCameraPosition(math.Vec3.new(0.0, 0.0, -3.0));
+        renderer.setCameraOrientation(0.0, 0.0);
+        renderer.setCameraFov(config.CAMERA_FOV_INITIAL);
+        renderer.setSceneCameraScriptActive(false);
+        app_logger.infoSub("bootstrap", "minimal primitive showcase active", .{});
+
+        const MinimalDriver = struct {
+            pub fn beginFrame(session: *MinimalAppSession) void {
+                session.renderer.keys_pressed.beginFrame();
+                session.renderer.mouse_input.beginFrame();
+            }
+
+            pub fn pump(session: *MinimalAppSession) bool {
+                const Hooks = struct {
+                    pub fn handleEvent(target: *MinimalAppSession, event: platform_loop.PlatformEvent) void {
+                        switch (event) {
+                            .key => |payload| target.renderer.handleKeyInput(payload.code, payload.is_down),
+                            .char => |char_code| target.renderer.handleCharInput(char_code),
+                            .focus_changed => |focused| {
+                                if (focused) target.renderer.handleFocusGained() else {
+                                    target.renderer.handleFocusLost();
+                                    target.mouse_grabbed.* = false;
+                                }
+                                applyPlatformCursor(target.renderer);
+                            },
+                            .raw_mouse_delta => |delta| target.renderer.handleRawMouseDelta(delta.x, delta.y),
+                            .mouse_move => |move| {
+                                target.renderer.handleMouseMove(move.x, move.y);
+                                applyPlatformCursor(target.renderer);
+                            },
+                            .mouse_button => |button| {
+                                switch (button.button) {
+                                    .left => if (button.pressed)
+                                        target.renderer.handleMouseLeftClick(button.x, button.y)
+                                    else
+                                        target.renderer.handleMouseLeftRelease(button.x, button.y),
+                                    .right => if (button.pressed)
+                                        target.renderer.handleMouseRightClick(button.x, button.y)
+                                    else
+                                        target.renderer.handleMouseRightRelease(button.x, button.y),
+                                }
+                                applyPlatformCursor(target.renderer);
+                            },
+                            .resized => |size| {
+                                if (size.width > 0 and size.height > 0) {
+                                    config.WINDOW_WIDTH = @intCast(size.width);
+                                    config.WINDOW_HEIGHT = @intCast(size.height);
+                                    target.renderer.setPresentSize(size.width, size.height);
+                                }
+                            },
+                            .minimized => {
+                                target.minimized = true;
+                                target.renderer.setPresentMinimized(true);
+                            },
+                            .restored => {
+                                target.minimized = false;
+                                target.renderer.setPresentMinimized(false);
+                            },
+                            .close_requested => target.close_requested = true,
+                            .quit => {},
+                        }
+                    }
+                };
+                const keep_running = platform_loop.pumpEvents(session, Hooks);
+                return keep_running and !session.close_requested;
+            }
+
+            pub fn update(session: *MinimalAppSession, _: u32) !void {
+                syncFirstPersonMouseGrab(session.window, session.renderer, session.mouse_grabbed);
+                applyPlatformCursor(session.renderer);
+            }
+
+            pub fn shouldRender(session: *MinimalAppSession) bool {
+                if (session.minimized or session.close_requested) return false;
+                return session.renderer.shouldRenderFrame();
+            }
+
+            pub fn waitUntilNextFrame(session: *MinimalAppSession) void {
+                session.renderer.waitUntilNextFrame();
+            }
+
+            pub fn render(session: *MinimalAppSession) !void {
+                try session.renderer.renderMinimalPrimitiveFrame(pumpRendererEvents);
+            }
+
+            pub fn onTtlExpired(_: *MinimalAppSession, kind: enum { time, frames }) void {
+                switch (kind) {
+                    .time => app_logger.info("renderer TTL expired, exiting", .{}),
+                    .frames => app_logger.info("renderer frame TTL expired, exiting", .{}),
+                }
+            }
+
+            pub fn onMessagePumpShutdown(_: *MinimalAppSession) void {
+                app_logger.info("message pump requested shutdown", .{});
+            }
+
+            pub fn onFrameStart(_: *MinimalAppSession, frame_count: u32) void {
+                if (frame_count <= 3) app_logger.debug("rendering frame {}", .{frame_count});
+            }
+
+            pub fn onRenderError(_: *MinimalAppSession, err: anyerror) void {
+                if (err == error.RenderInterrupted) {
+                    app_logger.info("render interrupted by shutdown request", .{});
+                } else {
+                    app_logger.@"error"("rendering failed: {s}", .{@errorName(err)});
+                }
+            }
+
+            pub fn onFrameComplete(session: *MinimalAppSession, frame_count: u32) void {
+                if (frame_count <= 3) {
+                    app_logger.debug("frame {} complete", .{frame_count});
+                } else if (frame_count % 120 == 0) {
+                    const timings = session.renderer.lastDirectFrameTimings();
+                    app_logger.infoSub("direct_demo", "timings clear={d:.3}ms build={d:.3}ms compile={d:.3}ms bin={d:.3}ms raster={d:.3}ms present={d:.3}ms primitives={d} touched_tiles={d}", .{
+                        @as(f64, @floatFromInt(timings.clear_ns)) / 1_000_000.0,
+                        @as(f64, @floatFromInt(timings.build_batch_ns)) / 1_000_000.0,
+                        @as(f64, @floatFromInt(timings.compile_draw_list_ns)) / 1_000_000.0,
+                        @as(f64, @floatFromInt(timings.binning_ns)) / 1_000_000.0,
+                        @as(f64, @floatFromInt(timings.raster_ns)) / 1_000_000.0,
+                        @as(f64, @floatFromInt(timings.present_ns)) / 1_000_000.0,
+                        timings.primitive_count,
+                        timings.touched_tiles,
+                    });
+                }
+            }
+        };
+
+        var loop_control = app_loop.LoopControl{
+            .running = &running,
+            .start_ns = renderer_start_ns,
+            .ttl_ns = renderer_ttl_ns,
+            .ttl_frames = effective_ttl_frames,
+        };
+        var minimal_session = MinimalAppSession{
+            .window = &window,
+            .renderer = &renderer,
+            .mouse_grabbed = &mouse_grabbed,
+        };
+        app_logger.info("starting main event loop...", .{});
+        const frame_count = try app_loop.run(&loop_control, &minimal_session, MinimalDriver);
+        app_logger.info("exited main loop after {} frames", .{frame_count});
+        return;
+    }
+
+    try zphysics.init(allocator, .{});
+    defer zphysics.deinit();
+    var phase13_runtime = try scene_runtime.SceneRuntime.init(allocator, .{
+        .min = .{ .x = -512.0, .y = -512.0, .z = -512.0 },
+        .max = .{ .x = 512.0, .y = 512.0, .z = 512.0 },
+    });
+    defer phase13_runtime.deinit();
+
+    var scene_resources = blk: {
+        const scene_index_bytes = try std.fs.cwd().readFileAlloc(allocator, scenes_index_path, 1024 * 1024);
+        defer allocator.free(scene_index_bytes);
+        const parsed_scene_index = try std.json.parseFromSlice(SceneIndexFile, allocator, scene_index_bytes, .{ .ignore_unknown_fields = true });
+        defer parsed_scene_index.deinit();
+
+        const selected_scene_key = try resolveLaunchSceneKey(allocator, parsed_scene_index.value);
+        const selected_scene_file_path = try resolveSceneFilePath(parsed_scene_index.value, selected_scene_key);
+        const scene_file_bytes = try std.fs.cwd().readFileAlloc(allocator, selected_scene_file_path, 1024 * 1024);
+        defer allocator.free(scene_file_bytes);
+        const parsed_scene_file = try std.json.parseFromSlice(SceneFile, allocator, scene_file_bytes, .{ .ignore_unknown_fields = true });
+        defer parsed_scene_file.deinit();
+
+        var scene_desc = try scene_runtime.buildSceneDescription(
+            allocator,
+            parsed_scene_file.value,
+            config.MESHLET_SHADOWS_ENABLED,
+            config.POST_SHADOW_ENABLED,
+            config.POST_SHADOW_MAP_SIZE,
+        );
+        defer scene_desc.deinit(allocator);
+
+        try populateSceneRuntimeBootstrap(&phase13_runtime, scene_desc);
+        app_logger.infoSub("bootstrap", "launch scene: {s}", .{scene_desc.key});
+        try renderer.setLightCapacity(scene_desc.lights.len);
+        var scene_loading_progress: ?SceneLoadingProgress = null;
+        var scene_loading_overlay_active = false;
+        defer if (scene_loading_overlay_active) renderer.endSceneLoadingOverlay();
+
+        if (parsed_scene_index.value.loadingScene) |loading_key| {
+            const loading_file_path = resolveSceneFilePath(parsed_scene_index.value, loading_key) catch null;
+            if (loading_file_path != null) {
+                const total_steps = sceneLoadingTotalSteps(scene_desc);
+                renderer.beginSceneLoadingOverlay(scene_desc.key, total_steps);
+                scene_loading_overlay_active = true;
+                scene_loading_progress = .{
+                    .renderer = &renderer,
+                    .running = &running,
+                    .pump = pumpRendererEvents,
+                    .total_steps = total_steps,
+                };
+                if (scene_loading_progress) |*progress| startSceneLoadingProgress(progress);
+            }
+        }
+
+        var scene_textures = [_]?texture.Texture{null} ** scene_texture_slots_capacity;
+        defer for (&scene_textures) |*tex| {
+            if (tex.*) |*loaded| loaded.deinit();
+        };
+        var material_textures = [_]?*const texture.Texture{null} ** scene_texture_slots_capacity;
+
+        var loaded_scene_resources = try loadSceneMeshResourcesWithProgress(allocator, scene_desc, if (scene_loading_progress) |*progress| progress else null);
+        assignSceneRenderEntities(&loaded_scene_resources, &phase13_runtime);
+        syncSceneMeshFromRuntime(null, &loaded_scene_resources, &phase13_runtime);
+        const runtime_renderables = try buildRuntimeRenderableSetups(allocator, &loaded_scene_resources);
+        defer allocator.free(runtime_renderables);
+        try phase13_runtime.configureExecution(scene_desc.runtime, runtime_renderables);
+        syncSceneMeshFromRuntime(null, &loaded_scene_resources, &phase13_runtime);
+        try configureSceneItemBindings(allocator, &renderer, &loaded_scene_resources, &phase13_runtime);
+        if (scene_desc.textureSlotCount() > 0) {
+            try loadSceneTexturesWithProgress(
+                allocator,
+                scene_desc.assets,
+                &scene_textures,
+                &material_textures,
+                if (scene_loading_progress) |*progress| progress else null,
+            );
+            renderer.setTextures(material_textures[0..]);
+        }
+        if (scene_desc.hdri_path) |hdri_path| {
+            if (texture.loadHdrRaw(allocator, hdri_path)) |env_map| {
+                app_logger.infoSub("assets", "loaded HDRI env map", .{});
+                renderer.setHdriMap(env_map);
+            } else |err| {
+                app_logger.warn("failed to load HDRI {s}: {s}", .{ hdri_path, @errorName(err) });
+            }
+        }
+        try renderer.setLightCapacity(scene_desc.lights.len);
+        try configureSceneLights(&renderer, scene_desc.lights);
+
+        const meshlet_builder = @import("render/core/meshlets/meshlet_builder.zig");
+        advanceSceneLoadingProgress(if (scene_loading_progress) |*progress| progress else null, "Building meshlets");
+        try meshlet_builder.buildMeshlets(allocator, &loaded_scene_resources.mesh, .{});
+
+        app_logger.infoSub(
+            "assets",
+            "loaded scene mesh vertices={} triangles={} meshlets={}",
+            .{ loaded_scene_resources.mesh.vertices.len, loaded_scene_resources.mesh.triangles.len, loaded_scene_resources.mesh.meshlets.len },
+        );
+        if (scene_loading_overlay_active) {
+            renderer.endSceneLoadingOverlay();
+            scene_loading_overlay_active = false;
+        }
+
+        renderer.setCameraPosition(toRenderVec3(scene_desc.camera_position));
+        renderer.setCameraOrientation(scene_desc.camera_orientation_pitch, scene_desc.camera_orientation_yaw);
+        renderer.setCameraFov(scene_desc.camera_fov_deg);
+        renderer.setSceneCameraScriptActive(true);
+        break :blk loaded_scene_resources;
+    };
+    defer scene_resources.deinit(allocator);
     var selected_scene_entity_pin: ?scene_runtime.EntityId = null;
     defer if (selected_scene_entity_pin) |entity| phase13_runtime.residency.unpinEntity(entity);
 
@@ -657,6 +822,11 @@ pub fn main() !void {
         }
 
         pub fn update(session: *AppSession, frame_count: u32) !void {
+            if (session.minimal_demo) {
+                syncFirstPersonMouseGrab(session.window, session.renderer, session.mouse_grabbed);
+                applyPlatformCursor(session.renderer);
+                return;
+            }
             const current_selected_entity = blk: {
                 const selection_id = session.renderer.selectedSceneItemSelectionId() orelse break :blk null;
                 const entity = main_module.selectionIdToEntity(selection_id);
@@ -761,12 +931,12 @@ pub fn main() !void {
         }
 
         pub fn render(session: *AppSession) !void {
-            session.phase13_runtime.beginPresent();
+            if (!session.minimal_demo) session.phase13_runtime.beginPresent();
             session.renderer.render3DMeshWithPump(&session.scene_resources.mesh, pumpRendererEvents) catch |err| {
-                session.phase13_runtime.endPresent();
+                if (!session.minimal_demo) session.phase13_runtime.endPresent();
                 return err;
             };
-            session.phase13_runtime.endPresent();
+            if (!session.minimal_demo) session.phase13_runtime.endPresent();
         }
 
         pub fn onTtlExpired(_: *AppSession, kind: enum { time, frames }) void {
@@ -808,6 +978,7 @@ pub fn main() !void {
         .renderer = &renderer,
         .phase13_runtime = &phase13_runtime,
         .scene_resources = &scene_resources,
+        .minimal_demo = minimal_triangle_demo_enabled,
         .mouse_grabbed = &mouse_grabbed,
         .selected_scene_entity_pin = &selected_scene_entity_pin,
         .last_runtime_update_ns = std.time.nanoTimestamp(),

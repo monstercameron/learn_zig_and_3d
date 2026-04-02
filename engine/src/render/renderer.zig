@@ -84,6 +84,11 @@ const depth_fog_pass = @import("passes/depth_fog_pass.zig");
 const scanline = @import("core/scanline.zig");
 const texture = @import("../assets/texture.zig");
 const WorkTypes = @import("core/mesh_work_types.zig");
+const direct_primitives = @import("direct_primitives.zig");
+const direct_demo = @import("direct_demo.zig");
+const direct_backend = @import("backends/direct_backend.zig");
+const present_d3d11 = @import("present/present_d3d11.zig");
+const present_state = @import("present_state.zig");
 const TrianglePacket = WorkTypes.TrianglePacket;
 const TriangleFlags = WorkTypes.TriangleFlags;
 const MeshletPacket = WorkTypes.MeshletPacket;
@@ -1084,12 +1089,8 @@ const TRANSPARENT = 1;
 // ========== WINDOWS API DECLARATIONS ==========
 // These are external function definitions for the Windows Graphics Device Interface (GDI).
 // JS Analogy: This is like the low-level native browser code that the Canvas API calls.
-extern "user32" fn GetDC(hWnd: windows.HWND) ?windows.HDC;
-extern "user32" fn ReleaseDC(hWnd: windows.HWND, hDC: windows.HDC) i32;
 extern "gdi32" fn CreateCompatibleDC(hdc: ?windows.HDC) ?windows.HDC;
 extern "gdi32" fn SelectObject(hdc: windows.HDC, hgdiobj: HGDIOBJ) HGDIOBJ;
-extern "gdi32" fn BitBlt(hdcDest: windows.HDC, nXDest: i32, nYDest: i32, nWidth: i32, nHeight: i32, hdcSrc: windows.HDC, nXSrc: i32, nYSrc: i32, dwRop: u32) bool;
-extern "gdi32" fn StretchBlt(hdcDest: windows.HDC, nXOriginDest: i32, nYOriginDest: i32, nWidthDest: i32, nHeightDest: i32, hdcSrc: windows.HDC, nXOriginSrc: i32, nYOriginSrc: i32, nWidthSrc: i32, nHeightSrc: i32, dwRop: u32) bool;
 extern "gdi32" fn DeleteDC(hdc: windows.HDC) bool;
 extern "gdi32" fn SetBkMode(hdc: windows.HDC, mode: i32) i32;
 extern "gdi32" fn SetTextColor(hdc: windows.HDC, color: u32) u32;
@@ -1319,9 +1320,9 @@ pub const Renderer = struct {
     // Core rendering resources
     hwnd: windows.HWND, // Handle to the window we are drawing to.
     bitmap: Bitmap, // The main pixel buffer we draw into (our "canvas").
-    hdc: ?windows.HDC, // The window's "device context" for drawing.
     hdc_mem: ?windows.HDC, // An in-memory device context for faster drawing operations.
     hdc_mem_old_bitmap: ?HGDIOBJ,
+    present_backend: present_d3d11.Backend,
     allocator: std.mem.Allocator,
 
     // Camera and object state
@@ -1388,6 +1389,8 @@ pub const Renderer = struct {
     frame_view_cache: FrameViewCache = .{},
     cached_post_graph: frame_graph.CachedGraph = .{},
     cached_frame_plan: frame_plan.CachedPlan = .{},
+    direct_backend: direct_backend.State,
+    present_state: present_state.State,
 
     // Rendering options and data
     single_texture_binding: [1]?*const texture.Texture,
@@ -1768,14 +1771,13 @@ pub const Renderer = struct {
 
     /// init initializes Renderer state and returns the configured value.
     pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allocator) !Renderer {
-        const hdc = GetDC(hwnd) orelse return error.DCNotFound;
-        const hdc_mem = CreateCompatibleDC(hdc) orelse {
-            _ = ReleaseDC(hwnd, hdc);
-            return error.MemoryDCCreationFailed;
-        };
-
-        const bitmap = try Bitmap.init(width, height);
+        var bitmap = try Bitmap.init(width, height);
+        errdefer bitmap.deinit();
+        const hdc_mem = CreateCompatibleDC(null) orelse return error.MemoryDCCreationFailed;
+        errdefer _ = DeleteDC(hdc_mem);
         const hdc_mem_old_bitmap = SelectObject(hdc_mem, bitmap.hbitmap);
+        var present_backend = try present_d3d11.Backend.init(hwnd, width, height);
+        errdefer present_backend.deinit();
         const current_time = std.time.nanoTimestamp();
         const tile_grid = try TileGrid.init(width, height, allocator);
 
@@ -1995,9 +1997,9 @@ pub const Renderer = struct {
         return Renderer{
             .hwnd = hwnd,
             .bitmap = bitmap,
-            .hdc = hdc,
             .hdc_mem = hdc_mem,
             .hdc_mem_old_bitmap = hdc_mem_old_bitmap,
+            .present_backend = present_backend,
             .allocator = allocator,
             .rotation_angle = 0,
             .rotation_x = 0,
@@ -2046,7 +2048,7 @@ pub const Renderer = struct {
             .tile_buffers = tile_buffers,
             .single_texture_binding = .{null},
             .textures = &.{},
-            .use_tiled_rendering = true,
+            .use_tiled_rendering = false,
             .job_system = job_system,
             .tile_jobs_buffer = tile_jobs_buffer,
             .shadow_chunk_jobs_buffer = shadow_chunk_jobs_buffer,
@@ -2060,6 +2062,8 @@ pub const Renderer = struct {
             .active_tile_indices = active_tile_indices,
             .tile_light_ranges = tile_light_ranges,
             .tile_light_indices = tile_light_indices,
+            .direct_backend = direct_backend.State.init(allocator),
+            .present_state = present_state.State.init(width, height),
             .render_pass_timings = [_]RenderPassTiming{.{
                 .name = "",
                 .frame_duration_ms = 0.0,
@@ -2223,6 +2227,7 @@ pub const Renderer = struct {
         renderer_logger.infoSub("shutdown", "deinitializing renderer frame_counter={}", .{self.frame_count});
         self.frame_pacing.exportCsv("artifacts/perf/frame_times.csv");
         self.mesh_work_cache.deinit(self.allocator);
+        self.direct_backend.deinit();
         self.sys_shadows.deinit();
         if (self.job_system) |js| js.deinit();
         if (self.job_buffer) |jobs| self.allocator.free(jobs);
@@ -2305,6 +2310,7 @@ pub const Renderer = struct {
         }
         if (self.tile_grid) |*grid| grid.deinit();
         self.bitmap.deinit();
+        self.present_backend.deinit();
         if (self.hdc_mem) |hdc_mem| {
             if (self.hdc_mem_old_bitmap) |old_bitmap| {
                 _ = SelectObject(hdc_mem, old_bitmap);
@@ -2312,7 +2318,6 @@ pub const Renderer = struct {
             _ = DeleteDC(hdc_mem);
         }
         if (self.frame_pacing_timer) |timer| _ = windows.CloseHandle(timer);
-        if (self.hdc) |hdc| _ = ReleaseDC(self.hwnd, hdc);
     }
 
     // ========== TILE RENDER JOB ==========
@@ -4423,6 +4428,18 @@ pub const Renderer = struct {
         camera_runtime.setCameraFov(self, fov_deg);
     }
 
+    pub fn setPresentSize(self: *Renderer, width: i32, height: i32) void {
+        self.present_state.applyResize(width, height);
+    }
+
+    pub fn setPresentMinimized(self: *Renderer, minimized: bool) void {
+        self.present_state.setMinimized(minimized);
+    }
+
+    pub fn lastDirectFrameTimings(self: *const Renderer) direct_backend.FrameTimings {
+        return self.direct_backend.lastTimings();
+    }
+
     /// Marks cached/derived data stale so it is recomputed on the next usage.
     /// It marks cached/derived data stale so dependent work is recomputed on next use.
     pub fn invalidateMeshWork(self: *Renderer) void {
@@ -4696,6 +4713,22 @@ pub const Renderer = struct {
         self.notePresentedFrame(now);
         self.finalizeFrame(now);
         return true;
+    }
+
+    pub fn renderMinimalPrimitiveFrame(self: *Renderer, pump: ?*const fn (*Renderer) bool) !void {
+        if (pump) |pump_fn| {
+            if (!pump_fn(self)) return error.RenderInterrupted;
+        }
+
+        const now = std.time.nanoTimestamp();
+        self.current_frame_start_time = now;
+        try self.renderDirectPrimitiveShowcase();
+        const present_start = std.time.nanoTimestamp();
+        self.drawBitmap();
+        const present_end = std.time.nanoTimestamp();
+        self.direct_backend.notePresentTime(present_end - present_start);
+        self.notePresentedFrame(present_end);
+        self.finalizeFrame(present_end);
     }
 
     /// Moves data for copy text truncate.
@@ -5261,10 +5294,11 @@ pub const Renderer = struct {
         self.light_work_stats.tile_light_overflow_tiles = 0;
         @memset(self.shadow_resolve_elapsed_ns[0..self.lights.items.len], 0);
         const is_editor_mode = self.camera_control_mode != .first_person;
+        const using_tiled_backend = self.use_tiled_rendering and self.tile_grid != null and self.tile_buffers != null;
         const compiled_frame_plan = frame_pipeline.compileCachedFramePlan(&self.cached_frame_plan, .{
             .has_shadow_map_lights = shadow_map_light_count > 0,
-            .backend = if (self.use_tiled_rendering and self.tile_grid != null and self.tile_buffers != null) .tiled else .direct,
-            .include_post_process = true,
+            .backend = if (using_tiled_backend) .tiled else .direct,
+            .include_post_process = using_tiled_backend,
             .include_present = true,
         });
         const frame_exec_ctx = FrameExecutionContext{
@@ -6737,48 +6771,20 @@ pub const Renderer = struct {
     }
 
     fn drawBitmap(self: *Renderer) void {
-        if (self.hdc) |hdc| {
-            if (self.hdc_mem) |hdc_mem| {
-                if (self.show_render_overlay or self.hybrid_shadow_debug.enabled or self.scene_item_gizmo.enabled or self.loading_overlay.enabled) {
-                    self.drawRenderPassOverlay(hdc_mem);
-                }
-                if (self.show_frame_pacing_overlay) {
-                    self.drawFramePacingPanel(hdc_mem);
-                }
+        if (!self.present_state.canPresent()) return;
+        if (self.hdc_mem) |hdc_mem| {
+            if (self.show_render_overlay or self.hybrid_shadow_debug.enabled or self.scene_item_gizmo.enabled or self.loading_overlay.enabled) {
+                self.drawRenderPassOverlay(hdc_mem);
+            }
+            if (self.show_frame_pacing_overlay) {
+                self.drawFramePacingPanel(hdc_mem);
+            }
 
-                const window_w = @as(i32, @intCast(config.WINDOW_WIDTH));
-                const window_h = @as(i32, @intCast(config.WINDOW_HEIGHT));
-                if (window_w != self.bitmap.width or window_h != self.bitmap.height) {
-                    _ = StretchBlt(
-                        hdc,
-                        0,
-                        0,
-                        window_w,
-                        window_h,
-                        hdc_mem,
-                        0,
-                        0,
-                        self.bitmap.width,
-                        self.bitmap.height,
-                        SRCCOPY,
-                    );
-                } else {
-                    _ = BitBlt(
-                        hdc,
-                        0,
-                        0,
-                        self.bitmap.width,
-                        self.bitmap.height,
-                        hdc_mem,
-                        0,
-                        0,
-                        SRCCOPY,
-                    );
-                }
-
-                if (config.WINDOW_VSYNC) {
-                    _ = DwmFlush();
-                }
+            self.present_backend.present(&self.bitmap, config.WINDOW_VSYNC) catch {
+                // The renderer should remain operational even if a present fails transiently.
+            };
+            if (config.WINDOW_VSYNC) {
+                _ = DwmFlush();
             }
         }
     }
@@ -8145,12 +8151,41 @@ pub const Renderer = struct {
         projection: ProjectionParams,
         mesh_work: *const MeshWork,
     ) !void {
-        _ = self;
         _ = mesh;
         _ = light_dir;
         _ = projection;
         _ = mesh_work;
         _ = transform;
+        try self.renderDirectPrimitiveShowcase();
+    }
+
+    fn clearDirectFrame(self: *Renderer, clear: direct_primitives.ClearConfig) void {
+        direct_demo.clearFrame(self.directFrameResources(), clear);
+    }
+
+    fn renderDirectPrimitiveShowcase(self: *Renderer) !void {
+        try self.direct_backend.renderPrimitiveShowcase(self.directFrameResources(), .{
+            .position = self.camera_position,
+            .yaw = self.rotation_angle,
+            .pitch = self.rotation_x,
+            .fov_deg = self.camera_fov_deg,
+        }, self.job_system, .{ .raster_mode = .single_thread });
+    }
+
+    fn directFrameResources(self: *Renderer) direct_demo.FrameResources {
+        return .{
+            .target = .{
+                .width = self.bitmap.width,
+                .height = self.bitmap.height,
+                .color = self.bitmap.pixels,
+                .depth = self.scene_depth,
+            },
+            .aux = .{
+                .scene_camera = self.scene_camera,
+                .scene_normal = self.scene_normal,
+                .scene_surface = self.scene_surface,
+            },
+        };
     }
 
     fn drawShadedTriangle(self: *Renderer, p0: [2]i32, p1: [2]i32, p2: [2]i32, shading: TileRenderer.ShadingParams) void {
