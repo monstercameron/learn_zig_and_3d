@@ -57,7 +57,7 @@ pub fn runPipeline(self: anytype, width: usize, height: usize, comptime noop_job
             @ptrCast(&self.fog_job_contexts[stripe_index]),
             &parent_job,
         );
-        if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+        if (!self.job_system.?.submitJobWithClass(&self.color_grade_jobs[stripe_index], .normal)) {
             CtxType.run(@ptrCast(&self.fog_job_contexts[stripe_index]));
         }
     }

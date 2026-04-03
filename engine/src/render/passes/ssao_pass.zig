@@ -143,7 +143,7 @@ fn dispatchStage(
             @ptrCast(&self.ao_job_contexts[stripe_index]),
             &parent_job,
         );
-        if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+        if (!self.job_system.?.submitJobWithClass(&self.color_grade_jobs[stripe_index], .normal)) {
             runStageRange(self, stage, start_row, end_row, scene_width, scene_height, generate_fn, blur_h_fn, blur_v_fn, composite_fn);
         }
     }

@@ -16,8 +16,12 @@ const script_host_module = @import("script_host.zig");
 const script_registry_module = @import("script_registry.zig");
 const render_extraction_module = @import("render_extraction.zig");
 const scene_math = @import("math.zig");
+const camera_state = @import("camera_state.zig");
 const loader_module = @import("loader.zig");
 const physics_utils = @import("physics_utils");
+const platform_input_module = @import("platform_input");
+const input_actions_module = @import("input_actions");
+const job_system_module = @import("job_system");
 
 pub const EntityId = handles.EntityId;
 pub const AssetHandle = handles.AssetHandle;
@@ -48,6 +52,9 @@ pub const CellState = residency_module.CellState;
 pub const ScriptHost = script_host_module.ScriptHost;
 pub const ScriptEvent = script_host_module.ScriptEvent;
 pub const ScriptInputState = script_host_module.ScriptInputState;
+pub const platform_input = platform_input_module;
+pub const input_actions = input_actions_module;
+pub const JobSystem = job_system_module.JobSystem;
 pub const ScriptModuleVTable = script_host_module.ScriptModuleVTable;
 pub const ScriptCallbackContext = script_host_module.ScriptCallbackContext;
 pub const ScriptHostAbiVersion = script_host_module.abi_version;
@@ -68,6 +75,7 @@ pub const LoadedSceneLight = loader_module.LightDefinition;
 pub const LoadedSceneDescription = loader_module.SceneDescription;
 pub const buildSceneDescription = loader_module.buildSceneDescription;
 pub const parseSceneLightShadowMode = loader_module.parseSceneLightShadowMode;
+pub const camera_utils = camera_state;
 
 pub const BootstrapTextureSlot = struct {
     slot: usize,
@@ -628,6 +636,7 @@ pub const SceneRuntime = struct {
     dependencies: DependencyGraph,
     assets: AssetRegistry,
     residency: ResidencyManager,
+    job_system: *JobSystem,
     scripts: ScriptHost,
     authored_entity_lookup: std.StringHashMapUnmanaged(EntityId),
     renderable_entities: std.ArrayList(EntityId),
@@ -653,6 +662,7 @@ pub const SceneRuntime = struct {
             .dependencies = DependencyGraph.init(allocator),
             .assets = AssetRegistry.init(allocator),
             .residency = try ResidencyManager.init(allocator, bounds, 4),
+            .job_system = try JobSystem.init(allocator),
             .scripts = ScriptHost.init(allocator),
             .authored_entity_lookup = .{},
             .renderable_entities = .{},
@@ -673,7 +683,14 @@ pub const SceneRuntime = struct {
     pub fn deinit(self: *SceneRuntime) void {
         self.execution.deinit(self.allocator);
         self.pending_renderer_commands.deinit(self.allocator);
+        var index: usize = 0;
+        while (index < self.world.slotCount()) : (index += 1) {
+            const entity = EntityId.init(@intCast(index), self.world.generations.items[index]);
+            if (!self.world.isAlive(entity)) continue;
+            self.scripts.destroyInstancesForEntity(&self.world, &self.components, &self.commands, entity);
+        }
         self.scripts.deinit();
+        self.job_system.deinit();
         self.residency.deinit();
         self.assets.deinit();
         self.dependencies.deinit();
@@ -739,7 +756,9 @@ pub const SceneRuntime = struct {
                 .set_camera_orientation => |payload| {
                     _ = self.setCameraOrientation(payload.entity, payload.pitch, payload.yaw);
                 },
-                .adjust_camera_fov,
+                .adjust_camera_fov => |payload| {
+                    self.adjustActiveCameraFov(payload.delta);
+                },
                 .set_camera_mode,
                 .toggle_scene_item_gizmo,
                 .toggle_light_gizmo,
@@ -994,11 +1013,12 @@ pub const SceneRuntime = struct {
         self.components.local_transforms.items[camera_index] = .{ .position = scene.camera.position };
         self.components.world_transforms.items[camera_index] = .{ .position = scene.camera.position };
         self.components.cameras.items[camera_index] = .{
-            .fov_deg = scene.camera.fov_deg,
-            .pitch = scene.camera.pitch,
-            .yaw = scene.camera.yaw,
+            .fov_deg = camera_state.normalizeFov(scene.camera.fov_deg),
+            .pitch = camera_state.clampPitch(scene.camera.pitch),
+            .yaw = camera_state.wrapYaw(scene.camera.yaw),
             .active = true,
         };
+        self.setActiveCameraEntity(camera_entity);
         try self.registerAuthoredEntity(camera_entity, scene.camera.authored_id);
         try self.attachAuthoredScripts(camera_entity, scene.camera.scripts);
         _ = try self.residency.registerStaticEntity(camera_entity, scene.camera.position);
@@ -1204,17 +1224,35 @@ pub const SceneRuntime = struct {
         frame_index: u64,
         delta_seconds: f32,
     ) !RenderSnapshot {
+        const current_camera_fov = self.activeCameraFov() orelse camera_state.normalizeFov(camera_state.default_fov_deg);
+        return self.updateFrameWithCamera(.{
+            .position = camera_position,
+            .pitch = camera_pitch,
+            .yaw = camera_yaw,
+            .fov_deg = current_camera_fov,
+        }, active_radius, prefetch_radius, frame_index, delta_seconds);
+    }
+
+    pub fn updateFrameWithCamera(
+        self: *SceneRuntime,
+        camera: camera_state.State,
+        active_radius: f32,
+        prefetch_radius: f32,
+        frame_index: u64,
+        delta_seconds: f32,
+    ) !RenderSnapshot {
+        const normalized_camera = camera.normalized();
+        self.normalizeActiveCameraSelection();
         self.beginPhase(.input);
         for (self.components.cameras.items, 0..) |maybe_camera, index| {
-            if (maybe_camera) |camera| {
-                if (!camera.active) continue;
+            if (maybe_camera) |camera_component| {
+                if (!camera_component.active) continue;
                 const entity = EntityId.init(@intCast(index), self.world.generations.items[index]);
                 const renderer_owns_camera = !self.entityHasScripts(entity) or !self.script_input.first_person_active;
                 if (renderer_owns_camera and index < self.components.local_transforms.items.len and self.components.local_transforms.items[index] != null) {
-                    self.components.local_transforms.items[index].?.position = camera_position;
+                    self.components.local_transforms.items[index].?.position = normalized_camera.position;
                     self.hierarchy.markSubtreeDirty(entity);
-                    self.components.cameras.items[index].?.pitch = camera_pitch;
-                    self.components.cameras.items[index].?.yaw = camera_yaw;
+                    self.applyCameraPose(index, normalized_camera.pitch, normalized_camera.yaw, normalized_camera.fov_deg);
                 }
                 break;
             }
@@ -1252,7 +1290,7 @@ pub const SceneRuntime = struct {
             _ = try self.residency.updateEntityPosition(entity, transform.position);
         }
 
-        try self.residency.updateCamera(camera_position, active_radius, prefetch_radius, frame_index);
+        try self.residency.updateCamera(normalized_camera.position, active_radius, prefetch_radius, frame_index);
         self.execution.syncBindingResidency(&self.world, &self.components, &self.residency);
         if (self.started) try self.queueResidencyZoneEvents(previous_resident_states);
         self.endPhase(.residency_decisions);
@@ -1271,9 +1309,10 @@ pub const SceneRuntime = struct {
         try self.scripts.queueUpdateForAll(&self.world, delta_seconds);
         try self.scripts.queueFixedUpdateForAll(&self.world, fixedStepSeconds, fixed_step_count);
         try self.scripts.queueLateUpdateForAll(&self.world, delta_seconds);
-        self.scripts.dispatchQueued(&self.world, &self.components, &self.script_input, &self.commands);
+        self.scripts.dispatchQueued(self.job_system, &self.world, &self.components, &self.script_input, &self.commands);
         self.unpinAssetsForUsage(.script_dispatch);
         self.applyDeferred();
+        try self.propagateWorldTransforms();
         self.endPhase(.script_events);
 
         self.beginPhase(.render_extraction);
@@ -1373,9 +1412,118 @@ pub const SceneRuntime = struct {
         if (!self.world.isAlive(entity)) return false;
         const index: usize = @intCast(entity.index);
         if (index >= self.components.cameras.items.len or self.components.cameras.items[index] == null) return false;
-        self.components.cameras.items[index].?.pitch = pitch;
-        self.components.cameras.items[index].?.yaw = yaw;
+        self.components.cameras.items[index].?.pitch = camera_state.clampPitch(pitch);
+        self.components.cameras.items[index].?.yaw = camera_state.wrapYaw(yaw);
         return true;
+    }
+
+    fn applyCameraPose(self: *SceneRuntime, index: usize, pitch: f32, yaw: f32, fov_deg: f32) void {
+        self.components.cameras.items[index].?.pitch = camera_state.clampPitch(pitch);
+        self.components.cameras.items[index].?.yaw = camera_state.wrapYaw(yaw);
+        self.components.cameras.items[index].?.fov_deg = camera_state.normalizeFov(fov_deg);
+    }
+
+    pub fn setActiveCamera(self: *SceneRuntime, entity: EntityId) bool {
+        if (!self.world.isAlive(entity)) return false;
+        const index: usize = @intCast(entity.index);
+        if (index >= self.components.cameras.items.len) return false;
+        if (self.components.cameras.items[index] == null) return false;
+        self.setActiveCameraEntity(entity);
+        return true;
+    }
+
+    pub fn activeCameraEntity(self: *const SceneRuntime) ?EntityId {
+        for (self.components.cameras.items, 0..) |maybe_camera, index| {
+            if (maybe_camera) |camera| {
+                if (!camera.active) continue;
+                const entity = EntityId.init(@intCast(index), self.world.generations.items[index]);
+                if (self.world.isAlive(entity)) return entity;
+            }
+        }
+        return null;
+    }
+
+    pub fn activeCameraState(self: *const SceneRuntime) ?camera_state.State {
+        for (self.components.cameras.items, 0..) |maybe_camera, index| {
+            if (maybe_camera) |camera| {
+                if (!camera.active) continue;
+                if (index >= self.components.world_transforms.items.len or self.components.world_transforms.items[index] == null) continue;
+                return .{
+                    .position = self.components.world_transforms.items[index].?.position,
+                    .pitch = camera.pitch,
+                    .yaw = camera.yaw,
+                    .fov_deg = camera.fov_deg,
+                };
+            }
+        }
+        return null;
+    }
+
+    pub fn cycleActiveCamera(self: *SceneRuntime) ?EntityId {
+        const active_entity = self.activeCameraEntity();
+        const start_index = if (active_entity) |entity| @as(usize, @intCast(entity.index + 1)) else 0;
+        const count = self.components.cameras.items.len;
+        if (count == 0) return null;
+
+        for (0..count) |offset| {
+            const index = (start_index + offset) % count;
+            if (self.components.cameras.items[index] == null) continue;
+            const entity = EntityId.init(@intCast(index), self.world.generations.items[index]);
+            if (!self.world.isAlive(entity)) continue;
+            self.setActiveCameraEntity(entity);
+            return entity;
+        }
+        return active_entity;
+    }
+
+    fn setActiveCameraEntity(self: *SceneRuntime, entity: EntityId) void {
+        for (self.components.cameras.items, 0..) |maybe_camera, index| {
+            if (maybe_camera == null) continue;
+            self.components.cameras.items[index].?.active = entity.index == index;
+        }
+    }
+
+    fn activeCameraFov(self: *const SceneRuntime) ?f32 {
+        for (self.components.cameras.items) |maybe_camera| {
+            if (maybe_camera) |camera| {
+                if (camera.active) return camera.fov_deg;
+            }
+        }
+        return null;
+    }
+
+    fn adjustActiveCameraFov(self: *SceneRuntime, delta: f32) void {
+        for (self.components.cameras.items) |*maybe_camera| {
+            if (maybe_camera.*) |*camera| {
+                if (!camera.active) continue;
+                camera.fov_deg = camera_state.normalizeFov(camera.fov_deg + delta);
+                return;
+            }
+        }
+    }
+
+    fn normalizeActiveCameraSelection(self: *SceneRuntime) void {
+        var first_camera: ?EntityId = null;
+        var active_camera: ?EntityId = null;
+
+        for (self.components.cameras.items, 0..) |maybe_camera, index| {
+            if (maybe_camera == null) continue;
+            const entity = EntityId.init(@intCast(index), self.world.generations.items[index]);
+            if (!self.world.isAlive(entity)) continue;
+            if (first_camera == null) first_camera = entity;
+            if (!self.components.cameras.items[index].?.active) continue;
+            if (active_camera == null) {
+                active_camera = entity;
+            } else {
+                self.components.cameras.items[index].?.active = false;
+            }
+        }
+
+        if (active_camera) |entity| {
+            self.setActiveCameraEntity(entity);
+        } else if (first_camera) |entity| {
+            self.setActiveCameraEntity(entity);
+        }
     }
 
     fn entityHasScripts(self: *const SceneRuntime, entity: EntityId) bool {

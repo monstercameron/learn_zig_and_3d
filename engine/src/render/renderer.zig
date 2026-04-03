@@ -61,12 +61,18 @@ const shadow_map_pass = @import("passes/shadow_map_pass.zig");
 const shadow_resolve_pass = @import("passes/shadow_resolve_pass.zig");
 const hybrid_shadow_pass = @import("passes/hybrid_shadow_pass.zig");
 const adaptive_shadow_tile_pass = @import("passes/adaptive_shadow_tile_pass.zig");
-const pass_registry = @import("pipeline/pass_registry.zig");
 const pass_graph = @import("pipeline/pass_graph.zig");
+const frame_graph = @import("graph/frame_graph.zig");
+const frame_plan = @import("graph/frame_plan.zig");
+const frame_pipeline = @import("frame_pipeline.zig");
+const frame_executor = @import("frame_executor.zig");
+const frame_hooks = @import("frame_hooks.zig");
 const render_utils = @import("core/utils.zig");
 const scene_item_gizmo = @import("scene_item_gizmo.zig");
 const camera_controller = @import("camera_controller.zig");
+const camera_runtime = @import("camera_runtime.zig");
 const frame_pacing_hud = @import("frame_pacing_hud.zig");
+const frame_pacing = @import("frame_pacing.zig");
 const shadow_raster_kernel = @import("kernels/shadow_raster_kernel.zig");
 const shadow_sample_kernel = @import("kernels/shadow_sample_kernel.zig");
 const hybrid_shadow_cache_kernel = @import("kernels/hybrid_shadow_cache_kernel.zig");
@@ -78,6 +84,16 @@ const depth_fog_pass = @import("passes/depth_fog_pass.zig");
 const scanline = @import("core/scanline.zig");
 const texture = @import("../assets/texture.zig");
 const WorkTypes = @import("core/mesh_work_types.zig");
+const direct_primitives = @import("direct_primitives.zig");
+const direct_demo = @import("direct_demo.zig");
+const direct_showcase = @import("direct_showcase.zig");
+const frame_resources = @import("frame_resources.zig");
+const frame_setup_stage = @import("stages/frame_setup_stage.zig");
+const presentation_stage = @import("stages/presentation_stage.zig");
+const direct_backend = @import("backends/direct_backend.zig");
+const scene_tiled_backend = @import("backends/scene_tiled_backend.zig");
+const present_d3d11 = @import("present/present_d3d11.zig");
+const present_state = @import("present_state.zig");
 const TrianglePacket = WorkTypes.TrianglePacket;
 const TriangleFlags = WorkTypes.TriangleFlags;
 const MeshletPacket = WorkTypes.MeshletPacket;
@@ -524,11 +540,11 @@ const FrameViewCache = struct {
     light_distance: f32 = 0.0,
     state: DerivedFrameViewState = undefined,
 
-    fn invalidate(self: *FrameViewCache) void {
+    pub fn invalidate(self: *FrameViewCache) void {
         self.valid = false;
     }
 
-    fn needsUpdate(
+    pub fn needsUpdate(
         self: *const FrameViewCache,
         camera_position: math.Vec3,
         rotation_angle: f32,
@@ -552,7 +568,7 @@ const FrameViewCache = struct {
     }
 
     /// update updates Renderer state for the current tick/frame.
-    fn update(
+    pub fn update(
         self: *FrameViewCache,
         camera_position: math.Vec3,
         rotation_angle: f32,
@@ -1078,12 +1094,8 @@ const TRANSPARENT = 1;
 // ========== WINDOWS API DECLARATIONS ==========
 // These are external function definitions for the Windows Graphics Device Interface (GDI).
 // JS Analogy: This is like the low-level native browser code that the Canvas API calls.
-extern "user32" fn GetDC(hWnd: windows.HWND) ?windows.HDC;
-extern "user32" fn ReleaseDC(hWnd: windows.HWND, hDC: windows.HDC) i32;
 extern "gdi32" fn CreateCompatibleDC(hdc: ?windows.HDC) ?windows.HDC;
 extern "gdi32" fn SelectObject(hdc: windows.HDC, hgdiobj: HGDIOBJ) HGDIOBJ;
-extern "gdi32" fn BitBlt(hdcDest: windows.HDC, nXDest: i32, nYDest: i32, nWidth: i32, nHeight: i32, hdcSrc: windows.HDC, nXSrc: i32, nYSrc: i32, dwRop: u32) bool;
-extern "gdi32" fn StretchBlt(hdcDest: windows.HDC, nXOriginDest: i32, nYOriginDest: i32, nWidthDest: i32, nHeightDest: i32, hdcSrc: windows.HDC, nXOriginSrc: i32, nYOriginSrc: i32, nWidthSrc: i32, nHeightSrc: i32, dwRop: u32) bool;
 extern "gdi32" fn DeleteDC(hdc: windows.HDC) bool;
 extern "gdi32" fn SetBkMode(hdc: windows.HDC, mode: i32) i32;
 extern "gdi32" fn SetTextColor(hdc: windows.HDC, color: u32) u32;
@@ -1104,7 +1116,7 @@ const TileRenderer = @import("core/tile_renderer.zig");
 const TileGrid = TileRenderer.TileGrid;
 const TileBuffer = TileRenderer.TileBuffer;
 const BinningStage = @import("core/binning_stage.zig");
-const job_system_module = @import("../core/job_system.zig");
+const job_system_module = @import("job_system");
 const JobSystem = job_system_module.JobSystem;
 const Job = job_system_module.Job;
 
@@ -1158,19 +1170,6 @@ const HybridShadowDispatchContext = struct {
     light_dir_world: math.Vec3,
 };
 
-const CompositionPlan = struct {
-    enabled_mask: pass_registry.PassMask,
-    uses_scratch_a: bool = false,
-    uses_scratch_b: bool = false,
-    uses_history: bool = false,
-    scratch_pool_a: []u32 = &[_]u32{},
-    scratch_pool_b: []u32 = &[_]u32{},
-    scene_mask: pass_registry.PassMask = 0,
-    geometry_post_mask: pass_registry.PassMask = 0,
-    lighting_scatter_mask: pass_registry.PassMask = 0,
-    final_color_mask: pass_registry.PassMask = 0,
-};
-
 const CompositionScratchBindings = struct {
     ssgi_scratch_pixels: []u32,
     ssr_scratch_pixels: []u32,
@@ -1190,7 +1189,6 @@ const PostPassExecutionContext = struct {
     projection: ProjectionParams,
     light_dir_world: math.Vec3,
     shadow_build_elapsed_ns: []const i128,
-    plan: CompositionPlan,
 };
 
 const AOJobContext = ssao_pass.JobContext(
@@ -1268,7 +1266,7 @@ const CompositeJobContext = struct {
     scene_normal: ?[]math.Vec3,
     scene_surface: ?[]TileRenderer.SurfaceHandle,
 
-    fn run(ctx_ptr: *anyopaque) void {
+    pub fn run(ctx_ptr: *anyopaque) void {
         const ctx: *CompositeJobContext = @ptrCast(@alignCast(ctx_ptr));
         TileRenderer.compositeTileToScreen(ctx.tile, ctx.tile_buffer, ctx.bitmap, ctx.scene_depth, ctx.scene_camera, ctx.scene_normal, ctx.scene_surface);
     }
@@ -1327,9 +1325,9 @@ pub const Renderer = struct {
     // Core rendering resources
     hwnd: windows.HWND, // Handle to the window we are drawing to.
     bitmap: Bitmap, // The main pixel buffer we draw into (our "canvas").
-    hdc: ?windows.HDC, // The window's "device context" for drawing.
     hdc_mem: ?windows.HDC, // An in-memory device context for faster drawing operations.
     hdc_mem_old_bitmap: ?HGDIOBJ,
+    present_backend: present_d3d11.Backend,
     allocator: std.mem.Allocator,
 
     // Camera and object state
@@ -1394,6 +1392,10 @@ pub const Renderer = struct {
     tile_light_indices: []usize,
     mesh_work_cache: MeshWorkCache = MeshWorkCache.init(),
     frame_view_cache: FrameViewCache = .{},
+    cached_post_graph: frame_graph.CachedGraph = .{},
+    cached_frame_plan: frame_plan.CachedPlan = .{},
+    direct_backend: direct_backend.State,
+    present_state: present_state.State,
 
     // Rendering options and data
     single_texture_binding: [1]?*const texture.Texture,
@@ -1567,7 +1569,7 @@ pub const Renderer = struct {
         }
     }
 
-    fn syncLightCameraSoA(self: *Renderer, basis_right: math.Vec3, basis_up: math.Vec3, basis_forward: math.Vec3) void {
+    pub fn syncLightCameraSoA(self: *Renderer, basis_right: math.Vec3, basis_up: math.Vec3, basis_forward: math.Vec3) void {
         for (self.lights.items, 0..) |_, i| {
             const dir_x = self.light_soa.dir_x[i];
             const dir_y = self.light_soa.dir_y[i];
@@ -1578,7 +1580,7 @@ pub const Renderer = struct {
         }
     }
 
-    fn countLightsWithShadowMode(self: *const Renderer, mode: LightInfo.ShadowMode) usize {
+    pub fn countLightsWithShadowMode(self: *const Renderer, mode: LightInfo.ShadowMode) usize {
         var count: usize = 0;
         for (self.lights.items) |light| {
             if (light.shadow_mode == mode) count += 1;
@@ -1774,14 +1776,13 @@ pub const Renderer = struct {
 
     /// init initializes Renderer state and returns the configured value.
     pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allocator) !Renderer {
-        const hdc = GetDC(hwnd) orelse return error.DCNotFound;
-        const hdc_mem = CreateCompatibleDC(hdc) orelse {
-            _ = ReleaseDC(hwnd, hdc);
-            return error.MemoryDCCreationFailed;
-        };
-
-        const bitmap = try Bitmap.init(width, height);
+        var bitmap = try Bitmap.init(width, height);
+        errdefer bitmap.deinit();
+        const hdc_mem = CreateCompatibleDC(null) orelse return error.MemoryDCCreationFailed;
+        errdefer _ = DeleteDC(hdc_mem);
         const hdc_mem_old_bitmap = SelectObject(hdc_mem, bitmap.hbitmap);
+        var present_backend = try present_d3d11.Backend.init(hwnd, width, height);
+        errdefer present_backend.deinit();
         const current_time = std.time.nanoTimestamp();
         const tile_grid = try TileGrid.init(width, height, allocator);
 
@@ -1874,23 +1875,23 @@ pub const Renderer = struct {
         errdefer allocator.free(dof_job_contexts);
         const color_grade_jobs = try allocator.alloc(Job, color_grade_job_count);
         errdefer allocator.free(color_grade_jobs);
-        const scene_depth = try allocator.alloc(f32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const scene_depth = try allocator.alignedAlloc(f32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(scene_depth);
-        const scene_camera = try allocator.alloc(math.Vec3, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const scene_camera = try allocator.alignedAlloc(math.Vec3, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(scene_camera);
-        const scene_normal = try allocator.alloc(math.Vec3, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const scene_normal = try allocator.alignedAlloc(math.Vec3, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(scene_normal);
-        const scene_surface = try allocator.alloc(TileRenderer.SurfaceHandle, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const scene_surface = try allocator.alignedAlloc(TileRenderer.SurfaceHandle, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(scene_surface);
-        const taa_history_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const taa_history_pixels = try allocator.alignedAlloc(u32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(taa_history_pixels);
-        const taa_resolve_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const taa_resolve_pixels = try allocator.alignedAlloc(u32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(taa_resolve_pixels);
-        const taa_history_depth = try allocator.alloc(f32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const taa_history_depth = try allocator.alignedAlloc(f32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(taa_history_depth);
-        const taa_history_surface_tags = try allocator.alloc(u64, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const taa_history_surface_tags = try allocator.alignedAlloc(u64, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(taa_history_surface_tags);
-        const taa_history_normals = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+        const taa_history_normals = try allocator.alignedAlloc(u32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(taa_history_normals);
         const hybrid_shadow_coarse_downsample = @max(1, config.POST_HYBRID_SHADOW_COARSE_DOWNSAMPLE);
         const hybrid_shadow_coarse_cache_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + hybrid_shadow_coarse_downsample - 1, hybrid_shadow_coarse_downsample))));
@@ -1975,7 +1976,7 @@ pub const Renderer = struct {
         const profile_capture_frame = try parseProfileCaptureFrame(allocator);
         const frame_pacing_timer = createFramePacingTimer();
         const configured_target_frame_time_ns = config.targetFrameTimeNs();
-        const pacing_mode = pacingModeForTarget(configured_target_frame_time_ns);
+        const pacing_mode = frame_pacing.resolveMode(config.WINDOW_VSYNC, configured_target_frame_time_ns);
 
         if (config.WINDOW_VSYNC and configured_target_frame_time_ns > 0) {
             renderer_logger.warnSub(
@@ -2001,9 +2002,9 @@ pub const Renderer = struct {
         return Renderer{
             .hwnd = hwnd,
             .bitmap = bitmap,
-            .hdc = hdc,
             .hdc_mem = hdc_mem,
             .hdc_mem_old_bitmap = hdc_mem_old_bitmap,
+            .present_backend = present_backend,
             .allocator = allocator,
             .rotation_angle = 0,
             .rotation_x = 0,
@@ -2066,6 +2067,8 @@ pub const Renderer = struct {
             .active_tile_indices = active_tile_indices,
             .tile_light_ranges = tile_light_ranges,
             .tile_light_indices = tile_light_indices,
+            .direct_backend = direct_backend.State.init(allocator),
+            .present_state = present_state.State.init(width, height),
             .render_pass_timings = [_]RenderPassTiming{.{
                 .name = "",
                 .frame_duration_ms = 0.0,
@@ -2224,17 +2227,12 @@ pub const Renderer = struct {
             CreateWaitableTimerExW(null, null, 0, desired_access);
     }
 
-    fn pacingModeForTarget(target_frame_time_ns: i128) frame_pacing_hud.Mode {
-        if (config.WINDOW_VSYNC) return .compositor;
-        if (target_frame_time_ns > 0) return .software;
-        return .uncapped;
-    }
-
     /// Cleans up all renderer resources in the reverse order of creation.
     pub fn deinit(self: *Renderer) void {
         renderer_logger.infoSub("shutdown", "deinitializing renderer frame_counter={}", .{self.frame_count});
         self.frame_pacing.exportCsv("artifacts/perf/frame_times.csv");
         self.mesh_work_cache.deinit(self.allocator);
+        self.direct_backend.deinit();
         self.sys_shadows.deinit();
         if (self.job_system) |js| js.deinit();
         if (self.job_buffer) |jobs| self.allocator.free(jobs);
@@ -2317,6 +2315,7 @@ pub const Renderer = struct {
         }
         if (self.tile_grid) |*grid| grid.deinit();
         self.bitmap.deinit();
+        self.present_backend.deinit();
         if (self.hdc_mem) |hdc_mem| {
             if (self.hdc_mem_old_bitmap) |old_bitmap| {
                 _ = SelectObject(hdc_mem, old_bitmap);
@@ -2324,7 +2323,6 @@ pub const Renderer = struct {
             _ = DeleteDC(hdc_mem);
         }
         if (self.frame_pacing_timer) |timer| _ = windows.CloseHandle(timer);
-        if (self.hdc) |hdc| _ = ReleaseDC(self.hwnd, hdc);
     }
 
     // ========== TILE RENDER JOB ==========
@@ -2513,7 +2511,7 @@ pub const Renderer = struct {
         }
 
         /// renderTileJob renders Renderer output.
-        fn renderTileJob(ctx: *anyopaque) void {
+        pub fn renderTileJob(ctx: *anyopaque) void {
             const _z_renderTileJob = profiler.zone("renderTileJob");
             defer if (_z_renderTileJob) |z| z.end();
             const job: *TileRenderJob = @ptrCast(@alignCast(ctx));
@@ -2579,7 +2577,7 @@ pub const Renderer = struct {
 
         /// Applies meshlet shadows.
         /// Consumes the provided context pointer and updates owned state through explicit, localized side effects.
-        fn applyMeshletShadows(ctx: *anyopaque) void {
+        pub fn applyMeshletShadows(ctx: *anyopaque) void {
             const job: *TileRenderJob = @ptrCast(@alignCast(ctx));
             if (job.sys_shadows) |sys| {
                 const _z_meshletShadowTile = profiler.zone("meshletShadowTile");
@@ -3695,6 +3693,29 @@ pub const Renderer = struct {
         }
     };
 
+    const FrameExecutionContext = struct {
+        renderer: *Renderer,
+        mesh: *const Mesh,
+        view_rotation: math.Mat4,
+        light_dir: math.Vec3,
+        pump: ?*const fn (*Renderer) bool,
+        raster_projection: ProjectionParams,
+        mesh_work: *const MeshWork,
+        is_editor_mode: bool,
+        light_camera: math.Vec3,
+        center_x: f32,
+        center_y: f32,
+        x_scale: f32,
+        y_scale: f32,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        taa_view: TemporalAAViewState,
+        shadow_map_light_count: usize,
+        light_dir_world: math.Vec3,
+        cache_projection: ProjectionParams,
+    };
+
     const MeshWorkWriter = struct {
         work: *MeshWork,
 
@@ -4116,7 +4137,7 @@ pub const Renderer = struct {
     /// Returns whether i sf ir st pe rs on mo de.
     /// The check is side-effect free so callers can gate expensive follow-up work cheaply.
     pub fn isFirstPersonMode(self: *const Renderer) bool {
-        return self.camera_control_mode == .first_person;
+        return camera_runtime.wantsHiddenCursor(self);
     }
 
     /// Returns whether i ss ce ne it em dr ag ac ti ve.
@@ -4129,22 +4150,9 @@ pub const Renderer = struct {
         self.scene_camera_script_active = active;
     }
 
-    pub fn requestCameraFovDelta(self: *Renderer, delta: f32) void {
-        if (!camera_controller.isHoldZoomHeld(&self.fps_zoom_state)) {
-            self.pending_fov_delta += delta;
-        }
-    }
-
     pub fn applyCameraModeCommand(self: *Renderer, mode_tag: u8) void {
-        switch (mode_tag) {
-            2 => {
-                const next_mode: CameraControlMode = if (self.camera_control_mode == .first_person) .editor else .first_person;
-                self.setCameraControlMode(next_mode);
-            },
-            0 => self.setCameraControlMode(.editor),
-            1 => self.setCameraControlMode(.first_person),
-            else => {},
-        }
+        const next_mode = camera_runtime.resolveCameraModeCommand(self.camera_control_mode, mode_tag) orelse return;
+        self.setCameraControlMode(next_mode);
     }
 
     pub fn toggleSceneItemGizmo(self: *Renderer) void {
@@ -4290,25 +4298,14 @@ pub const Renderer = struct {
     /// Handles handle raw mouse delta.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleRawMouseDelta(self: *Renderer, delta_x: i32, delta_y: i32) void {
-        _ = self.mouse_input.addRawDelta(delta_x, delta_y);
-        if (self.camera_control_mode != .first_person) return;
-        camera_controller.accumulateFirstPersonDelta(
-            &self.mouse_state,
-            math.Vec2.new(
-                @as(f32, @floatFromInt(delta_x)),
-                @as(f32, @floatFromInt(delta_y)),
-            ),
-        );
+        camera_runtime.handleRawMouseDelta(self, delta_x, delta_y);
     }
 
     /// Handles handle mouse left click.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleMouseLeftClick(self: *Renderer, x: i32, y: i32) void {
         _ = self.mouse_input.setButton(.left, true);
-        if (self.camera_control_mode == .first_person) {
-            camera_controller.beginHoldZoom(&self.fps_zoom_state, self.camera_fov_deg, .left_button);
-            return;
-        }
+        if (camera_runtime.handleFirstPersonLeftPress(self)) return;
         const pointer_view = self.computePointerViewState();
         if (self.beginLightGizmoDrag(x, y, pointer_view)) return;
         var pointer_ctx = SceneItemGizmoDrawContext{
@@ -4337,10 +4334,7 @@ pub const Renderer = struct {
         _ = self.mouse_input.setButton(.left, false);
         _ = x;
         _ = y;
-        if (self.camera_control_mode == .first_person) {
-            camera_controller.endHoldZoom(&self.fps_zoom_state, self.camera_fov_deg, .left_button);
-            return;
-        }
+        if (camera_runtime.handleFirstPersonLeftRelease(self)) return;
         self.scene_item_gizmo.handlePointerUp();
         self.clearLightGizmoInteraction();
     }
@@ -4351,8 +4345,7 @@ pub const Renderer = struct {
         _ = self.mouse_input.setButton(.right, true);
         _ = x;
         _ = y;
-        if (self.camera_control_mode != .first_person) return;
-        camera_controller.beginHoldZoom(&self.fps_zoom_state, self.camera_fov_deg, .right_button);
+        _ = camera_runtime.handleFirstPersonRightPress(self);
     }
 
     /// Handles handle mouse right release.
@@ -4361,36 +4354,39 @@ pub const Renderer = struct {
         _ = self.mouse_input.setButton(.right, false);
         _ = x;
         _ = y;
-        camera_controller.endHoldZoom(&self.fps_zoom_state, self.camera_fov_deg, .right_button);
+        _ = camera_runtime.handleFirstPersonRightRelease(self);
     }
 
     /// Handles handle focus lost.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleFocusLost(self: *Renderer) void {
-        self.keys_pressed.clear();
-        self.mouse_input.clear();
         self.scene_item_gizmo.handlePointerUp();
         self.clearLightGizmoInteraction();
-        camera_controller.cancelHoldZoom(&self.fps_zoom_state, &self.camera_fov_deg, true);
-        self.last_reported_fov_deg = self.camera_fov_deg;
-        camera_controller.setJumpHeldState(&self.fps_body_state, false);
-        camera_controller.resetForModeToggle(&self.mouse_state);
+        camera_runtime.handleFocusLost(self);
     }
 
     /// Handles handle focus gained.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleFocusGained(self: *Renderer) void {
-        camera_controller.resetForModeToggle(&self.mouse_state);
+        camera_runtime.handleFocusGained(self);
     }
 
     /// Performs desired cursor style.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn desiredCursorStyle(self: *const Renderer) CursorStyle {
-        if (self.camera_control_mode == .first_person) return .hidden;
-        const item_hint = self.scene_item_gizmo.cursorHint();
-        if (item_hint == .grabbing or self.light_gizmo.drag_axis != null) return .grabbing;
-        if (item_hint == .grab or self.light_gizmo.hover_axis != null) return .grab;
-        return .arrow;
+        return camera_runtime.desiredCursorStyle(
+            CursorStyle,
+            scene_item_gizmo.CursorHint,
+            LightGizmoAxis,
+            self,
+            self.scene_item_gizmo.cursorHint(),
+            self.light_gizmo.drag_axis,
+            self.light_gizmo.hover_axis,
+            .arrow,
+            .grab,
+            .grabbing,
+            .hidden,
+        );
     }
 
     /// Sets s et sc en ei te mb in di ng s.
@@ -4424,17 +4420,55 @@ pub const Renderer = struct {
     /// Sets s et ca me ra po si ti on.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setCameraPosition(self: *Renderer, position: math.Vec3) void {
-        self.camera_position = position;
-        if (!self.scene_camera_script_active) {
-            camera_controller.resetFpsBody(&self.fps_body_state, self.camera_position, fps_camera_floor_y, fps_camera_eye_height);
-        }
+        camera_runtime.setCameraPosition(self, position);
     }
 
     /// Sets s et ca me ra or ie nt at io n.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
     pub fn setCameraOrientation(self: *Renderer, pitch: f32, yaw: f32) void {
-        self.rotation_x = camera_controller.clampPitch(pitch);
-        self.rotation_angle = yaw;
+        camera_runtime.setCameraOrientation(self, pitch, yaw);
+    }
+
+    pub fn setCameraFov(self: *Renderer, fov_deg: f32) void {
+        camera_runtime.setCameraFov(self, fov_deg);
+    }
+
+    pub fn setPresentSize(self: *Renderer, width: i32, height: i32) void {
+        if (width <= 0 or height <= 0) return;
+        if (self.present_state.width == width and self.present_state.height == height) return;
+
+        const saved = ResizeStateSnapshot{
+            .camera_position = self.camera_position,
+            .camera_pitch = self.rotation_x,
+            .camera_yaw = self.rotation_angle,
+            .camera_fov_deg = self.camera_fov_deg,
+            .camera_control_mode = self.camera_control_mode,
+            .scene_camera_script_active = self.scene_camera_script_active,
+            .show_tile_borders = self.show_tile_borders,
+            .show_wireframe = self.show_wireframe,
+            .show_light_orb = self.show_light_orb,
+            .cull_light_orb = self.cull_light_orb,
+            .use_tiled_rendering = self.use_tiled_rendering,
+            .show_frame_pacing_overlay = self.show_frame_pacing_overlay,
+            .show_render_overlay = self.show_render_overlay,
+            .present_minimized = self.present_state.minimized,
+        };
+
+        self.recreateForPresentSize(width, height, saved) catch |err| {
+            renderer_logger.errorSub("resize", "failed to resize renderer to {d}x{d}: {s}", .{
+                width,
+                height,
+                @errorName(err),
+            });
+        };
+    }
+
+    pub fn setPresentMinimized(self: *Renderer, minimized: bool) void {
+        self.present_state.setMinimized(minimized);
+    }
+
+    pub fn lastDirectFrameTimings(self: *const Renderer) direct_backend.FrameTimings {
+        return self.direct_backend.lastTimings();
     }
 
     /// Marks cached/derived data stale so it is recomputed on the next usage.
@@ -4457,6 +4491,63 @@ pub const Renderer = struct {
         self.taa_previous_mesh_valid = false;
     }
 
+    const ResizeStateSnapshot = struct {
+        camera_position: math.Vec3,
+        camera_pitch: f32,
+        camera_yaw: f32,
+        camera_fov_deg: f32,
+        camera_control_mode: CameraControlMode,
+        scene_camera_script_active: bool,
+        show_tile_borders: bool,
+        show_wireframe: bool,
+        show_light_orb: bool,
+        cull_light_orb: bool,
+        use_tiled_rendering: bool,
+        show_frame_pacing_overlay: bool,
+        show_render_overlay: bool,
+        present_minimized: bool,
+    };
+
+    fn recreateForPresentSize(self: *Renderer, present_width: i32, present_height: i32, saved: ResizeStateSnapshot) !void {
+        const scale_percent: i32 = @intCast(@max(config.RENDER_RESOLUTION_SCALE_PERCENT, 1));
+        const render_width = @max(1, @divTrunc(present_width * scale_percent, 100));
+        const render_height = @max(1, @divTrunc(present_height * scale_percent, 100));
+
+        if (self.bitmap.width == render_width and self.bitmap.height == render_height) {
+            self.present_state.applyResize(present_width, present_height);
+            return;
+        }
+
+        renderer_logger.infoSub("resize", "recreating renderer surfaces present={d}x{d} render={d}x{d}", .{
+            present_width,
+            present_height,
+            render_width,
+            render_height,
+        });
+
+        var replacement = try Renderer.init(self.hwnd, render_width, render_height, self.allocator);
+        errdefer replacement.deinit();
+
+        replacement.setCameraPosition(saved.camera_position);
+        replacement.setCameraOrientation(saved.camera_pitch, saved.camera_yaw);
+        replacement.setCameraFov(saved.camera_fov_deg);
+        replacement.camera_control_mode = saved.camera_control_mode;
+        replacement.scene_camera_script_active = saved.scene_camera_script_active;
+        replacement.show_tile_borders = saved.show_tile_borders;
+        replacement.show_wireframe = saved.show_wireframe;
+        replacement.show_light_orb = saved.show_light_orb;
+        replacement.cull_light_orb = saved.cull_light_orb;
+        replacement.use_tiled_rendering = saved.use_tiled_rendering;
+        replacement.show_frame_pacing_overlay = saved.show_frame_pacing_overlay;
+        replacement.show_render_overlay = saved.show_render_overlay;
+        replacement.present_state.applyResize(present_width, present_height);
+        replacement.present_state.setMinimized(saved.present_minimized);
+
+        var old = self.*;
+        self.* = replacement;
+        old.deinit();
+    }
+
     /// Performs capture temporal mesh state.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn captureTemporalMeshState(self: *Renderer, mesh: *const Mesh) void {
@@ -4477,8 +4568,7 @@ pub const Renderer = struct {
     }
 
     pub fn consumeSceneCameraLookDelta(self: *Renderer, frame_dt_seconds: f32) math.Vec2 {
-        if (!self.scene_camera_script_active or self.camera_control_mode != .first_person) return math.Vec2.new(0.0, 0.0);
-        return self.consumeMouseDelta(frame_dt_seconds);
+        return camera_runtime.consumeSceneCameraLookDelta(self, frame_dt_seconds);
     }
 
     fn effectiveMouseSensitivity(self: *const Renderer) f32 {
@@ -4513,7 +4603,7 @@ pub const Renderer = struct {
         };
     }
 
-    fn clearLightGizmoInteraction(self: *Renderer) void {
+    pub fn clearLightGizmoInteraction(self: *Renderer) void {
         self.light_gizmo.hover_axis = null;
         self.light_gizmo.drag_axis = null;
         self.light_gizmo.drag_last_pointer = null;
@@ -4690,9 +4780,8 @@ pub const Renderer = struct {
     /// Returns whether s ho ul dr en de rf ra me.
     /// The check is side-effect free so callers can gate expensive follow-up work cheaply.
     pub fn shouldRenderFrame(self: *Renderer) bool {
-        if (!self.usesSoftwareFramePacing()) return true;
         const now = std.time.nanoTimestamp();
-        return now >= self.next_frame_time;
+        return frame_pacing.shouldRender(self.currentPacingMode(), self.next_frame_time, now);
     }
 
     /// renderLoadingOverlayFrame renders Renderer output.
@@ -4709,11 +4798,49 @@ pub const Renderer = struct {
         self.drawBitmap();
 
         const now = std.time.nanoTimestamp();
-        self.last_completed_frame_time = now;
-        self.total_frames_rendered += 1;
-        self.frame_count +%= 1;
-        self.advanceFrameDeadline(now);
+        self.notePresentedFrame(now);
+        self.finalizeFrame(now);
         return true;
+    }
+
+    pub fn renderMinimalPrimitiveFrame(self: *Renderer, pump: ?*const fn (*Renderer) bool) !void {
+        if (pump) |pump_fn| {
+            if (!pump_fn(self)) return error.RenderInterrupted;
+        }
+
+        const now = std.time.nanoTimestamp();
+        self.current_frame_start_time = now;
+        try self.renderDirectPrimitiveShowcase();
+        const present = try self.presentFrame(true);
+        self.direct_backend.notePresentTime(present.present_ns);
+        self.notePresentedFrame(std.time.nanoTimestamp());
+        self.finalizeFrame(std.time.nanoTimestamp());
+    }
+
+    fn presentFrame(self: *Renderer, use_direct_dirty_rect: bool) !presentation_stage.Result {
+        if (self.hdc_mem) |hdc_mem| {
+            if (self.show_render_overlay or self.hybrid_shadow_debug.enabled or self.scene_item_gizmo.enabled or self.loading_overlay.enabled) {
+                self.drawRenderPassOverlay(hdc_mem);
+            }
+            if (self.show_frame_pacing_overlay) {
+                self.drawFramePacingPanel(hdc_mem);
+            }
+        }
+        return presentation_stage.execute(
+            &self.present_backend,
+            &self.present_state,
+            &self.bitmap,
+            config.WINDOW_VSYNC,
+            if (use_direct_dirty_rect)
+                if (self.direct_backend.lastDirtyRect()) |rect| .{
+                    .min_x = rect.min_x,
+                    .min_y = rect.min_y,
+                    .max_x = rect.max_x,
+                    .max_y = rect.max_y,
+                } else null
+            else
+                null,
+        ) catch .{};
     }
 
     /// Moves data for copy text truncate.
@@ -4760,15 +4887,15 @@ pub const Renderer = struct {
     }
 
     fn currentPacingMode(self: *const Renderer) frame_pacing_hud.Mode {
-        return pacingModeForTarget(self.target_frame_time_ns);
+        return frame_pacing.resolveMode(config.WINDOW_VSYNC, self.target_frame_time_ns);
     }
 
     fn usesSoftwareFramePacing(self: *const Renderer) bool {
-        return self.currentPacingMode() == .software;
+        return frame_pacing.usesSoftwarePacing(self.currentPacingMode());
     }
 
     fn effectiveFramePacingTargetNs(self: *const Renderer) i128 {
-        return if (self.usesSoftwareFramePacing()) self.target_frame_time_ns else 0;
+        return frame_pacing.effectiveTargetNs(self.currentPacingMode(), self.target_frame_time_ns);
     }
 
     fn waitWithFramePacingTimer(self: *Renderer, sleep_ns: i128) bool {
@@ -4782,33 +4909,21 @@ pub const Renderer = struct {
         return true;
     }
 
-    fn framePacingSafetyMarginNs(self: *const Renderer) i128 {
-        if (self.target_frame_time_ns <= 0) return 500_000;
-        return std.math.clamp(@divTrunc(self.target_frame_time_ns, 30), @as(i128, 500_000), @as(i128, 2_000_000));
-    }
-
     fn framePacingCoarseThresholdNs(self: *const Renderer) i128 {
-        if (self.target_frame_time_ns <= 0) return 2_000_000;
-        return std.math.clamp(@divTrunc(self.target_frame_time_ns, 6), @as(i128, 2_000_000), @as(i128, 8_000_000));
+        return frame_pacing.coarseThresholdNs(self.target_frame_time_ns);
     }
 
     fn framePacingRequestedSleepNs(self: *const Renderer, remaining_ns: i128) i128 {
-        const safety_margin_ns = self.framePacingSafetyMarginNs();
-        const bias_ns = std.math.clamp(self.frame_pacing_sleep_bias_ns, @as(i128, 0), safety_margin_ns);
-        return remaining_ns - safety_margin_ns - bias_ns;
+        return frame_pacing.requestedSleepNs(self.target_frame_time_ns, self.frame_pacing_sleep_bias_ns, remaining_ns);
     }
 
     /// updateFramePacingSleepBias updates Renderer state for the current tick/frame.
     fn updateFramePacingSleepBias(self: *Renderer, requested_sleep_ns: i128, actual_wait_ns: i128) void {
-        if (requested_sleep_ns <= 0 or actual_wait_ns <= 0) return;
-
-        const overshoot_ns = @max(actual_wait_ns - requested_sleep_ns, @as(i128, 0));
-        // Instant-spike / fast-decay: react immediately to overshoots, recover in ~4 frames.
-        if (overshoot_ns > self.frame_pacing_sleep_bias_ns) {
-            self.frame_pacing_sleep_bias_ns = overshoot_ns;
-        } else {
-            self.frame_pacing_sleep_bias_ns = @divTrunc(self.frame_pacing_sleep_bias_ns * 3 + overshoot_ns, 4);
-        }
+        self.frame_pacing_sleep_bias_ns = frame_pacing.updateSleepBias(
+            self.frame_pacing_sleep_bias_ns,
+            requested_sleep_ns,
+            actual_wait_ns,
+        );
     }
 
     /// Performs wait until next frame.
@@ -4839,7 +4954,7 @@ pub const Renderer = struct {
                     self.updateFramePacingSleepBias(sleep_ns, @max(sleep_end - sleep_begin, @as(i128, 0)));
                     continue;
                 } else {
-                    self.frame_pacing_sleep_bias_ns = @divTrunc(self.frame_pacing_sleep_bias_ns * 3, 4);
+                    self.frame_pacing_sleep_bias_ns = frame_pacing.decaySleepBias(self.frame_pacing_sleep_bias_ns);
                 }
             }
 
@@ -4848,25 +4963,20 @@ pub const Renderer = struct {
     }
 
     fn advanceFrameDeadline(self: *Renderer, now_ns: i128) void {
-        if (!self.usesSoftwareFramePacing()) {
-            self.next_frame_time = now_ns;
-            return;
-        }
+        self.next_frame_time = frame_pacing.advanceDeadline(
+            self.currentPacingMode(),
+            self.next_frame_time,
+            self.target_frame_time_ns,
+            now_ns,
+        );
+    }
 
-        // Advance from the previous deadline to keep cadence steady instead of
-        // adding target dt to frame-end time (which drifts and causes uneven pacing).
-        if (self.next_frame_time <= 0) {
-            self.next_frame_time = now_ns + self.target_frame_time_ns;
-            return;
-        }
-        self.next_frame_time += self.target_frame_time_ns;
-
-        // If we fell behind, fast-forward by whole-frame quanta so we re-lock.
-        if (self.next_frame_time <= now_ns) {
-            const overdue = now_ns - self.next_frame_time;
-            const skip_frames = @divTrunc(overdue, self.target_frame_time_ns) + 1;
-            self.next_frame_time += skip_frames * self.target_frame_time_ns;
-        }
+    fn notePresentedFrame(self: *Renderer, current_time: i128) void {
+        self.frame_count += 1;
+        self.total_frames_rendered += 1;
+        self.last_completed_frame_time = current_time;
+        self.active_software_wait_ns = 0;
+        self.advanceFrameDeadline(current_time);
     }
 
     /// Handles handle char input.
@@ -4877,22 +4987,7 @@ pub const Renderer = struct {
     }
 
     fn setCameraControlMode(self: *Renderer, next_mode: CameraControlMode) void {
-        if (self.camera_control_mode == next_mode) return;
-        self.camera_control_mode = next_mode;
-        if (self.camera_control_mode == .first_person) {
-            self.scene_item_gizmo.cancelInteraction();
-            self.clearLightGizmoInteraction();
-            if (!self.scene_camera_script_active) {
-                camera_controller.resetFpsBody(&self.fps_body_state, self.camera_position, fps_camera_floor_y, fps_camera_eye_height);
-                const jump_down = self.keys_pressed.isDown(.space);
-                camera_controller.setJumpHeldState(&self.fps_body_state, jump_down);
-            }
-            camera_controller.onEnterFirstPerson(&self.fps_zoom_state, self.camera_fov_deg);
-        } else {
-            camera_controller.cancelHoldZoom(&self.fps_zoom_state, &self.camera_fov_deg, true);
-            self.last_reported_fov_deg = self.camera_fov_deg;
-        }
-        camera_controller.resetForModeToggle(&self.mouse_state);
+        if (!camera_runtime.setCameraControlMode(self, next_mode)) return;
         renderer_logger.infoSub(
             "camera_mode",
             "mode={s}",
@@ -5130,7 +5225,6 @@ pub const Renderer = struct {
         const _zone = profiler.zone("Renderer.render");
         defer if (_zone) |z| z.end();
 
-        @memset(self.bitmap.pixels, 0xFF000000);
         self.resetRenderPassTimings();
 
         const delta_seconds = self.beginFrame();
@@ -5147,34 +5241,6 @@ pub const Renderer = struct {
                 self.camera_fov_deg,
             },
         );
-
-        if (!self.scene_camera_script_active) {
-            const rotation_speed = 2.0;
-            if (self.keys_pressed.isDown(.left)) self.rotation_angle -= rotation_speed * simulation_delta_seconds;
-            if (self.keys_pressed.isDown(.right)) self.rotation_angle += rotation_speed * simulation_delta_seconds;
-            if (self.keys_pressed.isDown(.up)) self.rotation_x -= rotation_speed * simulation_delta_seconds;
-            if (self.keys_pressed.isDown(.down)) self.rotation_x += rotation_speed * simulation_delta_seconds;
-        }
-
-        const mouse_delta = if (self.scene_camera_script_active)
-            math.Vec2.new(0.0, 0.0)
-        else
-            self.consumeMouseDelta(delta_seconds);
-        if (self.camera_control_mode == .first_person and !self.scene_camera_script_active) {
-            const mouse_sensitivity = self.effectiveMouseSensitivity();
-            camera_controller.applyFirstPersonLook(
-                &self.rotation_angle,
-                &self.rotation_x,
-                mouse_delta,
-                mouse_sensitivity,
-            );
-        }
-        self.rotation_x = camera_controller.clampPitch(self.rotation_x);
-
-        const fov_delta = self.consumePendingFovDelta();
-        if (fov_delta != 0.0) self.adjustCameraFov(fov_delta);
-        camera_controller.updateHoldZoom(&self.fps_zoom_state, &self.camera_fov_deg, delta_seconds);
-        self.last_reported_fov_deg = self.camera_fov_deg;
 
         const sweep_half_angle = std.math.pi / 2.0;
         for (self.lights.items) |*light| {
@@ -5197,82 +5263,10 @@ pub const Renderer = struct {
             math.Vec3.new(self.light_soa.dir_x[0], self.light_soa.dir_y[0], self.light_soa.dir_z[0])
         else
             math.Vec3.new(0, -1, 0);
-
-        const frame_view = if (self.frame_view_cache.needsUpdate(
-            self.camera_position,
-            self.rotation_angle,
-            self.rotation_x,
-            self.camera_fov_deg,
-            self.bitmap.width,
-            self.bitmap.height,
-            light_dir_world,
-            light_distance_0,
-        ))
-            self.frame_view_cache.update(
-                self.camera_position,
-                self.rotation_angle,
-                self.rotation_x,
-                self.camera_fov_deg,
-                self.bitmap.width,
-                self.bitmap.height,
-                light_dir_world,
-                light_distance_0,
-            )
-        else
-            self.frame_view_cache.state;
-
-        const right = frame_view.right;
-        const up = frame_view.up;
-        const forward = frame_view.forward;
-        if (self.camera_control_mode == .first_person) {
-            if (!self.scene_camera_script_active) {
-                const basis = camera_controller.ViewBasis{
-                    .right = right,
-                    .up = up,
-                    .forward = forward,
-                };
-                const fps_params = camera_controller.FpsStepParams{
-                    .dt = simulation_delta_seconds,
-                    .move_speed = self.camera_move_speed,
-                    .floor_y = fps_camera_floor_y,
-                    .eye_height = fps_camera_eye_height,
-                };
-                camera_controller.stepFpsBody(&self.fps_body_state, &self.camera_position, basis, self.keys_pressed, fps_params);
-            }
-        } else if (!self.scene_camera_script_active) {
-            const world_up = math.Vec3.new(0.0, 1.0, 0.0);
-
-            var forward_flat = math.Vec3.new(forward.x, 0.0, forward.z);
-            const forward_flat_len = math.Vec3.length(forward_flat);
-            if (forward_flat_len > 0.0001) {
-                forward_flat = math.Vec3.scale(forward_flat, 1.0 / forward_flat_len);
-            } else {
-                forward_flat = math.Vec3.new(0.0, 0.0, 0.0);
-            }
-
-            var right_flat = math.Vec3.new(right.x, 0.0, right.z);
-            const right_flat_len = math.Vec3.length(right_flat);
-            if (right_flat_len > 0.0001) {
-                right_flat = math.Vec3.scale(right_flat, 1.0 / right_flat_len);
-            } else {
-                right_flat = math.Vec3.new(0.0, 0.0, 0.0);
-            }
-
-            var movement_dir = math.Vec3.new(0.0, 0.0, 0.0);
-            if (self.keys_pressed.isDown(.w)) movement_dir = math.Vec3.add(movement_dir, forward_flat);
-            if (self.keys_pressed.isDown(.s)) movement_dir = math.Vec3.sub(movement_dir, forward_flat);
-            if (self.keys_pressed.isDown(.d)) movement_dir = math.Vec3.add(movement_dir, right_flat);
-            if (self.keys_pressed.isDown(.a)) movement_dir = math.Vec3.sub(movement_dir, right_flat);
-            if (self.keys_pressed.isDown(.space)) movement_dir = math.Vec3.add(movement_dir, world_up);
-            if (self.keys_pressed.isDown(.ctrl)) movement_dir = math.Vec3.sub(movement_dir, world_up);
-
-            const movement_mag = math.Vec3.length(movement_dir);
-            if (movement_mag > 0.0001) {
-                const normalized_move = math.Vec3.scale(movement_dir, 1.0 / movement_mag);
-                const move_step = math.Vec3.scale(normalized_move, self.camera_move_speed * simulation_delta_seconds);
-                self.camera_position = math.Vec3.add(self.camera_position, move_step);
-            }
-        }
+        camera_runtime.prepareCameraForFrame(self, delta_seconds, simulation_delta_seconds, light_dir_world, light_distance_0);
+        const right = self.frame_view_cache.state.right;
+        const up = self.frame_view_cache.state.up;
+        const forward = self.frame_view_cache.state.forward;
 
         const resolved_frame_view = if (self.frame_view_cache.needsUpdate(
             self.camera_position,
@@ -5316,59 +5310,64 @@ pub const Renderer = struct {
             .jitter_y = taa_jitter.y,
         };
         const taa_view = TemporalAAViewState.init(self.camera_position, right, up, forward, raster_projection);
+        const legacy_mesh_work_required = scene_tiled_backend.usesLegacyMeshWork();
+        var empty_mesh_work = MeshWork.init();
+        const mesh_work = blk: {
+            if (!legacy_mesh_work_required) break :blk &empty_mesh_work;
 
-        var cache = &self.mesh_work_cache;
-        try cache.ensureCapacity(self.allocator, mesh.vertices.len);
-        if (config.POST_TAA_ENABLED) try self.ensureTemporalMeshVertexCapacity(mesh.vertices.len);
+            var cache = &self.mesh_work_cache;
+            try cache.ensureCapacity(self.allocator, mesh.vertices.len);
 
-        // Recompute mesh work only when camera/light/projection dependencies diverge from cached keys.
-        const needs_update = cache.needsUpdate(
-            mesh,
-            self.camera_position,
-            right,
-            up,
-            forward,
-            light_dir,
-            cache_projection,
-        );
-        if (needs_update) {
-            const mesh_work_start = std.time.nanoTimestamp();
-            meshlet_logger.debugSub(
-                "work",
-                "refreshing mesh work cache (vertices={} triangles={})",
-                .{ mesh.vertices.len, mesh.triangles.len },
-            );
-            cache.beginUpdate();
-            try self.generateMeshWork(
+            // Recompute mesh work only when camera/light/projection dependencies diverge from cached keys.
+            const needs_update = cache.needsUpdate(
                 mesh,
-                cache.projected,
-                cache.transformed_vertices,
-                cache.vertex_ready,
+                self.camera_position,
                 right,
                 up,
                 forward,
-                cache_projection,
-                &cache.work,
                 light_dir,
+                cache_projection,
             );
-            // Capture the exact dependency snapshot that will be checked on the next frame.
-            cache.finalizeUpdate(mesh, self.camera_position, right, up, forward, light_dir, cache_projection);
-            self.recordRenderPassTiming("mesh_work_update", mesh_work_start);
-        } else {
-            meshlet_logger.debugSub("work", "reusing cached mesh work", .{});
-        }
+            if (needs_update) {
+                const mesh_work_start = std.time.nanoTimestamp();
+                meshlet_logger.debugSub(
+                    "work",
+                    "refreshing mesh work cache (vertices={} triangles={})",
+                    .{ mesh.vertices.len, mesh.triangles.len },
+                );
+                cache.beginUpdate();
+                try self.generateMeshWork(
+                    mesh,
+                    cache.projected,
+                    cache.transformed_vertices,
+                    cache.vertex_ready,
+                    right,
+                    up,
+                    forward,
+                    cache_projection,
+                    &cache.work,
+                    light_dir,
+                );
+                // Capture the exact dependency snapshot that will be checked on the next frame.
+                cache.finalizeUpdate(mesh, self.camera_position, right, up, forward, light_dir, cache_projection);
+                self.recordRenderPassTiming("mesh_work_update", mesh_work_start);
+            } else {
+                meshlet_logger.debugSub("work", "reusing cached mesh work", .{});
+            }
 
-        if (config.MESHLET_SHADOWS_ENABLED and mesh.meshlets.len > 0) {
-            _ = try self.sys_shadows.ensureBLAS(mesh);
-            var instances = [_]math.Mat4{math.Mat4.identity()};
-            try self.sys_shadows.ensureTLAS(&instances);
-        }
+            if (config.MESHLET_SHADOWS_ENABLED and mesh.meshlets.len > 0) {
+                _ = try self.sys_shadows.ensureBLAS(mesh);
+                var instances = [_]math.Mat4{math.Mat4.identity()};
+                try self.sys_shadows.ensureTLAS(&instances);
+            }
 
-        if (builtin.mode == .Debug and cache.full_vertex_cache_valid and cache.transformed_vertices.len == mesh.vertices.len) {
-            self.debugGroundPlane(mesh, cache.transformed_vertices, view_rotation);
-        }
+            if (builtin.mode == .Debug and cache.full_vertex_cache_valid and cache.transformed_vertices.len == mesh.vertices.len) {
+                self.debugGroundPlane(mesh, cache.transformed_vertices, view_rotation);
+            }
 
-        const mesh_work = &cache.work;
+            break :blk &cache.work;
+        };
+        if (config.POST_TAA_ENABLED) try self.ensureTemporalMeshVertexCapacity(mesh.vertices.len);
         const shadow_map_light_count = if (config.POST_SHADOW_ENABLED)
             self.countLightsWithShadowMode(.shadow_map)
         else
@@ -5410,161 +5409,43 @@ pub const Renderer = struct {
         self.light_work_stats.tile_light_rejected = 0;
         self.light_work_stats.tile_light_overflow_tiles = 0;
         @memset(self.shadow_resolve_elapsed_ns[0..self.lights.items.len], 0);
-        if (config.POST_SHADOW_ENABLED) {
-            const shadow_budget_ns = self.computeShadowBuildBudgetNs();
-            const enforce_shadow_budget = shadow_budget_ns >= 0;
-            if (shadow_budget_ns > 0) {
-                self.light_work_stats.shadow_budget_ns = shadow_budget_ns;
-            }
-            var shadow_budget_spent_ns: i128 = 0;
-            @memset(self.shadow_build_elapsed_ns[0..self.lights.items.len], 0);
-            const frame_number = self.total_frames_rendered + 1;
-            for (self.lights.items, 0..) |*light, light_index| {
-                if (light.shadow_mode != .shadow_map) continue;
-                const base_cadence = @max(@as(u64, 1), @as(u64, light.shadow_update_interval_frames));
-                const cadence_scale = @max(@as(u64, 1), @as(u64, light.shadow_dynamic_interval_scale));
-                const cadence = @max(@as(u64, 1), @min(std.math.maxInt(u64), base_cadence * cadence_scale));
-                const frames_since_last_build = if (light.shadow_last_build_frame == 0)
-                    cadence
-                else
-                    frame_number - light.shadow_last_build_frame;
-                const should_rebuild = !light.shadow_map.active or frames_since_last_build >= cadence;
-                if (!should_rebuild) {
-                    self.light_work_stats.shadow_map_reused_lights += 1;
-                    continue;
-                }
-                if (enforce_shadow_budget and light.shadow_map.active) {
-                    const estimated_build_ns = estimateShadowBuildCostNs(light);
-                    if (shadow_budget_spent_ns + estimated_build_ns > shadow_budget_ns) {
-                        self.light_work_stats.shadow_map_reused_lights += 1;
-                        self.light_work_stats.shadow_budget_skipped_lights += 1;
-                        continue;
-                    }
-                }
-                const light_dir_world_for_shadow = math.Vec3.new(
-                    self.light_soa.dir_x[light_index],
-                    self.light_soa.dir_y[light_index],
-                    self.light_soa.dir_z[light_index],
-                );
-                self.shadow_build_elapsed_ns[light_index] = self.buildShadowMap(mesh, light_dir_world_for_shadow, &light.shadow_map);
-                light.shadow_last_build_frame = frame_number;
-                light.shadow_last_build_ns = self.shadow_build_elapsed_ns[light_index];
-                self.light_work_stats.shadow_build_ns += self.shadow_build_elapsed_ns[light_index];
-                shadow_budget_spent_ns += self.shadow_build_elapsed_ns[light_index];
-            }
-            if (self.light_work_stats.shadow_build_ns > 0) {
-                self.recordRenderPassDuration("shadow_map_build_total", self.light_work_stats.shadow_build_ns);
-            }
-        }
-
-        const scene_pass_start = std.time.nanoTimestamp();
-        if (self.use_tiled_rendering and self.tile_grid != null and self.tile_buffers != null) {
-            const tri_count = mesh_work.triangleSlice().len;
-            pipeline_logger.debugSub("dispatch", "rendering tiled path triangles={} meshlets={}", .{ tri_count, mesh_work.*.meshlet_len });
-            const shadow_pass_elapsed_ns = try self.renderTiled(mesh, view_rotation, light_dir, pump, raster_projection, mesh_work);
-            const scene_pass_elapsed_ns = std.time.nanoTimestamp() - scene_pass_start;
-            self.recordRenderPassDuration("meshlet_tiled", scene_pass_elapsed_ns - @as(i128, @intCast(shadow_pass_elapsed_ns)));
-            if (config.MESHLET_SHADOWS_ENABLED) {
-                self.recordRenderPassDuration("meshlet_shadows", @as(i128, @intCast(shadow_pass_elapsed_ns)));
-            }
-        } else {
-            const tri_count = mesh_work.triangleSlice().len;
-            pipeline_logger.debugSub("dispatch", "rendering direct path triangles={} meshlets={}", .{ tri_count, mesh_work.*.meshlet_len });
-            try self.renderDirect(mesh, view_rotation, light_dir, raster_projection, mesh_work);
-            self.recordRenderPassTiming("meshlet_direct", scene_pass_start);
-        }
-
         const is_editor_mode = self.camera_control_mode != .first_person;
-        if (is_editor_mode) {
-            self.scene_item_gizmo.resolvePendingPick(
-                self.bitmap.width,
-                self.bitmap.height,
-                @as(i32, @intCast(config.WINDOW_WIDTH)),
-                @as(i32, @intCast(config.WINDOW_HEIGHT)),
-                self.scene_surface,
-            );
-        }
-        self.applyPostProcessingPasses(
-            mesh,
-            self.camera_position,
-            right,
-            up,
-            forward,
-            taa_view,
-            raster_projection,
-            light_dir_world,
-            self.shadow_build_elapsed_ns[0..self.lights.items.len],
+        const using_tiled_backend = self.use_tiled_rendering and self.tile_grid != null and self.tile_buffers != null;
+        const compiled_frame_plan = frame_pipeline.compileCachedFramePlan(&self.cached_frame_plan, .{
+            .has_shadow_map_lights = shadow_map_light_count > 0,
+            .backend = if (using_tiled_backend) .tiled else .direct,
+            .include_post_process = false,
+            .include_present = true,
+        });
+        const frame_exec_ctx = FrameExecutionContext{
+            .renderer = self,
+            .mesh = mesh,
+            .view_rotation = view_rotation,
+            .light_dir = light_dir,
+            .pump = pump,
+            .raster_projection = raster_projection,
+            .mesh_work = mesh_work,
+            .is_editor_mode = is_editor_mode,
+            .light_camera = light_camera,
+            .center_x = center_x,
+            .center_y = center_y,
+            .x_scale = x_scale,
+            .y_scale = y_scale,
+            .basis_right = right,
+            .basis_up = up,
+            .basis_forward = forward,
+            .taa_view = taa_view,
+            .shadow_map_light_count = shadow_map_light_count,
+            .light_dir_world = light_dir_world,
+            .cache_projection = cache_projection,
+        };
+        const current_time = try frame_executor.executeFramePlan(
+            FrameExecutionContext,
+            compiled_frame_plan,
+            frame_exec_ctx,
+            frame_stage_dispatcher,
+            std.time.nanoTimestamp(),
         );
-        if (is_editor_mode) {
-            self.scene_item_gizmo.applyOutline(
-                self.bitmap.pixels,
-                self.bitmap.width,
-                self.bitmap.height,
-                self.scene_surface,
-            );
-        }
-        try self.applyAdaptiveShadowBudgetPolicy();
-        if (self.show_light_orb) {
-            const light_camera_z = light_camera.z;
-            if (light_camera_z > NEAR_CLIP) {
-                var glow_color = math.Vec3.new(1.0, 1.0, 1.0);
-                var glow_radius: f32 = 0.0;
-                var glow_intensity: f32 = 0.0;
-                if (self.lights.items.len > 0) {
-                    glow_color = self.lights.items[0].color;
-                    glow_radius = self.lights.items[0].glow_radius;
-                    glow_intensity = self.lights.items[0].glow_intensity;
-                }
-                if (glow_radius > 0.0 and glow_intensity > 0.0) {
-                    self.drawLightGlow(light_camera, light_camera_z, center_x, center_y, x_scale, y_scale, glow_color, glow_radius, glow_intensity);
-                }
-                self.drawLightMarker(light_camera, light_camera_z, center_x, center_y, x_scale, y_scale);
-            }
-        }
-        if (is_editor_mode and self.light_gizmo.enabled) {
-            self.drawLightGizmo(self.camera_position, right, up, forward, cache_projection);
-        }
-        if (is_editor_mode and self.scene_item_gizmo.isActive()) {
-            self.drawSceneItemGizmo(self.camera_position, right, up, forward, cache_projection);
-        }
-        const present_start = std.time.nanoTimestamp();
-        const cpu_frame_ns = present_start - self.current_frame_start_time;
-
-        // Pre-present compensation: if render finished early relative to the
-        // ideal present cadence, spin-wait so the present lands on the deadline.
-        // This absorbs render-time variance and produces evenly spaced presents.
-        if (self.usesSoftwareFramePacing() and self.last_completed_frame_time > 0) {
-            const ideal_present_time = self.last_completed_frame_time + self.target_frame_time_ns - self.present_cost_ema_ns;
-            var spin_now = std.time.nanoTimestamp();
-            while (spin_now < ideal_present_time) {
-                std.atomic.spinLoopHint();
-                spin_now = std.time.nanoTimestamp();
-            }
-        }
-
-        const pre_present_time = std.time.nanoTimestamp();
-        self.drawBitmap();
-        const present_end = std.time.nanoTimestamp();
-        // Update EMA of drawBitmap() cost so the pre-present spin accounts for it.
-        const draw_cost_ns = @max(present_end - pre_present_time, @as(i128, 0));
-        self.present_cost_ema_ns = @divTrunc(self.present_cost_ema_ns * 7 + draw_cost_ns, 8);
-        self.recordRenderPassTiming("present", present_start);
-        pipeline_logger.debugSub("present", "bitmap presented", .{});
-
-        self.frame_count += 1;
-        self.total_frames_rendered += 1;
-        self.maybeEmitSingleFrameProfile();
-        const current_time = present_end;
-        const frame_interval_ns = current_time - self.last_completed_frame_time;
-        self.frame_pacing.recordSample(.{
-            .total_ms = @as(f32, @floatFromInt(@max(frame_interval_ns, @as(i128, 0)))) / 1_000_000.0,
-            .cpu_ms = @as(f32, @floatFromInt(@max(cpu_frame_ns, @as(i128, 0)))) / 1_000_000.0,
-            .software_wait_ms = @as(f32, @floatFromInt(@max(self.active_software_wait_ns, @as(i128, 0)))) / 1_000_000.0,
-            .present_wait_ms = @as(f32, @floatFromInt(@max(present_end - present_start, @as(i128, 0)))) / 1_000_000.0,
-            .deadline_error_ms = @as(f32, @floatFromInt(self.frame_deadline_error_ns)) / 1_000_000.0,
-        }, self.effectiveFramePacingTargetNs());
-        self.last_completed_frame_time = current_time;
-        self.active_software_wait_ns = 0;
         self.finalizeFrame(current_time);
         self.advanceFrameDeadline(current_time);
 
@@ -5688,20 +5569,6 @@ pub const Renderer = struct {
                     self.hybrid_shadow_stats.final_candidate_count,
                 },
             );
-        }
-    }
-
-    fn consumePendingFovDelta(self: *Renderer) f32 {
-        const delta = self.pending_fov_delta;
-        self.pending_fov_delta = 0.0;
-        return delta;
-    }
-
-    fn adjustCameraFov(self: *Renderer, delta: f32) void {
-        const new_fov = std.math.clamp(self.camera_fov_deg + delta, config.CAMERA_FOV_MIN, config.CAMERA_FOV_MAX);
-        if (!std.math.approxEqAbs(f32, new_fov, self.camera_fov_deg, 0.0001)) {
-            self.camera_fov_deg = new_fov;
-            self.last_reported_fov_deg = new_fov;
         }
     }
 
@@ -6246,7 +6113,7 @@ pub const Renderer = struct {
 
     /// Applies skybox pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applySkyboxPass(
+    pub fn applySkyboxPass(
         self: *Renderer,
         basis_right: math.Vec3,
         basis_up: math.Vec3,
@@ -6268,6 +6135,86 @@ pub const Renderer = struct {
             skybox_pass.runJobWrapper(SkyboxJobContext),
         );
         self.recordRenderPassTiming("skybox", pass_start);
+    }
+
+    pub fn runShadowResolvePass(
+        self: *Renderer,
+        camera_position: math.Vec3,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        projection: ProjectionParams,
+        shadow_build_elapsed_ns: []const i128,
+    ) void {
+        const shadow_ctx = ShadowLightDispatchContext{
+            .renderer = self,
+            .camera_position = camera_position,
+            .basis_right = basis_right,
+            .basis_up = basis_up,
+            .basis_forward = basis_forward,
+            .projection = projection,
+            .shadow_build_elapsed_ns = shadow_build_elapsed_ns,
+        };
+        shadow_map_pass.runPerLight(self.lights.items.len, shadow_ctx, applyShadowLightFromPass);
+        if (self.light_work_stats.shadow_resolve_ns > 0) {
+            self.recordRenderPassDuration("shadow_map_resolve_total", self.light_work_stats.shadow_resolve_ns);
+        }
+    }
+
+    pub fn runHybridShadowPass(
+        self: *Renderer,
+        mesh: *const Mesh,
+        camera_position: math.Vec3,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        light_dir_world: math.Vec3,
+    ) void {
+        const hybrid_ctx = HybridShadowDispatchContext{
+            .renderer = self,
+            .mesh = mesh,
+            .camera_position = camera_position,
+            .basis_right = basis_right,
+            .basis_up = basis_up,
+            .basis_forward = basis_forward,
+            .light_dir_world = light_dir_world,
+        };
+        hybrid_shadow_pass.run(hybrid_ctx, applyHybridShadowFromPass);
+    }
+
+    pub fn runPostProcessStage(
+        self: *Renderer,
+        is_editor_mode: bool,
+        mesh: *const Mesh,
+        basis_right: math.Vec3,
+        basis_up: math.Vec3,
+        basis_forward: math.Vec3,
+        current_view: TemporalAAViewState,
+        projection: ProjectionParams,
+        shadow_map_light_count: usize,
+        light_dir_world: math.Vec3,
+    ) void {
+        if (is_editor_mode) {
+            self.scene_item_gizmo.resolvePendingPick(
+                self.bitmap.width,
+                self.bitmap.height,
+                @as(i32, @intCast(config.WINDOW_WIDTH)),
+                @as(i32, @intCast(config.WINDOW_HEIGHT)),
+                self.scene_surface,
+            );
+        }
+        self.applyPostProcessingPasses(
+            mesh,
+            self.camera_position,
+            basis_right,
+            basis_up,
+            basis_forward,
+            current_view,
+            projection,
+            shadow_map_light_count,
+            light_dir_world,
+            self.shadow_build_elapsed_ns[0..self.lights.items.len],
+        );
     }
 
     /// Applies shadow light from pass.
@@ -6303,54 +6250,6 @@ pub const Renderer = struct {
 
     /// Returns whether i sp os tp as se na bl ed.
     /// The check is side-effect free so callers can gate expensive follow-up work cheaply.
-    fn isPostPassEnabled(ctx: PostPassExecutionContext, pass_id: pass_registry.RenderPassId) bool {
-        const enabled = switch (pass_id) {
-            .skybox => config.POST_SKYBOX_ENABLED,
-            .shadow_map => config.POST_SHADOW_ENABLED and ctx.renderer.countLightsWithShadowMode(.shadow_map) > 0,
-            .shadow_resolve => config.POST_SHADOW_ENABLED and ctx.renderer.countLightsWithShadowMode(.shadow_map) > 0,
-            .hybrid_shadow => config.POST_HYBRID_SHADOW_ENABLED,
-            .ssao => config.POST_SSAO_ENABLED,
-            .ssgi => config.POST_SSGI_ENABLED,
-            .ssr => config.POST_SSR_ENABLED,
-            .depth_fog => config.POST_DEPTH_FOG_ENABLED,
-            .taa => config.POST_TAA_ENABLED,
-            .motion_blur => config.POST_MOTION_BLUR_ENABLED,
-            .god_rays => config.POST_GOD_RAYS_ENABLED,
-            .bloom => config.POST_BLOOM_ENABLED,
-            .lens_flare => config.POST_LENS_FLARE_ENABLED,
-            .dof => config.POST_DOF_ENABLED,
-            .chromatic_aberration => config.POST_CHROMATIC_ABERRATION_ENABLED,
-            .film_grain_vignette => config.POST_FILM_GRAIN_VIGNETTE_ENABLED,
-            .color_grade => config.POST_COLOR_CORRECTION_ENABLED,
-        };
-        if (!enabled) return false;
-        if (pass_id == .motion_blur and !ctx.renderer.taa_scratch.valid) return false;
-        return true;
-    }
-
-    fn onPostPassPhaseBoundary(ctx: PostPassExecutionContext, phase: pass_registry.PassPhase) void {
-        _ = phase;
-        _ = ctx.plan;
-    }
-
-    fn phaseMaskFor(plan: CompositionPlan, phase: pass_registry.PassPhase) pass_registry.PassMask {
-        return switch (phase) {
-            .scene => plan.scene_mask,
-            .geometry_post => plan.geometry_post_mask,
-            .lighting_scatter => plan.lighting_scatter_mask,
-            .final_color => plan.final_color_mask,
-        };
-    }
-
-    fn phaseTimingName(phase: pass_registry.PassPhase) []const u8 {
-        return switch (phase) {
-            .scene => "phase_scene",
-            .geometry_post => "phase_geometry_post",
-            .lighting_scatter => "phase_lighting_scatter",
-            .final_color => "phase_final_color",
-        };
-    }
-
     fn snapshotScratchBindings(self: *Renderer) CompositionScratchBindings {
         return .{
             .ssgi_scratch_pixels = self.ssgi_scratch_pixels,
@@ -6363,30 +6262,26 @@ pub const Renderer = struct {
 
     /// Applies composition scratch bindings.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applyCompositionScratchBindings(self: *Renderer, plan: CompositionPlan) void {
-        _ = self;
-        _ = plan;
+    fn applyCompositionScratchBindings(self: *Renderer, scratch_a: []u32, scratch_b: []u32) void {
+        const applied = frame_pipeline.applyScratchBindings(.{ .scratch_a = scratch_a, .scratch_b = scratch_b });
+        self.ssgi_scratch_pixels = applied.scratch_a;
+        self.ssr_scratch_pixels = applied.scratch_b;
+        self.moblur_scratch_pixels = applied.scratch_a;
+        self.god_rays_scratch_pixels = applied.scratch_a;
+        self.lens_flare_scratch_pixels = applied.scratch_a;
     }
 
-    fn chooseNonFrontScratch(ctx: PostPassExecutionContext) []u32 {
-        const front = ctx.renderer.bitmap.pixels.ptr;
-        if (ctx.plan.scratch_pool_a.len != 0 and front != ctx.plan.scratch_pool_a.ptr) return ctx.plan.scratch_pool_a;
-        if (ctx.plan.scratch_pool_b.len != 0 and front != ctx.plan.scratch_pool_b.ptr) return ctx.plan.scratch_pool_b;
-        return ctx.plan.scratch_pool_a;
+    fn recordPostPhaseTiming(ctx: *anyopaque, phase: pass_graph.PassPhase, duration_ns: i128) void {
+        const self: *Renderer = @ptrCast(@alignCast(ctx));
+        self.recordRenderPassDuration(frame_pipeline.phaseTimingName(phase), duration_ns);
     }
 
-    fn bindScratchForPass(ctx: PostPassExecutionContext, pass_id: pass_registry.RenderPassId) void {
-        const target = chooseNonFrontScratch(ctx);
-        if (target.len == 0) return;
-        switch (pass_id) {
-            .ssgi => ctx.renderer.ssgi_scratch_pixels = target,
-            .ssr => ctx.renderer.ssr_scratch_pixels = target,
-            .motion_blur => ctx.renderer.moblur_scratch_pixels = target,
-            .god_rays => ctx.renderer.god_rays_scratch_pixels = target,
-            .lens_flare => ctx.renderer.lens_flare_scratch_pixels = target,
-            .chromatic_aberration => ctx.renderer.moblur_scratch_pixels = target,
-            else => {},
+    fn shouldRecordPostPhaseTimings(self: *const Renderer) bool {
+        if (self.show_render_overlay) return true;
+        if (profiler.Profiler.instance) |instance| {
+            if (instance.active) return true;
         }
+        return self.profile_capture_frame != 0 and self.total_frames_rendered + 1 == self.profile_capture_frame;
     }
 
     fn restoreScratchBindings(self: *Renderer, saved: CompositionScratchBindings) void {
@@ -6396,56 +6291,8 @@ pub const Renderer = struct {
         self.god_rays_scratch_pixels = saved.god_rays_scratch_pixels;
         self.lens_flare_scratch_pixels = saved.lens_flare_scratch_pixels;
     }
-
-    /// Runs post pass by id.
-    /// Keeps run post pass by id as the single implementation point so call-site behavior stays consistent.
-    fn runPostPassById(ctx: PostPassExecutionContext, pass_id: pass_registry.RenderPassId) void {
-        bindScratchForPass(ctx, pass_id);
-        switch (pass_id) {
-            .skybox => ctx.renderer.applySkyboxPass(ctx.basis_right, ctx.basis_up, ctx.basis_forward, ctx.projection),
-            .shadow_map => {},
-            .shadow_resolve => {
-                const shadow_ctx = ShadowLightDispatchContext{
-                    .renderer = ctx.renderer,
-                    .camera_position = ctx.camera_position,
-                    .basis_right = ctx.basis_right,
-                    .basis_up = ctx.basis_up,
-                    .basis_forward = ctx.basis_forward,
-                    .projection = ctx.projection,
-                    .shadow_build_elapsed_ns = ctx.shadow_build_elapsed_ns,
-                };
-                shadow_map_pass.runPerLight(ctx.renderer.lights.items.len, shadow_ctx, applyShadowLightFromPass);
-                if (ctx.renderer.light_work_stats.shadow_resolve_ns > 0) {
-                    ctx.renderer.recordRenderPassDuration("shadow_map_resolve_total", ctx.renderer.light_work_stats.shadow_resolve_ns);
-                }
-            },
-            .hybrid_shadow => {
-                const hybrid_ctx = HybridShadowDispatchContext{
-                    .renderer = ctx.renderer,
-                    .mesh = ctx.mesh,
-                    .camera_position = ctx.camera_position,
-                    .basis_right = ctx.basis_right,
-                    .basis_up = ctx.basis_up,
-                    .basis_forward = ctx.basis_forward,
-                    .light_dir_world = ctx.light_dir_world,
-                };
-                hybrid_shadow_pass.run(hybrid_ctx, applyHybridShadowFromPass);
-            },
-            .ssao => ctx.renderer.applyAmbientOcclusionPass(),
-            .ssgi => ctx.renderer.applySSGIPass(),
-            .ssr => ctx.renderer.applySSRPass(ctx.projection),
-            .depth_fog => ctx.renderer.applyDepthFogPass(),
-            .taa => ctx.renderer.applyTemporalAAPass(ctx.mesh, ctx.current_view),
-            .motion_blur => ctx.renderer.applyMotionBlurPass(ctx.current_view),
-            .god_rays => ctx.renderer.applyGodRaysPass(ctx.projection, ctx.light_dir_world),
-            .bloom => ctx.renderer.applyBloomPass(),
-            .lens_flare => ctx.renderer.applyLensFlarePass(),
-            .dof => ctx.renderer.applyDepthOfFieldPass(),
-            .chromatic_aberration => ctx.renderer.applyChromaticAberrationPass(),
-            .film_grain_vignette => ctx.renderer.applyFilmGrainVignettePass(),
-            .color_grade => ctx.renderer.applyBlockbusterColorGradePass(),
-        }
-    }
+    const post_pass_dispatcher = frame_hooks.makePostPassDispatcher(PostPassExecutionContext);
+    const frame_stage_dispatcher = frame_hooks.makeFrameStageDispatcher(FrameExecutionContext);
 
     /// Applies post processing passes.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
@@ -6458,43 +6305,17 @@ pub const Renderer = struct {
         basis_forward: math.Vec3,
         current_view: TemporalAAViewState,
         projection: ProjectionParams,
+        shadow_map_light_count: usize,
         light_dir_world: math.Vec3,
         shadow_build_elapsed_ns: []const i128,
     ) void {
-        const base_ctx = PostPassExecutionContext{
-            .renderer = self,
-            .mesh = mesh,
-            .camera_position = camera_position,
-            .basis_right = basis_right,
-            .basis_up = basis_up,
-            .basis_forward = basis_forward,
-            .current_view = current_view,
-            .projection = projection,
-            .light_dir_world = light_dir_world,
-            .shadow_build_elapsed_ns = shadow_build_elapsed_ns,
-            .plan = .{ .enabled_mask = 0 },
+        const compiled_graph = frame_pipeline.compileCachedPostGraph(&self.cached_post_graph, .{
+            .shadow_map_light_count = shadow_map_light_count,
+            .taa_history_valid = self.taa_scratch.valid,
+        }) catch |err| {
+            pipeline_logger.errorSub("graph", "failed to compile post graph: {s}", .{@errorName(err)});
+            return;
         };
-        const enabled_mask = pass_registry.buildEnabledMask(base_ctx, isPostPassEnabled);
-        var plan = CompositionPlan{
-            .enabled_mask = enabled_mask,
-            .scratch_pool_a = self.moblur_scratch_pixels,
-            .scratch_pool_b = self.ssr_scratch_pixels,
-        };
-        for (pass_registry.post_passes) |node| {
-            if ((enabled_mask & pass_graph.passBit(node.id)) == 0) continue;
-            switch (node.phase) {
-                .scene => plan.scene_mask |= pass_graph.passBit(node.id),
-                .geometry_post => plan.geometry_post_mask |= pass_graph.passBit(node.id),
-                .lighting_scatter => plan.lighting_scatter_mask |= pass_graph.passBit(node.id),
-                .final_color => plan.final_color_mask |= pass_graph.passBit(node.id),
-            }
-            switch (node.output_target) {
-                .main => {},
-                .scratch_a => plan.uses_scratch_a = true,
-                .scratch_b => plan.uses_scratch_b = true,
-                .history => plan.uses_history = true,
-            }
-        }
 
         const ctx = PostPassExecutionContext{
             .renderer = self,
@@ -6507,44 +6328,199 @@ pub const Renderer = struct {
             .projection = projection,
             .light_dir_world = light_dir_world,
             .shadow_build_elapsed_ns = shadow_build_elapsed_ns,
-            .plan = plan,
-        };
-        const iface = pass_registry.PassInterface(PostPassExecutionContext){
-            .is_enabled = isPostPassEnabled,
-            .run = runPostPassById,
-            .on_phase_boundary = onPostPassPhaseBoundary,
         };
         const saved_bindings = snapshotScratchBindings(self);
         defer restoreScratchBindings(self, saved_bindings);
-        applyCompositionScratchBindings(self, plan);
-        const phase_order = [_]pass_registry.PassPhase{
-            .scene,
-            .geometry_post,
-            .lighting_scatter,
-            .final_color,
-        };
-        for (phase_order) |phase| {
-            const phase_mask = phaseMaskFor(plan, phase);
-            if (phase_mask == 0) continue;
-            const phase_start = std.time.nanoTimestamp();
-            pass_registry.executeMaskWithInterface(ctx, phase_mask, iface);
-            self.recordRenderPassDuration(phaseTimingName(phase), std.time.nanoTimestamp() - phase_start);
+        applyCompositionScratchBindings(self, saved_bindings.moblur_scratch_pixels, saved_bindings.ssr_scratch_pixels);
+        frame_executor.executePostGraph(
+            PostPassExecutionContext,
+            compiled_graph,
+            .{
+                .front = &self.bitmap.pixels,
+                .scratch_a = &self.moblur_scratch_pixels,
+                .scratch_b = &self.ssr_scratch_pixels,
+            },
+            .{
+                .enabled = self.shouldRecordPostPhaseTimings(),
+                .ctx = self,
+                .record = recordPostPhaseTiming,
+            },
+            ctx,
+            post_pass_dispatcher,
+        );
+    }
+
+    pub fn stageBuildShadowMaps(self: *Renderer, mesh: *const Mesh) void {
+        if (!config.POST_SHADOW_ENABLED) return;
+
+        const shadow_budget_ns = self.computeShadowBuildBudgetNs();
+        const enforce_shadow_budget = shadow_budget_ns >= 0;
+        if (shadow_budget_ns > 0) {
+            self.light_work_stats.shadow_budget_ns = shadow_budget_ns;
         }
+        var shadow_budget_spent_ns: i128 = 0;
+        @memset(self.shadow_build_elapsed_ns[0..self.lights.items.len], 0);
+        const frame_number = self.total_frames_rendered + 1;
+        for (self.lights.items, 0..) |*light, light_index| {
+            if (light.shadow_mode != .shadow_map) continue;
+            const base_cadence = @max(@as(u64, 1), @as(u64, light.shadow_update_interval_frames));
+            const cadence_scale = @max(@as(u64, 1), @as(u64, light.shadow_dynamic_interval_scale));
+            const cadence = @max(@as(u64, 1), @min(std.math.maxInt(u64), base_cadence * cadence_scale));
+            const frames_since_last_build = if (light.shadow_last_build_frame == 0)
+                cadence
+            else
+                frame_number - light.shadow_last_build_frame;
+            const should_rebuild = !light.shadow_map.active or frames_since_last_build >= cadence;
+            if (!should_rebuild) {
+                self.light_work_stats.shadow_map_reused_lights += 1;
+                continue;
+            }
+            if (enforce_shadow_budget and light.shadow_map.active) {
+                const estimated_build_ns = estimateShadowBuildCostNs(light);
+                if (shadow_budget_spent_ns + estimated_build_ns > shadow_budget_ns) {
+                    self.light_work_stats.shadow_map_reused_lights += 1;
+                    self.light_work_stats.shadow_budget_skipped_lights += 1;
+                    continue;
+                }
+            }
+            const light_dir_world_for_shadow = math.Vec3.new(
+                self.light_soa.dir_x[light_index],
+                self.light_soa.dir_y[light_index],
+                self.light_soa.dir_z[light_index],
+            );
+            self.shadow_build_elapsed_ns[light_index] = self.buildShadowMap(mesh, light_dir_world_for_shadow, &light.shadow_map);
+            light.shadow_last_build_frame = frame_number;
+            light.shadow_last_build_ns = self.shadow_build_elapsed_ns[light_index];
+            self.light_work_stats.shadow_build_ns += self.shadow_build_elapsed_ns[light_index];
+            shadow_budget_spent_ns += self.shadow_build_elapsed_ns[light_index];
+        }
+        if (self.light_work_stats.shadow_build_ns > 0) {
+            self.recordRenderPassDuration("shadow_map_build_total", self.light_work_stats.shadow_build_ns);
+        }
+    }
+
+    pub fn stageRenderScene(
+        self: *Renderer,
+        backend: frame_plan.BackendKind,
+        mesh: *const Mesh,
+        view_rotation: math.Mat4,
+        light_dir: math.Vec3,
+        pump: ?*const fn (*Renderer) bool,
+        raster_projection: ProjectionParams,
+        mesh_work: *const MeshWork,
+    ) !void {
+        const scene_pass_start = std.time.nanoTimestamp();
+        const tri_count = if (scene_tiled_backend.usesLegacyMeshWork()) mesh_work.triangleSlice().len else mesh.triangles.len;
+        const meshlet_count = if (scene_tiled_backend.usesLegacyMeshWork()) mesh_work.meshlet_len else mesh.meshlets.len;
+        switch (backend) {
+            .tiled => {
+                pipeline_logger.debugSub("dispatch", "rendering tiled path triangles={} meshlets={}", .{ tri_count, meshlet_count });
+                const shadow_pass_elapsed_ns = try self.renderTiled(mesh, view_rotation, light_dir, pump, raster_projection, mesh_work);
+                const scene_pass_elapsed_ns = std.time.nanoTimestamp() - scene_pass_start;
+                self.recordRenderPassDuration("meshlet_tiled", scene_pass_elapsed_ns - @as(i128, @intCast(shadow_pass_elapsed_ns)));
+                if (config.MESHLET_SHADOWS_ENABLED) {
+                    self.recordRenderPassDuration("meshlet_shadows", @as(i128, @intCast(shadow_pass_elapsed_ns)));
+                }
+            },
+            .direct => {
+                pipeline_logger.debugSub("dispatch", "rendering direct path triangles={} meshlets={}", .{ tri_count, meshlet_count });
+                try self.renderDirect(mesh, view_rotation, light_dir, raster_projection, mesh_work);
+                self.recordRenderPassTiming("meshlet_direct", scene_pass_start);
+            },
+        }
+    }
+
+    pub fn stageOverlayAndPresent(
+        self: *Renderer,
+        is_editor_mode: bool,
+        light_camera: math.Vec3,
+        center_x: f32,
+        center_y: f32,
+        x_scale: f32,
+        y_scale: f32,
+        right: math.Vec3,
+        up: math.Vec3,
+        forward: math.Vec3,
+        cache_projection: ProjectionParams,
+    ) !i128 {
+        if (is_editor_mode) {
+            self.scene_item_gizmo.applyOutline(
+                self.bitmap.pixels,
+                self.bitmap.width,
+                self.bitmap.height,
+                self.scene_surface,
+            );
+        }
+        try self.applyAdaptiveShadowBudgetPolicy();
+        if (self.show_light_orb) {
+            const light_camera_z = light_camera.z;
+            if (light_camera_z > NEAR_CLIP) {
+                var glow_color = math.Vec3.new(1.0, 1.0, 1.0);
+                var glow_radius: f32 = 0.0;
+                var glow_intensity: f32 = 0.0;
+                if (self.lights.items.len > 0) {
+                    glow_color = self.lights.items[0].color;
+                    glow_radius = self.lights.items[0].glow_radius;
+                    glow_intensity = self.lights.items[0].glow_intensity;
+                }
+                if (glow_radius > 0.0 and glow_intensity > 0.0) {
+                    self.drawLightGlow(light_camera, light_camera_z, center_x, center_y, x_scale, y_scale, glow_color, glow_radius, glow_intensity);
+                }
+                self.drawLightMarker(light_camera, light_camera_z, center_x, center_y, x_scale, y_scale);
+            }
+        }
+        if (is_editor_mode and self.light_gizmo.enabled) {
+            self.drawLightGizmo(self.camera_position, right, up, forward, cache_projection);
+        }
+        if (is_editor_mode and self.scene_item_gizmo.isActive()) {
+            self.drawSceneItemGizmo(self.camera_position, right, up, forward, cache_projection);
+        }
+
+        const present_start = std.time.nanoTimestamp();
+        const cpu_frame_ns = present_start - self.current_frame_start_time;
+
+        if (self.usesSoftwareFramePacing() and self.last_completed_frame_time > 0) {
+            const ideal_present_time = self.last_completed_frame_time + self.target_frame_time_ns - self.present_cost_ema_ns;
+            var spin_now = std.time.nanoTimestamp();
+            while (spin_now < ideal_present_time) {
+                std.atomic.spinLoopHint();
+                spin_now = std.time.nanoTimestamp();
+            }
+        }
+
+        const pre_present_time = std.time.nanoTimestamp();
+        self.drawBitmap();
+        const present_end = std.time.nanoTimestamp();
+        const draw_cost_ns = @max(present_end - pre_present_time, @as(i128, 0));
+        self.present_cost_ema_ns = @divTrunc(self.present_cost_ema_ns * 7 + draw_cost_ns, 8);
+        self.recordRenderPassTiming("present", present_start);
+        pipeline_logger.debugSub("present", "bitmap presented", .{});
+
+        const current_time = present_end;
+        const frame_interval_ns = current_time - self.last_completed_frame_time;
+        self.notePresentedFrame(current_time);
+        self.maybeEmitSingleFrameProfile();
+        self.frame_pacing.recordSample(.{
+            .total_ms = @as(f32, @floatFromInt(@max(frame_interval_ns, @as(i128, 0)))) / 1_000_000.0,
+            .cpu_ms = @as(f32, @floatFromInt(@max(cpu_frame_ns, @as(i128, 0)))) / 1_000_000.0,
+            .software_wait_ms = @as(f32, @floatFromInt(@max(self.active_software_wait_ns, @as(i128, 0)))) / 1_000_000.0,
+            .present_wait_ms = @as(f32, @floatFromInt(@max(present_end - present_start, @as(i128, 0)))) / 1_000_000.0,
+            .deadline_error_ms = @as(f32, @floatFromInt(self.frame_deadline_error_ns)) / 1_000_000.0,
+        }, self.effectiveFramePacingTargetNs());
+        return current_time;
     }
 
     /// Applies ssgi pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applySSGIPass(self: *Renderer) void {
+    pub fn applySSGIPass(self: *Renderer) void {
         const pass_start = std.time.nanoTimestamp();
         const height: usize = @intCast(self.bitmap.height);
         ssgi_pass.runPipeline(self, height, noopRenderPassJob);
-
-        std.mem.swap([]u32, &self.bitmap.pixels, &self.ssgi_scratch_pixels);
         self.recordRenderPassTiming("ssgi", pass_start);
     }
     /// Applies ambient occlusion pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applyAmbientOcclusionPass(self: *Renderer) void {
+    pub fn applyAmbientOcclusionPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
         const scene_width: usize = @intCast(self.bitmap.width);
@@ -6564,7 +6540,7 @@ pub const Renderer = struct {
 
     /// Applies depth fog pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applyDepthFogPass(self: *Renderer) void {
+    pub fn applyDepthFogPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
@@ -6731,7 +6707,7 @@ pub const Renderer = struct {
     };
 
     // --- God Rays ---
-    fn applyGodRaysPass(self: *Renderer, projection: ProjectionParams, light_dir_world: math.Vec3) void {
+    pub fn applyGodRaysPass(self: *Renderer, projection: ProjectionParams, light_dir_world: math.Vec3) void {
         if (self.bitmap.pixels.len == 0) return;
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
@@ -6762,13 +6738,11 @@ pub const Renderer = struct {
             config.POST_GOD_RAYS_EXPOSURE,
             noopRenderPassJob,
         );
-
-        std.mem.swap([]u32, &self.bitmap.pixels, &self.god_rays_scratch_pixels);
         self.recordRenderPassTiming("god_rays", pass_start);
     }
 
     // --- Lens Flare ---
-    fn applyLensFlarePass(self: *Renderer) void {
+    pub fn applyLensFlarePass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0) return;
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
@@ -6781,13 +6755,11 @@ pub const Renderer = struct {
             @as(f32, @floatFromInt(config.POST_LENS_FLARE_INTENSITY_PERCENT)) / 100.0,
             noopRenderPassJob,
         );
-
-        std.mem.swap([]u32, &self.bitmap.pixels, &self.lens_flare_scratch_pixels);
         self.recordRenderPassTiming("lens_flare", pass_start);
     }
 
     // --- Chromatic Aberration ---
-    fn applyChromaticAberrationPass(self: *Renderer) void {
+    pub fn applyChromaticAberrationPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0) return;
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
@@ -6799,13 +6771,11 @@ pub const Renderer = struct {
             config.POST_CHROMATIC_ABERRATION_STRENGTH,
             noopRenderPassJob,
         );
-
-        std.mem.swap([]u32, &self.bitmap.pixels, &self.moblur_scratch_pixels);
         self.recordRenderPassTiming("chromatic_aberration", pass_start);
     }
 
     // --- Film Grain & Vignette ---
-    fn applyFilmGrainVignettePass(self: *Renderer) void {
+    pub fn applyFilmGrainVignettePass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0) return;
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
@@ -6824,7 +6794,7 @@ pub const Renderer = struct {
 
     /// Applies motion blur pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applyMotionBlurPass(self: *Renderer, current_view: TemporalAAViewState) void {
+    pub fn applyMotionBlurPass(self: *Renderer, current_view: TemporalAAViewState) void {
         if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
@@ -6834,15 +6804,12 @@ pub const Renderer = struct {
         if (!self.taa_scratch.valid) return;
 
         motion_blur_pass.runPipeline(self, current_view, height, width, noopRenderPassJob);
-
-        std.mem.swap([]u32, &self.bitmap.pixels, &self.moblur_scratch_pixels);
-
         self.recordRenderPassTiming("motion_blur", pass_start);
     }
 
     /// Applies temporal aa pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applyTemporalAAPass(self: *Renderer, mesh: *const Mesh, current_view: TemporalAAViewState) void {
+    pub fn applyTemporalAAPass(self: *Renderer, mesh: *const Mesh, current_view: TemporalAAViewState) void {
         const _zone = profiler.zone("applyTemporalAAPass");
         defer if (_zone) |z| z.end();
         if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
@@ -6864,20 +6831,18 @@ pub const Renderer = struct {
 
     /// Applies ssr pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applySSRPass(self: *Renderer, projection: ProjectionParams) void {
+    pub fn applySSRPass(self: *Renderer, projection: ProjectionParams) void {
         if (self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
 
         const scene_height: usize = @intCast(self.bitmap.height);
         ssr_pass.runPipeline(self, projection, scene_height, noopRenderPassJob);
-
-        std.mem.swap([]u32, &self.bitmap.pixels, &self.ssr_scratch_pixels);
         self.recordRenderPassTiming("ssr", pass_start);
     }
 
     /// Applies depth of field pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applyDepthOfFieldPass(self: *Renderer) void {
+    pub fn applyDepthOfFieldPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
         const pass_start = std.time.nanoTimestamp();
 
@@ -6890,7 +6855,7 @@ pub const Renderer = struct {
 
     /// Applies bloom pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applyBloomPass(self: *Renderer) void {
+    pub fn applyBloomPass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0) return;
         const pass_start = std.time.nanoTimestamp();
         const scene_width: usize = @intCast(self.bitmap.width);
@@ -6912,7 +6877,7 @@ pub const Renderer = struct {
 
     /// Applies blockbuster color grade pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applyBlockbusterColorGradePass(self: *Renderer) void {
+    pub fn applyBlockbusterColorGradePass(self: *Renderer) void {
         if (self.bitmap.pixels.len == 0) return;
         const pass_start = std.time.nanoTimestamp();
         const width: usize = @intCast(self.bitmap.width);
@@ -6923,49 +6888,11 @@ pub const Renderer = struct {
     }
 
     fn drawBitmap(self: *Renderer) void {
-        if (self.hdc) |hdc| {
-            if (self.hdc_mem) |hdc_mem| {
-                if (self.show_render_overlay or self.hybrid_shadow_debug.enabled or self.scene_item_gizmo.enabled or self.loading_overlay.enabled) {
-                    self.drawRenderPassOverlay(hdc_mem);
-                }
-                if (self.show_frame_pacing_overlay) {
-                    self.drawFramePacingPanel(hdc_mem);
-                }
-
-                const window_w = @as(i32, @intCast(config.WINDOW_WIDTH));
-                const window_h = @as(i32, @intCast(config.WINDOW_HEIGHT));
-                if (window_w != self.bitmap.width or window_h != self.bitmap.height) {
-                    _ = StretchBlt(
-                        hdc,
-                        0,
-                        0,
-                        window_w,
-                        window_h,
-                        hdc_mem,
-                        0,
-                        0,
-                        self.bitmap.width,
-                        self.bitmap.height,
-                        SRCCOPY,
-                    );
-                } else {
-                    _ = BitBlt(
-                        hdc,
-                        0,
-                        0,
-                        self.bitmap.width,
-                        self.bitmap.height,
-                        hdc_mem,
-                        0,
-                        0,
-                        SRCCOPY,
-                    );
-                }
-
-                if (config.WINDOW_VSYNC) {
-                    _ = DwmFlush();
-                }
-            }
+        _ = self.presentFrame(false) catch {
+            // The renderer should remain operational even if a present fails transiently.
+        };
+        if (config.WINDOW_VSYNC and self.present_state.canPresent()) {
+            _ = DwmFlush();
         }
     }
 
@@ -7411,7 +7338,7 @@ pub const Renderer = struct {
         return (bound_x + bound_y + bound_z) > 0.0;
     }
 
-    fn firstTileLightWithMode(self: *const Renderer, range: TileLightRange, mode: LightInfo.ShadowMode) ?usize {
+    pub fn firstTileLightWithMode(self: *const Renderer, range: TileLightRange, mode: LightInfo.ShadowMode) ?usize {
         var i: usize = 0;
         while (i < range.count) : (i += 1) {
             const light_index = self.tile_light_indices[range.offset + i];
@@ -7422,7 +7349,7 @@ pub const Renderer = struct {
     }
 
     /// buildTileLightLists builds data structures used by Renderer.
-    fn buildTileLightLists(
+    pub fn buildTileLightLists(
         self: *Renderer,
         active_tile_indices: []const usize,
         tile_lists: []const BinningStage.TileTriangleList,
@@ -7581,407 +7508,16 @@ pub const Renderer = struct {
         projection: ProjectionParams,
         mesh_work: *const MeshWork,
     ) !u64 {
-        const _z_renderTiled = profiler.zone("renderTiled");
-        defer if (_z_renderTiled) |z| z.end();
-        _ = light_dir;
-        self.meshlet_ray_tests_counter.store(0, .release);
-        self.meshlet_shadow_chunk_counter.store(0, .release);
-        self.meshlet_shadow_chunk_pixels_counter.store(0, .release);
-        self.meshlet_shadow_chunk_active_rays_counter.store(0, .release);
-        self.meshlet_shadow_packet_counter.store(0, .release);
-        self.meshlet_shadow_packet_skipped_counter.store(0, .release);
-        self.meshlet_shadow_packet_active_lanes_counter.store(0, .release);
-        self.meshlet_shadow_packet_occluded_lanes_counter.store(0, .release);
-        self.meshlet_shadow_trace_ns_counter.store(0, .release);
-        self.meshlet_shadow_apply_ns_counter.store(0, .release);
-        self.triangles_rasterized_counter.store(0, .release);
-        self.covered_pixels_counter.store(0, .release);
-        self.depth_tests_passed_counter.store(0, .release);
-        self.alpha_pixels_counter.store(0, .release);
-        const grid = self.tile_grid.?;
-        const tile_buffers = self.tile_buffers.?;
-        const tile_lists = self.tile_triangle_lists.?;
-        const active_flags = self.active_tile_flags.?;
-        const active_indices = self.active_tile_indices.?;
-        BinningStage.clearTileTriangleLists(tile_lists);
-        if (!self.scene_buffers_initialized) {
-            @memset(self.scene_depth, std.math.inf(f32));
-            @memset(self.scene_camera, math.Vec3.new(0.0, 0.0, 0.0));
-            @memset(self.scene_normal, math.Vec3.new(0.0, 0.0, 0.0));
-            @memset(self.scene_surface, TileRenderer.SurfaceHandle.invalid());
-            self.scene_buffers_initialized = true;
-        } else {
-            for (active_flags, 0..) |was_active, tile_idx| {
-                if (!was_active) continue;
-                self.clearSceneAttachmentsForTile(&grid.tiles[tile_idx]);
-            }
-        }
-        @memset(active_flags, false);
-
-        const triangles = mesh_work.triangleSlice();
-        self.meshlet_telemetry.touched_tiles = 0;
-
-        if (triangles.len == 0) {
-            pipeline_logger.debugSub("tiled", "no triangles; bitmap cleared", .{});
-            return 0;
-        }
-
-        if (self.job_system != null and mesh_work.*.meshlet_len != 0) {
-            self.populateTilesFromMeshlets(tile_lists, mesh_work);
-        } else {
-            BinningStage.binTrianglesRangeToTiles(triangles, 0, triangles.len, &grid, tile_lists) catch |err| {
-                pipeline_logger.errorSub("binning", "triangle binning failed: {s}", .{@errorName(err)});
-            };
-        }
-
-        const tile_jobs = self.tile_jobs_buffer.?;
-        const jobs = self.job_buffer.?;
-        std.debug.assert(tile_jobs.len == grid.tiles.len);
-        std.debug.assert(jobs.len == grid.tiles.len);
-        var active_tile_count: usize = 0;
-        for (tile_lists, 0..) |*tile_list, tile_idx| {
-            if (tile_list.count() == 0) continue;
-            active_flags[tile_idx] = true;
-            active_indices[active_tile_count] = tile_idx;
-            active_tile_count += 1;
-        }
-
-        const cam_right = math.Vec3.new(transform.data[0], transform.data[1], transform.data[2]);
-        const cam_up = math.Vec3.new(transform.data[4], transform.data[5], transform.data[6]);
-        const cam_fwd = math.Vec3.new(transform.data[8], transform.data[9], transform.data[10]);
-        self.syncLightCameraSoA(cam_right, cam_up, cam_fwd);
-
-        self.buildTileLightLists(
-            active_indices[0..active_tile_count],
-            tile_lists,
-            triangles,
+        return scene_tiled_backend.execute(
+            self,
+            mesh,
+            transform,
+            light_dir,
+            pump,
+            projection,
+            mesh_work,
+            noopRenderPassJob,
         );
-
-        for (active_indices[0..active_tile_count]) |tile_idx| {
-            if (pump) |p| {
-                if ((tile_idx & 7) == 0 and !p(self)) return error.RenderInterrupted;
-            }
-            const tile = &grid.tiles[tile_idx];
-            const tile_light_range = self.tile_light_ranges[tile_idx];
-            const meshlet_light_index_opt = self.firstTileLightWithMode(tile_light_range, .meshlet_ray);
-            const primary_light_index = if (meshlet_light_index_opt) |meshlet_light_index|
-                meshlet_light_index
-            else if (tile_light_range.count > 0)
-                self.tile_light_indices[tile_light_range.offset]
-            else
-                @as(usize, 0);
-            const primary_light_direction = if (primary_light_index < self.lights.items.len)
-                math.Vec3.new(
-                    self.light_soa.dir_x[primary_light_index],
-                    self.light_soa.dir_y[primary_light_index],
-                    self.light_soa.dir_z[primary_light_index],
-                )
-            else
-                math.Vec3.new(0, -1, 0);
-            tile_jobs[tile_idx] = TileRenderJob{
-                .tile = tile,
-                .tile_buffer = &tile_buffers[tile_idx],
-                .tri_list = &tile_lists[tile_idx],
-                .packets = triangles,
-                .draw_wireframe = self.show_wireframe,
-                .textures = self.textures,
-                .projection = projection,
-                .sys_shadows = if (config.MESHLET_SHADOWS_ENABLED and meshlet_light_index_opt != null) &self.sys_shadows else null,
-                .light_direction = primary_light_direction,
-                .mesh_ptr = mesh,
-                .cam_pos = self.camera_position,
-                .cam_right = cam_right,
-                .cam_up = cam_up,
-                .cam_fwd = cam_fwd,
-                .meshlet_ray_counter = &self.meshlet_ray_tests_counter,
-                .shadow_chunk_counter = &self.meshlet_shadow_chunk_counter,
-                .shadow_chunk_pixels_counter = &self.meshlet_shadow_chunk_pixels_counter,
-                .shadow_chunk_active_rays_counter = &self.meshlet_shadow_chunk_active_rays_counter,
-                .shadow_packet_counter = &self.meshlet_shadow_packet_counter,
-                .shadow_packet_skipped_counter = &self.meshlet_shadow_packet_skipped_counter,
-                .shadow_packet_active_lanes_counter = &self.meshlet_shadow_packet_active_lanes_counter,
-                .shadow_packet_occluded_lanes_counter = &self.meshlet_shadow_packet_occluded_lanes_counter,
-                .shadow_trace_ns_counter = &self.meshlet_shadow_trace_ns_counter,
-                .shadow_apply_ns_counter = &self.meshlet_shadow_apply_ns_counter,
-                .triangles_rasterized_counter = &self.triangles_rasterized_counter,
-                .covered_pixels_counter = &self.covered_pixels_counter,
-                .depth_tests_passed_counter = &self.depth_tests_passed_counter,
-                .alpha_pixels_counter = &self.alpha_pixels_counter,
-                .shadow_start_idx = 0,
-                .shadow_end_idx = 0,
-            };
-        }
-
-        // CPU load-balancing: heavy tiles first improves job queue saturation.
-        if (active_tile_count > 1) {
-            var i: usize = 1;
-            while (i < active_tile_count) : (i += 1) {
-                const key = active_indices[i];
-                const key_cost = tile_lists[key].count();
-                var j = i;
-                while (j > 0) {
-                    const prev = active_indices[j - 1];
-                    if (tile_lists[prev].count() >= key_cost) break;
-                    active_indices[j] = prev;
-                    j -= 1;
-                }
-                active_indices[j] = key;
-            }
-        }
-
-        if (active_tile_count == 0) {
-            pipeline_logger.debugSub("tiled", "triangles binned to zero active tiles", .{});
-            return 0;
-        }
-
-        if (self.job_system) |job_sys| {
-            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-            const main_tile_idx = active_indices[0];
-
-            for (active_indices[1..active_tile_count]) |tile_idx| {
-                jobs[tile_idx] = Job.init(
-                    TileRenderJob.renderTileJob,
-                    @ptrCast(&tile_jobs[tile_idx]),
-                    &parent_job,
-                );
-
-                if (!job_sys.submitJobAuto(&jobs[tile_idx])) {
-                    TileRenderJob.renderTileJob(@ptrCast(&tile_jobs[tile_idx]));
-                }
-            }
-
-            TileRenderJob.renderTileJob(@ptrCast(&tile_jobs[main_tile_idx]));
-            parent_job.complete();
-
-            if (pump) |p| {
-                var interrupted = false;
-                while (!parent_job.isComplete()) {
-                    if (!p(self)) interrupted = true;
-                    std.Thread.yield() catch {};
-                }
-                if (interrupted) return error.RenderInterrupted;
-            } else {
-                job_sys.waitFor(&parent_job);
-            }
-        } else {
-            for (active_indices[0..active_tile_count]) |tile_idx| {
-                TileRenderJob.renderTileJob(@ptrCast(&tile_jobs[tile_idx]));
-            }
-        }
-
-        var shadow_pass_elapsed_ns: u64 = 0;
-        const run_meshlet_shadows = config.MESHLET_SHADOWS_ENABLED and mesh.meshlets.len > 0;
-        if (run_meshlet_shadows) {
-            const shadow_pass_start = std.time.nanoTimestamp();
-            const shadow_chunk_jobs = self.shadow_chunk_jobs_buffer.?;
-            const shadow_jobs = self.shadow_job_buffer.?;
-            const shadow_chunk_pixels: usize = 2048;
-            const shadow_min_chunk_pixels: usize = 1024;
-            const shadow_split_tri_threshold: usize = 96;
-            const worker_count: usize = if (self.job_system) |js| @intCast(js.worker_count) else 1;
-            const high_parallelism = worker_count > 4;
-            const runtime_shadow_min_chunk_pixels: usize = if (high_parallelism) @max(@as(usize, 512), @divTrunc(shadow_min_chunk_pixels, 2)) else shadow_min_chunk_pixels;
-            const shadow_max_chunks_per_tile: usize = if (high_parallelism) 16 else 8;
-            var shadow_job_count: usize = 0;
-
-            for (active_indices[0..active_tile_count]) |tile_idx| {
-                const tile_light_range = self.tile_light_ranges[tile_idx];
-                if (tile_light_range.count == 0) continue;
-                const base_job = tile_jobs[tile_idx];
-                if (base_job.sys_shadows == null) continue;
-                const total_pixels = @as(usize, @intCast(base_job.tile.width)) * @as(usize, @intCast(base_job.tile.height));
-                const tri_cost = tile_lists[tile_idx].count();
-                const light_cost = @max(@as(usize, 1), tile_light_range.count);
-                const tri_weight = @max(@as(usize, 1), @divTrunc(tri_cost + shadow_split_tri_threshold - 1, shadow_split_tri_threshold));
-                // Cost model uses pixels plus tile-local geometric/light pressure to reduce long-tail chunk stragglers.
-                const estimated_work_units = total_pixels * tri_weight * light_cost;
-                const target_work_units = shadow_chunk_pixels * 2;
-                const desired_chunks_by_work = @max(@as(usize, 1), @divTrunc(estimated_work_units + target_work_units - 1, target_work_units));
-                const desired_chunks_by_pixels = @max(@as(usize, 1), @divTrunc(total_pixels + shadow_chunk_pixels - 1, shadow_chunk_pixels));
-                const max_chunks = @max(@as(usize, 1), @min(shadow_max_chunks_per_tile, worker_count * 2));
-                const should_split = worker_count > 2 and total_pixels >= runtime_shadow_min_chunk_pixels and tri_cost >= @divTrunc(shadow_split_tri_threshold, 2);
-                const desired_chunks_base: usize = if (should_split) @min(max_chunks, @max(desired_chunks_by_work, desired_chunks_by_pixels)) else 1;
-                const desired_chunks: usize = if (high_parallelism and should_split) @min(max_chunks, desired_chunks_base * 2) else desired_chunks_base;
-                const adaptive_chunk_pixels: usize = @max(runtime_shadow_min_chunk_pixels, @divTrunc(total_pixels + desired_chunks - 1, desired_chunks));
-
-                var start: usize = 0;
-                while (start < total_pixels and shadow_job_count < shadow_chunk_jobs.len) {
-                    const end = @min(total_pixels, start + (if (should_split) adaptive_chunk_pixels else total_pixels));
-                    var chunk_job = base_job;
-                    chunk_job.shadow_start_idx = start;
-                    chunk_job.shadow_end_idx = end;
-                    shadow_chunk_jobs[shadow_job_count] = chunk_job;
-                    shadow_job_count += 1;
-                    start = end;
-                }
-            }
-
-            if (shadow_job_count == 0) {
-                const shadow_elapsed_ns = std.time.nanoTimestamp() - shadow_pass_start;
-                if (shadow_elapsed_ns > 0) shadow_pass_elapsed_ns = @intCast(shadow_elapsed_ns);
-                return shadow_pass_elapsed_ns;
-            }
-
-            if (self.job_system) |job_sys| {
-                var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-                const main_job_idx: usize = 0;
-                var submit_idx: usize = 1;
-                while (submit_idx < shadow_job_count) : (submit_idx += 1) {
-                    shadow_jobs[submit_idx] = Job.init(
-                        TileRenderJob.applyMeshletShadows,
-                        @ptrCast(&shadow_chunk_jobs[submit_idx]),
-                        &parent_job,
-                    );
-
-                    if (!job_sys.submitJobAuto(&shadow_jobs[submit_idx])) {
-                        TileRenderJob.applyMeshletShadows(@ptrCast(&shadow_chunk_jobs[submit_idx]));
-                    }
-                }
-
-                TileRenderJob.applyMeshletShadows(@ptrCast(&shadow_chunk_jobs[main_job_idx]));
-                parent_job.complete();
-
-                if (pump) |p| {
-                    var interrupted = false;
-                    while (!parent_job.isComplete()) {
-                        if (!p(self)) interrupted = true;
-                        std.Thread.yield() catch {};
-                    }
-                    if (interrupted) return error.RenderInterrupted;
-                } else {
-                    job_sys.waitFor(&parent_job);
-                }
-            } else {
-                for (shadow_chunk_jobs[0..shadow_job_count]) |*chunk_job| {
-                    TileRenderJob.applyMeshletShadows(@ptrCast(chunk_job));
-                }
-            }
-
-            const shadow_elapsed_ns = std.time.nanoTimestamp() - shadow_pass_start;
-            if (shadow_elapsed_ns > 0) {
-                shadow_pass_elapsed_ns = @intCast(shadow_elapsed_ns);
-            }
-        }
-        self.light_work_stats.meshlet_ray_tests = self.meshlet_ray_tests_counter.load(.acquire);
-        self.light_work_stats.meshlet_shadow_chunks = self.meshlet_shadow_chunk_counter.load(.acquire);
-        self.light_work_stats.meshlet_shadow_chunk_pixels = self.meshlet_shadow_chunk_pixels_counter.load(.acquire);
-        self.light_work_stats.meshlet_shadow_chunk_active_rays = self.meshlet_shadow_chunk_active_rays_counter.load(.acquire);
-        self.light_work_stats.meshlet_shadow_packets = self.meshlet_shadow_packet_counter.load(.acquire);
-        self.light_work_stats.meshlet_shadow_packets_skipped = self.meshlet_shadow_packet_skipped_counter.load(.acquire);
-        self.light_work_stats.meshlet_shadow_packet_active_lanes = self.meshlet_shadow_packet_active_lanes_counter.load(.acquire);
-        self.light_work_stats.meshlet_shadow_packet_occluded_lanes = self.meshlet_shadow_packet_occluded_lanes_counter.load(.acquire);
-        self.light_work_stats.meshlet_shadow_trace_us = @divTrunc(self.meshlet_shadow_trace_ns_counter.load(.acquire), 1000);
-        self.light_work_stats.meshlet_shadow_apply_us = @divTrunc(self.meshlet_shadow_apply_ns_counter.load(.acquire), 1000);
-        self.light_work_stats.triangles_rasterized = self.triangles_rasterized_counter.load(.acquire);
-        self.light_work_stats.covered_pixels = self.covered_pixels_counter.load(.acquire);
-        self.light_work_stats.depth_tests_passed = self.depth_tests_passed_counter.load(.acquire);
-        self.light_work_stats.alpha_pixels = self.alpha_pixels_counter.load(.acquire);
-
-        // 4. Compositing: Copy the pixels from each completed tile buffer to the main screen bitmap.
-        // Each tile writes to non-overlapping screen regions, so dispatch in parallel when possible.
-        if (self.job_system) |job_sys| {
-            const comp_ctxs = self.composite_job_contexts.?;
-            var parent_job = Job.init(noopRenderPassJob, @ptrCast(self), null);
-
-            for (active_indices[0..active_tile_count]) |tile_idx| {
-                comp_ctxs[tile_idx] = .{
-                    .tile = &grid.tiles[tile_idx],
-                    .tile_buffer = &tile_buffers[tile_idx],
-                    .bitmap = &self.bitmap,
-                    .scene_depth = self.scene_depth,
-                    .scene_camera = self.scene_camera,
-                    .scene_normal = self.scene_normal,
-                    .scene_surface = self.scene_surface,
-                };
-            }
-
-            if (active_tile_count > 1) {
-                const main_tile_idx = active_indices[0];
-                for (active_indices[1..active_tile_count]) |tile_idx| {
-                    jobs[tile_idx] = Job.init(
-                        CompositeJobContext.run,
-                        @ptrCast(&comp_ctxs[tile_idx]),
-                        &parent_job,
-                    );
-                    if (!job_sys.submitJobAuto(&jobs[tile_idx])) {
-                        CompositeJobContext.run(@ptrCast(&comp_ctxs[tile_idx]));
-                    }
-                }
-                CompositeJobContext.run(@ptrCast(&comp_ctxs[main_tile_idx]));
-                parent_job.complete();
-                job_sys.waitFor(&parent_job);
-            } else if (active_tile_count == 1) {
-                const tile_idx = active_indices[0];
-                TileRenderer.compositeTileToScreen(&grid.tiles[tile_idx], &tile_buffers[tile_idx], &self.bitmap, self.scene_depth, self.scene_camera, self.scene_normal, self.scene_surface);
-            }
-        } else {
-            for (active_indices[0..active_tile_count]) |tile_idx| {
-                const tile = &grid.tiles[tile_idx];
-                TileRenderer.compositeTileToScreen(tile, &tile_buffers[tile_idx], &self.bitmap, self.scene_depth, self.scene_camera, self.scene_normal, self.scene_surface);
-            }
-        }
-
-        return shadow_pass_elapsed_ns;
-    }
-
-    fn clearSceneAttachmentsForTile(self: *Renderer, tile: *const TileRenderer.Tile) void {
-        var y: i32 = 0;
-        while (y < tile.height) : (y += 1) {
-            const row_start = @as(usize, @intCast((tile.y + y) * self.bitmap.width + tile.x));
-            const row_end = row_start + @as(usize, @intCast(tile.width));
-            @memset(self.scene_depth[row_start..row_end], std.math.inf(f32));
-            @memset(self.scene_camera[row_start..row_end], math.Vec3.new(0.0, 0.0, 0.0));
-            @memset(self.scene_normal[row_start..row_end], math.Vec3.new(0.0, 0.0, 0.0));
-            @memset(self.scene_surface[row_start..row_end], TileRenderer.SurfaceHandle.invalid());
-        }
-    }
-
-    fn populateTilesFromMeshlets(
-        self: *Renderer,
-        tile_lists: []BinningStage.TileTriangleList,
-        mesh_work: *const MeshWork,
-    ) void {
-        const _z_populateTilesFromMeshlets = profiler.zone("populateTilesFromMeshlets");
-        defer if (_z_populateTilesFromMeshlets) |z| z.end();
-        const meshlet_count = mesh_work.*.meshlet_len;
-        if (meshlet_count == 0) return;
-
-        const contributions = self.mesh_work_cache.meshlet_contributions;
-        if (contributions.len < meshlet_count) {
-            meshlet_logger.errorSub(
-                "contrib",
-                "meshlet contribution capacity {} insufficient for packets {}",
-                .{ contributions.len, meshlet_count },
-            );
-            return;
-        }
-
-        const triangles = mesh_work.triangleSlice();
-
-        for (contributions[0..meshlet_count]) |contrib| {
-            self.meshlet_telemetry.touched_tiles += contrib.active_count;
-            for (contrib.entries.items[0..contrib.active_count]) |entry| {
-                if (entry.tile_index >= tile_lists.len) {
-                    meshlet_logger.errorSub(
-                        "contrib",
-                        "meshlet contribution tile {} outside tile list {}",
-                        .{ entry.tile_index, tile_lists.len },
-                    );
-                    continue;
-                }
-
-                for (entry.triangles.items) |tri_idx| {
-                    if (tri_idx >= triangles.len) continue;
-                    tile_lists[entry.tile_index].append(tri_idx) catch |err| {
-                        meshlet_logger.errorSub(
-                            "contrib",
-                            "failed to append triangle {} to tile {}: {s}",
-                            .{ tri_idx, entry.tile_index, @errorName(err) },
-                        );
-                    };
-                }
-            }
-        }
     }
 
     fn generateMeshWork(
@@ -8016,9 +7552,10 @@ pub const Renderer = struct {
 
         const mesh_vertices = mesh.vertices;
 
-        if (mesh.meshlets.len == 0) {
+        // TEMP: force per-triangle path — skip meshlet generation
+        if (false) {
             const mesh_mut: *Mesh = @constCast(mesh);
-            mesh_mut.generateMeshlets(64, 126) catch |err| {
+            mesh_mut.generateMeshlets(255, 512) catch |err| {
                 meshlet_logger.errorSub("build", "generateMeshlets failed: {s}", .{@errorName(err)});
             };
             self.mesh_work_cache.invalidate();
@@ -8094,7 +7631,7 @@ pub const Renderer = struct {
                         .projection = projection,
                     };
                     jobs[job_idx] = Job.init(MeshletCullJob.run, @ptrCast(&cull_jobs[job_idx]), &parent_job);
-                    if (!js.submitJobAuto(&jobs[job_idx])) {
+                    if (!js.submitJobWithClass(&jobs[job_idx], .normal)) {
                         cull_jobs[job_idx].process();
                     }
                 }
@@ -8235,7 +7772,7 @@ pub const Renderer = struct {
                     .contribution = &contributions[job_idx],
                 };
                 jobs[job_idx] = Job.init(MeshletRenderJob.run, @ptrCast(&meshlet_jobs[job_idx]), &parent_job);
-                if (!js.submitJobAuto(&jobs[job_idx])) {
+                if (!js.submitJobWithClass(&jobs[job_idx], .high)) {
                     meshlet_logger.errorSub("dispatch", "meshlet job {} failed to submit", .{job_idx});
                     meshlet_jobs[job_idx].process();
                 }
@@ -8280,6 +7817,7 @@ pub const Renderer = struct {
                 const meshlet_vertices = mesh.meshletVertexSlice(meshlet_ptr);
                 transformMeshletVertices(mesh_vertices, meshlet_vertices, self.camera_position, right, up, forward, projection, local_camera_vertices, local_projected_vertices);
 
+                const start_cursor = cursor;
                 for (mesh.meshletPrimitiveSlice(meshlet_ptr)) |primitive| {
                     const tri_idx = primitive.triangle_index;
                     const tri = mesh.triangles[tri_idx];
@@ -8303,6 +7841,8 @@ pub const Renderer = struct {
                         continue;
                     };
                 }
+                work.meshlet_packets[visible_idx].triangle_start = start_cursor;
+                work.meshlet_packets[visible_idx].triangle_count = cursor - start_cursor;
             }
 
             work.next_triangle.store(cursor, .release);
@@ -8327,12 +7867,51 @@ pub const Renderer = struct {
         projection: ProjectionParams,
         mesh_work: *const MeshWork,
     ) !void {
-        _ = self;
-        _ = mesh;
-        _ = light_dir;
-        _ = projection;
-        _ = mesh_work;
-        _ = transform;
+        _ = try self.renderTiled(mesh, transform, light_dir, null, projection, mesh_work);
+    }
+
+    fn clearDirectFrame(self: *Renderer, clear: direct_primitives.ClearConfig) void {
+        _ = frame_setup_stage.execute(self.directFrameResources(), .{
+            .clear_color = clear.color,
+            .clear_depth = clear.depth orelse std.math.inf(f32),
+        });
+    }
+
+    fn renderDirectPrimitiveShowcase(self: *Renderer) !void {
+        const plan = direct_showcase.defaultPlan(
+            self.camera_position,
+            self.rotation_angle,
+            self.rotation_x,
+            self.camera_fov_deg,
+            self.bitmap.width,
+            self.bitmap.height,
+            &self.direct_backend.suzanne_mesh,
+        );
+        try self.direct_backend.renderPrimitiveShowcase(
+            self.directFrameResources(),
+            plan.camera,
+            self.job_system,
+            .{
+                .raster_mode = plan.raster_mode,
+                .scene_kind = plan.scene_kind,
+            },
+        );
+    }
+
+    pub fn directFrameResources(self: *Renderer) frame_resources.FrameResources {
+        return .{
+            .target = .{
+                .width = self.bitmap.width,
+                .height = self.bitmap.height,
+                .color = self.bitmap.pixels,
+                .depth = self.scene_depth,
+            },
+            .aux = .{
+                .scene_camera = self.scene_camera,
+                .scene_normal = self.scene_normal,
+                .scene_surface = self.scene_surface,
+            },
+        };
     }
 
     fn drawShadedTriangle(self: *Renderer, p0: [2]i32, p1: [2]i32, p2: [2]i32, shading: TileRenderer.ShadingParams) void {

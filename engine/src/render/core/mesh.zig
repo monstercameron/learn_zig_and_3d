@@ -70,6 +70,8 @@ pub const Triangle = struct {
     v1: usize, // Index of the second vertex.
     v2: usize, // Index of the third vertex.
     cull_flags: TriangleCullFlags = .{}, // Flags for rendering.
+    flat_shaded: bool = false,
+    double_sided: bool = false,
     base_color: u32 = default_color,
     texture_index: u16 = no_texture_index,
 
@@ -84,6 +86,8 @@ pub const Triangle = struct {
             .v1 = v1,
             .v2 = v2,
             .cull_flags = .{},
+            .flat_shaded = false,
+            .double_sided = false,
             .base_color = default_color,
             .texture_index = no_texture_index,
         };
@@ -97,6 +101,8 @@ pub const Triangle = struct {
             .v1 = v1,
             .v2 = v2,
             .cull_flags = .{ .cull_fill = cull_fill, .cull_wireframe = cull_wireframe },
+            .flat_shaded = false,
+            .double_sided = false,
             .base_color = default_color,
             .texture_index = no_texture_index,
         };
@@ -110,6 +116,8 @@ pub const Triangle = struct {
             .v1 = v1,
             .v2 = v2,
             .cull_flags = .{},
+            .flat_shaded = false,
+            .double_sided = false,
             .base_color = color,
             .texture_index = no_texture_index,
         };
@@ -123,6 +131,8 @@ pub const Triangle = struct {
             .v1 = v1,
             .v2 = v2,
             .cull_flags = .{ .cull_fill = cull_fill, .cull_wireframe = cull_wireframe },
+            .flat_shaded = false,
+            .double_sided = false,
             .base_color = color,
             .texture_index = no_texture_index,
         };
@@ -139,6 +149,8 @@ pub const Mesh = struct {
     /// The list of face normals. Each normal corresponds to a triangle in the `triangles` array
     /// and represents the direction that triangle is facing. Used for lighting.
     normals: []Vec3,
+    /// Optional per-vertex normals used for smooth shading paths such as Gouraud.
+    vertex_normals: []Vec3,
     /// The list of 2D texture coordinates (UVs). Each entry corresponds to a vertex.
     tex_coords: []Vec2,
     /// Meshlets generated for this mesh. Empty until meshlet generation runs.
@@ -156,6 +168,7 @@ pub const Mesh = struct {
             .vertices = &[_]Vec3{},
             .triangles = &[_]Triangle{},
             .normals = &[_]Vec3{},
+            .vertex_normals = &[_]Vec3{},
             .tex_coords = &[_]Vec2{},
             .meshlets = &[_]Meshlet{},
             .meshlet_vertices = &[_]usize{},
@@ -178,6 +191,51 @@ pub const Mesh = struct {
             // The cross product gives a vector that is perpendicular to the plane of the triangle.
             const normal = Vec3.cross(edge1, edge2);
             self.normals[i] = normal.normalize();
+        }
+    }
+
+    /// Calculates averaged per-vertex normals from the current triangle set.
+    pub fn recalculateVertexNormals(self: *Mesh) void {
+        if (self.vertex_normals.len != self.vertices.len) return;
+        @memset(self.vertex_normals, Vec3.new(0.0, 0.0, 0.0));
+        for (self.triangles, 0..) |tri, i| {
+            const face_normal = if (i < self.normals.len) self.normals[i] else blk: {
+                const v0 = self.vertices[tri.v0];
+                const v1 = self.vertices[tri.v1];
+                const v2 = self.vertices[tri.v2];
+                const edge1 = Vec3.sub(v1, v0);
+                const edge2 = Vec3.sub(v2, v0);
+                break :blk Vec3.cross(edge1, edge2).normalize();
+            };
+            self.vertex_normals[tri.v0] = Vec3.add(self.vertex_normals[tri.v0], face_normal);
+            self.vertex_normals[tri.v1] = Vec3.add(self.vertex_normals[tri.v1], face_normal);
+            self.vertex_normals[tri.v2] = Vec3.add(self.vertex_normals[tri.v2], face_normal);
+        }
+        for (self.vertex_normals) |*normal| {
+            const len = Vec3.length(normal.*);
+            if (len > 1e-6) {
+                normal.* = Vec3.scale(normal.*, 1.0 / len);
+            } else {
+                normal.* = Vec3.new(0.0, 0.0, 1.0);
+            }
+        }
+    }
+
+    pub fn recalculateFlatVertexNormals(self: *Mesh) void {
+        if (self.vertex_normals.len != self.vertices.len) return;
+        @memset(self.vertex_normals, Vec3.new(0.0, 0.0, 0.0));
+        for (self.triangles, 0..) |tri, i| {
+            const face_normal = if (i < self.normals.len) self.normals[i] else blk: {
+                const v0 = self.vertices[tri.v0];
+                const v1 = self.vertices[tri.v1];
+                const v2 = self.vertices[tri.v2];
+                const edge1 = Vec3.sub(v1, v0);
+                const edge2 = Vec3.sub(v2, v0);
+                break :blk Vec3.cross(edge1, edge2).normalize();
+            };
+            self.vertex_normals[tri.v0] = face_normal;
+            self.vertex_normals[tri.v1] = face_normal;
+            self.vertex_normals[tri.v2] = face_normal;
         }
     }
 
@@ -219,6 +277,7 @@ pub const Mesh = struct {
             .vertices = vertices,
             .triangles = triangles,
             .normals = try allocator.alloc(Vec3, 12),
+            .vertex_normals = try allocator.alloc(Vec3, 8),
             .tex_coords = tex_coords,
             .meshlets = &[_]Meshlet{},
             .meshlet_vertices = &[_]usize{},
@@ -227,6 +286,7 @@ pub const Mesh = struct {
         };
 
         mesh.recalculateNormals();
+        mesh.recalculateVertexNormals();
         return mesh;
     }
 
@@ -247,6 +307,7 @@ pub const Mesh = struct {
             .vertices = vertices,
             .triangles = triangles,
             .normals = try allocator.alloc(Vec3, 1),
+            .vertex_normals = try allocator.alloc(Vec3, 3),
             .tex_coords = tex_coords,
             .meshlets = &[_]Meshlet{},
             .meshlet_vertices = &[_]usize{},
@@ -255,6 +316,7 @@ pub const Mesh = struct {
         };
 
         mesh.recalculateNormals();
+        mesh.recalculateVertexNormals();
         return mesh;
     }
 
@@ -264,6 +326,7 @@ pub const Mesh = struct {
         self.allocator.free(self.vertices);
         self.allocator.free(self.triangles);
         self.allocator.free(self.normals);
+        self.allocator.free(self.vertex_normals);
         self.allocator.free(self.tex_coords);
     }
 
@@ -388,6 +451,84 @@ pub const Mesh = struct {
         self.clearMeshlets();
     }
 
+    fn sortTrianglesSpatially(self: *Mesh) !void {
+        if (self.triangles.len == 0) return;
+
+        const TriSortData = struct {
+            tri: Triangle,
+            code: u32,
+        };
+
+        var sort_data = try self.allocator.alloc(TriSortData, self.triangles.len);
+        defer self.allocator.free(sort_data);
+
+        var min_c = Vec3.new(std.math.inf(f32), std.math.inf(f32), std.math.inf(f32));
+        var max_c = Vec3.new(-std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32));
+
+        for (self.triangles, 0..) |*tri, i| {
+            const v0 = self.vertices[tri.v0];
+            const v1 = self.vertices[tri.v1];
+            const v2 = self.vertices[tri.v2];
+            const cx = (v0.x + v1.x + v2.x) / 3.0;
+            const cy = (v0.y + v1.y + v2.y) / 3.0;
+            const cz = (v0.z + v1.z + v2.z) / 3.0;
+            min_c.x = @min(min_c.x, cx);
+            min_c.y = @min(min_c.y, cy);
+            min_c.z = @min(min_c.z, cz);
+            max_c.x = @max(max_c.x, cx);
+            max_c.y = @max(max_c.y, cy);
+            max_c.z = @max(max_c.z, cz);
+            sort_data[i] = .{ .tri = tri.*, .code = 0 };
+        }
+
+        const extent = Vec3.new(
+            @max(1e-4, max_c.x - min_c.x),
+            @max(1e-4, max_c.y - min_c.y),
+            @max(1e-4, max_c.z - min_c.z),
+        );
+
+        const Morton = struct {
+            fn expandBits(v: u32) u32 {
+                var x = v & 0x000003ff; // 10 bits
+                x = (x | (x << 16)) & 0x30000ff;
+                x = (x | (x <<  8)) & 0x0300f00f;
+                x = (x | (x <<  4)) & 0x30c30c3;
+                x = (x | (x <<  2)) & 0x9249249;
+                return x;
+            }
+            fn encode(x: f32, y: f32, z: f32) u32 {
+                const xx = expandBits(@as(u32, @intFromFloat(@max(0.0, @min(0.999, x)) * 1024.0)));
+                const yy = expandBits(@as(u32, @intFromFloat(@max(0.0, @min(0.999, y)) * 1024.0)));
+                const zz = expandBits(@as(u32, @intFromFloat(@max(0.0, @min(0.999, z)) * 1024.0)));
+                return xx | (yy << 1) | (zz << 2);
+            }
+        };
+
+        for (self.triangles, 0..) |*tri, i| {
+            const v0 = self.vertices[tri.v0];
+            const v1 = self.vertices[tri.v1];
+            const v2 = self.vertices[tri.v2];
+            const cx = (v0.x + v1.x + v2.x) / 3.0;
+            const cy = (v0.y + v1.y + v2.y) / 3.0;
+            const cz = (v0.z + v1.z + v2.z) / 3.0;
+            const nx = (cx - min_c.x) / extent.x;
+            const ny = (cy - min_c.y) / extent.y;
+            const nz = (cz - min_c.z) / extent.z;
+            sort_data[i].code = Morton.encode(nx, ny, nz);
+        }
+
+        const SortCtx = struct {
+            fn lessThan(_: void, a: TriSortData, b: TriSortData) bool {
+                return a.code < b.code;
+            }
+        };
+        std.mem.sortUnstable(TriSortData, sort_data, {}, SortCtx.lessThan);
+
+        for (sort_data, 0..) |sd, i| {
+            self.triangles[i] = sd.tri;
+        }
+    }
+
     /// Processes generate meshlets.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn generateMeshlets(self: *Mesh, max_vertices: usize, max_triangles: usize) !void {
@@ -399,6 +540,10 @@ pub const Mesh = struct {
             self.meshlets = &[_]Meshlet{};
             return;
         }
+
+        self.sortTrianglesSpatially() catch |err| {
+            std.debug.print("Spatial sort failed, continuing without sort: {}\n", .{err});
+        };
 
         var meshlets_temp = std.ArrayList(Meshlet){};
         defer meshlets_temp.deinit(self.allocator);

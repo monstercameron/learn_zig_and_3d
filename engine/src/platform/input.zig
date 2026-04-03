@@ -336,6 +336,7 @@ pub fn keyFromVirtualKey(key_code: u32) ?Key {
         0x44 => .d,
         0x45 => .e,
         0xA2 => .ctrl,
+        0xA3 => .ctrl,
         0x51 => .q,
         0x53 => .s,
         0x57 => .w,
@@ -429,6 +430,15 @@ test "keyboard state reports hold across frames without cross-key bleed" {
     try std.testing.expect(!keyboard.wasReleased(.a));
     try std.testing.expect(!keyboard.isDown(.space));
     try std.testing.expect(keyboard.wasReleased(.space));
+}
+
+test "keyboard state maps both control keys to ctrl" {
+    var keyboard = KeyboardState{};
+
+    keyboard.beginFrame();
+    const press_right_ctrl = updateKeyState(&keyboard, 0xA3, true) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(Key.ctrl, press_right_ctrl.key);
+    try std.testing.expect(keyboard.isDown(.ctrl));
 }
 
 test "mouse state exposes press release hold and movement" {

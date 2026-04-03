@@ -29,121 +29,8 @@
 //!
 const std = @import("std");
 const profiler = @import("core/profiler.zig");
-const windows = std.os.windows;
 const math = @import("core/math.zig");
 const zphysics = @import("zphysics");
-
-// Windows message structure.
-// JS Analogy: This is the raw event object from the operating system. A browser
-// would normally process this and give you a cleaner `KeyboardEvent` or `MouseEvent`.
-const MSG = extern struct {
-    hwnd: windows.HWND, // The window handle this message is for.
-    message: u32, // The type of message (e.g., WM_KEYDOWN, WM_CLOSE).
-    wParam: windows.WPARAM, // Extra event-specific data. For keyboard events, this is the key code.
-    lParam: windows.LPARAM, // More event-specific data.
-    time: u32, // Timestamp of when the event occurred.
-    pt: windows.POINT, // Mouse position when the event occurred.
-};
-
-// Windows message type constants.
-const WM_KEYDOWN = 0x0100;
-const WM_KEYUP = 0x0101;
-const WM_SYSKEYDOWN = 0x0104;
-const WM_SYSKEYUP = 0x0105;
-const WM_CHAR = 0x0102;
-const WM_QUIT = 0x12;
-const WM_SETFOCUS = 0x0007;
-const WM_KILLFOCUS = 0x0008;
-const WM_INPUT = 0x00FF;
-const WM_MOUSEMOVE = 0x0200;
-const WM_LBUTTONDOWN = 0x0201;
-const WM_LBUTTONUP = 0x0202;
-const WM_RBUTTONDOWN = 0x0204;
-const WM_RBUTTONUP = 0x0205;
-
-const RAWINPUTDEVICE = extern struct {
-    usUsagePage: u16,
-    usUsage: u16,
-    dwFlags: u32,
-    hwndTarget: ?windows.HWND,
-};
-
-const RAWINPUTHEADER = extern struct {
-    dwType: u32,
-    dwSize: u32,
-    hDevice: ?windows.HANDLE,
-    wParam: windows.WPARAM,
-};
-
-const RAWMOUSE_BUTTONS = extern union {
-    ulButtons: u32,
-    buttons: extern struct {
-        usButtonFlags: u16,
-        usButtonData: u16,
-    },
-};
-
-const RAWMOUSE = extern struct {
-    usFlags: u16,
-    buttons: RAWMOUSE_BUTTONS,
-    ulRawButtons: u32,
-    lLastX: i32,
-    lLastY: i32,
-    ulExtraInformation: u32,
-};
-
-const RAWINPUTMOUSE = extern struct {
-    header: RAWINPUTHEADER,
-    mouse: RAWMOUSE,
-};
-
-// Declarations for Windows API functions.
-// JS Analogy: These are low-level functions to interact with the OS event queue.
-// Think of them as the underlying native functions a browser's JS engine would call
-// to handle events, but here we are calling them directly.
-extern "user32" fn GetMessageW(
-    lpMsg: *MSG,
-    hWnd: ?windows.HWND,
-    wMsgFilterMin: u32,
-    wMsgFilterMax: u32,
-) i32;
-
-extern "user32" fn PeekMessageW(
-    lpMsg: *MSG,
-    hWnd: ?windows.HWND,
-    wMsgFilterMin: u32,
-    wMsgFilterMax: u32,
-    wRemoveMsg: u32,
-) i32;
-
-extern "user32" fn TranslateMessage(lpMsg: *const MSG) bool;
-
-extern "user32" fn DispatchMessageW(lpMsg: *const MSG) windows.LRESULT;
-extern "user32" fn GetAsyncKeyState(vKey: i32) i16;
-extern "user32" fn RegisterRawInputDevices(pRawInputDevices: [*]const RAWINPUTDEVICE, uiNumDevices: u32, cbSize: u32) windows.BOOL;
-extern "user32" fn GetRawInputData(hRawInput: ?windows.HANDLE, uiCommand: u32, pData: ?*anyopaque, pcbSize: *u32, cbSizeHeader: u32) u32;
-extern "user32" fn LoadCursorW(hInstance: ?windows.HINSTANCE, lpCursorName: [*:0]align(1) const u16) ?windows.HCURSOR;
-extern "user32" fn SetCapture(hWnd: windows.HWND) ?windows.HWND;
-extern "user32" fn ReleaseCapture() windows.BOOL;
-extern "user32" fn GetFocus() ?windows.HWND;
-extern "user32" fn SetCursor(hCursor: ?windows.HCURSOR) ?windows.HCURSOR;
-extern "user32" fn GetClientRect(hWnd: windows.HWND, lpRect: *windows.RECT) windows.BOOL;
-extern "user32" fn ClientToScreen(hWnd: windows.HWND, lpPoint: *windows.POINT) windows.BOOL;
-extern "user32" fn SetCursorPos(X: i32, Y: i32) windows.BOOL;
-
-// Constant for PeekMessageW: remove the message from the queue after reading.
-const PM_REMOVE = 1;
-const VK_RETURN = 0x0D;
-const MK_LBUTTON: usize = 0x0001;
-const MK_RBUTTON: usize = 0x0002;
-const IDC_ARROW_ID: usize = 32512;
-const IDC_SIZEALL_ID: usize = 32646;
-const IDC_HAND_ID: usize = 32649;
-const RID_INPUT: u32 = 0x10000003;
-const RIM_TYPEMOUSE: u32 = 0;
-const MOUSE_MOVE_ABSOLUTE: u16 = 0x0001;
-const HID_USAGE_PAGE_GENERIC: u16 = 0x01;
-const HID_USAGE_GENERIC_MOUSE: u16 = 0x02;
 
 // Import other modules from our project.
 // JS Analogy: `const Window = require('./window.js');`
@@ -160,13 +47,18 @@ const texture = @import("assets/texture.zig");
 const mesh_module = @import("render/core/mesh.zig");
 const config = @import("core/app_config.zig");
 const cpu_features = @import("core/cpu_features.zig");
+const app_loop = @import("app_loop.zig");
+const platform_loop = @import("platform/loop.zig");
 const input = @import("platform_input");
+const input_actions = @import("input_actions");
 const log = @import("core/log.zig");
 const scene_runtime = @import("scene_main");
+const main_module = @This();
 
 const app_logger = log.get("app.main");
 const scenes_index_path = "assets/configs/scenes/index.json";
 const scene_texture_slots_capacity: usize = scene_runtime.max_texture_slots;
+const minimal_triangle_demo_enabled = false;
 
 const SceneModelType = scene_runtime.LoadedSceneModelType;
 const SceneAssetConfigEntry = scene_runtime.SceneAssetConfigEntry;
@@ -187,6 +79,7 @@ const SceneMeshResources = struct {
         for (self.render_instances) |instance| {
             allocator.free(instance.local_vertices);
             allocator.free(instance.local_normals);
+            allocator.free(instance.local_vertex_normals);
         }
         self.mesh.deinit();
         allocator.free(self.render_instances);
@@ -206,7 +99,155 @@ const SceneRenderInstance = struct {
     bounds_max: math.Vec3,
     local_vertices: []math.Vec3,
     local_normals: []math.Vec3,
+    local_vertex_normals: []math.Vec3,
 };
+
+const AppSession = struct {
+    window: *Window,
+    renderer: *Renderer,
+    phase13_runtime: *scene_runtime.SceneRuntime,
+    scene_resources: *SceneMeshResources,
+    minimal_demo: bool = false,
+    mouse_grabbed: *bool,
+    selected_scene_entity_pin: *?scene_runtime.EntityId,
+    last_runtime_update_ns: i128,
+    minimized: bool = false,
+    close_requested: bool = false,
+};
+
+const MinimalAppSession = struct {
+    window: *Window,
+    renderer: *Renderer,
+    mouse_grabbed: *bool,
+    minimized: bool = false,
+    close_requested: bool = false,
+};
+
+fn logDirectFrameTimings(renderer: *Renderer, scope: []const u8) void {
+    const timings = renderer.lastDirectFrameTimings();
+    app_logger.infoSub(scope, "timings clear={d:.3}ms build={d:.3}ms compile={d:.3}ms bin={d:.3}ms raster={d:.3}ms shade={d:.3}ms compose={d:.3}ms post={d:.3}ms present={d:.3}ms primitives={d} touched_tiles={d}", .{
+        @as(f64, @floatFromInt(timings.clear_ns)) / 1_000_000.0,
+        @as(f64, @floatFromInt(timings.build_batch_ns)) / 1_000_000.0,
+        @as(f64, @floatFromInt(timings.compile_draw_list_ns)) / 1_000_000.0,
+        @as(f64, @floatFromInt(timings.binning_ns)) / 1_000_000.0,
+        @as(f64, @floatFromInt(timings.raster_ns)) / 1_000_000.0,
+        @as(f64, @floatFromInt(timings.shading_ns)) / 1_000_000.0,
+        @as(f64, @floatFromInt(timings.composition_ns)) / 1_000_000.0,
+        @as(f64, @floatFromInt(timings.post_process_ns)) / 1_000_000.0,
+        @as(f64, @floatFromInt(timings.present_ns)) / 1_000_000.0,
+        timings.primitive_count,
+        timings.touched_tiles,
+    });
+}
+
+fn toPlatformCursorStyle(style: CursorStyle) platform_loop.CursorStyle {
+    return switch (style) {
+        .arrow => .arrow,
+        .grab => .grab,
+        .grabbing => .grabbing,
+        .hidden => .hidden,
+    };
+}
+
+fn applyPlatformCursor(renderer: *Renderer) void {
+    platform_loop.setCursor(toPlatformCursorStyle(renderer.desiredCursorStyle()));
+}
+
+fn syncFirstPersonMouseGrab(window: *Window, renderer: *Renderer, mouse_grabbed: *bool) void {
+    const focused = platform_loop.windowHasFocus(window.hwnd);
+    const should_grab = focused and renderer.isFirstPersonMode();
+    if (should_grab) {
+        if (!mouse_grabbed.*) {
+            platform_loop.setMouseCapture(window.hwnd, true);
+            platform_loop.centerCursorInWindow(window.hwnd);
+            mouse_grabbed.* = true;
+        }
+        return;
+    }
+    if (mouse_grabbed.*) {
+        platform_loop.setMouseCapture(window.hwnd, false);
+        mouse_grabbed.* = false;
+    }
+}
+
+fn consumePlatformEvent(session: *AppSession, event: platform_loop.PlatformEvent) void {
+    const renderer = session.renderer;
+    switch (event) {
+        .key => |payload| renderer.handleKeyInput(payload.code, payload.is_down),
+        .char => |char_code| renderer.handleCharInput(char_code),
+        .focus_changed => |focused| {
+            if (focused) {
+                renderer.handleFocusGained();
+            } else {
+                renderer.handleFocusLost();
+                session.mouse_grabbed.* = false;
+            }
+            applyPlatformCursor(renderer);
+        },
+        .raw_mouse_delta => |delta| renderer.handleRawMouseDelta(delta.x, delta.y),
+        .mouse_move => |move| {
+            if (!renderer.isFirstPersonMode()) {
+                if (!move.left_down) renderer.handleMouseLeftRelease(move.x, move.y);
+                if (!move.right_down) renderer.handleMouseRightRelease(move.x, move.y);
+            }
+            renderer.handleMouseMove(move.x, move.y);
+            applyPlatformCursor(renderer);
+        },
+        .mouse_button => |button| {
+            switch (button.button) {
+                .left => if (button.pressed)
+                    renderer.handleMouseLeftClick(button.x, button.y)
+                else
+                    renderer.handleMouseLeftRelease(button.x, button.y),
+                .right => if (button.pressed)
+                    renderer.handleMouseRightClick(button.x, button.y)
+                else
+                    renderer.handleMouseRightRelease(button.x, button.y),
+            }
+            applyPlatformCursor(renderer);
+        },
+        .resized => |size| {
+            if (size.width > 0 and size.height > 0) {
+                config.WINDOW_WIDTH = @intCast(size.width);
+                config.WINDOW_HEIGHT = @intCast(size.height);
+                renderer.setPresentSize(size.width, size.height);
+            }
+        },
+        .minimized => {
+            session.minimized = true;
+            renderer.setPresentMinimized(true);
+        },
+        .restored => {
+            session.minimized = false;
+            renderer.setPresentMinimized(false);
+        },
+        .close_requested => {
+            session.close_requested = true;
+        },
+        .quit => {},
+    }
+}
+
+fn pumpRendererEvents(renderer: *Renderer) bool {
+    var dummy_mouse_grabbed = false;
+    var dummy_selected_pin: ?scene_runtime.EntityId = null;
+    var dummy_window = Window{ .hwnd = renderer.hwnd };
+    var session = AppSession{
+        .window = &dummy_window,
+        .renderer = renderer,
+        .phase13_runtime = undefined,
+        .scene_resources = undefined,
+        .mouse_grabbed = &dummy_mouse_grabbed,
+        .selected_scene_entity_pin = &dummy_selected_pin,
+        .last_runtime_update_ns = 0,
+    };
+    const Hooks = struct {
+        pub fn handleEvent(target: *AppSession, event: platform_loop.PlatformEvent) void {
+            consumePlatformEvent(target, event);
+        }
+    };
+    return platform_loop.pumpEvents(&session, Hooks);
+}
 
 fn populateSceneRuntimeBootstrap(runtime: *scene_runtime.SceneRuntime, scene_desc: scene_runtime.LoadedSceneDescription) !void {
     const default_camera_modules = [_][]const u8{
@@ -300,7 +341,7 @@ fn populateSceneRuntimeBootstrap(runtime: *scene_runtime.SceneRuntime, scene_des
             .position = .{ .x = scene_desc.camera_position.x, .y = scene_desc.camera_position.y, .z = scene_desc.camera_position.z },
             .pitch = scene_desc.camera_orientation_pitch,
             .yaw = scene_desc.camera_orientation_yaw,
-            .fov_deg = config.CAMERA_FOV_INITIAL,
+            .fov_deg = scene_desc.camera_fov_deg,
         },
         .lights = bootstrap_lights,
         .assets = bootstrap_assets,
@@ -338,8 +379,9 @@ fn selectionIdToEntity(selection_id: u64) scene_runtime.EntityId {
 
 fn syncRendererFromSceneSnapshot(renderer: *Renderer, snapshot: *const scene_runtime.RenderSnapshot) !void {
     if (snapshot.active_camera) |camera| {
-        renderer.setCameraPosition(toRenderVec3(camera.position));
-        renderer.setCameraOrientation(camera.pitch, camera.yaw);
+        renderer.setCameraPosition(toRenderVec3(camera.state.position));
+        renderer.setCameraOrientation(camera.state.pitch, camera.state.yaw);
+        renderer.setCameraFov(camera.state.fov_deg);
     }
 
     try renderer.setLightCapacity(snapshot.lights.items.len);
@@ -358,7 +400,6 @@ fn syncRendererFromSceneSnapshot(renderer: *Renderer, snapshot: *const scene_run
 
 fn applySceneRendererCommand(renderer: *Renderer, command: scene_runtime.Command) void {
     switch (command) {
-        .adjust_camera_fov => |payload| renderer.requestCameraFovDelta(payload.delta),
         .set_camera_mode => |mode| renderer.applyCameraModeCommand(@intFromEnum(mode)),
         .toggle_scene_item_gizmo => renderer.toggleSceneItemGizmo(),
         .toggle_light_gizmo => renderer.toggleLightGizmo(),
@@ -368,6 +409,7 @@ fn applySceneRendererCommand(renderer: *Renderer, command: scene_runtime.Command
         .toggle_render_overlay => renderer.toggleRenderOverlay(),
         .toggle_shadow_debug => renderer.toggleHybridShadowDebug(),
         .advance_shadow_debug => renderer.advanceHybridShadowDebug(),
+        .adjust_camera_fov => {},
         else => {},
     }
 }
@@ -380,43 +422,8 @@ const SceneLoadingProgress = struct {
     completed_steps: usize = 0,
 };
 
-/// Returns whether i se nt er do wn.
-/// The check is side-effect free so callers can gate expensive follow-up work cheaply.
-fn isEnterDown() bool {
-    return GetAsyncKeyState(VK_RETURN) < 0;
-}
-
 fn sceneLoadingTotalSteps(scene_desc: LoadedSceneDescription) usize {
     return @max(@as(usize, 1), scene_desc.assets.len + scene_desc.textureSlotCount() + 1);
-}
-
-fn centerCursorInWindow(hwnd: windows.HWND) void {
-    var rect: windows.RECT = undefined;
-    if (GetClientRect(hwnd, &rect) == 0) return;
-    var point = windows.POINT{
-        .x = @divTrunc(rect.right - rect.left, 2),
-        .y = @divTrunc(rect.bottom - rect.top, 2),
-    };
-    if (ClientToScreen(hwnd, &point) == 0) return;
-    _ = SetCursorPos(point.x, point.y);
-}
-
-fn syncFirstPersonMouseGrab(renderer: *Renderer, mouse_grabbed: *bool) void {
-    const focused = if (GetFocus()) |focused_hwnd| focused_hwnd == renderer.hwnd else false;
-    const should_grab = focused and renderer.isFirstPersonMode();
-    if (should_grab) {
-        if (!mouse_grabbed.*) {
-            _ = SetCapture(renderer.hwnd);
-            centerCursorInWindow(renderer.hwnd);
-            mouse_grabbed.* = true;
-        }
-        return;
-    }
-
-    if (mouse_grabbed.*) {
-        _ = ReleaseCapture();
-        mouse_grabbed.* = false;
-    }
 }
 
 /// renderSceneLoadingFrame renders Main output.
@@ -443,20 +450,6 @@ fn advanceSceneLoadingProgress(progress: ?*SceneLoadingProgress, phase: []const 
     }
 }
 
-/// Updates registry/attachment state for register raw mouse input.
-/// Propagates recoverable errors so allocation/IO failures stay explicit to the caller.
-fn registerRawMouseInput(hwnd: windows.HWND) !void {
-    const device = RAWINPUTDEVICE{
-        .usUsagePage = HID_USAGE_PAGE_GENERIC,
-        .usUsage = HID_USAGE_GENERIC_MOUSE,
-        .dwFlags = 0,
-        .hwndTarget = hwnd,
-    };
-    if (RegisterRawInputDevices(@ptrCast(&device), 1, @sizeOf(RAWINPUTDEVICE)) == 0) {
-        return error.RawInputRegistrationFailed;
-    }
-}
-
 /// # Application Entry Point
 /// This `main` function is where the program execution begins.
 /// JS Analogy: Think of this as an `async function main() { ... }` that is called
@@ -476,14 +469,7 @@ pub fn main() !void {
     // that `gpa.deinit()` is called at the end of the `main` function, cleaning up the allocator.
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-    try zphysics.init(allocator, .{});
-    defer zphysics.deinit();
-    var phase13_runtime = try scene_runtime.SceneRuntime.init(allocator, .{
-        .min = .{ .x = -512.0, .y = -512.0, .z = -512.0 },
-        .max = .{ .x = 512.0, .y = 512.0, .z = 512.0 },
-    });
-    defer phase13_runtime.deinit();
-    const renderer_ttl_ns = loadRendererTtlNs(allocator);
+    const requested_renderer_ttl_ns = loadRendererTtlNs(allocator);
     const renderer_ttl_frames = loadRendererTtlFrames(allocator);
     const profile_frame_target = loadProfileFrameTarget(allocator);
     const auto_profile_ttl_frames: ?u64 = if (renderer_ttl_frames == null and profile_frame_target != null)
@@ -491,6 +477,10 @@ pub fn main() !void {
     else
         null;
     const effective_ttl_frames = renderer_ttl_frames orelse auto_profile_ttl_frames;
+    const renderer_ttl_ns = requested_renderer_ttl_ns orelse if (effective_ttl_frames == null)
+        defaultRendererTtlNs()
+    else
+        null;
     const renderer_start_ns = std.time.nanoTimestamp();
 
     log.init(allocator);
@@ -549,9 +539,14 @@ pub fn main() !void {
 
     const initial_width = @as(i32, @intCast(config.WINDOW_WIDTH));
     const initial_height = @as(i32, @intCast(config.WINDOW_HEIGHT));
-    var window = try Window.init(config.WINDOW_TITLE, initial_width, initial_height);
+    var window = try Window.init(.{
+        .title = config.WINDOW_TITLE,
+        .width = initial_width,
+        .height = initial_height,
+        .visible = true,
+    });
     defer window.deinit(); // Guarantees the window is destroyed on exit.
-    try registerRawMouseInput(window.hwnd);
+    try platform_loop.registerRawMouseInput(window.hwnd);
     app_logger.infoSub("bootstrap", "window created {d}x{d}", .{ initial_width, initial_height });
 
     // Safely enforce a minimum size to prevent 0-dimension crashes
@@ -567,368 +562,450 @@ pub fn main() !void {
     app_logger.infoSub("bootstrap", "renderer initialized backbuffer={d}x{d}", .{ renderer.bitmap.width, renderer.bitmap.height });
 
     var running = true;
-    const MessagePump = struct {
-        fn cursorResource(id: usize) [*:0]align(1) const u16 {
-            return @ptrFromInt(id);
-        }
-
-        /// Applies cursor from renderer.
-        /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-        fn applyCursorFromRenderer(r: *Renderer) void {
-            const desired = r.desiredCursorStyle();
-            switch (desired) {
-                .hidden => {
-                    _ = SetCursor(null);
-                },
-                else => {
-                    const cursor_id: usize = switch (desired) {
-                        .arrow => IDC_ARROW_ID,
-                        .grab => IDC_HAND_ID,
-                        .grabbing => IDC_SIZEALL_ID,
-                        .hidden => unreachable,
-                    };
-                    const cursor = LoadCursorW(null, cursorResource(cursor_id));
-                    _ = SetCursor(cursor);
-                },
-            }
-        }
-
-        fn decodeRawMouseDelta(lParam: windows.LPARAM) ?windows.POINT {
-            var raw_input: RAWINPUTMOUSE = undefined;
-            var size: u32 = @sizeOf(RAWINPUTMOUSE);
-            const handle: ?windows.HANDLE = @ptrFromInt(@as(usize, @bitCast(lParam)));
-            const copied = GetRawInputData(handle, RID_INPUT, @ptrCast(&raw_input), &size, @sizeOf(RAWINPUTHEADER));
-            if (copied == std.math.maxInt(u32) or copied < @sizeOf(RAWINPUTHEADER)) return null;
-            if (raw_input.header.dwType != RIM_TYPEMOUSE) return null;
-            if ((raw_input.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) != 0) return null;
-            if (raw_input.mouse.lLastX == 0 and raw_input.mouse.lLastY == 0) return null;
-            return windows.POINT{
-                .x = raw_input.mouse.lLastX,
-                .y = raw_input.mouse.lLastY,
-            };
-        }
-
-        fn decodeMouseCoords(lParam: windows.LPARAM) windows.POINT {
-            const raw: usize = @bitCast(lParam);
-            const x16: u16 = @intCast(raw & 0xFFFF);
-            const y16: u16 = @intCast((raw >> 16) & 0xFFFF);
-            const x_component: i16 = @bitCast(x16);
-            const y_component: i16 = @bitCast(y16);
-            return windows.POINT{
-                .x = @intCast(x_component),
-                .y = @intCast(y_component),
-            };
-        }
-
-        fn pump(r: *Renderer) bool {
-            var m: MSG = undefined;
-            while (PeekMessageW(&m, null, 0, 0, PM_REMOVE) != 0) {
-                if (m.message == WM_QUIT) {
-                    app_logger.info("received WM_QUIT message, exiting", .{});
-                    return false;
-                }
-                if (m.message == WM_KEYDOWN or m.message == WM_SYSKEYDOWN) {
-                    const key_code: u32 = @intCast(m.wParam);
-                    r.handleKeyInput(key_code, true);
-                } else if (m.message == WM_KEYUP or m.message == WM_SYSKEYUP) {
-                    const key_code: u32 = @intCast(m.wParam);
-                    r.handleKeyInput(key_code, false);
-                } else if (m.message == WM_CHAR) {
-                    const char_code: u32 = @intCast(m.wParam);
-                    r.handleCharInput(char_code);
-                    applyCursorFromRenderer(r);
-                } else if (m.message == WM_SETFOCUS) {
-                    r.handleFocusGained();
-                    applyCursorFromRenderer(r);
-                } else if (m.message == WM_KILLFOCUS) {
-                    _ = ReleaseCapture();
-                    r.handleFocusLost();
-                    applyCursorFromRenderer(r);
-                } else if (m.message == WM_INPUT) {
-                    if (decodeRawMouseDelta(m.lParam)) |delta| {
-                        r.handleRawMouseDelta(delta.x, delta.y);
-                    }
-                } else if (m.message == WM_MOUSEMOVE) {
-                    const coords = decodeMouseCoords(m.lParam);
-                    if (!r.isFirstPersonMode()) {
-                        const button_mask: usize = @intCast(m.wParam);
-                        if ((button_mask & MK_LBUTTON) == 0) {
-                            r.handleMouseLeftRelease(coords.x, coords.y);
-                        }
-                        if ((button_mask & MK_RBUTTON) == 0) {
-                            r.handleMouseRightRelease(coords.x, coords.y);
-                        }
-                    }
-                    r.handleMouseMove(coords.x, coords.y);
-                    applyCursorFromRenderer(r);
-                } else if (m.message == WM_LBUTTONDOWN) {
-                    const coords = decodeMouseCoords(m.lParam);
-                    r.handleMouseLeftClick(coords.x, coords.y);
-                    applyCursorFromRenderer(r);
-                } else if (m.message == WM_LBUTTONUP) {
-                    const coords = decodeMouseCoords(m.lParam);
-                    r.handleMouseLeftRelease(coords.x, coords.y);
-                    applyCursorFromRenderer(r);
-                } else if (m.message == WM_RBUTTONDOWN) {
-                    const coords = decodeMouseCoords(m.lParam);
-                    r.handleMouseRightClick(coords.x, coords.y);
-                    applyCursorFromRenderer(r);
-                } else if (m.message == WM_RBUTTONUP) {
-                    const coords = decodeMouseCoords(m.lParam);
-                    r.handleMouseRightRelease(coords.x, coords.y);
-                    applyCursorFromRenderer(r);
-                }
-                _ = TranslateMessage(&m);
-                _ = DispatchMessageW(&m);
-            }
-            return true;
-        }
-    };
-
-    const scene_index_bytes = try std.fs.cwd().readFileAlloc(allocator, scenes_index_path, 1024 * 1024);
-    defer allocator.free(scene_index_bytes);
-    const parsed_scene_index = try std.json.parseFromSlice(SceneIndexFile, allocator, scene_index_bytes, .{ .ignore_unknown_fields = true });
-    defer parsed_scene_index.deinit();
-
-    const selected_scene_key = try resolveLaunchSceneKey(allocator, parsed_scene_index.value);
-    const selected_scene_file_path = try resolveSceneFilePath(parsed_scene_index.value, selected_scene_key);
-    const scene_file_bytes = try std.fs.cwd().readFileAlloc(allocator, selected_scene_file_path, 1024 * 1024);
-    defer allocator.free(scene_file_bytes);
-    const parsed_scene_file = try std.json.parseFromSlice(SceneFile, allocator, scene_file_bytes, .{ .ignore_unknown_fields = true });
-    defer parsed_scene_file.deinit();
-
-    var scene_desc = try scene_runtime.buildSceneDescription(
-        allocator,
-        parsed_scene_file.value,
-        config.MESHLET_SHADOWS_ENABLED,
-        config.POST_SHADOW_ENABLED,
-        config.POST_SHADOW_MAP_SIZE,
-    );
-    defer scene_desc.deinit(allocator);
-
-    try populateSceneRuntimeBootstrap(&phase13_runtime, scene_desc);
-    app_logger.infoSub("bootstrap", "launch scene: {s}", .{scene_desc.key});
-    try renderer.setLightCapacity(scene_desc.lights.len);
-    var scene_loading_progress: ?SceneLoadingProgress = null;
-    var scene_loading_overlay_active = false;
-    defer if (scene_loading_overlay_active) renderer.endSceneLoadingOverlay();
-
-    if (parsed_scene_index.value.loadingScene) |loading_key| {
-        const loading_file_path = resolveSceneFilePath(parsed_scene_index.value, loading_key) catch null;
-        if (loading_file_path != null) {
-            const total_steps = sceneLoadingTotalSteps(scene_desc);
-            renderer.beginSceneLoadingOverlay(scene_desc.key, total_steps);
-            scene_loading_overlay_active = true;
-            scene_loading_progress = .{
-                .renderer = &renderer,
-                .running = &running,
-                .pump = MessagePump.pump,
-                .total_steps = total_steps,
-            };
-            if (scene_loading_progress) |*progress| startSceneLoadingProgress(progress);
-        }
-    }
-
-    var scene_textures = [_]?texture.Texture{null} ** scene_texture_slots_capacity;
-    defer for (&scene_textures) |*tex| {
-        if (tex.*) |*loaded| loaded.deinit();
-    };
-    var material_textures = [_]?*const texture.Texture{null} ** scene_texture_slots_capacity;
-
-    var scene_resources = try loadSceneMeshResourcesWithProgress(allocator, scene_desc, if (scene_loading_progress) |*progress| progress else null);
-    defer scene_resources.deinit(allocator);
-    assignSceneRenderEntities(&scene_resources, &phase13_runtime);
-    syncSceneMeshFromRuntime(null, &scene_resources, &phase13_runtime);
-    const runtime_renderables = try buildRuntimeRenderableSetups(allocator, &scene_resources);
-    defer allocator.free(runtime_renderables);
-    try phase13_runtime.configureExecution(scene_desc.runtime, runtime_renderables);
-    syncSceneMeshFromRuntime(null, &scene_resources, &phase13_runtime);
-    try configureSceneItemBindings(allocator, &renderer, &scene_resources, &phase13_runtime);
-    if (scene_desc.textureSlotCount() > 0) {
-        try loadSceneTexturesWithProgress(
-            allocator,
-            scene_desc.assets,
-            &scene_textures,
-            &material_textures,
-            if (scene_loading_progress) |*progress| progress else null,
-        );
-        renderer.setTextures(material_textures[0..]);
-    }
-    if (scene_desc.hdri_path) |hdri_path| {
-        if (texture.loadHdrRaw(allocator, hdri_path)) |env_map| {
-            app_logger.infoSub("assets", "loaded HDRI env map", .{});
-            renderer.setHdriMap(env_map);
-        } else |err| {
-            app_logger.warn("failed to load HDRI {s}: {s}", .{ hdri_path, @errorName(err) });
-        }
-    }
-    try renderer.setLightCapacity(scene_desc.lights.len);
-    try configureSceneLights(&renderer, scene_desc.lights);
-
-    try scene_resources.mesh.generateMeshlets(64, 126);
-    advanceSceneLoadingProgress(if (scene_loading_progress) |*progress| progress else null, "Building meshlets");
-    app_logger.infoSub(
-        "assets",
-        "loaded scene mesh vertices={} triangles={} meshlets={}",
-        .{ scene_resources.mesh.vertices.len, scene_resources.mesh.triangles.len, scene_resources.mesh.meshlets.len },
-    );
-    if (scene_loading_overlay_active) {
-        renderer.endSceneLoadingOverlay();
-        scene_loading_overlay_active = false;
-    }
-
-    renderer.setCameraPosition(toRenderVec3(scene_desc.camera_position));
-    renderer.setCameraOrientation(scene_desc.camera_orientation_pitch, scene_desc.camera_orientation_yaw);
-    renderer.setSceneCameraScriptActive(true);
     var mouse_grabbed = false;
+
+    if (minimal_triangle_demo_enabled) {
+        try renderer.setLightCapacity(0);
+        renderer.show_light_orb = false;
+        renderer.show_frame_pacing_overlay = false;
+        renderer.show_render_overlay = false;
+        renderer.setCameraPosition(math.Vec3.new(0.0, 0.0, -3.0));
+        renderer.setCameraOrientation(0.0, 0.0);
+        renderer.setCameraFov(config.CAMERA_FOV_INITIAL);
+        renderer.setSceneCameraScriptActive(false);
+        app_logger.infoSub("bootstrap", "minimal primitive showcase active", .{});
+
+        const MinimalDriver = struct {
+            pub fn beginFrame(session: *MinimalAppSession) void {
+                session.renderer.keys_pressed.beginFrame();
+                session.renderer.mouse_input.beginFrame();
+            }
+
+            pub fn pump(session: *MinimalAppSession) bool {
+                const Hooks = struct {
+                    pub fn handleEvent(target: *MinimalAppSession, event: platform_loop.PlatformEvent) void {
+                        switch (event) {
+                            .key => |payload| target.renderer.handleKeyInput(payload.code, payload.is_down),
+                            .char => |char_code| target.renderer.handleCharInput(char_code),
+                            .focus_changed => |focused| {
+                                if (focused) target.renderer.handleFocusGained() else {
+                                    target.renderer.handleFocusLost();
+                                    target.mouse_grabbed.* = false;
+                                }
+                                applyPlatformCursor(target.renderer);
+                            },
+                            .raw_mouse_delta => |delta| target.renderer.handleRawMouseDelta(delta.x, delta.y),
+                            .mouse_move => |move| {
+                                target.renderer.handleMouseMove(move.x, move.y);
+                                applyPlatformCursor(target.renderer);
+                            },
+                            .mouse_button => |button| {
+                                switch (button.button) {
+                                    .left => if (button.pressed)
+                                        target.renderer.handleMouseLeftClick(button.x, button.y)
+                                    else
+                                        target.renderer.handleMouseLeftRelease(button.x, button.y),
+                                    .right => if (button.pressed)
+                                        target.renderer.handleMouseRightClick(button.x, button.y)
+                                    else
+                                        target.renderer.handleMouseRightRelease(button.x, button.y),
+                                }
+                                applyPlatformCursor(target.renderer);
+                            },
+                            .resized => |size| {
+                                if (size.width > 0 and size.height > 0) {
+                                    config.WINDOW_WIDTH = @intCast(size.width);
+                                    config.WINDOW_HEIGHT = @intCast(size.height);
+                                    target.renderer.setPresentSize(size.width, size.height);
+                                }
+                            },
+                            .minimized => {
+                                target.minimized = true;
+                                target.renderer.setPresentMinimized(true);
+                            },
+                            .restored => {
+                                target.minimized = false;
+                                target.renderer.setPresentMinimized(false);
+                            },
+                            .close_requested => target.close_requested = true,
+                            .quit => {},
+                        }
+                    }
+                };
+                const keep_running = platform_loop.pumpEvents(session, Hooks);
+                return keep_running and !session.close_requested;
+            }
+
+            pub fn update(session: *MinimalAppSession, _: u32) !void {
+                syncFirstPersonMouseGrab(session.window, session.renderer, session.mouse_grabbed);
+                applyPlatformCursor(session.renderer);
+            }
+
+            pub fn shouldRender(session: *MinimalAppSession) bool {
+                if (session.minimized or session.close_requested) return false;
+                return session.renderer.shouldRenderFrame();
+            }
+
+            pub fn waitUntilNextFrame(session: *MinimalAppSession) void {
+                session.renderer.waitUntilNextFrame();
+            }
+
+            pub fn render(session: *MinimalAppSession) !void {
+                try session.renderer.renderMinimalPrimitiveFrame(pumpRendererEvents);
+            }
+
+            pub fn onTtlExpired(_: *MinimalAppSession, kind: enum { time, frames }) void {
+                switch (kind) {
+                    .time => app_logger.info("renderer TTL expired, exiting", .{}),
+                    .frames => app_logger.info("renderer frame TTL expired, exiting", .{}),
+                }
+            }
+
+            pub fn onMessagePumpShutdown(_: *MinimalAppSession) void {
+                app_logger.info("message pump requested shutdown", .{});
+            }
+
+            pub fn onFrameStart(_: *MinimalAppSession, frame_count: u32) void {
+                if (frame_count <= 3) app_logger.debug("rendering frame {}", .{frame_count});
+            }
+
+            pub fn onRenderError(_: *MinimalAppSession, err: anyerror) void {
+                if (err == error.RenderInterrupted) {
+                    app_logger.info("render interrupted by shutdown request", .{});
+                } else {
+                    app_logger.@"error"("rendering failed: {s}", .{@errorName(err)});
+                }
+            }
+
+            pub fn onFrameComplete(session: *MinimalAppSession, frame_count: u32) void {
+                if (frame_count <= 3) {
+                    app_logger.debug("frame {} complete", .{frame_count});
+                } else if (frame_count % 300 == 0) {
+                    logDirectFrameTimings(session.renderer, "direct_demo");
+                }
+            }
+        };
+
+        var loop_control = app_loop.LoopControl{
+            .running = &running,
+            .start_ns = renderer_start_ns,
+            .ttl_ns = renderer_ttl_ns,
+            .ttl_frames = effective_ttl_frames,
+        };
+        var minimal_session = MinimalAppSession{
+            .window = &window,
+            .renderer = &renderer,
+            .mouse_grabbed = &mouse_grabbed,
+        };
+        app_logger.info("starting main event loop...", .{});
+        const frame_count = try app_loop.run(&loop_control, &minimal_session, MinimalDriver);
+        app_logger.info("exited main loop after {} frames", .{frame_count});
+        return;
+    }
+
+    try zphysics.init(allocator, .{});
+    defer zphysics.deinit();
+    var phase13_runtime = try scene_runtime.SceneRuntime.init(allocator, .{
+        .min = .{ .x = -512.0, .y = -512.0, .z = -512.0 },
+        .max = .{ .x = 512.0, .y = 512.0, .z = 512.0 },
+    });
+    defer phase13_runtime.deinit();
+
+    var scene_resources = blk: {
+        const scene_index_bytes = try std.fs.cwd().readFileAlloc(allocator, scenes_index_path, 1024 * 1024);
+        defer allocator.free(scene_index_bytes);
+        const parsed_scene_index = try std.json.parseFromSlice(SceneIndexFile, allocator, scene_index_bytes, .{ .ignore_unknown_fields = true });
+        defer parsed_scene_index.deinit();
+
+        const selected_scene_key = try resolveLaunchSceneKey(allocator, parsed_scene_index.value);
+        const selected_scene_file_path = try resolveSceneFilePath(parsed_scene_index.value, selected_scene_key);
+        const scene_file_bytes = try std.fs.cwd().readFileAlloc(allocator, selected_scene_file_path, 1024 * 1024);
+        defer allocator.free(scene_file_bytes);
+        const parsed_scene_file = try std.json.parseFromSlice(SceneFile, allocator, scene_file_bytes, .{ .ignore_unknown_fields = true });
+        defer parsed_scene_file.deinit();
+
+        var scene_desc = try scene_runtime.buildSceneDescription(
+            allocator,
+            parsed_scene_file.value,
+            config.MESHLET_SHADOWS_ENABLED,
+            config.POST_SHADOW_ENABLED,
+            config.POST_SHADOW_MAP_SIZE,
+        );
+        defer scene_desc.deinit(allocator);
+
+        try populateSceneRuntimeBootstrap(&phase13_runtime, scene_desc);
+        app_logger.infoSub("bootstrap", "launch scene: {s}", .{scene_desc.key});
+        try renderer.setLightCapacity(scene_desc.lights.len);
+        var scene_loading_progress: ?SceneLoadingProgress = null;
+        var scene_loading_overlay_active = false;
+        defer if (scene_loading_overlay_active) renderer.endSceneLoadingOverlay();
+
+        if (parsed_scene_index.value.loadingScene) |loading_key| {
+            const loading_file_path = resolveSceneFilePath(parsed_scene_index.value, loading_key) catch null;
+            if (loading_file_path != null) {
+                const total_steps = sceneLoadingTotalSteps(scene_desc);
+                renderer.beginSceneLoadingOverlay(scene_desc.key, total_steps);
+                scene_loading_overlay_active = true;
+                scene_loading_progress = .{
+                    .renderer = &renderer,
+                    .running = &running,
+                    .pump = pumpRendererEvents,
+                    .total_steps = total_steps,
+                };
+                if (scene_loading_progress) |*progress| startSceneLoadingProgress(progress);
+            }
+        }
+
+        var scene_textures = [_]?texture.Texture{null} ** scene_texture_slots_capacity;
+        defer for (&scene_textures) |*tex| {
+            if (tex.*) |*loaded| loaded.deinit();
+        };
+        var material_textures = [_]?*const texture.Texture{null} ** scene_texture_slots_capacity;
+
+        var loaded_scene_resources = try loadSceneMeshResourcesWithProgress(allocator, scene_desc, if (scene_loading_progress) |*progress| progress else null);
+        assignSceneRenderEntities(&loaded_scene_resources, &phase13_runtime);
+        syncSceneMeshFromRuntime(null, &loaded_scene_resources, &phase13_runtime);
+        const runtime_renderables = try buildRuntimeRenderableSetups(allocator, &loaded_scene_resources);
+        defer allocator.free(runtime_renderables);
+        try phase13_runtime.configureExecution(scene_desc.runtime, runtime_renderables);
+        syncSceneMeshFromRuntime(null, &loaded_scene_resources, &phase13_runtime);
+        try configureSceneItemBindings(allocator, &renderer, &loaded_scene_resources, &phase13_runtime);
+        if (scene_desc.textureSlotCount() > 0) {
+            try loadSceneTexturesWithProgress(
+                allocator,
+                scene_desc.assets,
+                &scene_textures,
+                &material_textures,
+                if (scene_loading_progress) |*progress| progress else null,
+            );
+            renderer.setTextures(material_textures[0..]);
+        }
+        if (scene_desc.hdri_path) |hdri_path| {
+            if (texture.loadHdrRaw(allocator, hdri_path)) |env_map| {
+                app_logger.infoSub("assets", "loaded HDRI env map", .{});
+                renderer.setHdriMap(env_map);
+            } else |err| {
+                app_logger.warn("failed to load HDRI {s}: {s}", .{ hdri_path, @errorName(err) });
+            }
+        }
+        try renderer.setLightCapacity(scene_desc.lights.len);
+        try configureSceneLights(&renderer, scene_desc.lights);
+
+        const meshlet_builder = @import("render/core/meshlets/meshlet_builder.zig");
+        advanceSceneLoadingProgress(if (scene_loading_progress) |*progress| progress else null, "Building meshlets");
+        try meshlet_builder.buildMeshlets(allocator, &loaded_scene_resources.mesh, .{});
+
+        app_logger.infoSub(
+            "assets",
+            "loaded scene mesh vertices={} triangles={} meshlets={}",
+            .{ loaded_scene_resources.mesh.vertices.len, loaded_scene_resources.mesh.triangles.len, loaded_scene_resources.mesh.meshlets.len },
+        );
+        if (scene_loading_overlay_active) {
+            renderer.endSceneLoadingOverlay();
+            scene_loading_overlay_active = false;
+        }
+
+        renderer.setCameraPosition(toRenderVec3(scene_desc.camera_position));
+        renderer.setCameraOrientation(scene_desc.camera_orientation_pitch, scene_desc.camera_orientation_yaw);
+        renderer.setCameraFov(scene_desc.camera_fov_deg);
+        renderer.setSceneCameraScriptActive(true);
+        break :blk loaded_scene_resources;
+    };
+    defer scene_resources.deinit(allocator);
     var selected_scene_entity_pin: ?scene_runtime.EntityId = null;
     defer if (selected_scene_entity_pin) |entity| phase13_runtime.residency.unpinEntity(entity);
 
     if (!running) return;
 
     app_logger.info("starting main event loop...", .{});
+    const AppLoopDriver = struct {
+        pub fn beginFrame(session: *AppSession) void {
+            session.renderer.keys_pressed.beginFrame();
+            session.renderer.mouse_input.beginFrame();
+        }
 
-    var frame_count: u32 = 0;
-    var last_runtime_update_ns = std.time.nanoTimestamp();
-    while (running) {
-        renderer.keys_pressed.beginFrame();
-        renderer.mouse_input.beginFrame();
-        if (renderer_ttl_ns) |ttl_ns| {
-            if (std.time.nanoTimestamp() - renderer_start_ns >= ttl_ns) {
-                app_logger.info("renderer TTL expired, exiting", .{});
-                running = false;
-                break;
+        pub fn pump(session: *AppSession) bool {
+            const Hooks = struct {
+                pub fn handleEvent(target: *AppSession, event: platform_loop.PlatformEvent) void {
+                    consumePlatformEvent(target, event);
+                }
+            };
+            const keep_running = platform_loop.pumpEvents(session, Hooks);
+            return keep_running and !session.close_requested;
+        }
+
+        pub fn update(session: *AppSession, frame_count: u32) !void {
+            if (session.minimal_demo) {
+                syncFirstPersonMouseGrab(session.window, session.renderer, session.mouse_grabbed);
+                applyPlatformCursor(session.renderer);
+                return;
             }
-        }
-        if (effective_ttl_frames) |ttl_frames| {
-            if (frame_count >= ttl_frames) {
-                app_logger.info("renderer frame TTL expired, exiting", .{});
-                running = false;
-                break;
-            }
-        }
+            const current_selected_entity = blk: {
+                const selection_id = session.renderer.selectedSceneItemSelectionId() orelse break :blk null;
+                const entity = main_module.selectionIdToEntity(selection_id);
+                if (!entity.isValid() or !session.phase13_runtime.world.isAlive(entity)) break :blk null;
+                break :blk entity;
+            };
+            session.phase13_runtime.setSelectedEntity(current_selected_entity) catch |err| {
+                app_logger.warn("phase13 selection sync failed: {}", .{err});
+            };
 
-        if (!MessagePump.pump(&renderer)) {
-            app_logger.info("message pump requested shutdown", .{});
-            running = false;
-            break;
-        }
-
-        const current_selected_entity = blk: {
-            const selection_id = renderer.selectedSceneItemSelectionId() orelse break :blk null;
-            const entity = selectionIdToEntity(selection_id);
-            if (!entity.isValid() or !phase13_runtime.world.isAlive(entity)) break :blk null;
-            break :blk entity;
-        };
-        phase13_runtime.setSelectedEntity(current_selected_entity) catch |err| {
-            app_logger.warn("phase13 selection sync failed: {}", .{err});
-        };
-
-        const enter_is_down = renderer.keys_pressed.isDown(.enter) or isEnterDown();
-
-        const now_ns = std.time.nanoTimestamp();
-        const runtime_delta_ns = @max(@as(i128, 0), now_ns - last_runtime_update_ns);
-        last_runtime_update_ns = now_ns;
-        const runtime_delta_seconds = std.math.clamp(
-            @as(f32, @floatFromInt(runtime_delta_ns)) / @as(f32, @floatFromInt(std.time.ns_per_s)),
-            0.0,
-            0.1,
-        );
-        const scene_look_delta = renderer.consumeSceneCameraLookDelta(runtime_delta_seconds);
-        const current_keys_pressed = renderer.keys_pressed;
-        phase13_runtime.setExecutionInputs(enter_is_down, renderer.isSceneItemDragActive(), .{
-            .first_person_active = renderer.isFirstPersonMode(),
-            .keyboard = current_keys_pressed,
-            .mouse = renderer.mouse_input,
-            .look_delta = .{
-                .x = scene_look_delta.x,
-                .y = scene_look_delta.y,
-            },
-        });
-
-        var phase13_snapshot = phase13_runtime.updateFrame(
-            .{
-                .x = renderer.camera_position.x,
-                .y = renderer.camera_position.y,
-                .z = renderer.camera_position.z,
-            },
-            renderer.rotation_x,
-            renderer.rotation_angle,
-            48.0,
-            96.0,
-            frame_count,
-            runtime_delta_seconds,
-        ) catch |err| {
-            app_logger.warn("phase13 runtime update failed: {}", .{err});
-            continue;
-        };
-        defer phase13_snapshot.deinit();
-        phase13_runtime.pinFrameAssets(&phase13_snapshot);
-        defer phase13_runtime.unpinFrameAssets(&phase13_snapshot);
-        syncRendererFromSceneSnapshot(&renderer, &phase13_snapshot) catch |err| {
-            app_logger.warn("phase13 renderer bridge failed: {}", .{err});
-            continue;
-        };
-        for (phase13_runtime.rendererCommands()) |command| {
-            applySceneRendererCommand(&renderer, command);
-        }
-        phase13_runtime.clearRendererCommands();
-        syncFirstPersonMouseGrab(&renderer, &mouse_grabbed);
-        MessagePump.applyCursorFromRenderer(&renderer);
-        syncSceneMeshIfDirty(&renderer, &scene_resources, &phase13_runtime);
-        if (selected_scene_entity_pin) |pinned_entity| {
-            if (current_selected_entity == null or !pinned_entity.eql(current_selected_entity.?)) {
-                phase13_runtime.residency.unpinEntity(pinned_entity);
-                selected_scene_entity_pin = null;
-            }
-        }
-        if (current_selected_entity) |entity| {
-            if (selected_scene_entity_pin == null) {
-                phase13_runtime.residency.pinEntity(entity);
-                selected_scene_entity_pin = entity;
-            }
-        }
-
-        if (renderer.consumeSceneItemTranslateRequest()) |move_request| {
-            applySceneItemTranslateRequest(
-                &renderer,
-                &phase13_runtime,
-                &scene_resources,
-                move_request,
+            const enter_is_down = session.renderer.keys_pressed.isDown(.enter);
+            const now_ns = std.time.nanoTimestamp();
+            const runtime_delta_ns = @max(@as(i128, 0), now_ns - session.last_runtime_update_ns);
+            session.last_runtime_update_ns = now_ns;
+            const runtime_delta_seconds = std.math.clamp(
+                @as(f32, @floatFromInt(runtime_delta_ns)) / @as(f32, @floatFromInt(std.time.ns_per_s)),
+                0.0,
+                0.1,
             );
-            syncSceneMeshIfDirty(&renderer, &scene_resources, &phase13_runtime);
+            const scene_look_delta = session.renderer.consumeSceneCameraLookDelta(runtime_delta_seconds);
+            const current_keys_pressed = session.renderer.keys_pressed;
+            const input_context: input_actions.InputContext = if (session.renderer.isFirstPersonMode())
+                .gameplay
+            else
+                .editor;
+            const resolved_actions = input_actions.resolveActions(
+                input_context,
+                current_keys_pressed,
+                session.renderer.mouse_input,
+            );
+            session.phase13_runtime.setExecutionInputs(enter_is_down, session.renderer.isSceneItemDragActive(), .{
+                .first_person_active = session.renderer.isFirstPersonMode(),
+                .keyboard = current_keys_pressed,
+                .mouse = session.renderer.mouse_input,
+                .actions = resolved_actions,
+                .look_delta = .{
+                    .x = scene_look_delta.x,
+                    .y = scene_look_delta.y,
+                },
+            });
+
+            var phase13_snapshot = session.phase13_runtime.updateFrameWithCamera(.{
+                .position = .{
+                    .x = session.renderer.camera_position.x,
+                    .y = session.renderer.camera_position.y,
+                    .z = session.renderer.camera_position.z,
+                },
+                .pitch = session.renderer.rotation_x,
+                .yaw = session.renderer.rotation_angle,
+                .fov_deg = session.renderer.camera_fov_deg,
+            }, 48.0, 96.0, frame_count, runtime_delta_seconds) catch |err| {
+                app_logger.warn("phase13 runtime update failed: {}", .{err});
+                return;
+            };
+            defer phase13_snapshot.deinit();
+            session.phase13_runtime.pinFrameAssets(&phase13_snapshot);
+            defer session.phase13_runtime.unpinFrameAssets(&phase13_snapshot);
+
+            main_module.syncRendererFromSceneSnapshot(session.renderer, &phase13_snapshot) catch |err| {
+                app_logger.warn("phase13 renderer bridge failed: {}", .{err});
+                return;
+            };
+            for (session.phase13_runtime.rendererCommands()) |command| {
+                main_module.applySceneRendererCommand(session.renderer, command);
+            }
+            session.phase13_runtime.clearRendererCommands();
+            syncFirstPersonMouseGrab(session.window, session.renderer, session.mouse_grabbed);
+            applyPlatformCursor(session.renderer);
+            main_module.syncSceneMeshForFrame(session.renderer, session.scene_resources, session.phase13_runtime);
+
+            if (session.selected_scene_entity_pin.*) |pinned_entity| {
+                if (current_selected_entity == null or !pinned_entity.eql(current_selected_entity.?)) {
+                    session.phase13_runtime.residency.unpinEntity(pinned_entity);
+                    session.selected_scene_entity_pin.* = null;
+                }
+            }
+            if (current_selected_entity) |entity| {
+                if (session.selected_scene_entity_pin.* == null) {
+                    session.phase13_runtime.residency.pinEntity(entity);
+                    session.selected_scene_entity_pin.* = entity;
+                }
+            }
+
+            if (session.renderer.consumeSceneItemTranslateRequest()) |move_request| {
+                main_module.applySceneItemTranslateRequest(
+                    session.renderer,
+                    session.phase13_runtime,
+                    session.scene_resources,
+                    move_request,
+                );
+                main_module.syncSceneMeshForFrame(session.renderer, session.scene_resources, session.phase13_runtime);
+            }
         }
 
-        // Check if it's time to render a new frame, based on our target FPS.
-
-        if (!renderer.shouldRenderFrame()) {
-            renderer.waitUntilNextFrame();
-            continue;
+        pub fn shouldRender(session: *AppSession) bool {
+            if (session.minimized or session.close_requested) return false;
+            return session.renderer.shouldRenderFrame();
         }
 
-        frame_count += 1;
-        if (frame_count <= 3) {
-            app_logger.debug("rendering frame {}", .{frame_count});
+        pub fn waitUntilNextFrame(session: *AppSession) void {
+            session.renderer.waitUntilNextFrame();
         }
-        // This is the main drawing call.
-        // JS Analogy: `renderer.renderScene(scene);` inside a `requestAnimationFrame` callback.
-        phase13_runtime.beginPresent();
-        renderer.render3DMeshWithPump(&scene_resources.mesh, MessagePump.pump) catch |err| {
-            phase13_runtime.endPresent();
-            // If rendering fails, log the error and exit the loop.
+
+        pub fn render(session: *AppSession) !void {
+            if (!session.minimal_demo) session.phase13_runtime.beginPresent();
+            session.renderer.render3DMeshWithPump(&session.scene_resources.mesh, pumpRendererEvents) catch |err| {
+                if (!session.minimal_demo) session.phase13_runtime.endPresent();
+                return err;
+            };
+            if (!session.minimal_demo) session.phase13_runtime.endPresent();
+        }
+
+        pub fn onTtlExpired(_: *AppSession, kind: enum { time, frames }) void {
+            switch (kind) {
+                .time => app_logger.info("renderer TTL expired, exiting", .{}),
+                .frames => app_logger.info("renderer frame TTL expired, exiting", .{}),
+            }
+        }
+
+        pub fn onMessagePumpShutdown(_: *AppSession) void {
+            app_logger.info("message pump requested shutdown", .{});
+        }
+
+        pub fn onFrameStart(_: *AppSession, frame_count: u32) void {
+            if (frame_count <= 3) app_logger.debug("rendering frame {}", .{frame_count});
+        }
+
+        pub fn onRenderError(_: *AppSession, err: anyerror) void {
             if (err == error.RenderInterrupted) {
                 app_logger.info("render interrupted by shutdown request", .{});
             } else {
                 app_logger.@"error"("rendering failed: {s}", .{@errorName(err)});
             }
-            running = false;
-            break;
-        };
-        phase13_runtime.endPresent();
-        if (frame_count <= 3) {
-            app_logger.debug("frame {} complete", .{frame_count});
         }
-    }
+
+        pub fn onFrameComplete(session: *AppSession, frame_count: u32) void {
+            if (frame_count <= 3) {
+                app_logger.debug("frame {} complete", .{frame_count});
+            } else if (frame_count % 300 == 0) {
+                logDirectFrameTimings(session.renderer, "scene_render");
+            }
+            if (frame_count == 60) {
+                dumpFramebufferIfRequested(session.renderer) catch |err| {
+                    app_logger.warn("framebuffer dump failed: {s}", .{@errorName(err)});
+                };
+            }
+        }
+    };
+
+    var loop_control = app_loop.LoopControl{
+        .running = &running,
+        .start_ns = renderer_start_ns,
+        .ttl_ns = renderer_ttl_ns,
+        .ttl_frames = effective_ttl_frames,
+    };
+    var app_session = AppSession{
+        .window = &window,
+        .renderer = &renderer,
+        .phase13_runtime = &phase13_runtime,
+        .scene_resources = &scene_resources,
+        .minimal_demo = minimal_triangle_demo_enabled,
+        .mouse_grabbed = &mouse_grabbed,
+        .selected_scene_entity_pin = &selected_scene_entity_pin,
+        .last_runtime_update_ns = std.time.nanoTimestamp(),
+    };
+    const frame_count = try app_loop.run(&loop_control, &app_session, AppLoopDriver);
 
     app_logger.info("exited main loop after {} frames", .{frame_count});
 }
@@ -957,6 +1034,39 @@ fn loadRendererTtlNs(allocator: std.mem.Allocator) ?i128 {
 
     const ttl_ns_f64 = ttl_seconds * @as(f64, @floatFromInt(std.time.ns_per_s));
     return @as(i128, @intFromFloat(ttl_ns_f64));
+}
+
+fn dumpFramebufferIfRequested(renderer: *Renderer) !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const path = std.process.getEnvVarOwned(allocator, "ZIG_DUMP_FRAMEBUFFER_PPM") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return,
+        else => return err,
+    };
+    defer allocator.free(path);
+
+    try writeBitmapPpm(path, renderer.bitmap.width, renderer.bitmap.height, renderer.bitmap.pixels);
+    app_logger.info("wrote framebuffer dump to {s}", .{path});
+}
+
+fn writeBitmapPpm(path: []const u8, width: i32, height: i32, pixels: []const u32) !void {
+    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    var header_buf: [64]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buf, "P6\n{} {}\n255\n", .{ width, height });
+    try file.writeAll(header);
+    var rgb: [3]u8 = undefined;
+    for (pixels) |pixel| {
+        rgb[0] = @intCast((pixel >> 16) & 0xFF);
+        rgb[1] = @intCast((pixel >> 8) & 0xFF);
+        rgb[2] = @intCast(pixel & 0xFF);
+        try file.writeAll(&rgb);
+    }
+}
+
+fn defaultRendererTtlNs() i128 {
+    return 15 * std.time.ns_per_s;
 }
 
 /// Loads l oa dr en de re rt tl fr am es from external or cached data sources.
@@ -1138,6 +1248,12 @@ fn syncSceneMeshIfDirty(renderer: *Renderer, scene_resources: *SceneMeshResource
     renderer.invalidateMeshWork();
 }
 
+fn syncSceneMeshForFrame(renderer: *Renderer, scene_resources: *SceneMeshResources, runtime: *scene_runtime.SceneRuntime) void {
+    syncSceneMeshFromRuntime(renderer, scene_resources, runtime);
+    scene_resources.mesh.refreshMeshlets();
+    renderer.invalidateMeshWork();
+}
+
 fn syncSceneMeshFromRuntime(renderer: ?*Renderer, scene_resources: *SceneMeshResources, runtime: *const scene_runtime.SceneRuntime) void {
     for (scene_resources.render_instances, 0..) |*instance, instance_index| {
         const transform = runtime.worldTransform(instance.entity) orelse continue;
@@ -1164,6 +1280,9 @@ fn syncSceneMeshFromRuntime(renderer: ?*Renderer, scene_resources: *SceneMeshRes
             }
         }
         for (scene_resources.mesh.normals[instance.triangle_start .. instance.triangle_start + instance.triangle_count], instance.local_normals) |*normal, local_normal| {
+            normal.* = rotateVector(local_normal, rotation).normalize();
+        }
+        for (scene_resources.mesh.vertex_normals[instance.vertex_start .. instance.vertex_start + instance.vertex_count], instance.local_vertex_normals) |*normal, local_normal| {
             normal.* = rotateVector(local_normal, rotation).normalize();
         }
         if (initialized) {
@@ -1212,6 +1331,9 @@ fn loadSceneMeshResourcesWithProgress(
             .gltf => try loadGltfMeshAsset(allocator, asset),
             .obj => try loadObjMeshAsset(allocator, asset),
         };
+        if (asset.model_type == .obj and std.mem.endsWith(u8, asset.model_path, "suzanne.obj")) {
+            loaded_mesh.centerToOrigin();
+        }
         if (scene_desc.runtime == .gun_physics and asset_index == 0) loaded_mesh.centerToOrigin();
         const loaded_vertex_count = loaded_mesh.vertices.len;
         const loaded_triangle_count = loaded_mesh.triangles.len;
@@ -1219,6 +1341,8 @@ fn loadSceneMeshResourcesWithProgress(
         errdefer allocator.free(local_vertices);
         const local_normals = try allocator.dupe(math.Vec3, loaded_mesh.normals);
         errdefer allocator.free(local_normals);
+        const local_vertex_normals = try allocator.dupe(math.Vec3, loaded_mesh.vertex_normals);
+        errdefer allocator.free(local_vertex_normals);
         var bounds_min = local_vertices[0];
         var bounds_max = local_vertices[0];
         for (local_vertices[1..]) |v| {
@@ -1252,6 +1376,7 @@ fn loadSceneMeshResourcesWithProgress(
             .bounds_max = bounds_max,
             .local_vertices = local_vertices,
             .local_normals = local_normals,
+            .local_vertex_normals = local_vertex_normals,
         };
         instance_count += 1;
 
@@ -1322,13 +1447,16 @@ fn loadSceneTexturesWithProgress(
 
 fn loadGltfMeshAsset(allocator: std.mem.Allocator, asset: LoadedSceneAsset) !mesh_module.Mesh {
     if (gltf_loader.load(allocator, asset.model_path)) |mesh| {
+        var resolved_mesh = mesh;
+        applyRequestedNormalMode(&resolved_mesh, asset.smooth_normals);
         app_logger.infoSub("assets", "loaded gltf asset from {s}", .{asset.model_path});
-        return mesh;
+        return resolved_mesh;
     } else |err| {
         app_logger.warn("scene gltf load failed for {s}: {s}", .{ asset.model_path, @errorName(err) });
     }
     if (asset.fallback_model_path) |fallback_path| {
-        const fallback_mesh = try obj_loader.load(allocator, fallback_path);
+        var fallback_mesh = try obj_loader.load(allocator, fallback_path);
+        applyRequestedNormalMode(&fallback_mesh, asset.smooth_normals);
         app_logger.infoSub("assets", "loaded fallback obj from {s}", .{fallback_path});
         return fallback_mesh;
     }
@@ -1338,8 +1466,20 @@ fn loadGltfMeshAsset(allocator: std.mem.Allocator, asset: LoadedSceneAsset) !mes
 fn loadObjMeshAsset(allocator: std.mem.Allocator, asset: LoadedSceneAsset) !mesh_module.Mesh {
     var mesh = try obj_loader.load(allocator, asset.model_path);
     if (asset.apply_cornell_palette) applyCornellColors(&mesh);
+    applyRequestedNormalMode(&mesh, asset.smooth_normals);
     app_logger.infoSub("assets", "loaded obj asset from {s}", .{asset.model_path});
     return mesh;
+}
+
+fn applyRequestedNormalMode(mesh: *mesh_module.Mesh, smooth_normals: ?bool) void {
+    const requested = smooth_normals orelse return;
+    mesh.recalculateNormals();
+    for (mesh.triangles) |*tri| tri.flat_shaded = !requested;
+    if (requested) {
+        mesh.recalculateVertexNormals();
+    } else {
+        mesh.recalculateFlatVertexNormals();
+    }
 }
 
 fn appendMesh(allocator: std.mem.Allocator, target: *mesh_module.Mesh, source: *const mesh_module.Mesh) !void {
@@ -1356,14 +1496,18 @@ fn appendMesh(allocator: std.mem.Allocator, target: *mesh_module.Mesh, source: *
     errdefer allocator.free(new_triangles);
     const new_normals = try allocator.alloc(math.Vec3, new_triangle_count);
     errdefer allocator.free(new_normals);
+    const new_vertex_normals = try allocator.alloc(math.Vec3, new_vertex_count);
+    errdefer allocator.free(new_vertex_normals);
 
     std.mem.copyForwards(math.Vec3, new_vertices[0..old_vertex_count], target.vertices);
     std.mem.copyForwards(math.Vec2, new_tex_coords[0..old_vertex_count], target.tex_coords);
     std.mem.copyForwards(mesh_module.Triangle, new_triangles[0..old_triangle_count], target.triangles);
     std.mem.copyForwards(math.Vec3, new_normals[0..old_triangle_count], target.normals);
+    std.mem.copyForwards(math.Vec3, new_vertex_normals[0..old_vertex_count], target.vertex_normals);
 
     std.mem.copyForwards(math.Vec3, new_vertices[old_vertex_count..], source.vertices);
     std.mem.copyForwards(math.Vec2, new_tex_coords[old_vertex_count..], source.tex_coords);
+    std.mem.copyForwards(math.Vec3, new_vertex_normals[old_vertex_count..], source.vertex_normals);
     for (source.triangles, 0..) |tri, i| {
         var shifted = tri;
         shifted.v0 += old_vertex_count;
@@ -1377,10 +1521,12 @@ fn appendMesh(allocator: std.mem.Allocator, target: *mesh_module.Mesh, source: *
     allocator.free(target.tex_coords);
     allocator.free(target.triangles);
     allocator.free(target.normals);
+    allocator.free(target.vertex_normals);
     target.vertices = new_vertices;
     target.tex_coords = new_tex_coords;
     target.triangles = new_triangles;
     target.normals = new_normals;
+    target.vertex_normals = new_vertex_normals;
     target.clearMeshlets();
 }
 
@@ -1434,6 +1580,7 @@ fn applyCornellColors(mesh: *mesh_module.Mesh) void {
             white
         else
             white;
+        tri.double_sided = true;
     }
 
     const flip_count: usize = @min(mesh.normals.len, 12);

@@ -49,26 +49,50 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const job_system_module = b.createModule(.{
+        .root_source_file = b.path("engine/src/core/job_system.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const input_actions_module = b.createModule(.{
+        .root_source_file = b.path("engine/src/input/actions.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const render_main_module = b.createModule(.{
+        .root_source_file = b.path("engine/src/render/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     app_module.addImport("engine_main", engine_main_module);
     engine_main_module.addImport("zphysics", zphysics_dep.module("root"));
     engine_main_module.addImport("scene_main", scene_main_module);
     engine_main_module.addImport("platform_input", platform_input_module);
+    engine_main_module.addImport("input_actions", input_actions_module);
+    engine_main_module.addImport("job_system", job_system_module);
     scene_main_module.addImport("zphysics", zphysics_dep.module("root"));
     scene_main_module.addImport("physics_utils", physics_utils_module);
     scene_main_module.addImport("platform_input", platform_input_module);
+    scene_main_module.addImport("input_actions", input_actions_module);
+    scene_main_module.addImport("job_system", job_system_module);
+    render_main_module.addImport("job_system", job_system_module);
     physics_utils_module.addImport("zphysics", zphysics_dep.module("root"));
+    input_actions_module.addImport("platform_input", platform_input_module);
 
     const exe = b.addExecutable(.{
         .name = "zig-windows-app",
         .root_module = app_module,
     });
 
-    // Link against Windows system libraries for GUI and graphics
-    exe.linkSystemLibrary("user32"); // For window management functions
-    exe.linkSystemLibrary("gdi32"); // For graphics device interface functions
-    exe.linkSystemLibrary("kernel32"); // For kernel functions
-    exe.linkSystemLibrary("winmm"); // For timer resolution control
-    exe.linkSystemLibrary("dwmapi"); // For compositor-backed frame pacing
+    if (target.result.os.tag == .windows) {
+        exe.linkSystemLibrary("user32");
+        exe.linkSystemLibrary("gdi32");
+        exe.linkSystemLibrary("kernel32");
+        exe.linkSystemLibrary("winmm");
+        exe.linkSystemLibrary("dwmapi");
+        exe.linkSystemLibrary("d3d11");
+        exe.linkSystemLibrary("dxgi");
+    }
     exe.root_module.addImport("zphysics", zphysics_dep.module("root"));
     exe.linkLibrary(zphysics_dep.artifact("joltc"));
 
@@ -101,11 +125,21 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     }));
+    test_module.addImport("render_main", render_main_module);
     test_module.addImport("scene_main", scene_main_module);
 
     const unit_tests = b.addTest(.{
         .root_module = test_module,
     });
+    if (target.result.os.tag == .windows) {
+        unit_tests.linkSystemLibrary("user32");
+        unit_tests.linkSystemLibrary("gdi32");
+        unit_tests.linkSystemLibrary("kernel32");
+        unit_tests.linkSystemLibrary("winmm");
+        unit_tests.linkSystemLibrary("dwmapi");
+        unit_tests.linkSystemLibrary("d3d11");
+        unit_tests.linkSystemLibrary("dxgi");
+    }
     unit_tests.root_module.addImport("zphysics", zphysics_dep.module("root"));
     unit_tests.linkLibrary(zphysics_dep.artifact("joltc"));
     const test_step = b.step("test", "Run unit tests");

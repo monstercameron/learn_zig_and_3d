@@ -4,6 +4,7 @@
 const std = @import("std");
 const scene_math = @import("math.zig");
 const components = @import("components.zig");
+const camera_state = @import("camera_state.zig");
 
 pub const SceneIndexEntry = struct {
     key: []const u8,
@@ -34,6 +35,7 @@ pub const SceneAssetConfigEntry = struct {
     modelPath: []const u8 = "",
     fallbackModelPath: ?[]const u8 = null,
     applyCornellPalette: bool = false,
+    smoothNormals: ?bool = null,
     position: [3]f32 = .{ 0.0, 0.0, 0.0 },
     rotationDeg: [3]f32 = .{ 0.0, 0.0, 0.0 },
     scale: [3]f32 = .{ 1.0, 1.0, 1.0 },
@@ -43,6 +45,7 @@ pub const SceneAssetConfigEntry = struct {
     runtimeName: ?[]const u8 = null,
     cameraPosition: ?[3]f32 = null,
     cameraOrientation: ?[2]f32 = null,
+    cameraFovDeg: ?f32 = null,
     cameraName: ?[]const u8 = null,
     lightColor: ?[3]f32 = null,
     lightDistance: ?f32 = null,
@@ -90,6 +93,7 @@ pub const AssetDefinition = struct {
     model_path: []const u8,
     fallback_model_path: ?[]const u8,
     apply_cornell_palette: bool,
+    smooth_normals: ?bool,
     position: scene_math.Vec3,
     rotation_deg: scene_math.Vec3,
     scale: scene_math.Vec3,
@@ -126,6 +130,7 @@ pub const SceneDescription = struct {
     camera_position: scene_math.Vec3,
     camera_orientation_pitch: f32,
     camera_orientation_yaw: f32,
+    camera_fov_deg: f32,
 
     pub fn deinit(self: *SceneDescription, allocator: std.mem.Allocator) void {
         for (self.assets) |asset| {
@@ -160,6 +165,7 @@ pub fn buildSceneDescription(
     var camera_position = scene_math.Vec3.new(0.0, 2.0, -6.5);
     var camera_orientation_pitch: f32 = 0.0;
     var camera_orientation_yaw: f32 = 0.0;
+    var camera_fov_deg: f32 = camera_state.default_fov_deg;
     var camera_authored_id: ?[]const u8 = null;
     var camera_parent_authored_id: ?[]const u8 = null;
     var camera_scripts: []ScriptAttachmentDefinition = &.{};
@@ -188,8 +194,12 @@ pub fn buildSceneDescription(
                 camera_position = scene_math.Vec3.new(pos[0], pos[1], pos[2]);
             }
             if (asset.cameraOrientation) |angles| {
-                camera_orientation_pitch = angles[0];
-                camera_orientation_yaw = angles[1];
+                const deg_to_rad = std.math.pi / 180.0;
+                camera_orientation_pitch = angles[0] * deg_to_rad;
+                camera_orientation_yaw = angles[1] * deg_to_rad;
+            }
+            if (asset.cameraFovDeg) |fov_deg| {
+                camera_fov_deg = fov_deg;
             }
             camera_authored_id = authored_id;
             camera_parent_authored_id = asset.parent;
@@ -263,6 +273,7 @@ pub fn buildSceneDescription(
             .model_path = asset.modelPath,
             .fallback_model_path = asset.fallbackModelPath,
             .apply_cornell_palette = asset.applyCornellPalette,
+            .smooth_normals = asset.smoothNormals,
             .position = scene_math.Vec3.new(asset.position[0], asset.position[1], asset.position[2]),
             .rotation_deg = scene_math.Vec3.new(asset.rotationDeg[0], asset.rotationDeg[1], asset.rotationDeg[2]),
             .scale = scene_math.Vec3.new(asset.scale[0], asset.scale[1], asset.scale[2]),
@@ -287,6 +298,7 @@ pub fn buildSceneDescription(
         .camera_position = camera_position,
         .camera_orientation_pitch = camera_orientation_pitch,
         .camera_orientation_yaw = camera_orientation_yaw,
+        .camera_fov_deg = camera_fov_deg,
     };
 }
 

@@ -8,15 +8,13 @@ const components = @import("components.zig");
 const ComponentStore = components.ComponentStore;
 const ResidencyManager = @import("residency_manager.zig").ResidencyManager;
 const math = @import("math.zig");
+const camera_state = @import("camera_state.zig");
 
 pub const EntityId = handles.EntityId;
 
 pub const CameraState = struct {
     entity: EntityId,
-    position: math.Vec3,
-    pitch: f32,
-    yaw: f32,
-    fov_deg: f32,
+    state: camera_state.State,
 };
 
 pub const LightState = struct {
@@ -69,10 +67,12 @@ pub fn extractFrameSnapshot(allocator: std.mem.Allocator, world: *const World, s
                     math.Vec3.new(0.0, 0.0, 0.0);
                 snapshot.active_camera = .{
                     .entity = entity,
-                    .position = position,
-                    .pitch = camera.pitch,
-                    .yaw = camera.yaw,
-                    .fov_deg = camera.fov_deg,
+                    .state = .{
+                        .position = position,
+                        .pitch = camera.pitch,
+                        .yaw = camera.yaw,
+                        .fov_deg = camera.fov_deg,
+                    },
                 };
                 break;
             }

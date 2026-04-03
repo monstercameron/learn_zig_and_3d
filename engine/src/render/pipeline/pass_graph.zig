@@ -5,7 +5,6 @@ const std = @import("std");
 
 pub const RenderPassId = enum {
     skybox,
-    shadow_map,
     shadow_resolve,
     hybrid_shadow,
     ssao,
@@ -37,6 +36,19 @@ pub const SurfaceTarget = enum {
     history,
 };
 
+pub const ResourceId = enum(u8) {
+    scene_color,
+    scene_depth,
+    scene_normals,
+    scene_surface,
+    shadow_buffer,
+    history_color,
+    scratch_a,
+    scratch_b,
+};
+
+pub const ResourceMask = u32;
+
 pub const PassFlags = packed struct(u8) {
     reads_depth: bool = false,
     writes_color: bool = true,
@@ -50,25 +62,155 @@ pub const PassNode = struct {
     flags: PassFlags = .{},
     phase: PassPhase = .final_color,
     output_target: SurfaceTarget = .main,
+    reads: ResourceMask = 0,
+    writes: ResourceMask = 0,
 };
 
 pub const default_post_pass_order = [_]PassNode{
-    .{ .id = .skybox, .name = "skybox", .flags = .{ .reads_depth = true }, .phase = .scene, .output_target = .main },
-    .{ .id = .shadow_resolve, .name = "shadow_resolve", .flags = .{ .reads_depth = true }, .phase = .scene, .output_target = .main },
-    .{ .id = .hybrid_shadow, .name = "hybrid_shadow", .flags = .{ .reads_depth = true }, .phase = .scene, .output_target = .main },
-    .{ .id = .ssao, .name = "ssao", .flags = .{ .reads_depth = true }, .phase = .geometry_post, .output_target = .main },
-    .{ .id = .ssgi, .name = "ssgi", .flags = .{ .reads_depth = true }, .phase = .geometry_post, .output_target = .scratch_a },
-    .{ .id = .ssr, .name = "ssr", .flags = .{ .reads_depth = true }, .phase = .geometry_post, .output_target = .scratch_b },
-    .{ .id = .depth_fog, .name = "depth_fog", .flags = .{ .reads_depth = true }, .phase = .geometry_post, .output_target = .main },
-    .{ .id = .taa, .name = "taa", .flags = .{ .reads_depth = true, .requires_history = true }, .phase = .geometry_post, .output_target = .history },
-    .{ .id = .motion_blur, .name = "motion_blur", .flags = .{ .requires_history = true }, .phase = .geometry_post, .output_target = .scratch_a },
-    .{ .id = .god_rays, .name = "god_rays", .flags = .{}, .phase = .lighting_scatter, .output_target = .scratch_a },
-    .{ .id = .bloom, .name = "bloom", .flags = .{}, .phase = .lighting_scatter, .output_target = .scratch_b },
-    .{ .id = .lens_flare, .name = "lens_flare", .flags = .{}, .phase = .lighting_scatter, .output_target = .scratch_a },
-    .{ .id = .dof, .name = "dof", .flags = .{ .reads_depth = true }, .phase = .final_color, .output_target = .main },
-    .{ .id = .chromatic_aberration, .name = "chromatic_aberration", .flags = .{}, .phase = .final_color, .output_target = .main },
-    .{ .id = .film_grain_vignette, .name = "film_grain_vignette", .flags = .{}, .phase = .final_color, .output_target = .main },
-    .{ .id = .color_grade, .name = "color_grade", .flags = .{}, .phase = .final_color, .output_target = .main },
+    .{
+        .id = .skybox,
+        .name = "skybox",
+        .flags = .{ .reads_depth = true },
+        .phase = .scene,
+        .output_target = .main,
+        .reads = resourceMask(&.{ .scene_color, .scene_depth }),
+        .writes = resourceMask(&.{.scene_color}),
+    },
+    .{
+        .id = .shadow_resolve,
+        .name = "shadow_resolve",
+        .flags = .{ .reads_depth = true },
+        .phase = .scene,
+        .output_target = .main,
+        .reads = resourceMask(&.{ .scene_color, .scene_depth, .shadow_buffer }),
+        .writes = resourceMask(&.{.scene_color}),
+    },
+    .{
+        .id = .hybrid_shadow,
+        .name = "hybrid_shadow",
+        .flags = .{ .reads_depth = true },
+        .phase = .scene,
+        .output_target = .main,
+        .reads = resourceMask(&.{ .scene_color, .scene_depth }),
+        .writes = resourceMask(&.{.scene_color}),
+    },
+    .{
+        .id = .ssao,
+        .name = "ssao",
+        .flags = .{ .reads_depth = true },
+        .phase = .geometry_post,
+        .output_target = .main,
+        .reads = resourceMask(&.{ .scene_color, .scene_depth, .scene_normals }),
+        .writes = resourceMask(&.{.scene_color}),
+    },
+    .{
+        .id = .ssgi,
+        .name = "ssgi",
+        .flags = .{ .reads_depth = true },
+        .phase = .geometry_post,
+        .output_target = .scratch_a,
+        .reads = resourceMask(&.{ .scene_color, .scene_depth, .scene_normals }),
+        .writes = resourceMask(&.{.scratch_a}),
+    },
+    .{
+        .id = .ssr,
+        .name = "ssr",
+        .flags = .{ .reads_depth = true },
+        .phase = .geometry_post,
+        .output_target = .scratch_b,
+        .reads = resourceMask(&.{ .scene_color, .scene_depth, .scene_normals }),
+        .writes = resourceMask(&.{.scratch_b}),
+    },
+    .{
+        .id = .depth_fog,
+        .name = "depth_fog",
+        .flags = .{ .reads_depth = true },
+        .phase = .geometry_post,
+        .output_target = .main,
+        .reads = resourceMask(&.{ .scene_color, .scene_depth }),
+        .writes = resourceMask(&.{.scene_color}),
+    },
+    .{
+        .id = .taa,
+        .name = "taa",
+        .flags = .{ .reads_depth = true, .requires_history = true },
+        .phase = .geometry_post,
+        .output_target = .history,
+        .reads = resourceMask(&.{ .scene_color, .scene_depth, .scene_normals, .scene_surface, .history_color }),
+        .writes = resourceMask(&.{ .scene_color, .history_color }),
+    },
+    .{
+        .id = .motion_blur,
+        .name = "motion_blur",
+        .flags = .{ .requires_history = true },
+        .phase = .geometry_post,
+        .output_target = .scratch_a,
+        .reads = resourceMask(&.{ .scene_color, .scene_depth, .history_color }),
+        .writes = resourceMask(&.{.scratch_a}),
+    },
+    .{
+        .id = .god_rays,
+        .name = "god_rays",
+        .flags = .{},
+        .phase = .lighting_scatter,
+        .output_target = .scratch_a,
+        .reads = resourceMask(&.{.scene_color}),
+        .writes = resourceMask(&.{.scratch_a}),
+    },
+    .{
+        .id = .bloom,
+        .name = "bloom",
+        .flags = .{},
+        .phase = .lighting_scatter,
+        .output_target = .main,
+        .reads = resourceMask(&.{.scene_color}),
+        .writes = resourceMask(&.{.scene_color}),
+    },
+    .{
+        .id = .lens_flare,
+        .name = "lens_flare",
+        .flags = .{},
+        .phase = .lighting_scatter,
+        .output_target = .scratch_a,
+        .reads = resourceMask(&.{.scene_color}),
+        .writes = resourceMask(&.{.scratch_a}),
+    },
+    .{
+        .id = .dof,
+        .name = "dof",
+        .flags = .{ .reads_depth = true },
+        .phase = .final_color,
+        .output_target = .main,
+        .reads = resourceMask(&.{ .scene_color, .scene_depth }),
+        .writes = resourceMask(&.{.scene_color}),
+    },
+    .{
+        .id = .chromatic_aberration,
+        .name = "chromatic_aberration",
+        .flags = .{},
+        .phase = .final_color,
+        .output_target = .scratch_a,
+        .reads = resourceMask(&.{.scene_color}),
+        .writes = resourceMask(&.{.scratch_a}),
+    },
+    .{
+        .id = .film_grain_vignette,
+        .name = "film_grain_vignette",
+        .flags = .{},
+        .phase = .final_color,
+        .output_target = .main,
+        .reads = resourceMask(&.{.scene_color}),
+        .writes = resourceMask(&.{.scene_color}),
+    },
+    .{
+        .id = .color_grade,
+        .name = "color_grade",
+        .flags = .{},
+        .phase = .final_color,
+        .output_target = .main,
+        .reads = resourceMask(&.{.scene_color}),
+        .writes = resourceMask(&.{.scene_color}),
+    },
 };
 
 pub const post_pass_count: usize = default_post_pass_order.len;
@@ -96,6 +238,16 @@ pub fn passNode(id: RenderPassId) ?PassNode {
         if (node.id == id) return node;
     }
     return null;
+}
+
+pub fn resourceBit(id: ResourceId) ResourceMask {
+    return @as(ResourceMask, 1) << @as(u5, @intCast(@intFromEnum(id)));
+}
+
+pub fn resourceMask(comptime ids: []const ResourceId) ResourceMask {
+    var mask: ResourceMask = 0;
+    for (ids) |id| mask |= resourceBit(id);
+    return mask;
 }
 
 /// Returns all pass mask.

@@ -62,6 +62,8 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
     defer final_vertices.deinit(allocator);
     var final_texcoords = std.ArrayList(Vec2){};
     defer final_texcoords.deinit(allocator);
+    var final_vertex_normals = std.ArrayList(Vec3){};
+    defer final_vertex_normals.deinit(allocator);
     var triangles = std.ArrayList(Triangle){};
     defer triangles.deinit(allocator);
 
@@ -70,6 +72,8 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
     var bounds_max = Vec3.new(0.0, 0.0, 0.0);
     var has_bounds = false;
     var mesh_center = Vec3.new(0.0, 0.0, 0.0);
+    var saw_any_face_normal = false;
+    var missing_any_face_normal = false;
 
     // Reusable face buffers hoisted out of the per-face loop to avoid
     // heap alloc/free on every face line (typical face has 3-4 vertices,
@@ -184,13 +188,19 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
                         const vn_usize = @as(usize, @intCast(vn_index - 1));
                         if (vn_usize >= normals.items.len) return error.NormalIndexOutOfRange;
                         normal_vec = normals.items[vn_usize];
+                        saw_any_face_normal = true;
+                    } else {
+                        missing_any_face_normal = true;
                     }
+                } else {
+                    missing_any_face_normal = true;
                 }
 
                 // This is the de-indexing step. We create a new, unique vertex in our final
                 // list for each `v/vt/vn` combination.
                 try final_vertices.append(allocator, pos);
                 try final_texcoords.append(allocator, uv);
+                try final_vertex_normals.append(allocator, normal_vec);
                 try face_indices.append(allocator, final_vertices.items.len - 1);
                 try face_normals.append(allocator, normal_vec);
             }
@@ -263,6 +273,8 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
     errdefer allocator.free(vertex_slice);
     const texcoord_slice = try final_texcoords.toOwnedSlice(allocator);
     errdefer allocator.free(texcoord_slice);
+    const vertex_normal_slice = try final_vertex_normals.toOwnedSlice(allocator);
+    errdefer allocator.free(vertex_normal_slice);
     const triangle_slice = try triangles.toOwnedSlice(allocator);
     errdefer allocator.free(triangle_slice);
 
@@ -270,6 +282,7 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
         .vertices = vertex_slice,
         .triangles = triangle_slice,
         .normals = try allocator.alloc(Vec3, triangle_slice.len), // Will be calculated next.
+        .vertex_normals = vertex_normal_slice,
         .tex_coords = texcoord_slice,
         .meshlets = &[_]MeshModule.Meshlet{},
         .meshlet_vertices = &[_]usize{},
@@ -280,6 +293,9 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
 
     // Now that we have the final triangles, calculate the face normals.
     mesh.recalculateNormals();
+    if (!saw_any_face_normal or missing_any_face_normal) {
+        mesh.recalculateVertexNormals();
+    }
 
     // Try to hydrate meshlets from disk cache before falling back to on-the-fly generation.
     const cache_hit = meshlet_cache.loadCachedMeshlets(allocator, &mesh, path) catch |err| blk: {
@@ -297,4 +313,16 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
     }
 
     return mesh;
+}
+
+test "obj loader generates vertex normals when obj file omits them" {
+    var mesh = try load(std.testing.allocator, "assets/models/box.obj");
+    defer mesh.deinit();
+
+    try std.testing.expect(mesh.vertices.len > 0);
+    try std.testing.expectEqual(mesh.vertices.len, mesh.vertex_normals.len);
+
+    for (mesh.vertex_normals) |normal| {
+        try std.testing.expect(math.Vec3.length(normal) > 0.5);
+    }
 }
