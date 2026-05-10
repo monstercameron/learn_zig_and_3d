@@ -1,12 +1,12 @@
 const std = @import("std");
-const math = @import("../core/math.zig");
-const direct_batch = @import("direct_batch.zig");
-const direct_mesh = @import("direct_mesh.zig");
-const direct_meshlets = @import("direct_meshlets.zig");
+const math = @import("../../core/math.zig");
+const direct_batch = @import("batch.zig");
+const direct_mesh = @import("mesh.zig");
+const direct_meshlets = @import("meshlets.zig");
 
 pub const WorldPacket = struct {
-    layer: @import("direct_packets.zig").RenderLayer = .geometry,
-    flags: @import("direct_packets.zig").PacketFlags = .{},
+    layer: @import("packets.zig").RenderLayer = .geometry,
+    flags: @import("packets.zig").PacketFlags = .{},
     transform: math.Mat4 = math.Mat4.identity(),
     source: Source,
 };

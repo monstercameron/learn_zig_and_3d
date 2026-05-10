@@ -35,7 +35,7 @@ pub fn build(b: *std.Build) void {
         .omit_frame_pointer = if (profile) false else null,
     });
     const scene_main_module = b.createModule(.{
-        .root_source_file = b.path("engine/src/scene/main.zig"),
+        .root_source_file = b.path("engine/src/scene/mod.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -60,7 +60,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const render_main_module = b.createModule(.{
-        .root_source_file = b.path("engine/src/render/main.zig"),
+        .root_source_file = b.path("engine/src/render/mod.zig"),
         .target = target,
         .optimize = optimize,
     });

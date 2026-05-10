@@ -1,6 +1,6 @@
 const std = @import("std");
-const direct_packets = @import("direct_packets.zig");
-const scanline = @import("core/scanline.zig");
+const direct_packets = @import("packets.zig");
+const scanline = @import("../core/scanline.zig");
 
 pub const Point2i = struct {
     x: i32,

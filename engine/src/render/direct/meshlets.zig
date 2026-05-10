@@ -1,9 +1,9 @@
 const std = @import("std");
-const math = @import("../core/math.zig");
+const math = @import("../../core/math.zig");
 const job_system = @import("job_system");
-const MeshModule = @import("core/mesh.zig");
-const meshlet_builder = @import("core/meshlets/meshlet_builder.zig");
-const direct_batch = @import("direct_batch.zig");
+const MeshModule = @import("../core/mesh.zig");
+const meshlet_builder = @import("../core/meshlets/meshlet_builder.zig");
+const direct_batch = @import("batch.zig");
 
 const Job = job_system.Job;
 const JobSystem = job_system.JobSystem;
@@ -143,7 +143,7 @@ fn estimateVisiblePrimitiveCount(mesh: *const Mesh, visible_indices: []const usi
 fn meshletVisible(meshlet: *const Meshlet, transform: math.Mat4, camera: direct_batch.Camera) bool {
     const center = transform.mulVec3(meshlet.bounds_center);
     const relative = math.Vec3.sub(center, camera.position);
-    const basis = @import("camera_controller.zig").computeViewBasis(camera.yaw, camera.pitch);
+    const basis = @import("../camera_controller.zig").computeViewBasis(camera.yaw, camera.pitch);
     const camera_z = math.Vec3.dot(relative, basis.forward);
     if (camera_z + meshlet.bounds_radius <= direct_batch.near_plane) return false;
     return true;

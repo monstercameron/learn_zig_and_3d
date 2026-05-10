@@ -1,6 +1,6 @@
-const std = @import("std");
+﻿const std = @import("std");
 const math = @import("../../core/math.zig");
-const direct_batch = @import("../direct_batch.zig");
+const direct_batch = @import("../direct/batch.zig");
 
 pub const LightConfig = struct {
     ambient: f32 = 0.18,

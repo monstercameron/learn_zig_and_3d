@@ -1,9 +1,9 @@
 const std = @import("std");
-const math = @import("../core/math.zig");
-const camera_controller = @import("camera_controller.zig");
-const direct_draw_list = @import("direct_draw_list.zig");
-const direct_packets = @import("direct_packets.zig");
-const direct_primitives = @import("direct_primitives.zig");
+const math = @import("../../core/math.zig");
+const camera_controller = @import("../camera_controller.zig");
+const direct_draw_list = @import("draw_list.zig");
+const direct_packets = @import("packets.zig");
+const direct_primitives = @import("primitives.zig");
 
 pub const max_polygon_points = 8;
 pub const near_plane: f32 = 0.1;
@@ -113,6 +113,10 @@ pub const PrimitiveBatch = struct {
 
     pub fn appendTriangle(self: *PrimitiveBatch, triangle: WorldTriangle, material: SurfaceMaterial) !void {
         try self.append(.{ .triangle = .{ .triangle = triangle, .material = material } });
+    }
+
+    pub fn appendTriangleAssumeCapacity(self: *PrimitiveBatch, triangle: WorldTriangle, material: SurfaceMaterial) void {
+        self.appendAssumeCapacity(.{ .triangle = .{ .triangle = triangle, .material = material } });
     }
 
     pub fn appendTriangleLit(self: *PrimitiveBatch, triangle: WorldTriangle, material: SurfaceMaterial, vertex_normals: [3]math.Vec3) !void {

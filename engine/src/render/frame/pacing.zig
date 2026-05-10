@@ -1,5 +1,5 @@
-const std = @import("std");
-const frame_pacing_hud = @import("frame_pacing_hud.zig");
+﻿const std = @import("std");
+const frame_pacing_hud = @import("pacing_hud.zig");
 
 pub const Mode = frame_pacing_hud.Mode;
 

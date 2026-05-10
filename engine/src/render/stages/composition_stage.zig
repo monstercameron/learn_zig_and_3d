@@ -1,7 +1,7 @@
-const std = @import("std");
+﻿const std = @import("std");
 const job_system = @import("job_system");
-const direct_primitives = @import("../direct_primitives.zig");
-const frame_resources = @import("../frame_resources.zig");
+const direct_primitives = @import("../direct/primitives.zig");
+const frame_resources = @import("../frame/resources.zig");
 const Job = job_system.Job;
 const JobSystem = job_system.JobSystem;
 

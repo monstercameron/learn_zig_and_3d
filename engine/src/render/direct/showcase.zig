@@ -1,9 +1,9 @@
 const std = @import("std");
-const math = @import("../core/math.zig");
-const direct_batch = @import("direct_batch.zig");
-const direct_mesh = @import("direct_mesh.zig");
-const rasterization_stage = @import("stages/rasterization_stage.zig");
-const scene_submission_stage = @import("stages/scene_submission_stage.zig");
+const math = @import("../../core/math.zig");
+const direct_batch = @import("batch.zig");
+const direct_mesh = @import("mesh.zig");
+const rasterization_stage = @import("../stages/rasterization_stage.zig");
+const scene_submission_stage = @import("../stages/scene_submission_stage.zig");
 
 pub const Plan = struct {
     camera: direct_batch.Camera,

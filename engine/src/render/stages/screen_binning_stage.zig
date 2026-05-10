@@ -1,8 +1,8 @@
-const std = @import("std");
+﻿const std = @import("std");
 const TileRenderer = @import("../core/tile_renderer.zig");
-const direct_draw_list = @import("../direct_draw_list.zig");
-const direct_packets = @import("../direct_packets.zig");
-const direct_primitives = @import("../direct_primitives.zig");
+const direct_draw_list = @import("../direct/draw_list.zig");
+const direct_packets = @import("../direct/packets.zig");
+const direct_primitives = @import("../direct/primitives.zig");
 
 pub const TileRange = struct {
     start: usize = 0,

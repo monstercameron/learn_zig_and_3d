@@ -1,4 +1,4 @@
-const direct_primitives = @import("direct_primitives.zig");
+const direct_primitives = @import("primitives.zig");
 
 pub const RenderLayer = enum(u8) {
     background,

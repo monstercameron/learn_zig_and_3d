@@ -1,9 +1,9 @@
 const std = @import("std");
 const math = @import("../core/math.zig");
-const direct_batch = @import("direct_batch.zig");
-const direct_mesh = @import("direct_mesh.zig");
-const direct_meshlets = @import("direct_meshlets.zig");
-const direct_packets = @import("direct_packets.zig");
+const direct_batch = @import("direct/batch.zig");
+const direct_mesh = @import("direct/mesh.zig");
+const direct_meshlets = @import("direct/meshlets.zig");
+const direct_packets = @import("direct/packets.zig");
 
 pub const VisiblePacket = union(enum) {
     primitive: PrimitivePacket,

@@ -1,8 +1,8 @@
-const std = @import("std");
+﻿const std = @import("std");
 const Bitmap = @import("../../assets/bitmap.zig").Bitmap;
-const direct_primitives = @import("../direct_primitives.zig");
+const direct_primitives = @import("../direct/primitives.zig");
 const present_d3d11 = @import("../present/present_d3d11.zig");
-const present_state = @import("../present_state.zig");
+const present_state = @import("../present/state.zig");
 
 pub const Result = struct {
     present_ns: i128 = 0,

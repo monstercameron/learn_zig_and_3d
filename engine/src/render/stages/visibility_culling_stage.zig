@@ -1,7 +1,7 @@
-const std = @import("std");
-const direct_batch = @import("../direct_batch.zig");
-const direct_meshlets = @import("../direct_meshlets.zig");
-const direct_scene_packets = @import("../direct_scene_packets.zig");
+﻿const std = @import("std");
+const direct_batch = @import("../direct/batch.zig");
+const direct_meshlets = @import("../direct/meshlets.zig");
+const direct_scene_packets = @import("../direct/scene_packets.zig");
 const visible_scene = @import("../visible_scene.zig");
 
 pub const Result = struct {

@@ -1,8 +1,8 @@
-const std = @import("std");
+﻿const std = @import("std");
 const job_system = @import("job_system");
-const direct_batch = @import("../direct_batch.zig");
-const direct_mesh = @import("../direct_mesh.zig");
-const direct_meshlets = @import("../direct_meshlets.zig");
+const direct_batch = @import("../direct/batch.zig");
+const direct_mesh = @import("../direct/mesh.zig");
+const direct_meshlets = @import("../direct/meshlets.zig");
 const visible_scene = @import("../visible_scene.zig");
 
 const JobSystem = job_system.JobSystem;

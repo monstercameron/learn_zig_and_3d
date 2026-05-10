@@ -1,6 +1,6 @@
-const math = @import("../core/math.zig");
-const TileRenderer = @import("core/tile_renderer.zig");
-const direct_primitives = @import("direct_primitives.zig");
+﻿const math = @import("../../core/math.zig");
+const TileRenderer = @import("../core/tile_renderer.zig");
+const direct_primitives = @import("../direct/primitives.zig");
 
 pub const AuxiliaryBuffers = struct {
     scene_camera: []math.Vec3,

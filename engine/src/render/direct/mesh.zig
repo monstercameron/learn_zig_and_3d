@@ -1,7 +1,7 @@
 const std = @import("std");
-const math = @import("../core/math.zig");
-const MeshModule = @import("core/mesh.zig");
-const direct_batch = @import("direct_batch.zig");
+const math = @import("../../core/math.zig");
+const MeshModule = @import("../core/mesh.zig");
+const direct_batch = @import("batch.zig");
 
 pub const Mesh = MeshModule.Mesh;
 pub const Triangle = MeshModule.Triangle;
@@ -27,23 +27,33 @@ pub fn appendMeshTriangles(
     if (instance.material_override) |material_override| {
         if (identity_transform) {
             for (triangles, 0..) |triangle, tri_index| {
-                const lighting_normals = resolveTriangleNormals(mesh, triangle, tri_index, vertex_normals);
-                batch.appendTriangleLitAssumeCapacity(.{
+                const world_triangle: direct_batch.WorldTriangle = .{
                     .a = vertices[triangle.v0],
                     .b = vertices[triangle.v1],
                     .c = vertices[triangle.v2],
-                }, material_override, lighting_normals);
+                };
+                if (triangle.lit) {
+                    const lighting_normals = resolveTriangleNormals(mesh, triangle, tri_index, vertex_normals);
+                    batch.appendTriangleLitAssumeCapacity(world_triangle, material_override, lighting_normals);
+                } else {
+                    batch.appendTriangleAssumeCapacity(world_triangle, material_override);
+                }
             }
             return;
         }
 
         for (triangles, 0..) |triangle, tri_index| {
-            const lighting_normals = resolveTriangleNormals(mesh, triangle, tri_index, vertex_normals);
-            batch.appendTriangleLitAssumeCapacity(.{
+            const world_triangle: direct_batch.WorldTriangle = .{
                 .a = instance.transform.mulVec3(vertices[triangle.v0]),
                 .b = instance.transform.mulVec3(vertices[triangle.v1]),
                 .c = instance.transform.mulVec3(vertices[triangle.v2]),
-            }, material_override, lighting_normals);
+            };
+            if (triangle.lit) {
+                const lighting_normals = resolveTriangleNormals(mesh, triangle, tri_index, vertex_normals);
+                batch.appendTriangleLitAssumeCapacity(world_triangle, material_override, lighting_normals);
+            } else {
+                batch.appendTriangleAssumeCapacity(world_triangle, material_override);
+            }
         }
         return;
     }
@@ -54,7 +64,12 @@ pub fn appendMeshTriangles(
             .b = if (identity_transform) vertices[triangle.v1] else instance.transform.mulVec3(vertices[triangle.v1]),
             .c = if (identity_transform) vertices[triangle.v2] else instance.transform.mulVec3(vertices[triangle.v2]),
         };
-        batch.appendTriangleLitAssumeCapacity(world_triangle, resolveTriangleMaterial(triangle, null), resolveTriangleNormals(mesh, triangle, tri_index, vertex_normals));
+        const material = resolveTriangleMaterial(triangle, null);
+        if (triangle.lit) {
+            batch.appendTriangleLitAssumeCapacity(world_triangle, material, resolveTriangleNormals(mesh, triangle, tri_index, vertex_normals));
+        } else {
+            batch.appendTriangleAssumeCapacity(world_triangle, material);
+        }
     }
 }
 

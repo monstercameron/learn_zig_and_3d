@@ -1,8 +1,8 @@
-const std = @import("std");
+﻿const std = @import("std");
 const math = @import("../../core/math.zig");
 const TileRenderer = @import("../core/tile_renderer.zig");
-const direct_primitives = @import("../direct_primitives.zig");
-const frame_resources = @import("../frame_resources.zig");
+const direct_primitives = @import("../direct/primitives.zig");
+const frame_resources = @import("../frame/resources.zig");
 
 pub const Config = struct {
     clear_color: u32 = 0xFF0B1220,

@@ -1,10 +1,10 @@
-const std = @import("std");
+﻿const std = @import("std");
 const job_system = @import("job_system");
 const TileRenderer = @import("../core/tile_renderer.zig");
-const direct_draw_list = @import("../direct_draw_list.zig");
-const direct_packets = @import("../direct_packets.zig");
-const direct_primitives = @import("../direct_primitives.zig");
-const frame_resources = @import("../frame_resources.zig");
+const direct_draw_list = @import("../direct/draw_list.zig");
+const direct_packets = @import("../direct/packets.zig");
+const direct_primitives = @import("../direct/primitives.zig");
+const frame_resources = @import("../frame/resources.zig");
 const screen_binning_stage = @import("screen_binning_stage.zig");
 
 const Job = job_system.Job;

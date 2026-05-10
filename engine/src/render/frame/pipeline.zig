@@ -1,9 +1,9 @@
-const std = @import("std");
-const config = @import("../core/app_config.zig");
-const pass_graph = @import("pipeline/pass_graph.zig");
-const frame_graph = @import("graph/frame_graph.zig");
-const frame_plan = @import("graph/frame_plan.zig");
-const frame_executor = @import("frame_executor.zig");
+﻿const std = @import("std");
+const config = @import("../../core/app_config.zig");
+const pass_graph = @import("../pipeline/pass_graph.zig");
+const frame_graph = @import("../graph/frame_graph.zig");
+const frame_plan = @import("../graph/frame_plan.zig");
+const frame_executor = @import("executor.zig");
 
 pub const PostPipelineFeatures = struct {
     shadow_map_light_count: usize,

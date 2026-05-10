@@ -1,4 +1,4 @@
-//! # The Main Renderer Module
+﻿//! # The Main Renderer Module
 //!
 //! This module is the heart and brain of the entire rendering engine. It orchestrates
 //! the entire 3D pipeline, from handling user input to update the camera, transforming
@@ -64,15 +64,15 @@ const adaptive_shadow_tile_pass = @import("passes/adaptive_shadow_tile_pass.zig"
 const pass_graph = @import("pipeline/pass_graph.zig");
 const frame_graph = @import("graph/frame_graph.zig");
 const frame_plan = @import("graph/frame_plan.zig");
-const frame_pipeline = @import("frame_pipeline.zig");
-const frame_executor = @import("frame_executor.zig");
-const frame_hooks = @import("frame_hooks.zig");
+const frame_pipeline = @import("frame/pipeline.zig");
+const frame_executor = @import("frame/executor.zig");
+const frame_hooks = @import("frame/hooks.zig");
 const render_utils = @import("core/utils.zig");
 const scene_item_gizmo = @import("scene_item_gizmo.zig");
 const camera_controller = @import("camera_controller.zig");
 const camera_runtime = @import("camera_runtime.zig");
-const frame_pacing_hud = @import("frame_pacing_hud.zig");
-const frame_pacing = @import("frame_pacing.zig");
+const frame_pacing_hud = @import("frame/pacing_hud.zig");
+const frame_pacing = @import("frame/pacing.zig");
 const shadow_raster_kernel = @import("kernels/shadow_raster_kernel.zig");
 const shadow_sample_kernel = @import("kernels/shadow_sample_kernel.zig");
 const hybrid_shadow_cache_kernel = @import("kernels/hybrid_shadow_cache_kernel.zig");
@@ -84,16 +84,15 @@ const depth_fog_pass = @import("passes/depth_fog_pass.zig");
 const scanline = @import("core/scanline.zig");
 const texture = @import("../assets/texture.zig");
 const WorkTypes = @import("core/mesh_work_types.zig");
-const direct_primitives = @import("direct_primitives.zig");
-const direct_demo = @import("direct_demo.zig");
-const direct_showcase = @import("direct_showcase.zig");
-const frame_resources = @import("frame_resources.zig");
+const direct_primitives = @import("direct/primitives.zig");
+const direct_showcase = @import("direct/showcase.zig");
+const frame_resources = @import("frame/resources.zig");
 const frame_setup_stage = @import("stages/frame_setup_stage.zig");
 const presentation_stage = @import("stages/presentation_stage.zig");
 const direct_backend = @import("backends/direct_backend.zig");
 const scene_tiled_backend = @import("backends/scene_tiled_backend.zig");
 const present_d3d11 = @import("present/present_d3d11.zig");
-const present_state = @import("present_state.zig");
+const present_state = @import("present/state.zig");
 const TrianglePacket = WorkTypes.TrianglePacket;
 const TriangleFlags = WorkTypes.TriangleFlags;
 const MeshletPacket = WorkTypes.MeshletPacket;
@@ -1115,7 +1114,7 @@ const Bitmap = @import("../assets/bitmap.zig").Bitmap;
 const TileRenderer = @import("core/tile_renderer.zig");
 const TileGrid = TileRenderer.TileGrid;
 const TileBuffer = TileRenderer.TileBuffer;
-const BinningStage = @import("core/binning_stage.zig");
+const BinningStage = @import("core/tile_binning.zig");
 const job_system_module = @import("job_system");
 const JobSystem = job_system_module.JobSystem;
 const Job = job_system_module.Job;
@@ -1390,7 +1389,6 @@ pub const Renderer = struct {
     active_tile_indices: ?[]usize,
     tile_light_ranges: []TileLightRange,
     tile_light_indices: []usize,
-    mesh_work_cache: MeshWorkCache = MeshWorkCache.init(),
     frame_view_cache: FrameViewCache = .{},
     cached_post_graph: frame_graph.CachedGraph = .{},
     cached_frame_plan: frame_plan.CachedPlan = .{},
@@ -2231,7 +2229,6 @@ pub const Renderer = struct {
     pub fn deinit(self: *Renderer) void {
         renderer_logger.infoSub("shutdown", "deinitializing renderer frame_counter={}", .{self.frame_count});
         self.frame_pacing.exportCsv("artifacts/perf/frame_times.csv");
-        self.mesh_work_cache.deinit(self.allocator);
         self.direct_backend.deinit();
         self.sys_shadows.deinit();
         if (self.job_system) |js| js.deinit();
@@ -3700,7 +3697,6 @@ pub const Renderer = struct {
         light_dir: math.Vec3,
         pump: ?*const fn (*Renderer) bool,
         raster_projection: ProjectionParams,
-        mesh_work: *const MeshWork,
         is_editor_mode: bool,
         light_camera: math.Vec3,
         center_x: f32,
@@ -4472,9 +4468,7 @@ pub const Renderer = struct {
     }
 
     /// Marks cached/derived data stale so it is recomputed on the next usage.
-    /// It marks cached/derived data stale so dependent work is recomputed on next use.
-    pub fn invalidateMeshWork(self: *Renderer) void {
-        self.mesh_work_cache.invalidate();
+    pub fn invalidateMeshDerivedCaches(self: *Renderer) void {
         self.frame_view_cache.invalidate();
         self.sys_shadows.invalidateBLAS();
     }
@@ -5298,7 +5292,6 @@ pub const Renderer = struct {
         const center_y = resolved_frame_view.center_y;
         const x_scale = resolved_frame_view.x_scale;
         const y_scale = resolved_frame_view.y_scale;
-        const cache_projection = resolved_frame_view.cache_projection;
         const taa_jitter = if (config.POST_TAA_ENABLED) taaJitterForFrame(self.total_frames_rendered) else math.Vec2.new(0.0, 0.0);
         const raster_projection = ProjectionParams{
             .center_x = center_x,
@@ -5310,63 +5303,6 @@ pub const Renderer = struct {
             .jitter_y = taa_jitter.y,
         };
         const taa_view = TemporalAAViewState.init(self.camera_position, right, up, forward, raster_projection);
-        const legacy_mesh_work_required = scene_tiled_backend.usesLegacyMeshWork();
-        var empty_mesh_work = MeshWork.init();
-        const mesh_work = blk: {
-            if (!legacy_mesh_work_required) break :blk &empty_mesh_work;
-
-            var cache = &self.mesh_work_cache;
-            try cache.ensureCapacity(self.allocator, mesh.vertices.len);
-
-            // Recompute mesh work only when camera/light/projection dependencies diverge from cached keys.
-            const needs_update = cache.needsUpdate(
-                mesh,
-                self.camera_position,
-                right,
-                up,
-                forward,
-                light_dir,
-                cache_projection,
-            );
-            if (needs_update) {
-                const mesh_work_start = std.time.nanoTimestamp();
-                meshlet_logger.debugSub(
-                    "work",
-                    "refreshing mesh work cache (vertices={} triangles={})",
-                    .{ mesh.vertices.len, mesh.triangles.len },
-                );
-                cache.beginUpdate();
-                try self.generateMeshWork(
-                    mesh,
-                    cache.projected,
-                    cache.transformed_vertices,
-                    cache.vertex_ready,
-                    right,
-                    up,
-                    forward,
-                    cache_projection,
-                    &cache.work,
-                    light_dir,
-                );
-                // Capture the exact dependency snapshot that will be checked on the next frame.
-                cache.finalizeUpdate(mesh, self.camera_position, right, up, forward, light_dir, cache_projection);
-                self.recordRenderPassTiming("mesh_work_update", mesh_work_start);
-            } else {
-                meshlet_logger.debugSub("work", "reusing cached mesh work", .{});
-            }
-
-            if (config.MESHLET_SHADOWS_ENABLED and mesh.meshlets.len > 0) {
-                _ = try self.sys_shadows.ensureBLAS(mesh);
-                var instances = [_]math.Mat4{math.Mat4.identity()};
-                try self.sys_shadows.ensureTLAS(&instances);
-            }
-
-            if (builtin.mode == .Debug and cache.full_vertex_cache_valid and cache.transformed_vertices.len == mesh.vertices.len) {
-                self.debugGroundPlane(mesh, cache.transformed_vertices, view_rotation);
-            }
-
-            break :blk &cache.work;
-        };
         if (config.POST_TAA_ENABLED) try self.ensureTemporalMeshVertexCapacity(mesh.vertices.len);
         const shadow_map_light_count = if (config.POST_SHADOW_ENABLED)
             self.countLightsWithShadowMode(.shadow_map)
@@ -5424,7 +5360,6 @@ pub const Renderer = struct {
             .light_dir = light_dir,
             .pump = pump,
             .raster_projection = raster_projection,
-            .mesh_work = mesh_work,
             .is_editor_mode = is_editor_mode,
             .light_camera = light_camera,
             .center_x = center_x,
@@ -5437,7 +5372,7 @@ pub const Renderer = struct {
             .taa_view = taa_view,
             .shadow_map_light_count = shadow_map_light_count,
             .light_dir_world = light_dir_world,
-            .cache_projection = cache_projection,
+            .cache_projection = resolved_frame_view.cache_projection,
         };
         const current_time = try frame_executor.executeFramePlan(
             FrameExecutionContext,
@@ -6407,15 +6342,14 @@ pub const Renderer = struct {
         light_dir: math.Vec3,
         pump: ?*const fn (*Renderer) bool,
         raster_projection: ProjectionParams,
-        mesh_work: *const MeshWork,
     ) !void {
         const scene_pass_start = std.time.nanoTimestamp();
-        const tri_count = if (scene_tiled_backend.usesLegacyMeshWork()) mesh_work.triangleSlice().len else mesh.triangles.len;
-        const meshlet_count = if (scene_tiled_backend.usesLegacyMeshWork()) mesh_work.meshlet_len else mesh.meshlets.len;
+        const tri_count = mesh.triangles.len;
+        const meshlet_count = mesh.meshlets.len;
         switch (backend) {
             .tiled => {
                 pipeline_logger.debugSub("dispatch", "rendering tiled path triangles={} meshlets={}", .{ tri_count, meshlet_count });
-                const shadow_pass_elapsed_ns = try self.renderTiled(mesh, view_rotation, light_dir, pump, raster_projection, mesh_work);
+                const shadow_pass_elapsed_ns = try self.renderTiled(mesh, view_rotation, light_dir, pump, raster_projection);
                 const scene_pass_elapsed_ns = std.time.nanoTimestamp() - scene_pass_start;
                 self.recordRenderPassDuration("meshlet_tiled", scene_pass_elapsed_ns - @as(i128, @intCast(shadow_pass_elapsed_ns)));
                 if (config.MESHLET_SHADOWS_ENABLED) {
@@ -6424,7 +6358,7 @@ pub const Renderer = struct {
             },
             .direct => {
                 pipeline_logger.debugSub("dispatch", "rendering direct path triangles={} meshlets={}", .{ tri_count, meshlet_count });
-                try self.renderDirect(mesh, view_rotation, light_dir, raster_projection, mesh_work);
+                try self.renderDirect(mesh, view_rotation, light_dir, raster_projection);
                 self.recordRenderPassTiming("meshlet_direct", scene_pass_start);
             },
         }
@@ -7506,7 +7440,6 @@ pub const Renderer = struct {
         light_dir: math.Vec3,
         pump: ?*const fn (*Renderer) bool,
         projection: ProjectionParams,
-        mesh_work: *const MeshWork,
     ) !u64 {
         return scene_tiled_backend.execute(
             self,
@@ -7515,7 +7448,6 @@ pub const Renderer = struct {
             light_dir,
             pump,
             projection,
-            mesh_work,
             noopRenderPassJob,
         );
     }
@@ -7865,9 +7797,8 @@ pub const Renderer = struct {
         transform: math.Mat4,
         light_dir: math.Vec3,
         projection: ProjectionParams,
-        mesh_work: *const MeshWork,
     ) !void {
-        _ = try self.renderTiled(mesh, transform, light_dir, null, projection, mesh_work);
+        _ = try self.renderTiled(mesh, transform, light_dir, null, projection);
     }
 
     fn clearDirectFrame(self: *Renderer, clear: direct_primitives.ClearConfig) void {

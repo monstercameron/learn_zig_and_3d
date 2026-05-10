@@ -1,6 +1,6 @@
 const std = @import("std");
-const direct_packets = @import("direct_packets.zig");
-const direct_primitives = @import("direct_primitives.zig");
+const direct_packets = @import("packets.zig");
+const direct_primitives = @import("primitives.zig");
 
 pub const DrawList = struct {
     pub const PreparedGouraudEntry = struct {

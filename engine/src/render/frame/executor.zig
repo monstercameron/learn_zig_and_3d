@@ -1,8 +1,8 @@
-const std = @import("std");
-const pass_graph = @import("pipeline/pass_graph.zig");
-const frame_graph = @import("graph/frame_graph.zig");
-const frame_plan = @import("graph/frame_plan.zig");
-const frame_pipeline = @import("frame_pipeline.zig");
+﻿const std = @import("std");
+const pass_graph = @import("../pipeline/pass_graph.zig");
+const frame_graph = @import("../graph/frame_graph.zig");
+const frame_plan = @import("../graph/frame_plan.zig");
+const frame_pipeline = @import("pipeline.zig");
 
 pub fn PostPassDispatcher(comptime Context: type) type {
     return struct {

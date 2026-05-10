@@ -1,8 +1,8 @@
-const std = @import("std");
-const config = @import("../core/app_config.zig");
-const frame_executor = @import("frame_executor.zig");
-const frame_pipeline = @import("frame_pipeline.zig");
-const frame_plan = @import("graph/frame_plan.zig");
+﻿const std = @import("std");
+const config = @import("../../core/app_config.zig");
+const frame_executor = @import("executor.zig");
+const frame_pipeline = @import("pipeline.zig");
+const frame_plan = @import("../graph/frame_plan.zig");
 
 pub fn makePostPassDispatcher(comptime Context: type) frame_executor.PostPassDispatcher(Context) {
     return .{
@@ -52,12 +52,12 @@ pub fn makeFrameStageDispatcher(comptime Context: type) frame_executor.FrameStag
         .shadow_build = struct { fn run(ctx: Context) void { ctx.renderer.stageBuildShadowMaps(ctx.mesh); } }.run,
         .scene_raster_tiled = struct {
             fn run(ctx: Context) !void {
-                try ctx.renderer.stageRenderScene(.tiled, ctx.mesh, ctx.view_rotation, ctx.light_dir, ctx.pump, ctx.raster_projection, ctx.mesh_work);
+                try ctx.renderer.stageRenderScene(.tiled, ctx.mesh, ctx.view_rotation, ctx.light_dir, ctx.pump, ctx.raster_projection);
             }
         }.run,
         .scene_raster_direct = struct {
             fn run(ctx: Context) !void {
-                try ctx.renderer.stageRenderScene(.direct, ctx.mesh, ctx.view_rotation, ctx.light_dir, ctx.pump, ctx.raster_projection, ctx.mesh_work);
+                try ctx.renderer.stageRenderScene(.direct, ctx.mesh, ctx.view_rotation, ctx.light_dir, ctx.pump, ctx.raster_projection);
             }
         }.run,
         .post_process = struct {
@@ -97,7 +97,6 @@ pub fn makeFrameStageDispatcher(comptime Context: type) frame_executor.FrameStag
 const FakeProjection = struct {};
 const FakeView = struct {};
 const FakeMesh = struct {};
-const FakeMeshWork = struct {};
 const FakeVec3 = struct {};
 const FakeMat4 = struct {};
 
@@ -125,7 +124,7 @@ const FakeRenderer = struct {
     pub fn applyFilmGrainVignettePass(self: *FakeRenderer) void { self.mark("film_grain_vignette"); }
     pub fn applyBlockbusterColorGradePass(self: *FakeRenderer) void { self.mark("color_grade"); }
     pub fn stageBuildShadowMaps(self: *FakeRenderer, _: *const FakeMesh) void { self.mark("shadow_build"); }
-    pub fn stageRenderScene(self: *FakeRenderer, backend: frame_plan.BackendKind, _: *const FakeMesh, _: FakeMat4, _: FakeVec3, _: ?*const fn (*FakeRenderer) bool, _: FakeProjection, _: *const FakeMeshWork) !void {
+    pub fn stageRenderScene(self: *FakeRenderer, backend: frame_plan.BackendKind, _: *const FakeMesh, _: FakeMat4, _: FakeVec3, _: ?*const fn (*FakeRenderer) bool, _: FakeProjection) !void {
         self.mark(if (backend == .tiled) "scene_tiled" else "scene_direct");
     }
     pub fn runPostProcessStage(self: *FakeRenderer, _: bool, _: *const FakeMesh, _: FakeVec3, _: FakeVec3, _: FakeVec3, _: FakeView, _: FakeProjection, _: usize, _: FakeVec3) void { self.mark("post_process"); }
@@ -155,7 +154,6 @@ const FakeFrameContext = struct {
     light_dir: FakeVec3,
     pump: ?*const fn (*FakeRenderer) bool,
     raster_projection: FakeProjection,
-    mesh_work: *const FakeMeshWork,
     is_editor_mode: bool,
     light_camera: FakeVec3,
     center_x: f32,
@@ -185,7 +183,7 @@ test "shared post-pass wiring drives executor through generic hooks" {
     var renderer = FakeRenderer{ .calls = &calls };
     const mesh = FakeMesh{};
     const shadow_times = [_]i128{0};
-    var graph_cache = @import("graph/frame_graph.zig").CachedGraph{};
+    var graph_cache = @import("../graph/frame_graph.zig").CachedGraph{};
     const compiled = try frame_pipeline.compileCachedPostGraph(&graph_cache, .{
         .shadow_map_light_count = 1,
         .taa_history_valid = true,
@@ -224,7 +222,6 @@ test "shared frame-stage wiring drives executor through generic hooks" {
     defer calls.deinit(std.testing.allocator);
     var renderer = FakeRenderer{ .calls = &calls };
     const mesh = FakeMesh{};
-    const mesh_work = FakeMeshWork{};
     var plan_cache = frame_plan.CachedPlan{};
     plan_cache.compileIfNeeded(.{
         .include_shadow_build = true,
@@ -243,7 +240,6 @@ test "shared frame-stage wiring drives executor through generic hooks" {
             .light_dir = .{},
             .pump = null,
             .raster_projection = .{},
-            .mesh_work = &mesh_work,
             .is_editor_mode = true,
             .light_camera = .{},
             .center_x = 0,

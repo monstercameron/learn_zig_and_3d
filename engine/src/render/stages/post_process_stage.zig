@@ -1,5 +1,5 @@
-const direct_primitives = @import("../direct_primitives.zig");
-const frame_resources = @import("../frame_resources.zig");
+﻿const direct_primitives = @import("../direct/primitives.zig");
+const frame_resources = @import("../frame/resources.zig");
 
 pub const Config = struct {
     enabled: bool = false,

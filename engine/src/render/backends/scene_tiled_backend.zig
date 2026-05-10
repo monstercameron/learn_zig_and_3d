@@ -1,11 +1,7 @@
 const std = @import("std");
 const math = @import("../../core/math.zig");
-const direct_batch = @import("../direct_batch.zig");
+const direct_batch = @import("../direct/batch.zig");
 const direct_backend = @import("direct_backend.zig");
-
-pub inline fn usesLegacyMeshWork() bool {
-    return false;
-}
 
 pub fn execute(
     renderer: anytype,
@@ -14,13 +10,11 @@ pub fn execute(
     light_dir: math.Vec3,
     pump: anytype,
     projection: anytype,
-    mesh_work: anytype,
     noop_job_fn: *const fn (*anyopaque) void,
 ) !u64 {
     _ = light_dir;
     _ = pump;
     _ = projection;
-    _ = mesh_work;
     _ = noop_job_fn;
     _ = transform;
 
