@@ -90,6 +90,7 @@ const renderer_input = @import("renderer/input.zig");
 const renderer_init = @import("renderer/init.zig");
 const renderer_lights = @import("renderer/lights.zig");
 const renderer_hud = @import("renderer/hud.zig");
+const renderer_orchestrator = @import("renderer/orchestrator.zig");
 const frame_resources = @import("frame/resources.zig");
 const frame_setup_stage = @import("stages/frame_setup_stage.zig");
 const presentation_stage = @import("stages/presentation_stage.zig");
@@ -101,7 +102,7 @@ const log = @import("../core/log.zig");
 pub const renderer_logger = log.get("renderer.core");
 const pipeline_logger = log.get("renderer.pipeline");
 const meshlet_logger = log.get("renderer.meshlet");
-const ground_logger = log.get("renderer.ground");
+pub const ground_logger = log.get("renderer.ground");
 
 pub const NEAR_CLIP: f32 = 0.01;
 pub const NEAR_EPSILON: f32 = 1e-4;
@@ -127,7 +128,7 @@ pub const HybridShadowTileRange = struct {
     count: usize = 0,
 };
 
-const min_rows_per_parallel_job: usize = 16;
+pub const min_rows_per_parallel_job: usize = 16;
 
 const LightSpaceSample = struct {
     u: f32,
@@ -220,7 +221,7 @@ pub const HybridShadowDebugState = struct {
     }
 };
 
-const GroundReason = struct {
+pub const GroundReason = struct {
     pub const near_plane: u8 = 1 << 0;
     pub const backface: u8 = 1 << 1;
     pub const cross_near: u8 = 1 << 2;
@@ -844,7 +845,7 @@ const ReprojectedHistorySample = struct {
     used_surface_path: bool,
 };
 
-fn taaJitterForFrame(frame_index: u64) math.Vec2 {
+pub fn taaJitterForFrame(frame_index: u64) math.Vec2 {
     const sample = taa_jitter_sequence[@as(usize, @intCast(frame_index % taa_jitter_sequence.len))];
     return .{
         .x = sample.x * 0.15,
@@ -1100,7 +1101,7 @@ pub extern "gdi32" fn DeleteDC(hdc: windows.HDC) bool;
 pub extern "gdi32" fn SetBkMode(hdc: windows.HDC, mode: i32) i32;
 pub extern "gdi32" fn SetTextColor(hdc: windows.HDC, color: u32) u32;
 pub extern "gdi32" fn TextOutW(hdc: windows.HDC, x: i32, y: i32, lpString: [*]const u16, c: i32) bool;
-extern "user32" fn SetWindowTextW(hWnd: windows.HWND, lpString: [*:0]const u16) bool;
+pub extern "user32" fn SetWindowTextW(hWnd: windows.HWND, lpString: [*:0]const u16) bool;
 extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
 pub extern "kernel32" fn CreateWaitableTimerExW(lpTimerAttributes: ?*anyopaque, lpTimerName: ?[*:0]const u16, dwFlags: u32, dwDesiredAccess: u32) ?windows.HANDLE;
 extern "kernel32" fn SetWaitableTimerEx(hTimer: windows.HANDLE, lpDueTime: *const i64, lPeriod: i32, pfnCompletionRoutine: ?*const anyopaque, lpArgToCompletionRoutine: ?*anyopaque, wakeContext: ?*const anyopaque, tolerableDelay: u32) windows.BOOL;
@@ -1528,6 +1529,13 @@ pub const Renderer = struct {
     pub const setLightShadowMapSize = renderer_lights.setLightShadowMapSize;
     pub const setLightGlow = renderer_lights.setLightGlow;
 
+    // ====== render orchestration + frame lifecycle (impl in renderer/orchestrator.zig) ======
+    pub const render3DMesh = renderer_orchestrator.render3DMesh;
+    pub const render3DMeshWithPump = renderer_orchestrator.render3DMeshWithPump;
+    pub const recordRenderPassTiming = renderer_orchestrator.recordRenderPassTiming;
+    pub const recordRenderPassDuration = renderer_orchestrator.recordRenderPassDuration;
+    pub const renderPassSortMetric = renderer_orchestrator.renderPassSortMetric;
+
     /// Cleans up all renderer resources in the reverse order of creation.
     pub fn deinit(self: *Renderer) void {
         renderer_logger.infoSub("shutdown", "deinitializing renderer frame_counter={}", .{self.frame_count});
@@ -1623,7 +1631,7 @@ pub const Renderer = struct {
         if (self.frame_pacing_timer) |timer| _ = windows.CloseHandle(timer);
     }
 
-    const FrameExecutionContext = struct {
+    pub const FrameExecutionContext = struct {
         renderer: *Renderer,
         mesh: *const Mesh,
         view_rotation: math.Mat4,
@@ -1700,7 +1708,7 @@ pub const Renderer = struct {
         self.sys_shadows.invalidateBLAS();
     }
 
-    fn ensureTemporalMeshVertexCapacity(self: *Renderer, vertex_count: usize) !void {
+    pub fn ensureTemporalMeshVertexCapacity(self: *Renderer, vertex_count: usize) !void {
         if (self.taa_previous_mesh_vertices.len == vertex_count) return;
         if (self.taa_previous_mesh_vertices.len != 0) self.allocator.free(self.taa_previous_mesh_vertices);
         self.taa_previous_mesh_vertices = if (vertex_count == 0)
@@ -2020,7 +2028,7 @@ pub const Renderer = struct {
 
         const now = std.time.nanoTimestamp();
         self.notePresentedFrame(now);
-        self.finalizeFrame(now);
+        renderer_orchestrator.finalizeFrame(self, now);
         return true;
     }
 
@@ -2035,7 +2043,7 @@ pub const Renderer = struct {
         const present = try self.presentFrame(true);
         self.direct_backend.notePresentTime(present.present_ns);
         self.notePresentedFrame(std.time.nanoTimestamp());
-        self.finalizeFrame(std.time.nanoTimestamp());
+        renderer_orchestrator.finalizeFrame(self, std.time.nanoTimestamp());
     }
 
     pub fn presentFrame(self: *Renderer, use_direct_dirty_rect: bool) !presentation_stage.Result {
@@ -2183,7 +2191,7 @@ pub const Renderer = struct {
         }
     }
 
-    fn advanceFrameDeadline(self: *Renderer, now_ns: i128) void {
+    pub fn advanceFrameDeadline(self: *Renderer, now_ns: i128) void {
         self.next_frame_time = frame_pacing.advanceDeadline(
             self.currentPacingMode(),
             self.next_frame_time,
@@ -2273,527 +2281,6 @@ pub const Renderer = struct {
         ctx.renderer.drawLineColored(x0, y0, x1, y1, color);
     }
 
-    /// Sets s et te xt ur e.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn render3DMesh(self: *Renderer, mesh: *const Mesh) !void {
-        try self.render3DMeshWithPump(mesh, null);
-    }
-
-    /// The main render loop function, with an added callback to process OS messages.
-    /// This is the heart of the engine, executing the full 3D pipeline each frame.
-    pub fn render3DMeshWithPump(self: *Renderer, mesh: *const Mesh, pump: ?*const fn (*Renderer) bool) !void {
-        if (self.total_frames_rendered == self.profile_capture_frame and profiler.Profiler.instance.?.active) {
-            profiler.Profiler.stopCaptureAndSave("profile.json") catch {};
-        }
-        if (self.total_frames_rendered + 1 == self.profile_capture_frame) {
-            profiler.Profiler.startCapture();
-        }
-        const _zone = profiler.zone("Renderer.render");
-        defer if (_zone) |z| z.end();
-
-        self.resetRenderPassTimings();
-
-        const delta_seconds = self.beginFrame();
-        const simulation_delta_seconds: f32 = if (self.hybrid_shadow_debug.enabled) 0.0 else delta_seconds;
-
-        renderer_logger.debugSub(
-            "frame",
-            "begin frame {} camera=({d:.2},{d:.2},{d:.2}) fov={d:.1}",
-            .{
-                self.frame_count + 1,
-                self.camera_position.x,
-                self.camera_position.y,
-                self.camera_position.z,
-                self.camera_fov_deg,
-            },
-        );
-
-        const sweep_half_angle = std.math.pi / 2.0;
-        for (self.lights.items) |*light| {
-            if (!light.manual_direction) {
-                light.orbit_x += light.orbit_speed * simulation_delta_seconds;
-                const sweep_angle = @sin(light.orbit_x) * sweep_half_angle;
-                const horizontal_radius = light.distance * @cos(light.elevation);
-                const light_height = @max(0.35, light.distance * @sin(light.elevation));
-                const light_pos = math.Vec3.new(
-                    @sin(sweep_angle) * horizontal_radius,
-                    light_height,
-                    @cos(sweep_angle) * horizontal_radius,
-                );
-                light.direction = math.Vec3.normalize(light_pos);
-            }
-        }
-        renderer_lights.syncLightSoA(self);
-        const light_distance_0 = if (self.lights.items.len > 0) self.light_soa.distance[0] else 10.0;
-        const light_dir_world = if (self.lights.items.len > 0)
-            math.Vec3.new(self.light_soa.dir_x[0], self.light_soa.dir_y[0], self.light_soa.dir_z[0])
-        else
-            math.Vec3.new(0, -1, 0);
-        camera_runtime.prepareCameraForFrame(self, delta_seconds, simulation_delta_seconds, light_dir_world, light_distance_0);
-        const right = self.frame_view_cache.state.right;
-        const up = self.frame_view_cache.state.up;
-        const forward = self.frame_view_cache.state.forward;
-
-        const resolved_frame_view = if (self.frame_view_cache.needsUpdate(
-            self.camera_position,
-            self.rotation_angle,
-            self.rotation_x,
-            self.camera_fov_deg,
-            self.bitmap.width,
-            self.bitmap.height,
-            light_dir_world,
-            light_distance_0,
-        ))
-            self.frame_view_cache.update(
-                self.camera_position,
-                self.rotation_angle,
-                self.rotation_x,
-                self.camera_fov_deg,
-                self.bitmap.width,
-                self.bitmap.height,
-                light_dir_world,
-                light_distance_0,
-            )
-        else
-            self.frame_view_cache.state;
-
-        const view_rotation = resolved_frame_view.view_rotation;
-        const light_camera = resolved_frame_view.light_camera;
-        const light_dir = resolved_frame_view.light_dir_camera;
-        const center_x = resolved_frame_view.center_x;
-        const center_y = resolved_frame_view.center_y;
-        const x_scale = resolved_frame_view.x_scale;
-        const y_scale = resolved_frame_view.y_scale;
-        const taa_jitter = if (config.POST_TAA_ENABLED) taaJitterForFrame(self.total_frames_rendered) else math.Vec2.new(0.0, 0.0);
-        const raster_projection = ProjectionParams{
-            .center_x = center_x,
-            .center_y = center_y,
-            .x_scale = x_scale,
-            .y_scale = y_scale,
-            .near_plane = NEAR_CLIP,
-            .jitter_x = taa_jitter.x,
-            .jitter_y = taa_jitter.y,
-        };
-        const taa_view = TemporalAAViewState.init(self.camera_position, right, up, forward, raster_projection);
-        if (config.POST_TAA_ENABLED) try self.ensureTemporalMeshVertexCapacity(mesh.vertices.len);
-        const shadow_map_light_count = if (config.POST_SHADOW_ENABLED)
-            self.countLightsWithShadowMode(.shadow_map)
-        else
-            0;
-        const meshlet_shadow_light_count = if (config.MESHLET_SHADOWS_ENABLED)
-            self.countLightsWithShadowMode(.meshlet_ray)
-        else
-            0;
-        self.light_work_stats.active_lights = self.lights.items.len;
-        self.light_work_stats.shadow_map_lights = shadow_map_light_count;
-        self.light_work_stats.meshlet_shadow_lights = meshlet_shadow_light_count;
-        self.light_work_stats.shadow_map_reused_lights = 0;
-        self.light_work_stats.shadow_budget_skipped_lights = 0;
-        self.light_work_stats.shadow_map_downscaled_lights = 0;
-        self.light_work_stats.shadow_map_upscaled_lights = 0;
-        self.light_work_stats.shadow_cadence_increased_lights = 0;
-        self.light_work_stats.shadow_cadence_decreased_lights = 0;
-        self.light_work_stats.shadow_queries = self.bitmap.pixels.len * shadow_map_light_count;
-        self.light_work_stats.meshlet_ray_tests = 0;
-        self.light_work_stats.meshlet_shadow_chunks = 0;
-        self.light_work_stats.meshlet_shadow_chunk_pixels = 0;
-        self.light_work_stats.meshlet_shadow_chunk_active_rays = 0;
-        self.light_work_stats.meshlet_shadow_packets = 0;
-        self.light_work_stats.meshlet_shadow_packets_skipped = 0;
-        self.light_work_stats.meshlet_shadow_packet_active_lanes = 0;
-        self.light_work_stats.meshlet_shadow_packet_occluded_lanes = 0;
-        self.light_work_stats.meshlet_shadow_trace_us = 0;
-        self.light_work_stats.meshlet_shadow_apply_us = 0;
-        self.light_work_stats.triangles_rasterized = 0;
-        self.light_work_stats.covered_pixels = 0;
-        self.light_work_stats.depth_tests_passed = 0;
-        self.light_work_stats.alpha_pixels = 0;
-        self.light_work_stats.shadow_budget_ns = 0;
-        self.light_work_stats.shadow_build_ns = 0;
-        self.light_work_stats.shadow_resolve_ns = 0;
-        self.light_work_stats.active_tiles = 0;
-        self.light_work_stats.tile_light_candidates = 0;
-        self.light_work_stats.tile_light_final = 0;
-        self.light_work_stats.tile_light_rejected = 0;
-        self.light_work_stats.tile_light_overflow_tiles = 0;
-        @memset(self.shadow_resolve_elapsed_ns[0..self.lights.items.len], 0);
-        const is_editor_mode = self.camera_control_mode != .first_person;
-        const using_tiled_backend = self.use_tiled_rendering and self.tile_grid != null and self.tile_buffers != null;
-        const compiled_frame_plan = frame_pipeline.compileCachedFramePlan(&self.cached_frame_plan, .{
-            .has_shadow_map_lights = shadow_map_light_count > 0,
-            .backend = if (using_tiled_backend) .tiled else .direct,
-            .include_post_process = false,
-            .include_present = true,
-        });
-        const frame_exec_ctx = FrameExecutionContext{
-            .renderer = self,
-            .mesh = mesh,
-            .view_rotation = view_rotation,
-            .light_dir = light_dir,
-            .pump = pump,
-            .raster_projection = raster_projection,
-            .is_editor_mode = is_editor_mode,
-            .light_camera = light_camera,
-            .center_x = center_x,
-            .center_y = center_y,
-            .x_scale = x_scale,
-            .y_scale = y_scale,
-            .basis_right = right,
-            .basis_up = up,
-            .basis_forward = forward,
-            .taa_view = taa_view,
-            .shadow_map_light_count = shadow_map_light_count,
-            .light_dir_world = light_dir_world,
-            .cache_projection = resolved_frame_view.cache_projection,
-        };
-        const current_time = try frame_executor.executeFramePlan(
-            FrameExecutionContext,
-            compiled_frame_plan,
-            frame_exec_ctx,
-            frame_stage_dispatcher,
-            std.time.nanoTimestamp(),
-        );
-        self.finalizeFrame(current_time);
-        self.advanceFrameDeadline(current_time);
-
-        renderer_logger.debugSub(
-            "frame",
-            "finish frame {} delta={d:.3}ms fps={}",
-            .{
-                self.frame_count,
-                delta_seconds * 1000.0,
-                self.current_fps,
-            },
-        );
-    }
-
-    /// Begins an operation and captures temporary context used until completion.
-    /// It marks the start of an operation and prepares transient state used until completion.
-    fn beginFrame(self: *Renderer) f32 {
-        const now = std.time.nanoTimestamp();
-        var delta_ns = now - self.last_frame_time;
-        if (delta_ns < 0) delta_ns = 0;
-        self.last_frame_time = now;
-        self.current_frame_start_time = now;
-        self.active_software_wait_ns = self.pending_software_wait_ns;
-        self.pending_software_wait_ns = 0;
-        self.frame_deadline_error_ns = if (self.next_frame_time > 0) now - self.next_frame_time else 0;
-
-        const delta_ns_f = @as(f64, @floatFromInt(delta_ns));
-        var delta_seconds = @as(f32, @floatCast(delta_ns_f / 1_000_000_000.0));
-        if (delta_seconds > 0.1) delta_seconds = 0.1;
-        if (delta_seconds <= 0.0) delta_seconds = 1.0 / 120.0;
-        return delta_seconds;
-    }
-
-    fn maybeEmitSingleFrameProfile(self: *Renderer) void {
-        if (self.profile_capture_emitted or self.profile_capture_frame == 0) return;
-        if (self.total_frames_rendered != self.profile_capture_frame) return;
-
-        self.profile_capture_emitted = true;
-        renderer_logger.infoSub("frame_profile", "frame={} exact pass timings follow", .{self.total_frames_rendered});
-
-        for (self.render_pass_timings[0..self.render_pass_count]) |pass| {
-            renderer_logger.infoSub("frame_profile", "{s}: {d:.3} ms", .{ pass.name, pass.frame_duration_ms });
-        }
-        const packet_count = @max(@as(usize, 1), self.light_work_stats.meshlet_shadow_packets);
-        const avg_active_lanes = @as(f32, @floatFromInt(self.light_work_stats.meshlet_shadow_packet_active_lanes)) /
-            @as(f32, @floatFromInt(packet_count));
-        const avg_occluded_lanes = @as(f32, @floatFromInt(self.light_work_stats.meshlet_shadow_packet_occluded_lanes)) /
-            @as(f32, @floatFromInt(packet_count));
-        renderer_logger.infoSub(
-            "frame_profile",
-            "light_work active={} shadow_map_lights={} meshlet_shadow_lights={} shadow_map_reused={} shadow_budget_skipped={} shadow_map_downscaled={} shadow_map_upscaled={} shadow_cadence_increased={} shadow_cadence_decreased={} shadow_queries={} meshlet_ray_tests={} meshlet_shadow_chunks={} meshlet_shadow_chunk_pixels={} meshlet_shadow_chunk_active_rays={} meshlet_shadow_packets={} meshlet_shadow_packets_skipped={} meshlet_shadow_avg_active_lanes={d:.2} meshlet_shadow_avg_occluded_lanes={d:.2} meshlet_shadow_trace={d:.3} ms meshlet_shadow_apply={d:.3} ms shadow_budget={d:.3} ms shadow_build={d:.3} ms shadow_resolve={d:.3} ms active_tiles={} tile_light_candidates={} tile_light_final={} tile_light_rejected={} tile_light_overflow_tiles={}",
-            .{
-                self.light_work_stats.active_lights,
-                self.light_work_stats.shadow_map_lights,
-                self.light_work_stats.meshlet_shadow_lights,
-                self.light_work_stats.shadow_map_reused_lights,
-                self.light_work_stats.shadow_budget_skipped_lights,
-                self.light_work_stats.shadow_map_downscaled_lights,
-                self.light_work_stats.shadow_map_upscaled_lights,
-                self.light_work_stats.shadow_cadence_increased_lights,
-                self.light_work_stats.shadow_cadence_decreased_lights,
-                self.light_work_stats.shadow_queries,
-                self.light_work_stats.meshlet_ray_tests,
-                self.light_work_stats.meshlet_shadow_chunks,
-                self.light_work_stats.meshlet_shadow_chunk_pixels,
-                self.light_work_stats.meshlet_shadow_chunk_active_rays,
-                self.light_work_stats.meshlet_shadow_packets,
-                self.light_work_stats.meshlet_shadow_packets_skipped,
-                avg_active_lanes,
-                avg_occluded_lanes,
-                @as(f32, @floatFromInt(self.light_work_stats.meshlet_shadow_trace_us)) / 1000.0,
-                @as(f32, @floatFromInt(self.light_work_stats.meshlet_shadow_apply_us)) / 1000.0,
-                render_utils.nanosecondsToMs(self.light_work_stats.shadow_budget_ns),
-                render_utils.nanosecondsToMs(self.light_work_stats.shadow_build_ns),
-                render_utils.nanosecondsToMs(self.light_work_stats.shadow_resolve_ns),
-                self.light_work_stats.active_tiles,
-                self.light_work_stats.tile_light_candidates,
-                self.light_work_stats.tile_light_final,
-                self.light_work_stats.tile_light_rejected,
-                self.light_work_stats.tile_light_overflow_tiles,
-            },
-        );
-        renderer_logger.infoSub(
-            "frame_profile",
-            "raster_work triangles_rasterized={} covered_pixels={} depth_tests_passed={} alpha_pixels={}",
-            .{
-                self.light_work_stats.triangles_rasterized,
-                self.light_work_stats.covered_pixels,
-                self.light_work_stats.depth_tests_passed,
-                self.light_work_stats.alpha_pixels,
-            },
-        );
-        for (0..self.lights.items.len) |light_index| {
-            const build_ns = self.shadow_build_elapsed_ns[light_index];
-            const resolve_ns = self.shadow_resolve_elapsed_ns[light_index];
-            if (build_ns == 0 and resolve_ns == 0) continue;
-            renderer_logger.infoSub(
-                "frame_profile",
-                "shadow_light {} build={d:.3} ms resolve={d:.3} ms",
-                .{
-                    light_index,
-                    render_utils.nanosecondsToMs(build_ns),
-                    render_utils.nanosecondsToMs(resolve_ns),
-                },
-            );
-        }
-
-        if (self.hybrid_shadow_stats.job_count != 0) {
-            renderer_logger.infoSub(
-                "frame_profile",
-                "hybrid_shadow detail accel={d:.3} candidate={d:.3} clear={d:.3} execute={d:.3} jobs={} active_tiles={} grid={} unique={} final={}",
-                .{
-                    self.hybrid_shadow_stats.accel_rebuild_ms,
-                    self.hybrid_shadow_stats.candidate_ms,
-                    self.hybrid_shadow_stats.cache_clear_ms,
-                    self.hybrid_shadow_stats.execute_ms,
-                    self.hybrid_shadow_stats.job_count,
-                    self.hybrid_shadow_stats.active_tile_count,
-                    self.hybrid_shadow_stats.grid_candidate_count,
-                    self.hybrid_shadow_stats.unique_candidate_count,
-                    self.hybrid_shadow_stats.final_candidate_count,
-                },
-            );
-        }
-    }
-
-    fn finalizeFrame(self: *Renderer, current_time: i128) void {
-        const elapsed_ns = current_time - self.last_time;
-        if (elapsed_ns < 1_000_000_000 or self.frame_count == 0) return;
-
-        const elapsed_us = @divTrunc(elapsed_ns, 1000);
-        if (elapsed_us == 0) return;
-        self.current_fps = @as(u32, @intCast((self.frame_count * 1_000_000) / @as(u32, @intCast(elapsed_us))));
-
-        const frame_count_f = @as(f32, @floatFromInt(self.frame_count));
-        const elapsed_ms = @as(f32, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        const avg_frame_time_ms = if (frame_count_f > 0.0) elapsed_ms / frame_count_f else 0.0;
-
-        self.sampleRenderPassTimings(self.frame_count);
-        self.frame_count = 0;
-        self.last_time = current_time;
-        self.updateWindowTitle(avg_frame_time_ms);
-    }
-
-    /// updateWindowTitle updates Renderer state for the current tick/frame.
-    fn updateWindowTitle(self: *Renderer, avg_frame_time_ms: f32) void {
-        var title_buffer: [256]u8 = undefined;
-        const telemetry = self.meshlet_telemetry;
-        const title = std.fmt.bufPrint(&title_buffer, "{s} | FPS: {} | Frame: {d:.2}ms | Meshlets: {}/{} | Tris: {} | Tiles: {}", .{
-            config.WINDOW_TITLE,
-            self.current_fps,
-            avg_frame_time_ms,
-            telemetry.visible_meshlets,
-            telemetry.total_meshlets,
-            telemetry.emitted_triangles,
-            telemetry.touched_tiles,
-        }) catch config.WINDOW_TITLE;
-
-        var title_wide: [256:0]u16 = undefined;
-        const title_len = std.unicode.utf8ToUtf16Le(&title_wide, title) catch 0;
-        title_wide[title_len] = 0;
-        _ = SetWindowTextW(self.hwnd, &title_wide);
-    }
-
-    fn resetRenderPassTimings(self: *Renderer) void {
-        self.render_pass_count = 0;
-    }
-
-    /// Records telemetry/sample data and updates aggregate counters/statistics.
-    /// It appends telemetry/sample data and updates aggregate counters/statistics.
-    pub fn recordRenderPassTiming(self: *Renderer, name: []const u8, start_ns: i128) void {
-        const elapsed_ns = std.time.nanoTimestamp() - start_ns;
-        self.recordRenderPassDuration(name, elapsed_ns);
-    }
-
-    /// Computes stripe count.
-    /// Keeps compute stripe count as the single implementation point so call-site behavior stays consistent.
-    fn computeStripeCount(max_jobs: usize, row_count: usize) usize {
-        if (row_count == 0 or max_jobs == 0) return 0;
-        const desired = @max(@as(usize, 1), (row_count + min_rows_per_parallel_job - 1) / min_rows_per_parallel_job);
-        return @min(max_jobs, desired);
-    }
-
-    /// Records telemetry/sample data and updates aggregate counters/statistics.
-    /// It appends telemetry/sample data and updates aggregate counters/statistics.
-    pub fn recordRenderPassDuration(self: *Renderer, name: []const u8, elapsed_ns: i128) void {
-        if (self.render_pass_count >= self.render_pass_timings.len) return;
-        const elapsed_ms = render_utils.nanosecondsToMs(elapsed_ns);
-        var timing = &self.render_pass_timings[self.render_pass_count];
-        if (timing.name.len == 0 or !std.mem.eql(u8, timing.name, name)) {
-            timing.* = .{
-                .name = name,
-                .frame_duration_ms = 0.0,
-                .accumulated_ms = 0.0,
-                .sampled_ms_per_frame = 0.0,
-                .has_sample = false,
-            };
-        }
-        timing.frame_duration_ms = elapsed_ms;
-        timing.accumulated_ms += elapsed_ms;
-        self.render_pass_count += 1;
-    }
-
-    /// renderPassSortMetric renders Renderer output.
-    pub fn renderPassSortMetric(pass: RenderPassTiming) f32 {
-        return if (pass.has_sample) pass.sampled_ms_per_frame else pass.frame_duration_ms;
-    }
-
-    /// sampleRenderPassTimings samples values used by Renderer.
-    fn sampleRenderPassTimings(self: *Renderer, frame_samples: u32) void {
-        if (frame_samples == 0) return;
-        const sample_count = @as(f32, @floatFromInt(frame_samples));
-        for (self.render_pass_timings[0..self.render_pass_count]) |*pass| {
-            pass.sampled_ms_per_frame = pass.accumulated_ms / sample_count;
-            pass.accumulated_ms = 0.0;
-            pass.has_sample = true;
-        }
-    }
-
-    fn debugGroundPlane(self: *Renderer, mesh: *const Mesh, transformed_vertices: []math.Vec3, transform: math.Mat4) void {
-        if (mesh.triangles.len < 2 or transformed_vertices.len < mesh.vertices.len) return;
-
-        const tri_limit = @min(mesh.triangles.len, @as(usize, 2));
-        var mask: u8 = 0;
-
-        const TriDebug = struct {
-            index: usize,
-            mask: u8,
-            z: [3]f32,
-            dot: ?f32,
-            front: [3]bool,
-            crosses: bool,
-        };
-
-        var tri_debug: [2]TriDebug = undefined;
-        var tri_debug_count: usize = 0;
-
-        var tri_idx: usize = 0;
-        while (tri_idx < tri_limit) : (tri_idx += 1) {
-            const tri = mesh.triangles[tri_idx];
-            const p0 = transformed_vertices[tri.v0];
-            const p1 = transformed_vertices[tri.v1];
-            const p2 = transformed_vertices[tri.v2];
-
-            const front0 = p0.z >= NEAR_CLIP - NEAR_EPSILON;
-            const front1 = p1.z >= NEAR_CLIP - NEAR_EPSILON;
-            const front2 = p2.z >= NEAR_CLIP - NEAR_EPSILON;
-
-            var tri_mask: u8 = 0;
-
-            if (!front0 or !front1 or !front2) {
-                tri_mask |= GroundReason.near_plane;
-            }
-
-            const crosses_near = (front0 or front1 or front2) and !(front0 and front1 and front2);
-            if (crosses_near) tri_mask |= GroundReason.cross_near;
-            var dot_value: ?f32 = null;
-
-            if (!crosses_near) {
-                const normal = mesh.normals[tri_idx];
-                const normal_transformed_raw = math.Vec3.new(
-                    transform.data[0] * normal.x + transform.data[1] * normal.y + transform.data[2] * normal.z,
-                    transform.data[4] * normal.x + transform.data[5] * normal.y + transform.data[6] * normal.z,
-                    transform.data[8] * normal.x + transform.data[9] * normal.y + transform.data[10] * normal.z,
-                );
-                const normal_transformed = normal_transformed_raw.normalize();
-
-                const centroid = math.Vec3.scale(math.Vec3.add(math.Vec3.add(p0, p1), p2), 1.0 / 3.0);
-                const view_dir = math.Vec3.scale(centroid, -1.0);
-                const view_dir_len = math.Vec3.length(view_dir);
-                if (view_dir_len > 1e-6) {
-                    const view_vector = math.Vec3.scale(view_dir, 1.0 / view_dir_len);
-                    const view_dot = normal_transformed.dot(view_vector);
-                    dot_value = view_dot;
-                    if (view_dot < -1e-4) tri_mask |= GroundReason.backface;
-                }
-            }
-
-            if (tri_mask != 0 and tri_debug_count < tri_debug.len) {
-                tri_debug[tri_debug_count] = TriDebug{
-                    .index = tri_idx,
-                    .mask = tri_mask,
-                    .z = .{ p0.z, p1.z, p2.z },
-                    .dot = dot_value,
-                    .front = .{ front0, front1, front2 },
-                    .crosses = crosses_near,
-                };
-                tri_debug_count += 1;
-            }
-
-            mask |= tri_mask;
-        }
-
-        self.ground_debug.frames_since_log += 1;
-        const first_frame = self.frame_count == 0;
-        const should_log = first_frame or mask != self.ground_debug.last_mask or (mask != 0 and self.ground_debug.frames_since_log >= 60);
-        if (!should_log) return;
-
-        self.ground_debug.frames_since_log = 0;
-        self.ground_debug.last_mask = mask;
-
-        if (mask == 0) {
-            ground_logger.debug("ground plane visible (frame {})", .{self.frame_count});
-            return;
-        }
-
-        for (tri_debug[0..tri_debug_count]) |info| {
-            if (info.dot) |d| {
-                ground_logger.debug(
-                    "ground tri {} issue mask {b:0>3} z[{d:.3},{d:.3},{d:.3}] front[{},{},{}] crosses={} dot={d:.4}",
-                    .{
-                        info.index,
-                        info.mask,
-                        info.z[0],
-                        info.z[1],
-                        info.z[2],
-                        info.front[0],
-                        info.front[1],
-                        info.front[2],
-                        info.crosses,
-                        d,
-                    },
-                );
-            } else {
-                ground_logger.debug(
-                    "ground tri {} issue mask {b:0>3} z[{d:.3},{d:.3},{d:.3}] front[{},{},{}] crosses={} dot=n/a",
-                    .{
-                        info.index,
-                        info.mask,
-                        info.z[0],
-                        info.z[1],
-                        info.z[2],
-                        info.front[0],
-                        info.front[1],
-                        info.front[2],
-                        info.crosses,
-                    },
-                );
-            }
-        }
-    }
 
     fn drawLightMarker(
         self: *Renderer,
@@ -3011,7 +2498,7 @@ pub const Renderer = struct {
             config.POST_SHADOW_ENABLED,
             config.POST_SHADOW_DEPTH_BIAS,
             chooseShadowBasis,
-            computeStripeCount,
+            renderer_orchestrator.computeStripeCount,
             noopRenderPassJob,
         );
     }
@@ -3298,8 +2785,8 @@ pub const Renderer = struct {
         self.god_rays_scratch_pixels = saved.god_rays_scratch_pixels;
         self.lens_flare_scratch_pixels = saved.lens_flare_scratch_pixels;
     }
-    const post_pass_dispatcher = frame_dispatchers.makePostPassDispatcher(PostPassExecutionContext);
-    const frame_stage_dispatcher = frame_dispatchers.makeFrameStageDispatcher(FrameExecutionContext);
+    pub const post_pass_dispatcher = frame_dispatchers.makePostPassDispatcher(PostPassExecutionContext);
+    pub const frame_stage_dispatcher = frame_dispatchers.makeFrameStageDispatcher(FrameExecutionContext);
 
     /// Applies post processing passes.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
@@ -3505,7 +2992,7 @@ pub const Renderer = struct {
         const current_time = present_end;
         const frame_interval_ns = current_time - self.last_completed_frame_time;
         self.notePresentedFrame(current_time);
-        self.maybeEmitSingleFrameProfile();
+        renderer_orchestrator.maybeEmitSingleFrameProfile(self);
         self.frame_pacing.recordSample(.{
             .total_ms = @as(f32, @floatFromInt(@max(frame_interval_ns, @as(i128, 0)))) / 1_000_000.0,
             .cpu_ms = @as(f32, @floatFromInt(@max(cpu_frame_ns, @as(i128, 0)))) / 1_000_000.0,
