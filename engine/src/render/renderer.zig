@@ -86,6 +86,7 @@ const texture = @import("../assets/texture.zig");
 const direct_primitives = @import("direct/primitives.zig");
 const direct_showcase = @import("direct/showcase.zig");
 const post_dispatch = @import("renderer/post_dispatch.zig");
+const renderer_input = @import("renderer/input.zig");
 const frame_resources = @import("frame/resources.zig");
 const frame_setup_stage = @import("stages/frame_setup_stage.zig");
 const presentation_stage = @import("stages/presentation_stage.zig");
@@ -94,7 +95,7 @@ const scene_tiled_backend = @import("backends/scene_tiled_backend.zig");
 const present_d3d11 = @import("present/present_d3d11.zig");
 const present_state = @import("present/state.zig");
 const log = @import("../core/log.zig");
-const renderer_logger = log.get("renderer.core");
+pub const renderer_logger = log.get("renderer.core");
 const pipeline_logger = log.get("renderer.pipeline");
 const meshlet_logger = log.get("renderer.meshlet");
 const ground_logger = log.get("renderer.ground");
@@ -210,7 +211,7 @@ const HybridShadowDebugState = struct {
     advance_requested: bool = false,
     completed_jobs: usize = 0,
 
-    fn reset(self: *HybridShadowDebugState) void {
+    pub fn reset(self: *HybridShadowDebugState) void {
         self.advance_requested = false;
         self.completed_jobs = 0;
     }
@@ -235,7 +236,7 @@ const MeshletTelemetry = struct {
     touched_tiles: usize = 0,
 };
 
-const LightGizmoAxis = enum(u8) {
+pub const LightGizmoAxis = enum(u8) {
     x = 0,
     y = 1,
     z = 2,
@@ -260,7 +261,7 @@ pub const CursorStyle = enum(u8) {
     hidden = 3,
 };
 
-fn lightGizmoAxisName(axis: LightGizmoAxis) []const u8 {
+pub fn lightGizmoAxisName(axis: LightGizmoAxis) []const u8 {
     return switch (axis) {
         .x => "x",
         .y => "y",
@@ -2342,344 +2343,39 @@ pub const Renderer = struct {
         return math.Vec3.scale(transformed, 1.0 / len);
     }
 
-    /// Handles handle key input.
-    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
-    pub fn handleKeyInput(self: *Renderer, key: u32, is_down: bool) void {
-        _ = input.updateKeyState(&self.keys_pressed, key, is_down);
-    }
-
-    /// Returns whether i sf ir st pe rs on mo de.
-    /// The check is side-effect free so callers can gate expensive follow-up work cheaply.
-    pub fn isFirstPersonMode(self: *const Renderer) bool {
-        return camera_runtime.wantsHiddenCursor(self);
-    }
-
-    /// Returns whether i ss ce ne it em dr ag ac ti ve.
-    /// The check is side-effect free so callers can gate expensive follow-up work cheaply.
-    pub fn isSceneItemDragActive(self: *const Renderer) bool {
-        return self.scene_item_gizmo.isDragging();
-    }
-
-    pub fn setSceneCameraScriptActive(self: *Renderer, active: bool) void {
-        self.scene_camera_script_active = active;
-    }
-
-    pub fn applyCameraModeCommand(self: *Renderer, mode_tag: u8) void {
-        const next_mode = camera_runtime.resolveCameraModeCommand(self.camera_control_mode, mode_tag) orelse return;
-        self.setCameraControlMode(next_mode);
-    }
-
-    pub fn toggleSceneItemGizmo(self: *Renderer) void {
-        self.scene_item_gizmo.toggleEnabled();
-        if (self.scene_item_gizmo.isActive()) {
-            renderer_logger.infoSub(
-                "scene_gizmo",
-                "enabled item={} axis={s} step={d:.2}",
-                .{
-                    self.scene_item_gizmo.selected_item_index.?,
-                    scene_item_gizmo.axisName(self.scene_item_gizmo.active_axis),
-                    self.scene_item_gizmo.move_step,
-                },
-            );
-        } else if (self.scene_item_gizmo.enabled) {
-            renderer_logger.infoSub("scene_gizmo", "enabled (no selected item)", .{});
-        } else {
-            renderer_logger.infoSub("scene_gizmo", "disabled", .{});
-        }
-    }
-
-    pub fn toggleLightGizmo(self: *Renderer) void {
-        self.light_gizmo.enabled = !self.light_gizmo.enabled;
-        self.clampLightGizmoSelection();
-        if (self.light_gizmo.enabled and self.lights.items.len > 0) {
-            renderer_logger.infoSub(
-                "light_gizmo",
-                "enabled light={} axis={s} step={d:.2}",
-                .{
-                    self.light_gizmo.selected_light_index,
-                    lightGizmoAxisName(self.light_gizmo.active_axis),
-                    self.light_gizmo.move_step,
-                },
-            );
-        } else if (self.light_gizmo.enabled) {
-            renderer_logger.infoSub("light_gizmo", "enabled (no lights)", .{});
-        } else {
-            self.clearLightGizmoInteraction();
-            renderer_logger.infoSub("light_gizmo", "disabled", .{});
-        }
-    }
-
-    pub fn setActiveGizmoAxis(self: *Renderer, axis_tag: u8) void {
-        const light_axis: LightGizmoAxis = switch (axis_tag) {
-            0 => .x,
-            1 => .y,
-            2 => .z,
-            else => return,
-        };
-        if (self.scene_item_gizmo.isActive()) {
-            self.scene_item_gizmo.setAxis(switch (axis_tag) {
-                0 => .x,
-                1 => .y,
-                2 => .z,
-                else => unreachable,
-            });
-            renderer_logger.infoSub("scene_gizmo", "axis={s}", .{scene_item_gizmo.axisName(self.scene_item_gizmo.active_axis)});
-        } else {
-            self.light_gizmo.active_axis = light_axis;
-            renderer_logger.infoSub("light_gizmo", "axis={s}", .{lightGizmoAxisName(self.light_gizmo.active_axis)});
-        }
-    }
-
-    pub fn cycleLightGizmoSelection(self: *Renderer) void {
-        if (self.lights.items.len == 0) return;
-        self.clampLightGizmoSelection();
-        self.light_gizmo.selected_light_index = (self.light_gizmo.selected_light_index + 1) % self.lights.items.len;
-        renderer_logger.infoSub("light_gizmo", "light={}", .{self.light_gizmo.selected_light_index});
-    }
-
-    pub fn nudgeActiveGizmo(self: *Renderer, delta: f32) void {
-        if (self.scene_item_gizmo.isActive()) {
-            self.scene_item_gizmo.queueSelectedTranslation(delta);
-        } else if (self.light_gizmo.enabled) {
-            self.moveSelectedLightAlongAxis(delta);
-        }
-    }
-
-    pub fn toggleRenderOverlay(self: *Renderer) void {
-        self.show_render_overlay = !self.show_render_overlay;
-        renderer_logger.infoSub(
-            "overlay",
-            "render overlay {s}",
-            .{if (self.show_render_overlay) "enabled" else "disabled"},
-        );
-    }
-
-    pub fn toggleHybridShadowDebug(self: *Renderer) void {
-        self.hybrid_shadow_debug.enabled = !self.hybrid_shadow_debug.enabled;
-        self.hybrid_shadow_debug.reset();
-        renderer_logger.infoSub(
-            "shadow_debug",
-            "hybrid shadow stepping {s}",
-            .{if (self.hybrid_shadow_debug.enabled) "enabled" else "disabled"},
-        );
-    }
-
-    pub fn advanceHybridShadowDebug(self: *Renderer) void {
-        if (self.hybrid_shadow_debug.enabled) {
-            self.hybrid_shadow_debug.advance_requested = true;
-        }
-    }
-
-    /// Handles handle mouse move.
-    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
-    pub fn handleMouseMove(self: *Renderer, x: i32, y: i32) void {
-        _ = self.mouse_input.setPosition(x, y);
-        if (self.camera_control_mode == .first_person) return;
-
-        const pointer_view = self.computePointerViewState();
-        var pointer_ctx = SceneItemGizmoDrawContext{
-            .renderer = self,
-            .camera_position = self.camera_position,
-            .basis_right = pointer_view.right,
-            .basis_up = pointer_view.up,
-            .basis_forward = pointer_view.forward,
-            .projection = pointer_view.projection,
-        };
-        self.scene_item_gizmo.handlePointerMove(
-            x,
-            y,
-            self.bitmap.width,
-            self.bitmap.height,
-            @as(i32, @intCast(config.WINDOW_WIDTH)),
-            @as(i32, @intCast(config.WINDOW_HEIGHT)),
-            @ptrCast(&pointer_ctx),
-            projectSceneItemWorld,
-        );
-
-        const mapped_pointer = self.mapWindowPointToBackbuffer(x, y) orelse {
-            if (self.light_gizmo.drag_axis == null) self.light_gizmo.hover_axis = null;
-            return;
-        };
-        self.updateLightGizmoPointer(
-            math.Vec2.new(
-                @as(f32, @floatFromInt(mapped_pointer.x)),
-                @as(f32, @floatFromInt(mapped_pointer.y)),
-            ),
-            pointer_view,
-        );
-    }
-
-    /// Handles handle raw mouse delta.
-    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
-    pub fn handleRawMouseDelta(self: *Renderer, delta_x: i32, delta_y: i32) void {
-        camera_runtime.handleRawMouseDelta(self, delta_x, delta_y);
-    }
-
-    /// Handles handle mouse left click.
-    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
-    pub fn handleMouseLeftClick(self: *Renderer, x: i32, y: i32) void {
-        _ = self.mouse_input.setButton(.left, true);
-        if (camera_runtime.handleFirstPersonLeftPress(self)) return;
-        const pointer_view = self.computePointerViewState();
-        if (self.beginLightGizmoDrag(x, y, pointer_view)) return;
-        var pointer_ctx = SceneItemGizmoDrawContext{
-            .renderer = self,
-            .camera_position = self.camera_position,
-            .basis_right = pointer_view.right,
-            .basis_up = pointer_view.up,
-            .basis_forward = pointer_view.forward,
-            .projection = pointer_view.projection,
-        };
-        _ = self.scene_item_gizmo.handlePointerDown(
-            x,
-            y,
-            self.bitmap.width,
-            self.bitmap.height,
-            @as(i32, @intCast(config.WINDOW_WIDTH)),
-            @as(i32, @intCast(config.WINDOW_HEIGHT)),
-            @ptrCast(&pointer_ctx),
-            projectSceneItemWorld,
-        );
-    }
-
-    /// Handles handle mouse left release.
-    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
-    pub fn handleMouseLeftRelease(self: *Renderer, x: i32, y: i32) void {
-        _ = self.mouse_input.setButton(.left, false);
-        _ = x;
-        _ = y;
-        if (camera_runtime.handleFirstPersonLeftRelease(self)) return;
-        self.scene_item_gizmo.handlePointerUp();
-        self.clearLightGizmoInteraction();
-    }
-
-    /// Handles handle mouse right click.
-    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
-    pub fn handleMouseRightClick(self: *Renderer, x: i32, y: i32) void {
-        _ = self.mouse_input.setButton(.right, true);
-        _ = x;
-        _ = y;
-        _ = camera_runtime.handleFirstPersonRightPress(self);
-    }
-
-    /// Handles handle mouse right release.
-    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
-    pub fn handleMouseRightRelease(self: *Renderer, x: i32, y: i32) void {
-        _ = self.mouse_input.setButton(.right, false);
-        _ = x;
-        _ = y;
-        _ = camera_runtime.handleFirstPersonRightRelease(self);
-    }
-
-    /// Handles handle focus lost.
-    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
-    pub fn handleFocusLost(self: *Renderer) void {
-        self.scene_item_gizmo.handlePointerUp();
-        self.clearLightGizmoInteraction();
-        camera_runtime.handleFocusLost(self);
-    }
-
-    /// Handles handle focus gained.
-    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
-    pub fn handleFocusGained(self: *Renderer) void {
-        camera_runtime.handleFocusGained(self);
-    }
-
-    /// Performs desired cursor style.
-    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
-    pub fn desiredCursorStyle(self: *const Renderer) CursorStyle {
-        return camera_runtime.desiredCursorStyle(
-            CursorStyle,
-            scene_item_gizmo.CursorHint,
-            LightGizmoAxis,
-            self,
-            self.scene_item_gizmo.cursorHint(),
-            self.light_gizmo.drag_axis,
-            self.light_gizmo.hover_axis,
-            .arrow,
-            .grab,
-            .grabbing,
-            .hidden,
-        );
-    }
-
-    /// Sets s et sc en ei te mb in di ng s.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn setSceneItemBindings(self: *Renderer, bindings: []const SceneItemBinding, triangle_count: usize) !void {
-        try self.scene_item_gizmo.setBindings(self.allocator, bindings, triangle_count);
-    }
-
-    /// Propagates an external state change into local bookkeeping and dependent systems.
-    /// It propagates an external state change into the local subsystem bookkeeping.
-    pub fn notifySceneItemTranslated(self: *Renderer, item_index: usize, delta: math.Vec3) void {
-        self.scene_item_gizmo.notifyItemTranslated(item_index, delta);
-    }
-
-    /// Sets s et sc en ei te mc en te r.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn setSceneItemCenter(self: *Renderer, item_index: usize, center: math.Vec3) void {
-        self.scene_item_gizmo.setItemOrigin(item_index, center);
-    }
-
-    /// Returns pending data and advances internal cursors/flags to avoid reprocessing.
-    /// It returns pending data and clears or advances the underlying queue/state.
-    pub fn consumeSceneItemTranslateRequest(self: *Renderer) ?SceneItemTranslateRequest {
-        return self.scene_item_gizmo.consumeTranslateRequest();
-    }
-
-    pub fn selectedSceneItemSelectionId(self: *const Renderer) ?u64 {
-        return self.scene_item_gizmo.selectedSelectionId();
-    }
-
-    /// Sets s et ca me ra po si ti on.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn setCameraPosition(self: *Renderer, position: math.Vec3) void {
-        camera_runtime.setCameraPosition(self, position);
-    }
-
-    /// Sets s et ca me ra or ie nt at io n.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn setCameraOrientation(self: *Renderer, pitch: f32, yaw: f32) void {
-        camera_runtime.setCameraOrientation(self, pitch, yaw);
-    }
-
-    pub fn setCameraFov(self: *Renderer, fov_deg: f32) void {
-        camera_runtime.setCameraFov(self, fov_deg);
-    }
-
-    pub fn setPresentSize(self: *Renderer, width: i32, height: i32) void {
-        if (width <= 0 or height <= 0) return;
-        if (self.present_state.width == width and self.present_state.height == height) return;
-
-        const saved = ResizeStateSnapshot{
-            .camera_position = self.camera_position,
-            .camera_pitch = self.rotation_x,
-            .camera_yaw = self.rotation_angle,
-            .camera_fov_deg = self.camera_fov_deg,
-            .camera_control_mode = self.camera_control_mode,
-            .scene_camera_script_active = self.scene_camera_script_active,
-            .show_tile_borders = self.show_tile_borders,
-            .show_wireframe = self.show_wireframe,
-            .show_light_orb = self.show_light_orb,
-            .cull_light_orb = self.cull_light_orb,
-            .use_tiled_rendering = self.use_tiled_rendering,
-            .show_frame_pacing_overlay = self.show_frame_pacing_overlay,
-            .show_render_overlay = self.show_render_overlay,
-            .present_minimized = self.present_state.minimized,
-        };
-
-        self.recreateForPresentSize(width, height, saved) catch |err| {
-            renderer_logger.errorSub("resize", "failed to resize renderer to {d}x{d}: {s}", .{
-                width,
-                height,
-                @errorName(err),
-            });
-        };
-    }
-
-    pub fn setPresentMinimized(self: *Renderer, minimized: bool) void {
-        self.present_state.setMinimized(minimized);
-    }
+    // ====== input/gizmo/scene-item/camera setter handlers (impl in renderer/input.zig) ======
+    pub const handleKeyInput = renderer_input.handleKeyInput;
+    pub const isFirstPersonMode = renderer_input.isFirstPersonMode;
+    pub const isSceneItemDragActive = renderer_input.isSceneItemDragActive;
+    pub const setSceneCameraScriptActive = renderer_input.setSceneCameraScriptActive;
+    pub const applyCameraModeCommand = renderer_input.applyCameraModeCommand;
+    pub const toggleSceneItemGizmo = renderer_input.toggleSceneItemGizmo;
+    pub const toggleLightGizmo = renderer_input.toggleLightGizmo;
+    pub const setActiveGizmoAxis = renderer_input.setActiveGizmoAxis;
+    pub const cycleLightGizmoSelection = renderer_input.cycleLightGizmoSelection;
+    pub const nudgeActiveGizmo = renderer_input.nudgeActiveGizmo;
+    pub const toggleRenderOverlay = renderer_input.toggleRenderOverlay;
+    pub const toggleHybridShadowDebug = renderer_input.toggleHybridShadowDebug;
+    pub const advanceHybridShadowDebug = renderer_input.advanceHybridShadowDebug;
+    pub const handleMouseMove = renderer_input.handleMouseMove;
+    pub const handleRawMouseDelta = renderer_input.handleRawMouseDelta;
+    pub const handleMouseLeftClick = renderer_input.handleMouseLeftClick;
+    pub const handleMouseLeftRelease = renderer_input.handleMouseLeftRelease;
+    pub const handleMouseRightClick = renderer_input.handleMouseRightClick;
+    pub const handleMouseRightRelease = renderer_input.handleMouseRightRelease;
+    pub const handleFocusLost = renderer_input.handleFocusLost;
+    pub const handleFocusGained = renderer_input.handleFocusGained;
+    pub const desiredCursorStyle = renderer_input.desiredCursorStyle;
+    pub const setSceneItemBindings = renderer_input.setSceneItemBindings;
+    pub const notifySceneItemTranslated = renderer_input.notifySceneItemTranslated;
+    pub const setSceneItemCenter = renderer_input.setSceneItemCenter;
+    pub const consumeSceneItemTranslateRequest = renderer_input.consumeSceneItemTranslateRequest;
+    pub const selectedSceneItemSelectionId = renderer_input.selectedSceneItemSelectionId;
+    pub const setCameraPosition = renderer_input.setCameraPosition;
+    pub const setCameraOrientation = renderer_input.setCameraOrientation;
+    pub const setCameraFov = renderer_input.setCameraFov;
+    pub const setPresentSize = renderer_input.setPresentSize;
+    pub const setPresentMinimized = renderer_input.setPresentMinimized;
 
     pub fn lastDirectFrameTimings(self: *const Renderer) direct_backend.FrameTimings {
         return self.direct_backend.lastTimings();
@@ -2703,7 +2399,7 @@ pub const Renderer = struct {
         self.taa_previous_mesh_valid = false;
     }
 
-    const ResizeStateSnapshot = struct {
+    pub const ResizeStateSnapshot = struct {
         camera_position: math.Vec3,
         camera_pitch: f32,
         camera_yaw: f32,
@@ -2720,7 +2416,7 @@ pub const Renderer = struct {
         present_minimized: bool,
     };
 
-    fn recreateForPresentSize(self: *Renderer, present_width: i32, present_height: i32, saved: ResizeStateSnapshot) !void {
+    pub fn recreateForPresentSize(self: *Renderer, present_width: i32, present_height: i32, saved: ResizeStateSnapshot) !void {
         const scale_percent: i32 = @intCast(@max(config.RENDER_RESOLUTION_SCALE_PERCENT, 1));
         const render_width = @max(1, @divTrunc(present_width * scale_percent, 100));
         const render_height = @max(1, @divTrunc(present_height * scale_percent, 100));
@@ -2796,7 +2492,7 @@ pub const Renderer = struct {
 
     /// Computes pointer view state.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
-    fn computePointerViewState(self: *const Renderer) PointerViewState {
+    pub fn computePointerViewState(self: *const Renderer) PointerViewState {
         const basis = camera_controller.computeViewBasis(self.rotation_angle, self.rotation_x);
         const projection = camera_controller.computeProjectionScalars(self.bitmap.width, self.bitmap.height, self.camera_fov_deg);
         return .{
@@ -2821,7 +2517,7 @@ pub const Renderer = struct {
         self.light_gizmo.drag_last_pointer = null;
     }
 
-    fn mapWindowPointToBackbuffer(self: *const Renderer, window_x: i32, window_y: i32) ?windows.POINT {
+    pub fn mapWindowPointToBackbuffer(self: *const Renderer, window_x: i32, window_y: i32) ?windows.POINT {
         if (window_x < 0 or window_y < 0) return null;
         if (self.bitmap.width <= 0 or self.bitmap.height <= 0) return null;
         const window_width: i32 = @intCast(config.WINDOW_WIDTH);
@@ -2948,7 +2644,7 @@ pub const Renderer = struct {
     }
 
     /// updateLightGizmoPointer updates Renderer state for the current tick/frame.
-    fn updateLightGizmoPointer(self: *Renderer, pointer: math.Vec2, pointer_view: PointerViewState) void {
+    pub fn updateLightGizmoPointer(self: *Renderer, pointer: math.Vec2, pointer_view: PointerViewState) void {
         if (!self.light_gizmo.enabled or self.lights.items.len == 0) {
             self.clearLightGizmoInteraction();
             return;
@@ -2974,7 +2670,7 @@ pub const Renderer = struct {
 
     /// Begins an operation and captures temporary context used until completion.
     /// It marks the start of an operation and prepares transient state used until completion.
-    fn beginLightGizmoDrag(self: *Renderer, window_x: i32, window_y: i32, pointer_view: PointerViewState) bool {
+    pub fn beginLightGizmoDrag(self: *Renderer, window_x: i32, window_y: i32, pointer_view: PointerViewState) bool {
         if (!self.light_gizmo.enabled or self.lights.items.len == 0) return false;
         const mapped = self.mapWindowPointToBackbuffer(window_x, window_y) orelse return false;
         const pointer = math.Vec2.new(
@@ -3198,7 +2894,7 @@ pub const Renderer = struct {
         _ = char_code;
     }
 
-    fn setCameraControlMode(self: *Renderer, next_mode: CameraControlMode) void {
+    pub fn setCameraControlMode(self: *Renderer, next_mode: CameraControlMode) void {
         if (!camera_runtime.setCameraControlMode(self, next_mode)) return;
         renderer_logger.infoSub(
             "camera_mode",
@@ -3209,7 +2905,7 @@ pub const Renderer = struct {
 
     /// Clamps light gizmo selection to a valid range for downstream code.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
-    fn clampLightGizmoSelection(self: *Renderer) void {
+    pub fn clampLightGizmoSelection(self: *Renderer) void {
         if (self.lights.items.len == 0) {
             self.light_gizmo.selected_light_index = 0;
             self.clearLightGizmoInteraction();
@@ -3220,7 +2916,7 @@ pub const Renderer = struct {
         }
     }
 
-    fn moveSelectedLightAlongAxis(self: *Renderer, delta: f32) void {
+    pub fn moveSelectedLightAlongAxis(self: *Renderer, delta: f32) void {
         if (self.lights.items.len == 0) return;
         self.clampLightGizmoSelection();
         const light_index = self.light_gizmo.selected_light_index;
@@ -3237,7 +2933,7 @@ pub const Renderer = struct {
         self.setDirectionalLight(light_index, light_position, updated_distance, null);
     }
 
-    const SceneItemGizmoDrawContext = struct {
+    pub const SceneItemGizmoDrawContext = struct {
         renderer: *Renderer,
         camera_position: math.Vec3,
         basis_right: math.Vec3,
@@ -3247,7 +2943,7 @@ pub const Renderer = struct {
     };
 
     /// projectSceneItemWorld projects coordinates for Renderer calculations.
-    fn projectSceneItemWorld(ctx_ptr: *anyopaque, world_position: math.Vec3) ?[2]i32 {
+    pub fn projectSceneItemWorld(ctx_ptr: *anyopaque, world_position: math.Vec3) ?[2]i32 {
         const ctx: *const SceneItemGizmoDrawContext = @ptrCast(@alignCast(ctx_ptr));
         return ctx.renderer.projectWorldToScreen(
             ctx.camera_position,
