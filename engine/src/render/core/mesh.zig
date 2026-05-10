@@ -72,6 +72,7 @@ pub const Triangle = struct {
     cull_flags: TriangleCullFlags = .{}, // Flags for rendering.
     flat_shaded: bool = false,
     double_sided: bool = false,
+    lit: bool = true,
     base_color: u32 = default_color,
     texture_index: u16 = no_texture_index,
 
@@ -88,6 +89,7 @@ pub const Triangle = struct {
             .cull_flags = .{},
             .flat_shaded = false,
             .double_sided = false,
+            .lit = true,
             .base_color = default_color,
             .texture_index = no_texture_index,
         };
@@ -103,6 +105,7 @@ pub const Triangle = struct {
             .cull_flags = .{ .cull_fill = cull_fill, .cull_wireframe = cull_wireframe },
             .flat_shaded = false,
             .double_sided = false,
+            .lit = true,
             .base_color = default_color,
             .texture_index = no_texture_index,
         };
@@ -118,6 +121,7 @@ pub const Triangle = struct {
             .cull_flags = .{},
             .flat_shaded = false,
             .double_sided = false,
+            .lit = true,
             .base_color = color,
             .texture_index = no_texture_index,
         };
@@ -133,6 +137,7 @@ pub const Triangle = struct {
             .cull_flags = .{ .cull_fill = cull_fill, .cull_wireframe = cull_wireframe },
             .flat_shaded = false,
             .double_sided = false,
+            .lit = true,
             .base_color = color,
             .texture_index = no_texture_index,
         };

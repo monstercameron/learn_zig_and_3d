@@ -1245,13 +1245,13 @@ fn syncSceneMeshIfDirty(renderer: *Renderer, scene_resources: *SceneMeshResource
     if (!runtime.takeRenderablesDirty()) return;
     syncSceneMeshFromRuntime(renderer, scene_resources, runtime);
     scene_resources.mesh.refreshMeshlets();
-    renderer.invalidateMeshWork();
+    renderer.invalidateMeshDerivedCaches();
 }
 
 fn syncSceneMeshForFrame(renderer: *Renderer, scene_resources: *SceneMeshResources, runtime: *scene_runtime.SceneRuntime) void {
     syncSceneMeshFromRuntime(renderer, scene_resources, runtime);
     scene_resources.mesh.refreshMeshlets();
-    renderer.invalidateMeshWork();
+    renderer.invalidateMeshDerivedCaches();
 }
 
 fn syncSceneMeshFromRuntime(renderer: ?*Renderer, scene_resources: *SceneMeshResources, runtime: *const scene_runtime.SceneRuntime) void {
@@ -1449,6 +1449,9 @@ fn loadGltfMeshAsset(allocator: std.mem.Allocator, asset: LoadedSceneAsset) !mes
     if (gltf_loader.load(allocator, asset.model_path)) |mesh| {
         var resolved_mesh = mesh;
         applyRequestedNormalMode(&resolved_mesh, asset.smooth_normals);
+        applyRequestedTrianglePalette(&resolved_mesh, asset.triangle_palette);
+        if (asset.base_color) |base_color| applyRequestedBaseColor(&resolved_mesh, base_color.x, base_color.y, base_color.z);
+        applyRequestedLighting(&resolved_mesh, asset.lit);
         app_logger.infoSub("assets", "loaded gltf asset from {s}", .{asset.model_path});
         return resolved_mesh;
     } else |err| {
@@ -1457,6 +1460,9 @@ fn loadGltfMeshAsset(allocator: std.mem.Allocator, asset: LoadedSceneAsset) !mes
     if (asset.fallback_model_path) |fallback_path| {
         var fallback_mesh = try obj_loader.load(allocator, fallback_path);
         applyRequestedNormalMode(&fallback_mesh, asset.smooth_normals);
+        applyRequestedTrianglePalette(&fallback_mesh, asset.triangle_palette);
+        if (asset.base_color) |base_color| applyRequestedBaseColor(&fallback_mesh, base_color.x, base_color.y, base_color.z);
+        applyRequestedLighting(&fallback_mesh, asset.lit);
         app_logger.infoSub("assets", "loaded fallback obj from {s}", .{fallback_path});
         return fallback_mesh;
     }
@@ -1467,6 +1473,9 @@ fn loadObjMeshAsset(allocator: std.mem.Allocator, asset: LoadedSceneAsset) !mesh
     var mesh = try obj_loader.load(allocator, asset.model_path);
     if (asset.apply_cornell_palette) applyCornellColors(&mesh);
     applyRequestedNormalMode(&mesh, asset.smooth_normals);
+    applyRequestedTrianglePalette(&mesh, asset.triangle_palette);
+    if (asset.base_color) |base_color| applyRequestedBaseColor(&mesh, base_color.x, base_color.y, base_color.z);
+    applyRequestedLighting(&mesh, asset.lit);
     app_logger.infoSub("assets", "loaded obj asset from {s}", .{asset.model_path});
     return mesh;
 }
@@ -1480,6 +1489,37 @@ fn applyRequestedNormalMode(mesh: *mesh_module.Mesh, smooth_normals: ?bool) void
     } else {
         mesh.recalculateFlatVertexNormals();
     }
+}
+
+fn applyRequestedTrianglePalette(mesh: *mesh_module.Mesh, triangle_palette: ?[]const u8) void {
+    const palette = triangle_palette orelse return;
+    if (std.ascii.eqlIgnoreCase(palette, "internal_tricolor")) {
+        applyInteriorTricolorPalette(mesh);
+        return;
+    }
+    app_logger.warn("unknown triangle palette: {s}", .{palette});
+}
+
+fn applyRequestedBaseColor(mesh: *mesh_module.Mesh, r: f32, g: f32, b: f32) void {
+    const packed_color = packRgbColor(r, g, b);
+    for (mesh.triangles) |*tri| tri.base_color = packed_color;
+}
+
+fn applyRequestedLighting(mesh: *mesh_module.Mesh, lit: ?bool) void {
+    const enabled = lit orelse return;
+    for (mesh.triangles) |*tri| tri.lit = enabled;
+}
+
+fn packRgbColor(r: f32, g: f32, b: f32) u32 {
+    const to_u8 = struct {
+        fn convert(value: f32) u32 {
+            return @intFromFloat(std.math.clamp(value, 0.0, 1.0) * 255.0 + 0.5);
+        }
+    }.convert;
+    return 0xFF000000 |
+        (to_u8(r) << 16) |
+        (to_u8(g) << 8) |
+        to_u8(b);
 }
 
 fn appendMesh(allocator: std.mem.Allocator, target: *mesh_module.Mesh, source: *const mesh_module.Mesh) !void {
@@ -1566,28 +1606,48 @@ fn rotateVector(v: math.Vec3, rotation_deg: math.Vec3) math.Vec3 {
 
 fn applyCornellColors(mesh: *mesh_module.Mesh) void {
     const white: u32 = 0xFFE6E6E6;
-    const red: u32 = 0xFF3A3ACB;
-    const green: u32 = 0xFF59D66F;
+    const red: u32 = 0xFFD84B4B;
+    const green: u32 = 0xFF6AD36A;
+
+    if (mesh.vertices.len == 0) return;
+    var bounds_min = mesh.vertices[0];
+    var bounds_max = mesh.vertices[0];
+    for (mesh.vertices[1..]) |v| {
+        bounds_min = math.Vec3.min(bounds_min, v);
+        bounds_max = math.Vec3.max(bounds_max, v);
+    }
+    const span_x = @max(bounds_max.x - bounds_min.x, 1e-3);
+    const left_limit = bounds_min.x + span_x * 0.2;
+    const right_limit = bounds_max.x - span_x * 0.2;
 
     for (mesh.triangles, 0..) |*tri, i| {
-        tri.base_color = if (i < 2)
-            white
-        else if (i < 4)
+        const v0 = mesh.vertices[tri.v0];
+        const v1 = mesh.vertices[tri.v1];
+        const v2 = mesh.vertices[tri.v2];
+        const center = math.Vec3.scale(math.Vec3.add(math.Vec3.add(v0, v1), v2), 1.0 / 3.0);
+        const normal = if (i < mesh.normals.len) mesh.normals[i] else math.Vec3.cross(math.Vec3.sub(v1, v0), math.Vec3.sub(v2, v0)).normalize();
+        const abs_x = @abs(normal.x);
+        const abs_y = @abs(normal.y);
+        const abs_z = @abs(normal.z);
+        tri.base_color = if (abs_x > abs_y and abs_x > abs_z and center.x <= left_limit)
             red
-        else if (i < 6)
+        else if (abs_x > abs_y and abs_x > abs_z and center.x >= right_limit)
             green
-        else if (i < 12)
-            white
         else
             white;
         tri.double_sided = true;
     }
+}
 
-    const flip_count: usize = @min(mesh.normals.len, 12);
-    for (mesh.normals[0..flip_count]) |*n| {
-        n.x = -n.x;
-        n.y = -n.y;
-        n.z = -n.z;
+fn applyInteriorTricolorPalette(mesh: *mesh_module.Mesh) void {
+    const palette = [_]u32{
+        0xFFE0584A,
+        0xFF48B2E8,
+        0xFFF2C14E,
+    };
+    for (mesh.triangles, 0..) |*tri, i| {
+        tri.base_color = palette[i % palette.len];
+        tri.double_sided = false;
     }
 }
 
