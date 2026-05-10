@@ -88,6 +88,7 @@ const direct_showcase = @import("direct/showcase.zig");
 const post_dispatch = @import("renderer/post_dispatch.zig");
 const renderer_input = @import("renderer/input.zig");
 const renderer_init = @import("renderer/init.zig");
+const renderer_lights = @import("renderer/lights.zig");
 const frame_resources = @import("frame/resources.zig");
 const frame_setup_stage = @import("stages/frame_setup_stage.zig");
 const presentation_stage = @import("stages/presentation_stage.zig");
@@ -1508,269 +1509,23 @@ pub const Renderer = struct {
 
     /// Initializes the renderer, creating all necessary resources.
     /// JS Analogy: The `constructor` for our main rendering class.
-    pub fn defaultLightColor(light_idx: usize) math.Vec3 {
-        return if ((light_idx & 1) == 0)
-            math.Vec3.new(1.0, 0.9, 0.8)
-        else
-            math.Vec3.new(0.5, 0.6, 1.0);
-    }
-
-    pub fn defaultLightShadowMode() LightInfo.ShadowMode {
-        if (config.MESHLET_SHADOWS_ENABLED) return .meshlet_ray;
-        if (config.POST_SHADOW_ENABLED) return .shadow_map;
-        return .none;
-    }
-
-    /// initLightInfo initializes Renderer state and returns the configured value.
-    pub fn initLightInfo(allocator: std.mem.Allocator, light_idx: usize) !LightInfo {
-        const sm_depth = try allocator.alloc(f32, config.POST_SHADOW_MAP_SIZE * config.POST_SHADOW_MAP_SIZE);
-        return LightInfo{
-            .orbit_x = @as(f32, @floatFromInt(light_idx)) * 3.14159,
-            .orbit_speed = 0.0,
-            .distance = config.LIGHT_DISTANCE_INITIAL,
-            .elevation = 0.65,
-            .color = defaultLightColor(light_idx),
-            .shadow_mode = defaultLightShadowMode(),
-            .shadow_map_target_size = config.POST_SHADOW_MAP_SIZE,
-            .shadow_map = .{
-                .width = config.POST_SHADOW_MAP_SIZE,
-                .height = config.POST_SHADOW_MAP_SIZE,
-                .depth = sm_depth,
-                .basis_right = math.Vec3.new(1.0, 0.0, 0.0),
-                .basis_up = math.Vec3.new(0.0, 1.0, 0.0),
-                .basis_forward = math.Vec3.new(0.0, 0.0, 1.0),
-                .min_x = -1.0,
-                .max_x = 1.0,
-                .min_y = -1.0,
-                .max_y = 1.0,
-                .min_z = -1.0,
-                .max_z = 1.0,
-                .inv_extent_x = 1.0,
-                .inv_extent_y = 1.0,
-                .depth_bias = config.POST_SHADOW_DEPTH_BIAS,
-                .texel_bias = 0.0,
-                .active = false,
-            },
-        };
-    }
-
-    fn syncLightSoA(self: *Renderer) void {
-        for (self.lights.items, 0..) |light, i| {
-            self.light_soa.dir_x[i] = light.direction.x;
-            self.light_soa.dir_y[i] = light.direction.y;
-            self.light_soa.dir_z[i] = light.direction.z;
-            self.light_soa.distance[i] = light.distance;
-            self.light_soa.shadow_mode[i] = @intFromEnum(light.shadow_mode);
-        }
-    }
-
-    pub fn syncLightCameraSoA(self: *Renderer, basis_right: math.Vec3, basis_up: math.Vec3, basis_forward: math.Vec3) void {
-        for (self.lights.items, 0..) |_, i| {
-            const dir_x = self.light_soa.dir_x[i];
-            const dir_y = self.light_soa.dir_y[i];
-            const dir_z = self.light_soa.dir_z[i];
-            self.light_soa.dir_cam_x[i] = dir_x * basis_right.x + dir_y * basis_right.y + dir_z * basis_right.z;
-            self.light_soa.dir_cam_y[i] = dir_x * basis_up.x + dir_y * basis_up.y + dir_z * basis_up.z;
-            self.light_soa.dir_cam_z[i] = dir_x * basis_forward.x + dir_y * basis_forward.y + dir_z * basis_forward.z;
-        }
-    }
-
-    pub fn countLightsWithShadowMode(self: *const Renderer, mode: LightInfo.ShadowMode) usize {
-        var count: usize = 0;
-        for (self.lights.items) |light| {
-            if (light.shadow_mode == mode) count += 1;
-        }
-        return count;
-    }
-
-    fn totalShadowMapBytes(self: *const Renderer) usize {
-        var total_bytes: usize = 0;
-        for (self.lights.items) |light| {
-            total_bytes += light.shadow_map.width * light.shadow_map.height * @sizeOf(f32);
-        }
-        return total_bytes;
-    }
-
-    /// Computes shadow build budget ns.
-    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
-    fn computeShadowBuildBudgetNs(self: *const Renderer) i128 {
-        if (self.target_frame_time_ns <= 0) return -1;
-        const budget_percent = std.math.clamp(config.POST_SHADOW_BUDGET_PERCENT, 0, 100);
-        if (budget_percent <= 0) return 0;
-        if (budget_percent >= 100) return self.target_frame_time_ns;
-        return @divTrunc(self.target_frame_time_ns * @as(i128, @intCast(budget_percent)), 100);
-    }
-
-    /// Estimates shadow build cost ns.
-    /// Keeps estimate shadow build cost ns as the single implementation point so call-site behavior stays consistent.
-    fn estimateShadowBuildCostNs(light: *const LightInfo) i128 {
-        if (light.shadow_last_build_ns > 0) return light.shadow_last_build_ns;
-        const shadow_texel_count = light.shadow_map.width * light.shadow_map.height;
-        const texel_estimate_ns: i128 = @intCast(shadow_texel_count);
-        return @max(@as(i128, 100_000), texel_estimate_ns);
-    }
-
-    fn resizeLightShadowMap(
-        self: *Renderer,
-        index: usize,
-        shadow_map_size: usize,
-        update_target_size: bool,
-        reason: []const u8,
-    ) !bool {
-        if (index >= self.lights.items.len) return false;
-        const clamped_size = std.math.clamp(shadow_map_size, @as(usize, 64), @as(usize, 4096));
-        const light = &self.lights.items[index];
-        if (update_target_size) {
-            light.shadow_map_target_size = clamped_size;
-        }
-        if (light.shadow_map.width == clamped_size and light.shadow_map.height == clamped_size) return false;
-
-        const prev_width = light.shadow_map.width;
-        const prev_height = light.shadow_map.height;
-        light.shadow_map.depth = try self.allocator.realloc(light.shadow_map.depth, clamped_size * clamped_size);
-        light.shadow_map.width = clamped_size;
-        light.shadow_map.height = clamped_size;
-        light.shadow_map.active = false;
-        light.shadow_last_build_frame = 0;
-        light.shadow_last_build_ns = 0;
-        renderer_logger.infoSub(
-            "lights",
-            "light {} shadow_map resized {}x{} -> {}x{} ({s})",
-            .{ index, prev_width, prev_height, clamped_size, clamped_size, reason },
-        );
-        return true;
-    }
-
-    fn tryDownscaleOneShadowMapLight(self: *Renderer) !bool {
-        var candidate_index: ?usize = null;
-        var candidate_size: usize = 0;
-        const min_size = @max(@as(usize, 64), config.POST_SHADOW_ADAPTIVE_MIN_MAP_SIZE);
-        for (self.lights.items, 0..) |light, light_index| {
-            if (light.shadow_mode != .shadow_map) continue;
-            if (light.shadow_map.width <= min_size) continue;
-            if (light.shadow_map.width > candidate_size) {
-                candidate_size = light.shadow_map.width;
-                candidate_index = light_index;
-            }
-        }
-        if (candidate_index == null) return false;
-        const idx = candidate_index.?;
-        const current_size = self.lights.items[idx].shadow_map.width;
-        const next_size = @max(min_size, current_size / 2);
-        if (next_size >= current_size) return false;
-        return self.resizeLightShadowMap(idx, next_size, false, "budget_downscale");
-    }
-
-    fn tryUpscaleOneShadowMapLight(self: *Renderer) !bool {
-        var candidate_index: ?usize = null;
-        var candidate_size: usize = std.math.maxInt(usize);
-        for (self.lights.items, 0..) |light, light_index| {
-            if (light.shadow_mode != .shadow_map) continue;
-            if (light.shadow_map.width >= light.shadow_map_target_size) continue;
-            if (light.shadow_map.width < candidate_size) {
-                candidate_size = light.shadow_map.width;
-                candidate_index = light_index;
-            }
-        }
-        if (candidate_index == null) return false;
-        const idx = candidate_index.?;
-        const current_size = self.lights.items[idx].shadow_map.width;
-        const target_size = self.lights.items[idx].shadow_map_target_size;
-        const next_size = @min(target_size, current_size * 2);
-        if (next_size <= current_size) return false;
-        return self.resizeLightShadowMap(idx, next_size, false, "budget_upscale");
-    }
-
-    fn tryIncreaseShadowCadenceScale(self: *Renderer) bool {
-        var candidate_index: ?usize = null;
-        var candidate_cost_ns: i128 = 0;
-        for (self.lights.items, 0..) |light, light_index| {
-            if (light.shadow_mode != .shadow_map) continue;
-            if (light.shadow_dynamic_interval_scale >= config.POST_SHADOW_ADAPTIVE_MAX_INTERVAL_SCALE) continue;
-            const est_ns = estimateShadowBuildCostNs(&light);
-            if (est_ns > candidate_cost_ns) {
-                candidate_cost_ns = est_ns;
-                candidate_index = light_index;
-            }
-        }
-        if (candidate_index == null) return false;
-        const idx = candidate_index.?;
-        const light = &self.lights.items[idx];
-        light.shadow_dynamic_interval_scale = @min(config.POST_SHADOW_ADAPTIVE_MAX_INTERVAL_SCALE, light.shadow_dynamic_interval_scale * 2);
-        renderer_logger.infoSub(
-            "lights",
-            "light {} shadow cadence scale increased to {}x",
-            .{ idx, light.shadow_dynamic_interval_scale },
-        );
-        return true;
-    }
-
-    fn tryDecreaseShadowCadenceScale(self: *Renderer) bool {
-        var candidate_index: ?usize = null;
-        var candidate_scale: u32 = 1;
-        for (self.lights.items, 0..) |light, light_index| {
-            if (light.shadow_mode != .shadow_map) continue;
-            if (light.shadow_dynamic_interval_scale <= 1) continue;
-            if (light.shadow_dynamic_interval_scale > candidate_scale) {
-                candidate_scale = light.shadow_dynamic_interval_scale;
-                candidate_index = light_index;
-            }
-        }
-        if (candidate_index == null) return false;
-        const idx = candidate_index.?;
-        const light = &self.lights.items[idx];
-        light.shadow_dynamic_interval_scale = @max(@as(u32, 1), light.shadow_dynamic_interval_scale / 2);
-        renderer_logger.infoSub(
-            "lights",
-            "light {} shadow cadence scale decreased to {}x",
-            .{ idx, light.shadow_dynamic_interval_scale },
-        );
-        return true;
-    }
-
-    /// Applies adaptive shadow budget policy.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    fn applyAdaptiveShadowBudgetPolicy(self: *Renderer) !void {
-        if (!config.POST_SHADOW_ENABLED) return;
-        if (!config.POST_SHADOW_ADAPTIVE_RESOLUTION_ENABLED) return;
-        if (self.light_work_stats.shadow_map_lights == 0) return;
-        const shadow_budget_ns = self.light_work_stats.shadow_budget_ns;
-        if (shadow_budget_ns <= 0) return;
-
-        if (self.light_work_stats.shadow_budget_skipped_lights > 0) {
-            self.shadow_budget_pressure_frames += 1;
-            self.shadow_budget_relief_frames = 0;
-            if (self.shadow_budget_pressure_frames >= config.POST_SHADOW_ADAPTIVE_PRESSURE_FRAMES) {
-                if (try self.tryDownscaleOneShadowMapLight()) {
-                    self.light_work_stats.shadow_map_downscaled_lights += 1;
-                } else if (self.tryIncreaseShadowCadenceScale()) {
-                    self.light_work_stats.shadow_cadence_increased_lights += 1;
-                }
-                self.shadow_budget_pressure_frames = 0;
-            }
-            return;
-        }
-
-        const recovery_budget_percent = std.math.clamp(config.POST_SHADOW_ADAPTIVE_RECOVERY_BUDGET_PERCENT, 1, 100);
-        const within_recovery_budget = (self.light_work_stats.shadow_build_ns * 100) <=
-            (shadow_budget_ns * @as(i128, @intCast(recovery_budget_percent)));
-        if (!within_recovery_budget) {
-            self.shadow_budget_relief_frames = 0;
-            return;
-        }
-
-        self.shadow_budget_relief_frames += 1;
-        if (self.shadow_budget_relief_frames < config.POST_SHADOW_ADAPTIVE_RECOVERY_FRAMES) return;
-        if (try self.tryUpscaleOneShadowMapLight()) {
-            self.light_work_stats.shadow_map_upscaled_lights += 1;
-        } else if (self.tryDecreaseShadowCadenceScale()) {
-            self.light_work_stats.shadow_cadence_decreased_lights += 1;
-        }
-        self.shadow_budget_relief_frames = 0;
-    }
-
-    /// init initializes Renderer state and returns the configured value.
     pub const init = renderer_init.init;
+
+    // ====== light + texture setup (impl in renderer/lights.zig) ======
+    pub const defaultLightColor = renderer_lights.defaultLightColor;
+    pub const defaultLightShadowMode = renderer_lights.defaultLightShadowMode;
+    pub const initLightInfo = renderer_lights.initLightInfo;
+    pub const syncLightCameraSoA = renderer_lights.syncLightCameraSoA;
+    pub const countLightsWithShadowMode = renderer_lights.countLightsWithShadowMode;
+    pub const setTexture = renderer_lights.setTexture;
+    pub const setHdriMap = renderer_lights.setHdriMap;
+    pub const setTextures = renderer_lights.setTextures;
+    pub const setLightCapacity = renderer_lights.setLightCapacity;
+    pub const setDirectionalLight = renderer_lights.setDirectionalLight;
+    pub const setLightShadowMode = renderer_lights.setLightShadowMode;
+    pub const setLightShadowUpdateInterval = renderer_lights.setLightShadowUpdateInterval;
+    pub const setLightShadowMapSize = renderer_lights.setLightShadowMapSize;
+    pub const setLightGlow = renderer_lights.setLightGlow;
 
     /// Cleans up all renderer resources in the reverse order of creation.
     pub fn deinit(self: *Renderer) void {
@@ -2519,161 +2274,6 @@ pub const Renderer = struct {
 
     /// Sets s et te xt ur e.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn setTexture(self: *Renderer, tex: *const texture.Texture) void {
-        self.single_texture_binding[0] = tex;
-        self.textures = self.single_texture_binding[0..];
-    }
-
-    /// Sets s et hd ri ma p.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn setHdriMap(self: *Renderer, hdri_map: texture.HdrTexture) void {
-        self.hdri_map = hdri_map;
-    }
-
-    /// Sets s et te xt ur es.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn setTextures(self: *Renderer, textures: []const ?*const texture.Texture) void {
-        self.textures = textures;
-    }
-
-    /// Sets s et li gh tc ap ac it y.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn setLightCapacity(self: *Renderer, light_count: usize) !void {
-        const requested_count = @max(@as(usize, 1), light_count);
-        const light_count_max = @max(config.LIGHT_COUNT_MIN, config.LIGHT_COUNT_MAX);
-        const desired_count = std.math.clamp(requested_count, config.LIGHT_COUNT_MIN, light_count_max);
-        if (desired_count != requested_count) {
-            renderer_logger.infoSub(
-                "lights",
-                "clamped requested light capacity {} to {} (min={}, max={})",
-                .{ requested_count, desired_count, config.LIGHT_COUNT_MIN, light_count_max },
-            );
-        }
-        if (desired_count > self.shadow_build_elapsed_ns.len) {
-            const prev_len = self.shadow_build_elapsed_ns.len;
-            self.shadow_build_elapsed_ns = try self.allocator.realloc(self.shadow_build_elapsed_ns, desired_count);
-            @memset(self.shadow_build_elapsed_ns[prev_len..], 0);
-        }
-        if (desired_count > self.shadow_resolve_elapsed_ns.len) {
-            const prev_len = self.shadow_resolve_elapsed_ns.len;
-            self.shadow_resolve_elapsed_ns = try self.allocator.realloc(self.shadow_resolve_elapsed_ns, desired_count);
-            @memset(self.shadow_resolve_elapsed_ns[prev_len..], 0);
-        }
-        if (desired_count > self.light_soa.distance.len) {
-            self.light_soa.dir_x = try self.allocator.realloc(self.light_soa.dir_x, desired_count);
-            self.light_soa.dir_y = try self.allocator.realloc(self.light_soa.dir_y, desired_count);
-            self.light_soa.dir_z = try self.allocator.realloc(self.light_soa.dir_z, desired_count);
-            self.light_soa.dir_cam_x = try self.allocator.realloc(self.light_soa.dir_cam_x, desired_count);
-            self.light_soa.dir_cam_y = try self.allocator.realloc(self.light_soa.dir_cam_y, desired_count);
-            self.light_soa.dir_cam_z = try self.allocator.realloc(self.light_soa.dir_cam_z, desired_count);
-            self.light_soa.distance = try self.allocator.realloc(self.light_soa.distance, desired_count);
-            self.light_soa.shadow_mode = try self.allocator.realloc(self.light_soa.shadow_mode, desired_count);
-        }
-        const tile_count = self.tile_light_ranges.len;
-        const tile_light_capacity = @max(@as(usize, 1), tile_count * desired_count);
-        if (tile_light_capacity > self.tile_light_indices.len) {
-            self.tile_light_indices = try self.allocator.realloc(self.tile_light_indices, tile_light_capacity);
-        }
-        while (self.lights.items.len > desired_count) {
-            const remove_index = self.lights.items.len - 1;
-            const removed = self.lights.items[remove_index];
-            self.allocator.free(removed.shadow_map.depth);
-            self.lights.items.len = remove_index;
-        }
-        while (self.lights.items.len < desired_count) {
-            const light_idx = self.lights.items.len;
-            try self.lights.append(self.allocator, try initLightInfo(self.allocator, light_idx));
-        }
-        var min_shadow_size: usize = config.POST_SHADOW_MAP_SIZE;
-        var max_shadow_size: usize = config.POST_SHADOW_MAP_SIZE;
-        if (self.lights.items.len > 0) {
-            min_shadow_size = self.lights.items[0].shadow_map.width;
-            max_shadow_size = self.lights.items[0].shadow_map.width;
-            for (self.lights.items[1..]) |light| {
-                min_shadow_size = @min(min_shadow_size, light.shadow_map.width);
-                max_shadow_size = @max(max_shadow_size, light.shadow_map.width);
-            }
-        }
-        const total_shadow_bytes = self.totalShadowMapBytes();
-        const should_log_light_capacity = !self.light_capacity_log_initialized or
-            self.last_logged_light_capacity != self.lights.items.len or
-            self.last_logged_min_shadow_size != min_shadow_size or
-            self.last_logged_max_shadow_size != max_shadow_size or
-            self.last_logged_total_shadow_bytes != total_shadow_bytes;
-        if (should_log_light_capacity) {
-            renderer_logger.infoSub(
-                "lights",
-                "capacity={} shadow_map_range={}..{} total_shadow_mem={d:.2} MiB",
-                .{
-                    self.lights.items.len,
-                    min_shadow_size,
-                    max_shadow_size,
-                    @as(f64, @floatFromInt(total_shadow_bytes)) / (1024.0 * 1024.0),
-                },
-            );
-            self.light_capacity_log_initialized = true;
-            self.last_logged_light_capacity = self.lights.items.len;
-            self.last_logged_min_shadow_size = min_shadow_size;
-            self.last_logged_max_shadow_size = max_shadow_size;
-            self.last_logged_total_shadow_bytes = total_shadow_bytes;
-        }
-        self.syncLightSoA();
-        self.frame_view_cache.invalidate();
-    }
-
-    /// Sets s et di re ct io na ll ig ht.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn setDirectionalLight(self: *Renderer, index: usize, direction: math.Vec3, distance: f32, color: ?math.Vec3) void {
-        if (index >= self.lights.items.len) return;
-        const dir_len = math.Vec3.length(direction);
-        const normalized = if (dir_len > 1e-6)
-            math.Vec3.scale(direction, 1.0 / dir_len)
-        else
-            math.Vec3.new(0.0, 1.0, 0.0);
-        self.lights.items[index].direction = normalized;
-        self.lights.items[index].distance = @max(distance, 0.01);
-        if (color) |c| self.lights.items[index].color = c;
-        self.lights.items[index].manual_direction = true;
-        self.lights.items[index].shadow_map.active = false;
-        self.lights.items[index].shadow_last_build_frame = 0;
-        self.lights.items[index].shadow_last_build_ns = 0;
-        if (index < self.shadow_build_elapsed_ns.len) self.shadow_build_elapsed_ns[index] = 0;
-        if (index < self.shadow_resolve_elapsed_ns.len) self.shadow_resolve_elapsed_ns[index] = 0;
-        self.syncLightSoA();
-        self.frame_view_cache.invalidate();
-    }
-
-    /// Sets s et li gh ts ha do wm od e.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn setLightShadowMode(self: *Renderer, index: usize, mode: LightInfo.ShadowMode) void {
-        if (index >= self.lights.items.len) return;
-        self.lights.items[index].shadow_mode = mode;
-        self.light_soa.shadow_mode[index] = @intFromEnum(mode);
-    }
-
-    /// Sets s et li gh ts ha do wu pd at ei nt er va l.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn setLightShadowUpdateInterval(self: *Renderer, index: usize, interval_frames: u32) void {
-        if (index >= self.lights.items.len) return;
-        self.lights.items[index].shadow_update_interval_frames = @max(@as(u32, 1), interval_frames);
-        self.lights.items[index].shadow_dynamic_interval_scale = 1;
-    }
-
-    /// Sets s et li gh ts ha do wm ap si ze.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn setLightShadowMapSize(self: *Renderer, index: usize, shadow_map_size: usize) !void {
-        _ = try self.resizeLightShadowMap(index, shadow_map_size, true, "config");
-    }
-
-    /// Sets s et li gh tg lo w.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn setLightGlow(self: *Renderer, index: usize, radius: f32, intensity: f32) void {
-        if (index >= self.lights.items.len) return;
-        self.lights.items[index].glow_radius = std.math.clamp(radius, 0.0, 256.0);
-        self.lights.items[index].glow_intensity = std.math.clamp(intensity, 0.0, 8.0);
-    }
-
-    /// The main render loop function for a single frame.
     pub fn render3DMesh(self: *Renderer, mesh: *const Mesh) !void {
         try self.render3DMeshWithPump(mesh, null);
     }
@@ -2722,7 +2322,7 @@ pub const Renderer = struct {
                 light.direction = math.Vec3.normalize(light_pos);
             }
         }
-        self.syncLightSoA();
+        renderer_lights.syncLightSoA(self);
         const light_distance_0 = if (self.lights.items.len > 0) self.light_soa.distance[0] else 10.0;
         const light_dir_world = if (self.lights.items.len > 0)
             math.Vec3.new(self.light_soa.dir_x[0], self.light_soa.dir_y[0], self.light_soa.dir_z[0])
@@ -3759,7 +3359,7 @@ pub const Renderer = struct {
     pub fn stageBuildShadowMaps(self: *Renderer, mesh: *const Mesh) void {
         if (!config.POST_SHADOW_ENABLED) return;
 
-        const shadow_budget_ns = self.computeShadowBuildBudgetNs();
+        const shadow_budget_ns = renderer_lights.computeShadowBuildBudgetNs(self);
         const enforce_shadow_budget = shadow_budget_ns >= 0;
         if (shadow_budget_ns > 0) {
             self.light_work_stats.shadow_budget_ns = shadow_budget_ns;
@@ -3782,7 +3382,7 @@ pub const Renderer = struct {
                 continue;
             }
             if (enforce_shadow_budget and light.shadow_map.active) {
-                const estimated_build_ns = estimateShadowBuildCostNs(light);
+                const estimated_build_ns = renderer_lights.estimateShadowBuildCostNs(light);
                 if (shadow_budget_spent_ns + estimated_build_ns > shadow_budget_ns) {
                     self.light_work_stats.shadow_map_reused_lights += 1;
                     self.light_work_stats.shadow_budget_skipped_lights += 1;
@@ -3856,7 +3456,7 @@ pub const Renderer = struct {
                 self.scene_surface,
             );
         }
-        try self.applyAdaptiveShadowBudgetPolicy();
+        try renderer_lights.applyAdaptiveShadowBudgetPolicy(self);
         if (self.show_light_orb) {
             const light_camera_z = light_camera.z;
             if (light_camera_z > NEAR_CLIP) {
