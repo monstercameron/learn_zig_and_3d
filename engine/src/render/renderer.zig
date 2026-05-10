@@ -92,6 +92,8 @@ const renderer_lights = @import("renderer/lights.zig");
 const renderer_hud = @import("renderer/hud.zig");
 const renderer_orchestrator = @import("renderer/orchestrator.zig");
 const renderer_scene_dispatch = @import("renderer/scene_dispatch.zig");
+const renderer_pacing = @import("renderer/pacing.zig");
+const renderer_draw = @import("renderer/draw.zig");
 const frame_resources = @import("frame/resources.zig");
 const frame_setup_stage = @import("stages/frame_setup_stage.zig");
 const presentation_stage = @import("stages/presentation_stage.zig");
@@ -282,7 +284,7 @@ fn lightGizmoAxisUnit(axis: LightGizmoAxis) math.Vec3 {
     };
 }
 
-fn lightGizmoAxisColor(axis: LightGizmoAxis, active_axis: LightGizmoAxis, hot_axis: ?LightGizmoAxis) u32 {
+pub fn lightGizmoAxisColor(axis: LightGizmoAxis, active_axis: LightGizmoAxis, hot_axis: ?LightGizmoAxis) u32 {
     if (hot_axis != null and hot_axis.? == axis) return 0xFFFFFF66;
     if (axis == active_axis) {
         return switch (axis) {
@@ -1103,9 +1105,9 @@ pub extern "gdi32" fn SetBkMode(hdc: windows.HDC, mode: i32) i32;
 pub extern "gdi32" fn SetTextColor(hdc: windows.HDC, color: u32) u32;
 pub extern "gdi32" fn TextOutW(hdc: windows.HDC, x: i32, y: i32, lpString: [*]const u16, c: i32) bool;
 pub extern "user32" fn SetWindowTextW(hWnd: windows.HWND, lpString: [*:0]const u16) bool;
-extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
+pub extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
 pub extern "kernel32" fn CreateWaitableTimerExW(lpTimerAttributes: ?*anyopaque, lpTimerName: ?[*:0]const u16, dwFlags: u32, dwDesiredAccess: u32) ?windows.HANDLE;
-extern "kernel32" fn SetWaitableTimerEx(hTimer: windows.HANDLE, lpDueTime: *const i64, lPeriod: i32, pfnCompletionRoutine: ?*const anyopaque, lpArgToCompletionRoutine: ?*anyopaque, wakeContext: ?*const anyopaque, tolerableDelay: u32) windows.BOOL;
+pub extern "kernel32" fn SetWaitableTimerEx(hTimer: windows.HANDLE, lpDueTime: *const i64, lPeriod: i32, pfnCompletionRoutine: ?*const anyopaque, lpArgToCompletionRoutine: ?*anyopaque, wakeContext: ?*const anyopaque, tolerableDelay: u32) windows.BOOL;
 pub extern "dwmapi" fn DwmFlush() callconv(.winapi) windows.HRESULT;
 
 pub const TIMER_MODIFY_STATE: u32 = 0x0002;
@@ -1546,6 +1548,37 @@ pub const Renderer = struct {
     pub const stageRenderScene = renderer_scene_dispatch.stageRenderScene;
     pub const stageOverlayAndPresent = renderer_scene_dispatch.stageOverlayAndPresent;
 
+    // ====== frame pacing helpers (impl in renderer/pacing.zig) ======
+    pub const currentPacingMode = renderer_pacing.currentPacingMode;
+    pub const usesSoftwareFramePacing = renderer_pacing.usesSoftwareFramePacing;
+    pub const effectiveFramePacingTargetNs = renderer_pacing.effectiveFramePacingTargetNs;
+    pub const waitUntilNextFrame = renderer_pacing.waitUntilNextFrame;
+    pub const advanceFrameDeadline = renderer_pacing.advanceFrameDeadline;
+    pub const notePresentedFrame = renderer_pacing.notePresentedFrame;
+
+    // ====== light + scene-item draw helpers (impl in renderer/draw.zig) ======
+    pub const drawLightMarker = renderer_draw.drawLightMarker;
+    pub const drawLightGizmo = renderer_draw.drawLightGizmo;
+    pub const drawSceneItemGizmo = renderer_draw.drawSceneItemGizmo;
+    pub const drawLightGlow = renderer_draw.drawLightGlow;
+
+    // ====== post-process pass dispatchers (impl in renderer/post_dispatch.zig) ======
+    pub const applySSGIPass = post_dispatch.applySSGIPass;
+    pub const applyAmbientOcclusionPass = post_dispatch.applyAmbientOcclusionPass;
+    pub const applyDepthFogPass = post_dispatch.applyDepthFogPass;
+    pub const applyTemporalAARows = post_dispatch.applyTemporalAARows;
+    pub const applyGodRaysPass = post_dispatch.applyGodRaysPass;
+    pub const applyLensFlarePass = post_dispatch.applyLensFlarePass;
+    pub const applyChromaticAberrationPass = post_dispatch.applyChromaticAberrationPass;
+    pub const applyFilmGrainVignettePass = post_dispatch.applyFilmGrainVignettePass;
+    pub const applyMotionBlurPass = post_dispatch.applyMotionBlurPass;
+    pub const applyTemporalAAPass = post_dispatch.applyTemporalAAPass;
+    pub const applySSRPass = post_dispatch.applySSRPass;
+    pub const applyDepthOfFieldPass = post_dispatch.applyDepthOfFieldPass;
+    pub const applyBloomPass = post_dispatch.applyBloomPass;
+    pub const applyBlockbusterColorGradePass = post_dispatch.applyBlockbusterColorGradePass;
+
+
     /// Cleans up all renderer resources in the reverse order of creation.
     pub fn deinit(self: *Renderer) void {
         renderer_logger.infoSub("shutdown", "deinitializing renderer frame_counter={}", .{self.frame_count});
@@ -1900,7 +1933,7 @@ pub const Renderer = struct {
 
     fn hoverLightGizmoAxisAtPointer(self: *Renderer, pointer: math.Vec2, pointer_view: PointerViewState) ?LightGizmoAxis {
         const origin_world = self.lightGizmoOriginWorld() orelse return null;
-        const origin_screen = self.projectWorldToScreen(
+        const origin_screen = renderer_draw.projectWorldToScreen(self, 
             self.camera_position,
             pointer_view.right,
             pointer_view.up,
@@ -1916,7 +1949,7 @@ pub const Renderer = struct {
         var best_dist: f32 = 8.0;
         for ([_]LightGizmoAxis{ .x, .y, .z }) |axis| {
             const endpoint_world = lightGizmoAxisEndpoint(origin_world, axis, axis_extent);
-            const endpoint_screen = self.projectWorldToScreen(
+            const endpoint_screen = renderer_draw.projectWorldToScreen(self, 
                 self.camera_position,
                 pointer_view.right,
                 pointer_view.up,
@@ -1947,7 +1980,7 @@ pub const Renderer = struct {
         const light = self.lights.items[self.light_gizmo.selected_light_index];
         const axis_extent = std.math.clamp(light.distance * 0.18, 0.3, 1.25);
         const endpoint_world = lightGizmoAxisEndpoint(origin_world, axis, axis_extent);
-        const origin_screen = self.projectWorldToScreen(
+        const origin_screen = renderer_draw.projectWorldToScreen(self, 
             self.camera_position,
             pointer_view.right,
             pointer_view.up,
@@ -1955,7 +1988,7 @@ pub const Renderer = struct {
             pointer_view.projection,
             origin_world,
         ) orelse return 0.0;
-        const endpoint_screen = self.projectWorldToScreen(
+        const endpoint_screen = renderer_draw.projectWorldToScreen(self, 
             self.camera_position,
             pointer_view.right,
             pointer_view.up,
@@ -2125,99 +2158,6 @@ pub const Renderer = struct {
         self.loading_overlay.phase_text_len = 0;
     }
 
-    pub fn currentPacingMode(self: *const Renderer) frame_pacing_hud.Mode {
-        return frame_pacing.resolveMode(config.WINDOW_VSYNC, self.target_frame_time_ns);
-    }
-
-    pub fn usesSoftwareFramePacing(self: *const Renderer) bool {
-        return frame_pacing.usesSoftwarePacing(self.currentPacingMode());
-    }
-
-    pub fn effectiveFramePacingTargetNs(self: *const Renderer) i128 {
-        return frame_pacing.effectiveTargetNs(self.currentPacingMode(), self.target_frame_time_ns);
-    }
-
-    fn waitWithFramePacingTimer(self: *Renderer, sleep_ns: i128) bool {
-        const timer = self.frame_pacing_timer orelse return false;
-        if (sleep_ns <= 0) return false;
-
-        const relative_100ns = @max(@as(i128, 1), @divTrunc(sleep_ns, 100));
-        const due_time: i64 = -@as(i64, @intCast(relative_100ns));
-        if (SetWaitableTimerEx(timer, &due_time, 0, null, null, null, 0) == 0) return false;
-        windows.WaitForSingleObject(timer, windows.INFINITE) catch return false;
-        return true;
-    }
-
-    fn framePacingCoarseThresholdNs(self: *const Renderer) i128 {
-        return frame_pacing.coarseThresholdNs(self.target_frame_time_ns);
-    }
-
-    fn framePacingRequestedSleepNs(self: *const Renderer, remaining_ns: i128) i128 {
-        return frame_pacing.requestedSleepNs(self.target_frame_time_ns, self.frame_pacing_sleep_bias_ns, remaining_ns);
-    }
-
-    /// updateFramePacingSleepBias updates Renderer state for the current tick/frame.
-    fn updateFramePacingSleepBias(self: *Renderer, requested_sleep_ns: i128, actual_wait_ns: i128) void {
-        self.frame_pacing_sleep_bias_ns = frame_pacing.updateSleepBias(
-            self.frame_pacing_sleep_bias_ns,
-            requested_sleep_ns,
-            actual_wait_ns,
-        );
-    }
-
-    /// Performs wait until next frame.
-    /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
-    pub fn waitUntilNextFrame(self: *Renderer) void {
-        if (!self.usesSoftwareFramePacing()) return;
-
-        const wait_start = std.time.nanoTimestamp();
-        const coarse_threshold_ns = self.framePacingCoarseThresholdNs();
-
-        while (true) {
-            const now = std.time.nanoTimestamp();
-            const remaining_ns = self.next_frame_time - now;
-            if (remaining_ns <= 0) {
-                self.pending_software_wait_ns += std.time.nanoTimestamp() - wait_start;
-                return;
-            }
-
-            if (remaining_ns > coarse_threshold_ns) {
-                const sleep_ns = self.framePacingRequestedSleepNs(remaining_ns);
-                if (sleep_ns > 0) {
-                    const sleep_begin = std.time.nanoTimestamp();
-                    if (!self.waitWithFramePacingTimer(sleep_ns)) {
-                        const sleep_ms = @max(@as(i128, 1), @divTrunc(sleep_ns, 1_000_000));
-                        Sleep(@intCast(sleep_ms));
-                    }
-                    const sleep_end = std.time.nanoTimestamp();
-                    self.updateFramePacingSleepBias(sleep_ns, @max(sleep_end - sleep_begin, @as(i128, 0)));
-                    continue;
-                } else {
-                    self.frame_pacing_sleep_bias_ns = frame_pacing.decaySleepBias(self.frame_pacing_sleep_bias_ns);
-                }
-            }
-
-            std.atomic.spinLoopHint();
-        }
-    }
-
-    pub fn advanceFrameDeadline(self: *Renderer, now_ns: i128) void {
-        self.next_frame_time = frame_pacing.advanceDeadline(
-            self.currentPacingMode(),
-            self.next_frame_time,
-            self.target_frame_time_ns,
-            now_ns,
-        );
-    }
-
-    pub fn notePresentedFrame(self: *Renderer, current_time: i128) void {
-        self.frame_count += 1;
-        self.total_frames_rendered += 1;
-        self.last_completed_frame_time = current_time;
-        self.active_software_wait_ns = 0;
-        self.advanceFrameDeadline(current_time);
-    }
-
     /// Handles handle char input.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn handleCharInput(self: *Renderer, char_code: u32) void {
@@ -2276,7 +2216,8 @@ pub const Renderer = struct {
     /// projectSceneItemWorld projects coordinates for Renderer calculations.
     pub fn projectSceneItemWorld(ctx_ptr: *anyopaque, world_position: math.Vec3) ?[2]i32 {
         const ctx: *const SceneItemGizmoDrawContext = @ptrCast(@alignCast(ctx_ptr));
-        return ctx.renderer.projectWorldToScreen(
+        return renderer_draw.projectWorldToScreen(
+            ctx.renderer,
             ctx.camera_position,
             ctx.basis_right,
             ctx.basis_up,
@@ -2286,235 +2227,10 @@ pub const Renderer = struct {
         );
     }
 
-    fn drawSceneItemGizmoLine(ctx_ptr: *anyopaque, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) void {
+    pub fn drawSceneItemGizmoLine(ctx_ptr: *anyopaque, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) void {
         const ctx: *SceneItemGizmoDrawContext = @ptrCast(@alignCast(ctx_ptr));
         ctx.renderer.drawLineColored(x0, y0, x1, y1, color);
     }
-
-
-    pub fn drawLightMarker(
-        self: *Renderer,
-        light_pos: math.Vec3,
-        light_camera_z: f32,
-        center_x: f32,
-        center_y: f32,
-        x_scale: f32,
-        y_scale: f32,
-    ) void {
-        if (light_camera_z <= NEAR_CLIP) return;
-
-        const ndc_x = (light_pos.x / light_camera_z) * x_scale;
-        const ndc_y = (light_pos.y / light_camera_z) * y_scale;
-        const screen_x = ndc_x * center_x + center_x;
-        const screen_y = -ndc_y * center_y + center_y;
-
-        const light_x = @as(i32, @intFromFloat(screen_x));
-        const light_y = @as(i32, @intFromFloat(screen_y));
-        const radius: i32 = 4;
-        const color: u32 = 0xFF00FFFF;
-
-        var py = light_y - radius;
-        while (py <= light_y + radius) : (py += 1) {
-            if (py < 0 or py >= self.bitmap.height) continue;
-            var px = light_x - radius;
-            while (px <= light_x + radius) : (px += 1) {
-                if (px < 0 or px >= self.bitmap.width) continue;
-                const dx = @as(f32, @floatFromInt(px - light_x));
-                const dy = @as(f32, @floatFromInt(py - light_y));
-                if ((dx * dx + dy * dy) > @as(f32, @floatFromInt(radius * radius))) continue;
-                const idx = @as(usize, @intCast(py)) * @as(usize, @intCast(self.bitmap.width)) + @as(usize, @intCast(px));
-                if (idx < self.bitmap.pixels.len) self.bitmap.pixels[idx] = color;
-            }
-        }
-    }
-
-    fn worldToCameraPosition(
-        camera_position: math.Vec3,
-        basis_right: math.Vec3,
-        basis_up: math.Vec3,
-        basis_forward: math.Vec3,
-        world_position: math.Vec3,
-    ) math.Vec3 {
-        const relative = math.Vec3.sub(world_position, camera_position);
-        return math.Vec3.new(
-            math.Vec3.dot(relative, basis_right),
-            math.Vec3.dot(relative, basis_up),
-            math.Vec3.dot(relative, basis_forward),
-        );
-    }
-
-    /// projectWorldToScreen projects coordinates for Renderer calculations.
-    fn projectWorldToScreen(
-        self: *Renderer,
-        camera_position: math.Vec3,
-        basis_right: math.Vec3,
-        basis_up: math.Vec3,
-        basis_forward: math.Vec3,
-        projection: ProjectionParams,
-        world_position: math.Vec3,
-    ) ?[2]i32 {
-        const camera_space = worldToCameraPosition(camera_position, basis_right, basis_up, basis_forward, world_position);
-        if (camera_space.z <= NEAR_CLIP) return null;
-
-        const projected = projectCameraPositionFloat(camera_space, projection);
-        if (!std.math.isFinite(projected.x) or !std.math.isFinite(projected.y)) return null;
-
-        const max_x = @as(f32, @floatFromInt(self.bitmap.width * 8));
-        const max_y = @as(f32, @floatFromInt(self.bitmap.height * 8));
-        if (projected.x < -max_x or projected.x > max_x or projected.y < -max_y or projected.y > max_y) return null;
-
-        return .{
-            @as(i32, @intFromFloat(projected.x)),
-            @as(i32, @intFromFloat(projected.y)),
-        };
-    }
-
-    pub fn drawLightGizmo(
-        self: *Renderer,
-        camera_position: math.Vec3,
-        basis_right: math.Vec3,
-        basis_up: math.Vec3,
-        basis_forward: math.Vec3,
-        projection: ProjectionParams,
-    ) void {
-        if (self.lights.items.len == 0) return;
-        self.clampLightGizmoSelection();
-        const light = self.lights.items[self.light_gizmo.selected_light_index];
-        const origin_world = math.Vec3.scale(light.direction, light.distance);
-        const origin_screen = self.projectWorldToScreen(
-            camera_position,
-            basis_right,
-            basis_up,
-            basis_forward,
-            projection,
-            origin_world,
-        ) orelse return;
-
-        const axis_extent = std.math.clamp(light.distance * 0.18, 0.3, 1.25);
-        const x_endpoint = math.Vec3.add(origin_world, math.Vec3.new(axis_extent, 0.0, 0.0));
-        const y_endpoint = math.Vec3.add(origin_world, math.Vec3.new(0.0, axis_extent, 0.0));
-        const z_endpoint = math.Vec3.add(origin_world, math.Vec3.new(0.0, 0.0, axis_extent));
-        const hot_axis = self.light_gizmo.drag_axis orelse self.light_gizmo.hover_axis;
-
-        if (self.projectWorldToScreen(camera_position, basis_right, basis_up, basis_forward, projection, x_endpoint)) |p| {
-            const color = lightGizmoAxisColor(.x, self.light_gizmo.active_axis, hot_axis);
-            self.drawLineColored(origin_screen[0], origin_screen[1], p[0], p[1], color);
-            self.drawLightGizmoHandle(p[0], p[1], color);
-        }
-        if (self.projectWorldToScreen(camera_position, basis_right, basis_up, basis_forward, projection, y_endpoint)) |p| {
-            const color = lightGizmoAxisColor(.y, self.light_gizmo.active_axis, hot_axis);
-            self.drawLineColored(origin_screen[0], origin_screen[1], p[0], p[1], color);
-            self.drawLightGizmoHandle(p[0], p[1], color);
-        }
-        if (self.projectWorldToScreen(camera_position, basis_right, basis_up, basis_forward, projection, z_endpoint)) |p| {
-            const color = lightGizmoAxisColor(.z, self.light_gizmo.active_axis, hot_axis);
-            self.drawLineColored(origin_screen[0], origin_screen[1], p[0], p[1], color);
-            self.drawLightGizmoHandle(p[0], p[1], color);
-        }
-
-        self.drawLineColored(origin_screen[0] - 2, origin_screen[1], origin_screen[0] + 2, origin_screen[1], 0xFFFFFFFF);
-        self.drawLineColored(origin_screen[0], origin_screen[1] - 2, origin_screen[0], origin_screen[1] + 2, 0xFFFFFFFF);
-    }
-
-    fn drawLightGizmoHandle(self: *Renderer, x: i32, y: i32, color: u32) void {
-        self.drawLineColored(x - 3, y, x + 3, y, color);
-        self.drawLineColored(x, y - 3, x, y + 3, color);
-    }
-
-    pub fn drawSceneItemGizmo(
-        self: *Renderer,
-        camera_position: math.Vec3,
-        basis_right: math.Vec3,
-        basis_up: math.Vec3,
-        basis_forward: math.Vec3,
-        projection: ProjectionParams,
-    ) void {
-        var draw_ctx = SceneItemGizmoDrawContext{
-            .renderer = self,
-            .camera_position = camera_position,
-            .basis_right = basis_right,
-            .basis_up = basis_up,
-            .basis_forward = basis_forward,
-            .projection = projection,
-        };
-        self.scene_item_gizmo.drawGizmo(
-            @ptrCast(&draw_ctx),
-            projectSceneItemWorld,
-            drawSceneItemGizmoLine,
-        );
-    }
-
-    pub fn drawLightGlow(
-        self: *Renderer,
-        light_pos: math.Vec3,
-        light_camera_z: f32,
-        center_x: f32,
-        center_y: f32,
-        x_scale: f32,
-        y_scale: f32,
-        glow_color: math.Vec3,
-        radius_px: f32,
-        intensity: f32,
-    ) void {
-        if (light_camera_z <= NEAR_CLIP) return;
-        if (radius_px <= 0.5 or intensity <= 0.0) return;
-
-        const ndc_x = (light_pos.x / light_camera_z) * x_scale;
-        const ndc_y = (light_pos.y / light_camera_z) * y_scale;
-        const screen_x = ndc_x * center_x + center_x;
-        const screen_y = -ndc_y * center_y + center_y;
-        const cx = @as(i32, @intFromFloat(screen_x));
-        const cy = @as(i32, @intFromFloat(screen_y));
-        const radius: i32 = @intFromFloat(radius_px);
-        const inv_radius = 1.0 / @max(radius_px, 1.0);
-
-        var py = cy - radius;
-        while (py <= cy + radius) : (py += 1) {
-            if (py < 0 or py >= self.bitmap.height) continue;
-            var px = cx - radius;
-            while (px <= cx + radius) : (px += 1) {
-                if (px < 0 or px >= self.bitmap.width) continue;
-                const dx = @as(f32, @floatFromInt(px - cx));
-                const dy = @as(f32, @floatFromInt(py - cy));
-                const dist = @sqrt(dx * dx + dy * dy);
-                if (dist > radius_px) continue;
-                const falloff = (1.0 - dist * inv_radius);
-                const glow = falloff * falloff * intensity;
-                const idx = @as(usize, @intCast(py)) * @as(usize, @intCast(self.bitmap.width)) + @as(usize, @intCast(px));
-                if (idx >= self.bitmap.pixels.len) continue;
-
-                const src = self.bitmap.pixels[idx];
-                const sr: i32 = @intCast((src >> 16) & 0xFF);
-                const sg: i32 = @intCast((src >> 8) & 0xFF);
-                const sb: i32 = @intCast(src & 0xFF);
-                const add_r: i32 = @intFromFloat(std.math.clamp(glow_color.x * 255.0 * glow, 0.0, 255.0));
-                const add_g: i32 = @intFromFloat(std.math.clamp(glow_color.y * 255.0 * glow, 0.0, 255.0));
-                const add_b: i32 = @intFromFloat(std.math.clamp(glow_color.z * 255.0 * glow, 0.0, 255.0));
-                const out_r: u32 = @intCast(std.math.clamp(sr + add_r, 0, 255));
-                const out_g: u32 = @intCast(std.math.clamp(sg + add_g, 0, 255));
-                const out_b: u32 = @intCast(std.math.clamp(sb + add_b, 0, 255));
-                self.bitmap.pixels[idx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b;
-            }
-        }
-    }
-
-// ====== post-process pass dispatchers (impl in renderer/post_dispatch.zig) ======
-    pub const applySSGIPass = post_dispatch.applySSGIPass;
-    pub const applyAmbientOcclusionPass = post_dispatch.applyAmbientOcclusionPass;
-    pub const applyDepthFogPass = post_dispatch.applyDepthFogPass;
-    pub const applyTemporalAARows = post_dispatch.applyTemporalAARows;
-    pub const applyGodRaysPass = post_dispatch.applyGodRaysPass;
-    pub const applyLensFlarePass = post_dispatch.applyLensFlarePass;
-    pub const applyChromaticAberrationPass = post_dispatch.applyChromaticAberrationPass;
-    pub const applyFilmGrainVignettePass = post_dispatch.applyFilmGrainVignettePass;
-    pub const applyMotionBlurPass = post_dispatch.applyMotionBlurPass;
-    pub const applyTemporalAAPass = post_dispatch.applyTemporalAAPass;
-    pub const applySSRPass = post_dispatch.applySSRPass;
-    pub const applyDepthOfFieldPass = post_dispatch.applyDepthOfFieldPass;
-    pub const applyBloomPass = post_dispatch.applyBloomPass;
-    pub const applyBlockbusterColorGradePass = post_dispatch.applyBlockbusterColorGradePass;
-
-
 
 
     /// buildBlockbusterGradeProfile builds data structures used by Renderer.
