@@ -19,6 +19,7 @@ const scene_math = @import("math.zig");
 const camera_state = @import("camera_state.zig");
 const loader_module = @import("loader.zig");
 const transform_math = @import("transform_math.zig");
+const bootstrap_module = @import("bootstrap.zig");
 const physics_utils = @import("physics_utils");
 const platform_input_module = @import("platform_input");
 const input_actions_module = @import("input_actions");
@@ -78,92 +79,16 @@ pub const buildSceneDescription = loader_module.buildSceneDescription;
 pub const parseSceneLightShadowMode = loader_module.parseSceneLightShadowMode;
 pub const camera_utils = camera_state;
 
-pub const BootstrapTextureSlot = struct {
-    slot: usize,
-    path: []const u8,
-};
-
-pub const BootstrapScriptAttachment = struct {
-    module_name: []const u8,
-};
-
-pub const BootstrapAsset = struct {
-    authored_id: ?[]const u8 = null,
-    parent_authored_id: ?[]const u8 = null,
-    scripts: []const BootstrapScriptAttachment = &.{},
-    model_path: []const u8,
-    position: scene_math.Vec3,
-    rotation_deg: scene_math.Vec3,
-    scale: scene_math.Vec3,
-    texture_slots: []const BootstrapTextureSlot = &.{},
-    physics_motion: ?components_module.PhysicsMotion = null,
-    physics_shape: ?[]const u8 = null,
-    physics_mass: ?f32 = null,
-    physics_restitution: ?f32 = null,
-};
-
-pub const BootstrapLight = struct {
-    authored_id: ?[]const u8 = null,
-    parent_authored_id: ?[]const u8 = null,
-    scripts: []const BootstrapScriptAttachment = &.{},
-    direction: scene_math.Vec3,
-    distance: f32,
-    color: scene_math.Vec3,
-    glow_radius: f32 = 0.0,
-    glow_intensity: f32 = 0.0,
-    shadow_mode: components_module.LightShadowMode = .meshlet_ray,
-    shadow_update_interval_frames: u32 = 1,
-    shadow_map_size: usize = 512,
-};
-
-pub const BootstrapCamera = struct {
-    authored_id: ?[]const u8 = null,
-    parent_authored_id: ?[]const u8 = null,
-    scripts: []const BootstrapScriptAttachment = &.{},
-    position: scene_math.Vec3,
-    pitch: f32,
-    yaw: f32,
-    fov_deg: f32,
-};
-
-pub const BootstrapScene = struct {
-    camera: BootstrapCamera,
-    lights: []const BootstrapLight,
-    assets: []const BootstrapAsset,
-    hdri_path: ?[]const u8 = null,
-};
-
-pub const RuntimeStats = struct {
-    frame_index: u64 = 0,
-    resident_renderables: usize = 0,
-    resident_lights: usize = 0,
-    script_phase_pins: usize = 0,
-    physics_phase_pins: usize = 0,
-    render_extraction_pins: usize = 0,
-};
-
-const PhaseAssetUsage = enum {
-    script_dispatch,
-    physics_sync,
-};
-
-pub const FramePhase = enum {
-    input,
-    residency_decisions,
-    job_completion_integration,
-    script_events,
-    fixed_step_physics,
-    transform_propagation,
-    render_extraction,
-    present,
-    safe_offload_deferred_destruction,
-};
-
-pub const RuntimeRenderableSetup = struct {
-    entity: EntityId,
-    local_bounds_min: scene_math.Vec3,
-    local_bounds_max: scene_math.Vec3,
-};
+pub const BootstrapTextureSlot = bootstrap_module.BootstrapTextureSlot;
+pub const BootstrapScriptAttachment = bootstrap_module.BootstrapScriptAttachment;
+pub const BootstrapAsset = bootstrap_module.BootstrapAsset;
+pub const BootstrapLight = bootstrap_module.BootstrapLight;
+pub const BootstrapCamera = bootstrap_module.BootstrapCamera;
+pub const BootstrapScene = bootstrap_module.BootstrapScene;
+pub const RuntimeStats = bootstrap_module.RuntimeStats;
+pub const FramePhase = bootstrap_module.FramePhase;
+pub const RuntimeRenderableSetup = bootstrap_module.RuntimeRenderableSetup;
+const PhaseAssetUsage = bootstrap_module.PhaseAssetUsage;
 
 const PendingParentLink = struct {
     child: EntityId,
