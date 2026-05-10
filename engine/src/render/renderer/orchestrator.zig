@@ -211,7 +211,7 @@ pub fn render3DMeshWithPump(renderer: *Renderer, mesh: *const Mesh, pump: ?*cons
         FrameExecutionContext,
         compiled_frame_plan,
         frame_exec_ctx,
-        Renderer.frame_stage_dispatcher,
+        @import("scene_dispatch.zig").frame_stage_dispatcher,
         std.time.nanoTimestamp(),
     );
     finalizeFrame(renderer, current_time);
