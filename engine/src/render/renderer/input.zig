@@ -7,11 +7,11 @@ const CursorStyle = renderer_module.CursorStyle;
 const SceneItemBinding = renderer_module.SceneItemBinding;
 const SceneItemTranslateRequest = renderer_module.SceneItemTranslateRequest;
 const direct_backend = @import("../backends/direct_backend.zig");
-const camera_runtime = @import("../camera_runtime.zig");
-const camera_controller = @import("../camera_controller.zig");
+const camera_runtime = @import("../camera/runtime.zig");
+const camera_controller = @import("../camera/controller.zig");
 const input = @import("platform_input");
 const log = @import("../../core/log.zig");
-const scene_item_gizmo = @import("../scene_item_gizmo.zig");
+const scene_item_gizmo = @import("../scene/item_gizmo.zig");
 
 const renderer_logger = renderer_module.renderer_logger;
 const LightGizmoAxis = renderer_module.LightGizmoAxis;

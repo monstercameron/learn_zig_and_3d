@@ -1,7 +1,7 @@
-const std = @import("std");
-const math = @import("../core/math.zig");
-const config = @import("../core/app_config.zig");
-const camera_controller = @import("camera_controller.zig");
+﻿const std = @import("std");
+const math = @import("../../core/math.zig");
+const config = @import("../../core/app_config.zig");
+const camera_controller = @import("controller.zig");
 
 const fps_camera_floor_y: f32 = 0.0;
 const fps_camera_eye_height: f32 = 1.6;

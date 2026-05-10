@@ -3,8 +3,8 @@
 
 const std = @import("std");
 const windows = std.os.windows;
-const math = @import("../core/math.zig");
-const TileRenderer = @import("core/tile_renderer.zig");
+const math = @import("../../core/math.zig");
+const TileRenderer = @import("../core/tile_renderer.zig");
 
 pub const Axis = enum(u8) {
     x = 0,

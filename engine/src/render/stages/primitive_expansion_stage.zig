@@ -3,7 +3,7 @@ const job_system = @import("job_system");
 const direct_batch = @import("../direct/batch.zig");
 const direct_mesh = @import("../direct/mesh.zig");
 const direct_meshlets = @import("../direct/meshlets.zig");
-const visible_scene = @import("../visible_scene.zig");
+const visible_scene = @import("../scene/visible.zig");
 
 const JobSystem = job_system.JobSystem;
 

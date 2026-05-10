@@ -19,7 +19,7 @@ const rasterization_stage = @import("../stages/rasterization_stage.zig");
 const shading_stage = @import("../stages/shading_stage.zig");
 const composition_stage = @import("../stages/composition_stage.zig");
 const post_process_stage = @import("../stages/post_process_stage.zig");
-const visible_scene = @import("../visible_scene.zig");
+const visible_scene = @import("../scene/visible.zig");
 const Job = job_system.Job;
 const JobSystem = job_system.JobSystem;
 

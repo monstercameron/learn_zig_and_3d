@@ -2,7 +2,7 @@
 const direct_batch = @import("../direct/batch.zig");
 const direct_meshlets = @import("../direct/meshlets.zig");
 const direct_scene_packets = @import("../direct/scene_packets.zig");
-const visible_scene = @import("../visible_scene.zig");
+const visible_scene = @import("../scene/visible.zig");
 
 pub const Result = struct {
     visible_packet_count: usize,

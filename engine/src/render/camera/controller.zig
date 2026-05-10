@@ -2,8 +2,8 @@
 //! Renderer subsystem module for camera/input integration, overlays, or scene interaction.
 
 const std = @import("std");
-const math = @import("../core/math.zig");
-const config = @import("../core/app_config.zig");
+const math = @import("../../core/math.zig");
+const config = @import("../../core/app_config.zig");
 const input = @import("platform_input");
 
 pub const ControlMode = enum(u8) {
