@@ -1,4 +1,4 @@
-//! Build configuration for benchmark binaries and benchmark-only dependencies.
+﻿//! Build configuration for benchmark binaries and benchmark-only dependencies.
 //! Benchmark build/runtime integration module.
 
 const std = @import("std");
@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const engine_bench_module = b.createModule(.{
-        .root_source_file = b.path("../engine/src/bench_exports.zig"),
+        .root_source_file = b.path("../engine/src/bench/exports.zig"),
         .target = target,
         .optimize = optimize,
     });

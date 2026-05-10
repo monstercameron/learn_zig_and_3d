@@ -1,10 +1,10 @@
 ﻿const std = @import("std");
-const math = @import("core/math.zig");
-const mesh_module = @import("render/core/mesh.zig");
-const gltf_loader = @import("assets/gltf_loader.zig");
-const obj_loader = @import("assets/obj_loader.zig");
+const math = @import("../core/math.zig");
+const mesh_module = @import("../render/core/mesh.zig");
+const gltf_loader = @import("../assets/gltf_loader.zig");
+const obj_loader = @import("../assets/obj_loader.zig");
 const scene_runtime = @import("scene_main");
-const log = @import("core/log.zig");
+const log = @import("../core/log.zig");
 
 const LoadedSceneAsset = scene_runtime.LoadedSceneAsset;
 

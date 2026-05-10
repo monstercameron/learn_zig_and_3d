@@ -47,14 +47,14 @@ const texture = @import("assets/texture.zig");
 const mesh_module = @import("render/core/mesh.zig");
 const config = @import("core/app_config.zig");
 const cpu_features = @import("core/cpu_features.zig");
-const app_loop = @import("app_loop.zig");
+const app_loop = @import("runtime/loop.zig");
 const platform_loop = @import("platform/loop.zig");
 const input = @import("platform_input");
 const input_actions = @import("input_actions");
 const log = @import("core/log.zig");
 const scene_runtime = @import("scene_main");
-const mesh_loaders = @import("mesh_loaders.zig");
-const runtime_env = @import("runtime_env.zig");
+const mesh_loaders = @import("loaders/mesh.zig");
+const runtime_env = @import("runtime/env.zig");
 const main_module = @This();
 
 const app_logger = log.get("app.main");

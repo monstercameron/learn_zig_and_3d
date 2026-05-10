@@ -1,6 +1,6 @@
 ﻿const std = @import("std");
-const log = @import("core/log.zig");
-const renderer_module = @import("render/renderer.zig");
+const log = @import("../core/log.zig");
+const renderer_module = @import("../render/renderer.zig");
 
 const Renderer = renderer_module.Renderer;
 const app_logger = log.get("app.main");
