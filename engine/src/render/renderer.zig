@@ -36,7 +36,7 @@ const builtin = @import("builtin");
 const windows = std.os.windows;
 const math = @import("../core/math.zig");
 const MeshModule = @import("core/mesh.zig");
-const Mesh = MeshModule.Mesh;
+pub const Mesh = MeshModule.Mesh;
 const Meshlet = MeshModule.Meshlet;
 const config = @import("../core/app_config.zig");
 const input = @import("platform_input");
@@ -85,6 +85,7 @@ const scanline = @import("core/scanline.zig");
 const texture = @import("../assets/texture.zig");
 const direct_primitives = @import("direct/primitives.zig");
 const direct_showcase = @import("direct/showcase.zig");
+const post_dispatch = @import("renderer/post_dispatch.zig");
 const frame_resources = @import("frame/resources.zig");
 const frame_setup_stage = @import("stages/frame_setup_stage.zig");
 const presentation_stage = @import("stages/presentation_stage.zig");
@@ -99,7 +100,7 @@ const meshlet_logger = log.get("renderer.meshlet");
 const ground_logger = log.get("renderer.ground");
 
 const NEAR_CLIP: f32 = 0.01;
-const NEAR_EPSILON: f32 = 1e-4;
+pub const NEAR_EPSILON: f32 = 1e-4;
 const INVALID_PROJECTED_COORD: i32 = -1000;
 const ENABLE_MESHLET_CONE_CULL = false;
 const fps_camera_floor_y: f32 = 0.0;
@@ -499,7 +500,7 @@ const TemporalAAConfig = struct {
     depth_threshold: f32,
 };
 
-const ProjectionParams = struct {
+pub const ProjectionParams = struct {
     center_x: f32,
     center_y: f32,
     x_scale: f32,
@@ -701,7 +702,7 @@ fn averageBlur5(sum: i32) u8 {
     return @intCast(@divTrunc(sum + 2, 5));
 }
 
-fn validSceneCameraSample(camera_pos: math.Vec3) bool {
+pub fn validSceneCameraSample(camera_pos: math.Vec3) bool {
     return render_utils.validSceneCameraSample(camera_pos, NEAR_CLIP);
 }
 
@@ -724,7 +725,7 @@ const ao_sample_offsets = [_][2]i32{
     .{ -1, -1 },
 };
 
-const TemporalAAViewState = struct {
+pub const TemporalAAViewState = struct {
     camera_position: math.Vec3,
     basis_right: math.Vec3,
     basis_up: math.Vec3,
@@ -818,7 +819,7 @@ fn darkenPixelSpan(pixels: []u32, start_index: usize, end_index: usize, scale: f
     }
 }
 
-const cameraToWorldPosition = render_utils.cameraToWorldPosition;
+pub const cameraToWorldPosition = render_utils.cameraToWorldPosition;
 
 const taa_jitter_sequence = [_]math.Vec2{
     .{ .x = 0.25, .y = -0.16666666 },
@@ -848,7 +849,7 @@ fn taaJitterForFrame(frame_index: u64) math.Vec2 {
 }
 
 /// projectCameraPositionFloat projects coordinates for Renderer calculations.
-fn projectCameraPositionFloat(position: math.Vec3, projection: ProjectionParams) math.Vec2 {
+pub fn projectCameraPositionFloat(position: math.Vec3, projection: ProjectionParams) math.Vec2 {
     return render_utils.projectCameraPositionFloat(position, projection, NEAR_EPSILON);
 }
 
@@ -994,7 +995,7 @@ fn packShiftedColorBatch(
     }
 }
 
-fn tryApplyTemporalAAMeshletBatch(
+pub fn tryApplyTemporalAAMeshletBatch(
     self: *Renderer,
     mesh: *const Mesh,
     current_view: TemporalAAViewState,
@@ -1025,7 +1026,7 @@ fn tryApplyTemporalAAMeshletBatch(
 }
 
 /// renderAmbientOcclusionRows renders Renderer output.
-fn renderAmbientOcclusionRows(
+pub fn renderAmbientOcclusionRows(
     scene_camera: []const math.Vec3,
     scene_width: usize,
     scene_height: usize,
@@ -1037,15 +1038,15 @@ fn renderAmbientOcclusionRows(
     ssao_rows.renderRows(scene_camera, scene_width, scene_height, ao, config_value, start_row, end_row);
 }
 
-fn blurAmbientOcclusionHorizontalRows(ao: *AOScratch, depth_threshold: f32, start_row: usize, end_row: usize) void {
+pub fn blurAmbientOcclusionHorizontalRows(ao: *AOScratch, depth_threshold: f32, start_row: usize, end_row: usize) void {
     ssao_rows.blurHorizontalRows(ao, depth_threshold, start_row, end_row);
 }
 
-fn blurAmbientOcclusionVerticalRows(ao: *AOScratch, depth_threshold: f32, start_row: usize, end_row: usize) void {
+pub fn blurAmbientOcclusionVerticalRows(ao: *AOScratch, depth_threshold: f32, start_row: usize, end_row: usize) void {
     ssao_rows.blurVerticalRows(ao, depth_threshold, start_row, end_row);
 }
 
-fn compositeAmbientOcclusionRows(
+pub fn compositeAmbientOcclusionRows(
     dst: []u32,
     scene_camera: []const math.Vec3,
     dst_width: usize,
@@ -1267,7 +1268,7 @@ const CompositeJobContext = struct {
     }
 };
 
-fn noopRenderPassJob(ctx: *anyopaque) void {
+pub fn noopRenderPassJob(ctx: *anyopaque) void {
     _ = ctx;
 }
 
@@ -1481,13 +1482,13 @@ pub const Renderer = struct {
     dof_target_focal_distance: f32,
     taa_job_contexts: []TAAJobContext,
     color_grade_job_contexts: []ColorGradeJobContext,
-    moblur_job_contexts: []MotionBlurJobContext,
+    moblur_job_contexts: []post_dispatch.MotionBlurJobContext,
     moblur_scratch_pixels: []u32,
-    god_rays_job_contexts: []GodRaysJobContext,
+    god_rays_job_contexts: []post_dispatch.GodRaysJobContext,
     god_rays_scratch_pixels: []u32,
-    chromatic_aberration_job_contexts: []ChromaticAberrationJobContext,
-    film_grain_job_contexts: []FilmGrainVignetteJobContext,
-    lens_flare_job_contexts: []LensFlareJobContext,
+    chromatic_aberration_job_contexts: []post_dispatch.ChromaticAberrationJobContext,
+    film_grain_job_contexts: []post_dispatch.FilmGrainVignetteJobContext,
+    lens_flare_job_contexts: []post_dispatch.LensFlareJobContext,
     lens_flare_scratch_pixels: []u32,
     color_grade_jobs: []Job,
 
@@ -1814,23 +1815,23 @@ pub const Renderer = struct {
         const color_grade_job_count = @max(@as(usize, 1), @as(usize, @intCast(job_system.worker_count * 2)));
         const color_grade_job_contexts = try allocator.alloc(ColorGradeJobContext, color_grade_job_count);
         errdefer allocator.free(color_grade_job_contexts);
-        const moblur_job_contexts = try allocator.alloc(MotionBlurJobContext, color_grade_job_count);
+        const moblur_job_contexts = try allocator.alloc(post_dispatch.MotionBlurJobContext, color_grade_job_count);
         errdefer allocator.free(moblur_job_contexts);
         const moblur_scratch_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(moblur_scratch_pixels);
 
-        const god_rays_job_contexts = try allocator.alloc(GodRaysJobContext, color_grade_job_count);
+        const god_rays_job_contexts = try allocator.alloc(post_dispatch.GodRaysJobContext, color_grade_job_count);
         errdefer allocator.free(god_rays_job_contexts);
         const god_rays_scratch_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(god_rays_scratch_pixels);
 
-        const chromatic_aberration_job_contexts = try allocator.alloc(ChromaticAberrationJobContext, color_grade_job_count);
+        const chromatic_aberration_job_contexts = try allocator.alloc(post_dispatch.ChromaticAberrationJobContext, color_grade_job_count);
         errdefer allocator.free(chromatic_aberration_job_contexts);
 
-        const film_grain_job_contexts = try allocator.alloc(FilmGrainVignetteJobContext, color_grade_job_count);
+        const film_grain_job_contexts = try allocator.alloc(post_dispatch.FilmGrainVignetteJobContext, color_grade_job_count);
         errdefer allocator.free(film_grain_job_contexts);
 
-        const lens_flare_job_contexts = try allocator.alloc(LensFlareJobContext, color_grade_job_count);
+        const lens_flare_job_contexts = try allocator.alloc(post_dispatch.LensFlareJobContext, color_grade_job_count);
         errdefer allocator.free(lens_flare_job_contexts);
         const lens_flare_scratch_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
         errdefer allocator.free(lens_flare_scratch_pixels);
@@ -4660,383 +4661,23 @@ pub const Renderer = struct {
         }, self.effectiveFramePacingTargetNs());
         return current_time;
     }
+// ====== post-process pass dispatchers (impl in renderer/post_dispatch.zig) ======
+    pub const applySSGIPass = post_dispatch.applySSGIPass;
+    pub const applyAmbientOcclusionPass = post_dispatch.applyAmbientOcclusionPass;
+    pub const applyDepthFogPass = post_dispatch.applyDepthFogPass;
+    pub const applyTemporalAARows = post_dispatch.applyTemporalAARows;
+    pub const applyGodRaysPass = post_dispatch.applyGodRaysPass;
+    pub const applyLensFlarePass = post_dispatch.applyLensFlarePass;
+    pub const applyChromaticAberrationPass = post_dispatch.applyChromaticAberrationPass;
+    pub const applyFilmGrainVignettePass = post_dispatch.applyFilmGrainVignettePass;
+    pub const applyMotionBlurPass = post_dispatch.applyMotionBlurPass;
+    pub const applyTemporalAAPass = post_dispatch.applyTemporalAAPass;
+    pub const applySSRPass = post_dispatch.applySSRPass;
+    pub const applyDepthOfFieldPass = post_dispatch.applyDepthOfFieldPass;
+    pub const applyBloomPass = post_dispatch.applyBloomPass;
+    pub const applyBlockbusterColorGradePass = post_dispatch.applyBlockbusterColorGradePass;
 
-    /// Applies ssgi pass.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn applySSGIPass(self: *Renderer) void {
-        const pass_start = std.time.nanoTimestamp();
-        const height: usize = @intCast(self.bitmap.height);
-        ssgi_pass.runPipeline(self, height, noopRenderPassJob);
-        self.recordRenderPassTiming("ssgi", pass_start);
-    }
-    /// Applies ambient occlusion pass.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn applyAmbientOcclusionPass(self: *Renderer) void {
-        if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
-        const pass_start = std.time.nanoTimestamp();
-        const scene_width: usize = @intCast(self.bitmap.width);
-        const scene_height: usize = @intCast(self.bitmap.height);
-        ssao_pass.runPipeline(
-            self,
-            scene_width,
-            scene_height,
-            noopRenderPassJob,
-            renderAmbientOcclusionRows,
-            blurAmbientOcclusionHorizontalRows,
-            blurAmbientOcclusionVerticalRows,
-            compositeAmbientOcclusionRows,
-        );
-        self.recordRenderPassTiming("ssao", pass_start);
-    }
 
-    /// Applies depth fog pass.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn applyDepthFogPass(self: *Renderer) void {
-        if (self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
-        const pass_start = std.time.nanoTimestamp();
-        const width: usize = @intCast(self.bitmap.width);
-        const height: usize = @intCast(self.bitmap.height);
-        depth_fog_pass.runPipeline(self, width, height, noopRenderPassJob);
-        self.recordRenderPassTiming("depth_fog", pass_start);
-    }
-
-    /// Applies temporal aa rows.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn applyTemporalAARows(
-        self: *Renderer,
-        mesh: *const Mesh,
-        current_view: TemporalAAViewState,
-        previous_view: TemporalAAViewState,
-        start_row: usize,
-        end_row: usize,
-        width: usize,
-        height: usize,
-    ) void {
-        taa_pass.runRows(
-            self,
-            mesh,
-            current_view,
-            previous_view,
-            start_row,
-            end_row,
-            width,
-            height,
-            tryApplyTemporalAAMeshletBatch,
-            validSceneCameraSample,
-            cameraToWorldPosition,
-            projectCameraPositionFloat,
-            NEAR_EPSILON,
-        );
-    }
-
-    const GodRaysJobContext = struct {
-        renderer: *Renderer,
-        start_row: usize,
-        end_row: usize,
-        width: usize,
-        height: usize,
-        light_screen_pos: math.Vec2,
-
-        /// Runs this module step with the currently bound configuration.
-        /// Keeps run as the single implementation point so call-site behavior stays consistent.
-        pub fn run(ctx_ptr: *anyopaque) void {
-            const ctx: *GodRaysJobContext = @ptrCast(@alignCast(ctx_ptr));
-            god_rays_pass.runRows(
-                ctx.renderer.bitmap.pixels,
-                ctx.renderer.god_rays_scratch_pixels,
-                ctx.start_row,
-                ctx.end_row,
-                ctx.width,
-                ctx.height,
-                ctx.light_screen_pos.x,
-                ctx.light_screen_pos.y,
-                config.POST_GOD_RAYS_SAMPLES,
-                config.POST_GOD_RAYS_DECAY,
-                config.POST_GOD_RAYS_DENSITY,
-                config.POST_GOD_RAYS_WEIGHT,
-                config.POST_GOD_RAYS_EXPOSURE,
-            );
-        }
-    };
-
-    const ChromaticAberrationJobContext = struct {
-        renderer: *Renderer,
-        start_row: usize,
-        end_row: usize,
-        width: usize,
-        height: usize,
-
-        /// Runs this module step with the currently bound configuration.
-        /// Keeps run as the single implementation point so call-site behavior stays consistent.
-        pub fn run(ctx_ptr: *anyopaque) void {
-            const ctx: *ChromaticAberrationJobContext = @ptrCast(@alignCast(ctx_ptr));
-            chromatic_aberration_pass.runRows(
-                ctx.renderer.bitmap.pixels,
-                ctx.renderer.moblur_scratch_pixels,
-                ctx.start_row,
-                ctx.end_row,
-                ctx.width,
-                ctx.height,
-                config.POST_CHROMATIC_ABERRATION_STRENGTH,
-            );
-        }
-    };
-
-    const FilmGrainVignetteJobContext = struct {
-        renderer: *Renderer,
-        start_row: usize,
-        end_row: usize,
-        width: usize,
-        height: usize,
-
-        /// Runs this module step with the currently bound configuration.
-        /// Keeps run as the single implementation point so call-site behavior stays consistent.
-        pub fn run(ctx_ptr: *anyopaque) void {
-            const ctx: *FilmGrainVignetteJobContext = @ptrCast(@alignCast(ctx_ptr));
-            film_grain_vignette_pass.runRows(
-                ctx.renderer.bitmap.pixels,
-                ctx.start_row,
-                ctx.end_row,
-                ctx.width,
-                ctx.height,
-                config.POST_FILM_GRAIN_STRENGTH,
-                config.POST_VIGNETTE_STRENGTH,
-                @as(u32, @intCast(ctx.renderer.total_frames_rendered % 1000)),
-            );
-        }
-    };
-
-    const LensFlareJobContext = struct {
-        renderer: *Renderer,
-        start_row: usize,
-        end_row: usize,
-        width: usize,
-        height: usize,
-
-        /// Runs this module step with the currently bound configuration.
-        /// Keeps run as the single implementation point so call-site behavior stays consistent.
-        pub fn run(ctx_ptr: *anyopaque) void {
-            const ctx: *LensFlareJobContext = @ptrCast(@alignCast(ctx_ptr));
-            _ = ctx.height;
-            lens_flare_pass.runRows(
-                ctx.renderer.bitmap.pixels,
-                ctx.renderer.lens_flare_scratch_pixels,
-                ctx.start_row,
-                ctx.end_row,
-                ctx.width,
-                config.POST_LENS_FLARE_THRESHOLD,
-                @as(f32, @floatFromInt(config.POST_LENS_FLARE_INTENSITY_PERCENT)) / 100.0,
-            );
-        }
-    };
-
-    const MotionBlurJobContext = struct {
-        renderer: *Renderer,
-        current_view: TemporalAAViewState,
-        previous_view: TemporalAAViewState,
-        start_row: usize,
-        end_row: usize,
-        width: usize,
-        height: usize,
-
-        /// Runs this module step with the currently bound configuration.
-        /// Keeps run as the single implementation point so call-site behavior stays consistent.
-        pub fn run(ctx_ptr: *anyopaque) void {
-            const ctx: *MotionBlurJobContext = @ptrCast(@alignCast(ctx_ptr));
-            motion_blur_pass.runRows(
-                ctx.renderer.bitmap.pixels,
-                ctx.renderer.moblur_scratch_pixels,
-                ctx.renderer.scene_camera,
-                ctx.start_row,
-                ctx.end_row,
-                ctx.width,
-                ctx.height,
-                ctx.current_view,
-                ctx.previous_view,
-            );
-        }
-    };
-
-    // --- God Rays ---
-    pub fn applyGodRaysPass(self: *Renderer, projection: ProjectionParams, light_dir_world: math.Vec3) void {
-        if (self.bitmap.pixels.len == 0) return;
-        const pass_start = std.time.nanoTimestamp();
-        const width: usize = @intCast(self.bitmap.width);
-        const height: usize = @intCast(self.bitmap.height);
-
-        // actually we can just project the light_dir_world as a point relative to camera since it's directional.
-        // Actually, we already have self.scene_camera setup, so we know our view.
-        // But for god rays we usually just want a screen coordinate where the light is. Let's simplify.
-        const light_pos_view = math.Vec3.new(math.Vec3.dot(light_dir_world, self.taa_previous_view.basis_right), // just using any active view basis
-            math.Vec3.dot(light_dir_world, self.taa_previous_view.basis_up), math.Vec3.dot(light_dir_world, self.taa_previous_view.basis_forward));
-
-        var light_screen_pos = math.Vec2.new(-1000, -1000);
-        if (light_pos_view.z > 0.0) {
-            // Light is in front
-            const light_proj = projectCameraPositionFloat(math.Vec3.scale(light_pos_view, 1000.0), projection);
-            light_screen_pos = math.Vec2.new(light_proj.x, light_proj.y);
-        }
-        god_rays_pass.runPipeline(
-            self,
-            width,
-            height,
-            light_screen_pos.x,
-            light_screen_pos.y,
-            config.POST_GOD_RAYS_SAMPLES,
-            config.POST_GOD_RAYS_DECAY,
-            config.POST_GOD_RAYS_DENSITY,
-            config.POST_GOD_RAYS_WEIGHT,
-            config.POST_GOD_RAYS_EXPOSURE,
-            noopRenderPassJob,
-        );
-        self.recordRenderPassTiming("god_rays", pass_start);
-    }
-
-    // --- Lens Flare ---
-    pub fn applyLensFlarePass(self: *Renderer) void {
-        if (self.bitmap.pixels.len == 0) return;
-        const pass_start = std.time.nanoTimestamp();
-        const width: usize = @intCast(self.bitmap.width);
-        const height: usize = @intCast(self.bitmap.height);
-        lens_flare_pass.runPipeline(
-            self,
-            width,
-            height,
-            config.POST_LENS_FLARE_THRESHOLD,
-            @as(f32, @floatFromInt(config.POST_LENS_FLARE_INTENSITY_PERCENT)) / 100.0,
-            noopRenderPassJob,
-        );
-        self.recordRenderPassTiming("lens_flare", pass_start);
-    }
-
-    // --- Chromatic Aberration ---
-    pub fn applyChromaticAberrationPass(self: *Renderer) void {
-        if (self.bitmap.pixels.len == 0) return;
-        const pass_start = std.time.nanoTimestamp();
-        const width: usize = @intCast(self.bitmap.width);
-        const height: usize = @intCast(self.bitmap.height);
-        chromatic_aberration_pass.runPipeline(
-            self,
-            width,
-            height,
-            config.POST_CHROMATIC_ABERRATION_STRENGTH,
-            noopRenderPassJob,
-        );
-        self.recordRenderPassTiming("chromatic_aberration", pass_start);
-    }
-
-    // --- Film Grain & Vignette ---
-    pub fn applyFilmGrainVignettePass(self: *Renderer) void {
-        if (self.bitmap.pixels.len == 0) return;
-        const pass_start = std.time.nanoTimestamp();
-        const width: usize = @intCast(self.bitmap.width);
-        const height: usize = @intCast(self.bitmap.height);
-        film_grain_vignette_pass.runPipeline(
-            self,
-            width,
-            height,
-            config.POST_FILM_GRAIN_STRENGTH,
-            config.POST_VIGNETTE_STRENGTH,
-            @as(u32, @intCast(self.total_frames_rendered % 1000)),
-            noopRenderPassJob,
-        );
-        self.recordRenderPassTiming("film_grain_vignette", pass_start);
-    }
-
-    /// Applies motion blur pass.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn applyMotionBlurPass(self: *Renderer, current_view: TemporalAAViewState) void {
-        if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
-        const pass_start = std.time.nanoTimestamp();
-        const width: usize = @intCast(self.bitmap.width);
-        const height: usize = @intCast(self.bitmap.height);
-
-        // If TAA isn't populated, we can't reliably do motion blur
-        if (!self.taa_scratch.valid) return;
-
-        motion_blur_pass.runPipeline(self, current_view, height, width, noopRenderPassJob);
-        self.recordRenderPassTiming("motion_blur", pass_start);
-    }
-
-    /// Applies temporal aa pass.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn applyTemporalAAPass(self: *Renderer, mesh: *const Mesh, current_view: TemporalAAViewState) void {
-        const _zone = profiler.zone("applyTemporalAAPass");
-        defer if (_zone) |z| z.end();
-        if (self.bitmap.pixels.len == 0 or self.scene_camera.len != self.bitmap.pixels.len) return;
-        const pass_start = std.time.nanoTimestamp();
-        const width: usize = @intCast(self.bitmap.width);
-        const height: usize = @intCast(self.bitmap.height);
-        taa_pass.runPipeline(
-            self,
-            mesh,
-            current_view,
-            width,
-            height,
-            noopRenderPassJob,
-            taa_helpers.surfaceTagForHandle,
-            taa_helpers.packHistoryNormal,
-        );
-        self.recordRenderPassTiming("taa", pass_start);
-    }
-
-    /// Applies ssr pass.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn applySSRPass(self: *Renderer, projection: ProjectionParams) void {
-        if (self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
-        const pass_start = std.time.nanoTimestamp();
-
-        const scene_height: usize = @intCast(self.bitmap.height);
-        ssr_pass.runPipeline(self, projection, scene_height, noopRenderPassJob);
-        self.recordRenderPassTiming("ssr", pass_start);
-    }
-
-    /// Applies depth of field pass.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn applyDepthOfFieldPass(self: *Renderer) void {
-        if (self.bitmap.pixels.len == 0 or self.scene_depth.len != self.bitmap.pixels.len) return;
-        const pass_start = std.time.nanoTimestamp();
-
-        const scene_width: usize = @intCast(self.bitmap.width);
-        const scene_height: usize = @intCast(self.bitmap.height);
-        depth_of_field_pass.runPipeline(self, scene_width, scene_height, noopRenderPassJob);
-
-        self.recordRenderPassTiming("dof", pass_start);
-    }
-
-    /// Applies bloom pass.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn applyBloomPass(self: *Renderer) void {
-        if (self.bitmap.pixels.len == 0) return;
-        const pass_start = std.time.nanoTimestamp();
-        const scene_width: usize = @intCast(self.bitmap.width);
-        const scene_height: usize = @intCast(self.bitmap.height);
-        bloom_pass.runPipeline(
-            self,
-            scene_width,
-            scene_height,
-            config.POST_BLOOM_THRESHOLD,
-            config.POST_BLOOM_INTENSITY_PERCENT,
-            noopRenderPassJob,
-            bloom_rows.extractDownsampleRows,
-            bloom_rows.blurHorizontalRows,
-            bloom_rows.blurVerticalRows,
-            bloom_rows.compositeRows,
-        );
-        self.recordRenderPassTiming("bloom", pass_start);
-    }
-
-    /// Applies blockbuster color grade pass.
-    /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-    pub fn applyBlockbusterColorGradePass(self: *Renderer) void {
-        if (self.bitmap.pixels.len == 0) return;
-        const pass_start = std.time.nanoTimestamp();
-        const width: usize = @intCast(self.bitmap.width);
-        const height: usize = @intCast(self.bitmap.height);
-        color_grade_pass.runPipeline(self, width, height, noopRenderPassJob);
-
-        self.recordRenderPassTiming(config.POST_COLOR_PROFILE_NAME, pass_start);
-    }
 
     fn drawBitmap(self: *Renderer) void {
         _ = self.presentFrame(false) catch {
