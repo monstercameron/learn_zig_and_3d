@@ -1,7 +1,7 @@
 pub const pass_graph = @import("pipeline/pass_graph.zig");
 pub const frame_graph = @import("graph/frame_graph.zig");
 pub const frame_plan = @import("graph/frame_plan.zig");
-pub const full_pipeline = @import("full_pipeline.zig");
+pub const stages_descriptor = @import("stages/descriptor.zig");
 pub const direct_primitives = @import("direct/primitives.zig");
 pub const direct_packets = @import("direct/packets.zig");
 pub const direct_draw_list = @import("direct/draw_list.zig");

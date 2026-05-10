@@ -66,7 +66,7 @@ const frame_graph = @import("graph/frame_graph.zig");
 const frame_plan = @import("graph/frame_plan.zig");
 const frame_pipeline = @import("frame/pipeline.zig");
 const frame_executor = @import("frame/executor.zig");
-const frame_hooks = @import("frame/hooks.zig");
+const frame_dispatchers = @import("frame/dispatchers.zig");
 const render_utils = @import("core/utils.zig");
 const scene_item_gizmo = @import("scene_item_gizmo.zig");
 const camera_controller = @import("camera_controller.zig");
@@ -6226,8 +6226,8 @@ pub const Renderer = struct {
         self.god_rays_scratch_pixels = saved.god_rays_scratch_pixels;
         self.lens_flare_scratch_pixels = saved.lens_flare_scratch_pixels;
     }
-    const post_pass_dispatcher = frame_hooks.makePostPassDispatcher(PostPassExecutionContext);
-    const frame_stage_dispatcher = frame_hooks.makeFrameStageDispatcher(FrameExecutionContext);
+    const post_pass_dispatcher = frame_dispatchers.makePostPassDispatcher(PostPassExecutionContext);
+    const frame_stage_dispatcher = frame_dispatchers.makeFrameStageDispatcher(FrameExecutionContext);
 
     /// Applies post processing passes.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
