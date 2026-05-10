@@ -37,7 +37,7 @@ const windows = std.os.windows;
 const math = @import("../core/math.zig");
 const MeshModule = @import("core/mesh.zig");
 pub const Mesh = MeshModule.Mesh;
-const Meshlet = MeshModule.Meshlet;
+pub const Meshlet = MeshModule.Meshlet;
 const config = @import("../core/app_config.zig");
 const input = @import("platform_input");
 const skybox_pass = @import("passes/skybox_pass.zig");
@@ -94,6 +94,7 @@ const renderer_orchestrator = @import("renderer/orchestrator.zig");
 const renderer_scene_dispatch = @import("renderer/scene_dispatch.zig");
 const renderer_pacing = @import("renderer/pacing.zig");
 const renderer_draw = @import("renderer/draw.zig");
+const renderer_backend_glue = @import("renderer/backend_glue.zig");
 const frame_resources = @import("frame/resources.zig");
 const frame_setup_stage = @import("stages/frame_setup_stage.zig");
 const presentation_stage = @import("stages/presentation_stage.zig");
@@ -110,7 +111,7 @@ pub const ground_logger = log.get("renderer.ground");
 pub const NEAR_CLIP: f32 = 0.01;
 pub const NEAR_EPSILON: f32 = 1e-4;
 pub const INVALID_PROJECTED_COORD: i32 = -1000;
-const ENABLE_MESHLET_CONE_CULL = false;
+pub const ENABLE_MESHLET_CONE_CULL = false;
 const fps_camera_floor_y: f32 = 0.0;
 const fps_camera_eye_height: f32 = 1.6;
 pub const shadow_rebuild_dot_threshold: f32 = 0.9986; // about 3 degrees
@@ -1280,7 +1281,7 @@ pub fn noopRenderPassJob(ctx: *anyopaque) void {
     _ = ctx;
 }
 
-const clampByte = render_utils.clampByte;
+pub const clampByte = render_utils.clampByte;
 
 /// The `Renderer` struct holds the entire state of the rendering engine.
 /// It manages the window connection, the pixel buffer, the rendering pipeline, and application state.
@@ -1562,6 +1563,14 @@ pub const Renderer = struct {
     pub const drawSceneItemGizmo = renderer_draw.drawSceneItemGizmo;
     pub const drawLightGlow = renderer_draw.drawLightGlow;
 
+    // ====== backend glue + tile light cull + small draw (impl in renderer/backend_glue.zig) ======
+    pub const buildBlockbusterGradeProfile = renderer_backend_glue.buildBlockbusterGradeProfile;
+    pub const firstTileLightWithMode = renderer_backend_glue.firstTileLightWithMode;
+    pub const renderTiled = renderer_backend_glue.renderTiled;
+    pub const renderDirect = renderer_backend_glue.renderDirect;
+    pub const directFrameResources = renderer_backend_glue.directFrameResources;
+    pub const drawLineColored = renderer_backend_glue.drawLineColored;
+
     // ====== post-process pass dispatchers (impl in renderer/post_dispatch.zig) ======
     pub const applySSGIPass = post_dispatch.applySSGIPass;
     pub const applyAmbientOcclusionPass = post_dispatch.applyAmbientOcclusionPass;
@@ -1696,7 +1705,7 @@ pub const Renderer = struct {
         cache_projection: ProjectionParams,
     };
 
-    fn transformNormalFromBasis(basis_right: math.Vec3, basis_up: math.Vec3, basis_forward: math.Vec3, normal: math.Vec3) math.Vec3 {
+    pub fn transformNormalFromBasis(basis_right: math.Vec3, basis_up: math.Vec3, basis_forward: math.Vec3, normal: math.Vec3) math.Vec3 {
         const transformed = math.Vec3.new(
             math.Vec3.dot(normal, basis_right),
             math.Vec3.dot(normal, basis_up),
@@ -2233,257 +2242,4 @@ pub const Renderer = struct {
     }
 
 
-    /// buildBlockbusterGradeProfile builds data structures used by Renderer.
-    pub fn buildBlockbusterGradeProfile() ColorGradeProfile {
-        var profile: ColorGradeProfile = undefined;
-        var i: usize = 0;
-        while (i < 256) : (i += 1) {
-            const value: i32 = @intCast(i);
-            const contrasted = @divTrunc((value - 128) * config.POST_COLOR_CONTRAST_PERCENT, 100) + 128 + config.POST_COLOR_BRIGHTNESS_BIAS;
-            profile.base_curve[i] = clampByte(contrasted);
-
-            const shadow_span = 124 - value;
-            const highlight_span = value - 96;
-            const shadow = std.math.clamp(@divTrunc(shadow_span * 255, 124), 0, 255);
-            const highlight = std.math.clamp(@divTrunc(highlight_span * 255, 159), 0, 255);
-            profile.tone_add_r[i] = @intCast(@divTrunc(highlight * 26, 255) - @divTrunc(shadow * 10, 255));
-            profile.tone_add_g[i] = @intCast(@divTrunc(highlight * 8, 255) + @divTrunc(shadow * 10, 255));
-            profile.tone_add_b[i] = @intCast(-@divTrunc(highlight * 18, 255) + @divTrunc(shadow * 24, 255));
-        }
-        return profile;
-    }
-
-    fn meshletVisible(
-        self: *const Renderer,
-        meshlet: *const Meshlet,
-        camera_position: math.Vec3,
-        right: math.Vec3,
-        up: math.Vec3,
-        forward: math.Vec3,
-        projection: ProjectionParams,
-    ) bool {
-        _ = self;
-        const relative_center = math.Vec3.sub(meshlet.bounds_center, camera_position);
-        const center_cam = math.Vec3.new(
-            math.Vec3.dot(relative_center, right),
-            math.Vec3.dot(relative_center, up),
-            math.Vec3.dot(relative_center, forward),
-        );
-
-        const radius = meshlet.bounds_radius;
-        const safety_margin = radius * 0.5 + 1.0; // generous guard against over-eager clipping near the screen edges
-        const sphere_radius = radius + safety_margin;
-
-        if (center_cam.z + sphere_radius <= projection.near_plane - NEAR_EPSILON) return false;
-        if (projection.x_scale <= 0.0 or projection.y_scale <= 0.0) return true;
-
-        const side_plane_x_len = @sqrt(projection.x_scale * projection.x_scale + 1.0);
-        const side_plane_y_len = @sqrt(projection.y_scale * projection.y_scale + 1.0);
-        if (projection.x_scale * center_cam.x - center_cam.z > sphere_radius * side_plane_x_len) return false;
-        if (-projection.x_scale * center_cam.x - center_cam.z > sphere_radius * side_plane_x_len) return false;
-        if (projection.y_scale * center_cam.y - center_cam.z > sphere_radius * side_plane_y_len) return false;
-        if (-projection.y_scale * center_cam.y - center_cam.z > sphere_radius * side_plane_y_len) return false;
-
-        if (ENABLE_MESHLET_CONE_CULL and meshlet.normal_cone_cutoff > -1.0) {
-            const axis_cam = transformNormalFromBasis(right, up, forward, meshlet.normal_cone_axis);
-            const view_to_camera = math.Vec3.scale(center_cam, -1.0);
-            const view_len = math.Vec3.length(view_to_camera);
-            if (view_len > 1e-6) {
-                const view_dir = math.Vec3.scale(view_to_camera, 1.0 / view_len);
-                const cone_sine = @sqrt(@max(0.0, 1.0 - meshlet.normal_cone_cutoff * meshlet.normal_cone_cutoff));
-                if (math.Vec3.dot(axis_cam, view_dir) < -cone_sine) return false;
-            }
-        }
-
-        return true;
-    }
-
-    /// Returns runtime tile light cull lanes.
-    /// Keeps runtime tile light cull lanes as the single implementation point so call-site behavior stays consistent.
-    fn runtimeTileLightCullLanes() usize {
-        return switch (cpu_features.detect().preferredVectorBackend()) {
-            .avx512, .avx2 => 8,
-            .sse2, .neon => 4,
-            .scalar => 1,
-        };
-    }
-
-    fn tileLightBroadphaseMaskSimd(
-        comptime lanes: usize,
-        dir_cam_x: []const f32,
-        dir_cam_y: []const f32,
-        dir_cam_z: []const f32,
-        shadow_mode: []const u8,
-        start_index: usize,
-        min_nx: f32,
-        max_nx: f32,
-        min_ny: f32,
-        max_ny: f32,
-        min_nz: f32,
-        max_nz: f32,
-    ) u32 {
-        const FloatVec = @Vector(lanes, f32);
-        const x_ptr: *const [lanes]f32 = @ptrCast(dir_cam_x[start_index..][0..lanes]);
-        const y_ptr: *const [lanes]f32 = @ptrCast(dir_cam_y[start_index..][0..lanes]);
-        const z_ptr: *const [lanes]f32 = @ptrCast(dir_cam_z[start_index..][0..lanes]);
-        const dx: FloatVec = @bitCast(x_ptr.*);
-        const dy: FloatVec = @bitCast(y_ptr.*);
-        const dz: FloatVec = @bitCast(z_ptr.*);
-
-        const zero: FloatVec = @splat(0.0);
-        const bound_x = @select(f32, dx >= zero, @as(FloatVec, @splat(max_nx)), @as(FloatVec, @splat(min_nx)));
-        const bound_y = @select(f32, dy >= zero, @as(FloatVec, @splat(max_ny)), @as(FloatVec, @splat(min_ny)));
-        const bound_z = @select(f32, dz >= zero, @as(FloatVec, @splat(max_nz)), @as(FloatVec, @splat(min_nz)));
-        const dot_max = bound_x * dx + bound_y * dy + bound_z * dz;
-
-        var mask: u32 = 0;
-        inline for (0..lanes) |lane| {
-            const light_mode: LightInfo.ShadowMode = @enumFromInt(shadow_mode[start_index + lane]);
-            if (light_mode != .none and dot_max[lane] > 0.0) {
-                mask |= (@as(u32, 1) << @as(u5, @intCast(lane)));
-            }
-        }
-        return mask;
-    }
-
-    fn tileLightBroadphaseAccept(
-        dir_cam_x: f32,
-        dir_cam_y: f32,
-        dir_cam_z: f32,
-        min_nx: f32,
-        max_nx: f32,
-        min_ny: f32,
-        max_ny: f32,
-        min_nz: f32,
-        max_nz: f32,
-    ) bool {
-        const bound_x = (if (dir_cam_x >= 0.0) max_nx else min_nx) * dir_cam_x;
-        const bound_y = (if (dir_cam_y >= 0.0) max_ny else min_ny) * dir_cam_y;
-        const bound_z = (if (dir_cam_z >= 0.0) max_nz else min_nz) * dir_cam_z;
-        return (bound_x + bound_y + bound_z) > 0.0;
-    }
-
-    pub fn firstTileLightWithMode(self: *const Renderer, range: TileLightRange, mode: LightInfo.ShadowMode) ?usize {
-        var i: usize = 0;
-        while (i < range.count) : (i += 1) {
-            const light_index = self.tile_light_indices[range.offset + i];
-            if (light_index >= self.lights.items.len) continue;
-            if (self.lights.items[light_index].shadow_mode == mode) return light_index;
-        }
-        return null;
-    }
-
-    /// Renders the scene using the parallel, tile-based pipeline.
-    pub fn renderTiled(
-        self: *Renderer,
-        mesh: *const Mesh,
-        transform: math.Mat4,
-        light_dir: math.Vec3,
-        pump: ?*const fn (*Renderer) bool,
-        projection: ProjectionParams,
-    ) !u64 {
-        return scene_tiled_backend.execute(
-            self,
-            mesh,
-            transform,
-            light_dir,
-            pump,
-            projection,
-            noopRenderPassJob,
-        );
-    }
-
-    /// renderDirect renders Renderer output.
-    pub fn renderDirect(
-        self: *Renderer,
-        mesh: *const Mesh,
-        transform: math.Mat4,
-        light_dir: math.Vec3,
-        projection: ProjectionParams,
-    ) !void {
-        _ = try self.renderTiled(mesh, transform, light_dir, null, projection);
-    }
-
-    fn clearDirectFrame(self: *Renderer, clear: direct_primitives.ClearConfig) void {
-        _ = frame_setup_stage.execute(self.directFrameResources(), .{
-            .clear_color = clear.color,
-            .clear_depth = clear.depth orelse std.math.inf(f32),
-        });
-    }
-
-    fn renderDirectPrimitiveShowcase(self: *Renderer) !void {
-        const plan = direct_showcase.defaultPlan(
-            self.camera_position,
-            self.rotation_angle,
-            self.rotation_x,
-            self.camera_fov_deg,
-            self.bitmap.width,
-            self.bitmap.height,
-            &self.direct_backend.suzanne_mesh,
-        );
-        try self.direct_backend.renderPrimitiveShowcase(
-            self.directFrameResources(),
-            plan.camera,
-            self.job_system,
-            .{
-                .raster_mode = plan.raster_mode,
-                .scene_kind = plan.scene_kind,
-            },
-        );
-    }
-
-    pub fn directFrameResources(self: *Renderer) frame_resources.FrameResources {
-        return .{
-            .target = .{
-                .width = self.bitmap.width,
-                .height = self.bitmap.height,
-                .color = self.bitmap.pixels,
-                .depth = self.scene_depth,
-            },
-            .aux = .{
-                .scene_camera = self.scene_camera,
-                .scene_normal = self.scene_normal,
-                .scene_surface = self.scene_surface,
-            },
-        };
-    }
-
-    fn drawShadedTriangle(self: *Renderer, p0: [2]i32, p1: [2]i32, p2: [2]i32, shading: TileRenderer.ShadingParams) void {
-        _ = self;
-        _ = p0;
-        _ = p1;
-        _ = p2;
-        _ = shading;
-    }
-
-    pub fn drawLineColored(self: *Renderer, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) void {
-        var cx = x0;
-        var cy = y0;
-
-        const dx = if (x1 >= x0) (x1 - x0) else (x0 - x1);
-        const dy = if (y1 >= y0) (y1 - y0) else (y0 - y1);
-        const sx: i32 = if (x0 < x1) 1 else -1;
-        const sy: i32 = if (y0 < y1) 1 else -1;
-        var err: i32 = dx - dy;
-
-        while (true) {
-            if (cx >= 0 and cx < self.bitmap.width and cy >= 0 and cy < self.bitmap.height) {
-                const idx = @as(usize, @intCast(cy)) * @as(usize, @intCast(self.bitmap.width)) + @as(usize, @intCast(cx));
-                if (idx < self.bitmap.pixels.len) {
-                    self.bitmap.pixels[idx] = color;
-                }
-            }
-
-            if (cx == x1 and cy == y1) break;
-            const doubled_err = err * 2;
-            if (doubled_err > -dy) {
-                err -= dy;
-                cx += sx;
-            }
-            if (doubled_err < dx) {
-                err += dx;
-                cy += sy;
-            }
-        }
-    }
 };
