@@ -1,4 +1,4 @@
-//! Primary entry point and bootstrapping flow for the engine executable.
+﻿//! Primary entry point and bootstrapping flow for the engine executable.
 //! Scene-system module for entity data, graph dependencies, extraction, and streaming/residency.
 
 const std = @import("std");
@@ -18,6 +18,7 @@ const render_extraction_module = @import("render_extraction.zig");
 const scene_math = @import("math.zig");
 const camera_state = @import("camera_state.zig");
 const loader_module = @import("loader.zig");
+const transform_math = @import("transform_math.zig");
 const physics_utils = @import("physics_utils");
 const platform_input_module = @import("platform_input");
 const input_actions_module = @import("input_actions");
@@ -369,8 +370,8 @@ const ExecutionState = struct {
         read_lock.lock(lock_iface, binding.body_id);
         const body = read_lock.body orelse return;
         const xform = body.getWorldTransform();
-        const rotation_deg = rotationMatrixToEulerDegrees(xform.rotation);
-        const offset = rotateVector(binding.body_to_entity_offset_local, rotation_deg);
+        const rotation_deg = transform_math.rotationMatrixToEulerDegrees(xform.rotation);
+        const offset = transform_math.rotateVector(binding.body_to_entity_offset_local, rotation_deg);
         const entity_position = scene_math.Vec3.new(
             @as(f32, @floatCast(xform.position[0])) + offset.x,
             @as(f32, @floatCast(xform.position[1])) + offset.y,
@@ -392,13 +393,13 @@ const ExecutionState = struct {
         const index: usize = @intCast(binding.entity.index);
         if (index >= component_store.world_transforms.items.len) return;
         const transform = component_store.world_transforms.items[index] orelse return;
-        const body_position = entityTransformToBodyPosition(transform, binding.body_to_entity_offset_local);
+        const body_position = transform_math.entityTransformToBodyPosition(transform, binding.body_to_entity_offset_local);
         body_interface.setPosition(binding.body_id, .{
             @as(zphysics.Real, @floatCast(body_position.x)),
             @as(zphysics.Real, @floatCast(body_position.y)),
             @as(zphysics.Real, @floatCast(body_position.z)),
         }, .dont_activate);
-        body_interface.setRotation(binding.body_id, eulerDegreesToQuaternion(transform.rotation_deg), .dont_activate);
+        body_interface.setRotation(binding.body_id, transform_math.eulerDegreesToQuaternion(transform.rotation_deg), .dont_activate);
     }
 };
 
@@ -421,10 +422,10 @@ fn createBindingForRenderable(
     if (index >= component_store.world_transforms.items.len) return error.InvalidEntity;
     const transform = component_store.world_transforms.items[index] orelse return error.InvalidEntity;
     const local_center = scene_math.Vec3.scale(scene_math.Vec3.add(renderable.local_bounds_min, renderable.local_bounds_max), 0.5);
-    const scaled_center = mulComponents(local_center, transform.scale);
-    const half_extents = scene_math.Vec3.scale(absComponents(mulComponents(scene_math.Vec3.sub(renderable.local_bounds_max, renderable.local_bounds_min), transform.scale)), 0.5);
-    const rotation = eulerDegreesToQuaternion(transform.rotation_deg);
-    const center_offset = rotateVector(scaled_center, transform.rotation_deg);
+    const scaled_center = transform_math.mulComponents(local_center, transform.scale);
+    const half_extents = scene_math.Vec3.scale(transform_math.absComponents(transform_math.mulComponents(scene_math.Vec3.sub(renderable.local_bounds_max, renderable.local_bounds_min), transform.scale)), 0.5);
+    const rotation = transform_math.eulerDegreesToQuaternion(transform.rotation_deg);
+    const center_offset = transform_math.rotateVector(scaled_center, transform.rotation_deg);
     const body_center = scene_math.Vec3.add(scene_math.Vec3.add(transform.position, center_offset), setup.position_offset);
 
     const body_id = switch (setup.shape) {
@@ -549,83 +550,6 @@ fn createGunArena(body_interface: anytype) !void {
     }, .activate);
 }
 
-fn mulComponents(a: scene_math.Vec3, b: scene_math.Vec3) scene_math.Vec3 {
-    return .{ .x = a.x * b.x, .y = a.y * b.y, .z = a.z * b.z };
-}
-
-fn absComponents(v: scene_math.Vec3) scene_math.Vec3 {
-    return .{ .x = @abs(v.x), .y = @abs(v.y), .z = @abs(v.z) };
-}
-
-fn rotateVector(v: scene_math.Vec3, rotation_deg: scene_math.Vec3) scene_math.Vec3 {
-    const rad_scale = std.math.pi / 180.0;
-    const rx = rotation_deg.x * rad_scale;
-    const ry = rotation_deg.y * rad_scale;
-    const rz = rotation_deg.z * rad_scale;
-
-    const sx = @sin(rx);
-    const cx = @cos(rx);
-    const sy = @sin(ry);
-    const cy = @cos(ry);
-    const sz = @sin(rz);
-    const cz = @cos(rz);
-
-    const x1 = v.x;
-    const y1 = v.y * cx - v.z * sx;
-    const z1 = v.y * sx + v.z * cx;
-
-    const x2 = x1 * cy + z1 * sy;
-    const y2 = y1;
-    const z2 = -x1 * sy + z1 * cy;
-
-    return .{
-        .x = x2 * cz - y2 * sz,
-        .y = x2 * sz + y2 * cz,
-        .z = z2,
-    };
-}
-
-fn eulerDegreesToQuaternion(rotation_deg: scene_math.Vec3) [4]zphysics.Real {
-    const half_to_rad = std.math.pi / 360.0;
-    const hx = rotation_deg.x * half_to_rad;
-    const hy = rotation_deg.y * half_to_rad;
-    const hz = rotation_deg.z * half_to_rad;
-
-    const sx = @sin(hx);
-    const cx = @cos(hx);
-    const sy = @sin(hy);
-    const cy = @cos(hy);
-    const sz = @sin(hz);
-    const cz = @cos(hz);
-
-    return .{
-        @as(zphysics.Real, @floatCast(sx * cy * cz - cx * sy * sz)),
-        @as(zphysics.Real, @floatCast(cx * sy * cz + sx * cy * sz)),
-        @as(zphysics.Real, @floatCast(cx * cy * sz - sx * sy * cz)),
-        @as(zphysics.Real, @floatCast(cx * cy * cz + sx * sy * sz)),
-    };
-}
-
-fn rotationMatrixToEulerDegrees(rotation: [9]zphysics.Real) scene_math.Vec3 {
-    const m00 = @as(f32, @floatCast(rotation[0]));
-    const m10 = @as(f32, @floatCast(rotation[1]));
-    const m20 = @as(f32, @floatCast(rotation[2]));
-    const m21 = @as(f32, @floatCast(rotation[5]));
-    const m22 = @as(f32, @floatCast(rotation[8]));
-    const rad_to_deg = 180.0 / std.math.pi;
-    const yaw = std.math.asin(std.math.clamp(-m20, -1.0, 1.0));
-    const pitch = std.math.atan2(m21, m22);
-    const roll = std.math.atan2(m10, m00);
-    return .{
-        .x = pitch * rad_to_deg,
-        .y = yaw * rad_to_deg,
-        .z = roll * rad_to_deg,
-    };
-}
-
-fn entityTransformToBodyPosition(transform: components_module.TransformWorld, body_to_entity_offset_local: scene_math.Vec3) scene_math.Vec3 {
-    return scene_math.Vec3.sub(transform.position, rotateVector(body_to_entity_offset_local, transform.rotation_deg));
-}
 
 pub const SceneRuntime = struct {
     allocator: std.mem.Allocator,
@@ -932,7 +856,7 @@ pub const SceneRuntime = struct {
         var changed = false;
         const local_delta = if (self.hierarchy.parentOf(entity)) |parent|
             if (self.worldTransform(parent)) |parent_world|
-                worldDeltaToLocal(parent_world, delta)
+                transform_math.worldDeltaToLocal(parent_world, delta)
             else
                 delta
         else
@@ -958,7 +882,7 @@ pub const SceneRuntime = struct {
         const index: usize = @intCast(entity.index);
         if (index >= self.components.local_transforms.items.len) return false;
         if (self.components.local_transforms.items[index] == null) return false;
-        if (vec3ApproxEq(self.components.local_transforms.items[index].?.rotation_deg, rotation_deg)) return false;
+        if (transform_math.vec3ApproxEq(self.components.local_transforms.items[index].?.rotation_deg, rotation_deg)) return false;
         self.components.local_transforms.items[index].?.rotation_deg = rotation_deg;
         self.hierarchy.markSubtreeDirty(entity);
         self.propagateWorldTransforms() catch {};
@@ -975,7 +899,7 @@ pub const SceneRuntime = struct {
         const index: usize = @intCast(entity.index);
         if (index >= self.components.local_transforms.items.len) return false;
         if (self.components.local_transforms.items[index] == null) return false;
-        if (vec3ApproxEq(self.components.local_transforms.items[index].?.scale, scale)) return false;
+        if (transform_math.vec3ApproxEq(self.components.local_transforms.items[index].?.scale, scale)) return false;
         self.components.local_transforms.items[index].?.scale = scale;
         self.hierarchy.markSubtreeDirty(entity);
         self.propagateWorldTransforms() catch {};
@@ -1380,7 +1304,7 @@ pub const SceneRuntime = struct {
         if (index >= self.components.local_transforms.items.len) return;
         const local = self.components.local_transforms.items[index] orelse return;
         const next_world = if (parent_world) |parent|
-            composeWorldTransform(parent, local)
+            transform_math.composeWorldTransform(parent, local)
         else
             components_module.TransformWorld{
                 .position = local.position,
@@ -1388,7 +1312,7 @@ pub const SceneRuntime = struct {
                 .scale = local.scale,
             };
         const current_world = if (index < self.components.world_transforms.items.len) self.components.world_transforms.items[index] else null;
-        const changed = current_world == null or !worldTransformsEqual(current_world.?, next_world);
+        const changed = current_world == null or !transform_math.worldTransformsEqual(current_world.?, next_world);
         self.components.world_transforms.items[index] = next_world;
         self.hierarchy.clearDirty(entity);
         if (changed and self.started) try self.scripts.queueEvent(entity, .transform_changed);
@@ -1647,25 +1571,9 @@ pub const SceneRuntime = struct {
 
 const fixedStepSeconds: f32 = 1.0 / 60.0;
 
-fn composeWorldTransform(parent: components_module.TransformWorld, local: components_module.TransformLocal) components_module.TransformWorld {
-    return .{
-        .position = scene_math.Vec3.add(parent.position, rotateVector(mulComponents(local.position, parent.scale), parent.rotation_deg)),
-        .rotation_deg = scene_math.Vec3.add(parent.rotation_deg, local.rotation_deg),
-        .scale = mulComponents(parent.scale, local.scale),
-    };
-}
 
-fn worldTransformsEqual(a: components_module.TransformWorld, b: components_module.TransformWorld) bool {
-    return vec3ApproxEq(a.position, b.position) and vec3ApproxEq(a.rotation_deg, b.rotation_deg) and vec3ApproxEq(a.scale, b.scale);
-}
 
-fn vec3ApproxEq(a: scene_math.Vec3, b: scene_math.Vec3) bool {
-    return approxEq(a.x, b.x) and approxEq(a.y, b.y) and approxEq(a.z, b.z);
-}
 
-fn approxEq(a: f32, b: f32) bool {
-    return @abs(a - b) <= 1e-4;
-}
 
 fn scriptComponentHasAttachments(component: ?components_module.ScriptComponent) bool {
     return component != null and component.?.count != 0;
@@ -1690,25 +1598,8 @@ fn removeScriptAttachmentAt(component: *components_module.ScriptComponent, slot:
     component.modules[component.count] = AssetHandle.invalid();
 }
 
-fn worldDeltaToLocal(parent: components_module.TransformWorld, world_delta: scene_math.Vec3) scene_math.Vec3 {
-    return divideComponents(inverseRotateVector(world_delta, parent.rotation_deg), parent.scale);
-}
 
-fn inverseRotateVector(v: scene_math.Vec3, rotation_deg: scene_math.Vec3) scene_math.Vec3 {
-    return rotateVector(v, .{
-        .x = -rotation_deg.x,
-        .y = -rotation_deg.y,
-        .z = -rotation_deg.z,
-    });
-}
 
-fn divideComponents(a: scene_math.Vec3, b: scene_math.Vec3) scene_math.Vec3 {
-    return .{
-        .x = if (@abs(b.x) > 1e-6) a.x / b.x else a.x,
-        .y = if (@abs(b.y) > 1e-6) a.y / b.y else a.y,
-        .z = if (@abs(b.z) > 1e-6) a.z / b.z else a.z,
-    };
-}
 
 fn entityIsResident(residency: *const ResidencyManager, entity: EntityId) bool {
     const index: usize = @intCast(entity.index);
