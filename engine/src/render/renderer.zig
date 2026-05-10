@@ -87,6 +87,7 @@ const direct_primitives = @import("direct/primitives.zig");
 const direct_showcase = @import("direct/showcase.zig");
 const post_dispatch = @import("renderer/post_dispatch.zig");
 const renderer_input = @import("renderer/input.zig");
+const renderer_init = @import("renderer/init.zig");
 const frame_resources = @import("frame/resources.zig");
 const frame_setup_stage = @import("stages/frame_setup_stage.zig");
 const presentation_stage = @import("stages/presentation_stage.zig");
@@ -100,17 +101,17 @@ const pipeline_logger = log.get("renderer.pipeline");
 const meshlet_logger = log.get("renderer.meshlet");
 const ground_logger = log.get("renderer.ground");
 
-const NEAR_CLIP: f32 = 0.01;
+pub const NEAR_CLIP: f32 = 0.01;
 pub const NEAR_EPSILON: f32 = 1e-4;
-const INVALID_PROJECTED_COORD: i32 = -1000;
+pub const INVALID_PROJECTED_COORD: i32 = -1000;
 const ENABLE_MESHLET_CONE_CULL = false;
 const fps_camera_floor_y: f32 = 0.0;
 const fps_camera_eye_height: f32 = 1.6;
 const shadow_rebuild_dot_threshold: f32 = 0.9986; // about 3 degrees
 const hybrid_shadow_grid_dim: usize = 32;
-const hybrid_shadow_grid_cells: usize = hybrid_shadow_grid_dim * hybrid_shadow_grid_dim;
+pub const hybrid_shadow_grid_cells: usize = hybrid_shadow_grid_dim * hybrid_shadow_grid_dim;
 
-const HybridShadowCasterBounds = struct {
+pub const HybridShadowCasterBounds = struct {
     meshlet_index: usize,
     min_u: f32,
     max_u: f32,
@@ -119,7 +120,7 @@ const HybridShadowCasterBounds = struct {
     max_depth: f32,
 };
 
-const HybridShadowTileRange = struct {
+pub const HybridShadowTileRange = struct {
     offset: usize = 0,
     count: usize = 0,
 };
@@ -182,7 +183,7 @@ const CameraToLightTransform = struct {
     }
 };
 
-const HybridShadowGrid = struct {
+pub const HybridShadowGrid = struct {
     basis_right: math.Vec3 = math.Vec3.new(1.0, 0.0, 0.0),
     basis_up: math.Vec3 = math.Vec3.new(0.0, 1.0, 0.0),
     min_u: f32 = 0.0,
@@ -194,7 +195,7 @@ const HybridShadowGrid = struct {
     active: bool = false,
 };
 
-const HybridShadowStats = struct {
+pub const HybridShadowStats = struct {
     active_tile_count: usize = 0,
     job_count: usize = 0,
     grid_candidate_count: usize = 0,
@@ -206,7 +207,7 @@ const HybridShadowStats = struct {
     execute_ms: f32 = 0.0,
 };
 
-const HybridShadowDebugState = struct {
+pub const HybridShadowDebugState = struct {
     enabled: bool = false,
     advance_requested: bool = false,
     completed_jobs: usize = 0,
@@ -228,7 +229,7 @@ const GroundDebugState = struct {
     frames_since_log: u32 = 0,
 };
 
-const MeshletTelemetry = struct {
+pub const MeshletTelemetry = struct {
     total_meshlets: usize = 0,
     visible_meshlets: usize = 0,
     culled_meshlets: usize = 0,
@@ -242,7 +243,7 @@ pub const LightGizmoAxis = enum(u8) {
     z = 2,
 };
 
-const LightGizmoState = struct {
+pub const LightGizmoState = struct {
     enabled: bool = true,
     selected_light_index: usize = 0,
     active_axis: LightGizmoAxis = .x,
@@ -296,7 +297,7 @@ fn lightGizmoAxisColor(axis: LightGizmoAxis, active_axis: LightGizmoAxis, hot_ax
 pub const SceneItemBinding = scene_item_gizmo.ItemBinding;
 pub const SceneItemTranslateRequest = scene_item_gizmo.TranslateRequest;
 
-const LightWorkStats = struct {
+pub const LightWorkStats = struct {
     active_lights: usize = 0,
     shadow_map_lights: usize = 0,
     meshlet_shadow_lights: usize = 0,
@@ -331,7 +332,7 @@ const LightWorkStats = struct {
     tile_light_overflow_tiles: usize = 0,
 };
 
-const LoadingOverlayState = struct {
+pub const LoadingOverlayState = struct {
     enabled: bool = false,
     progress: f32 = 0.0,
     completed_steps: usize = 0,
@@ -351,9 +352,9 @@ const LoadingOverlayState = struct {
     }
 };
 
-const max_render_passes = 32;
+pub const max_render_passes = 32;
 
-const RenderPassTiming = struct {
+pub const RenderPassTiming = struct {
     name: []const u8,
     frame_duration_ms: f32,
     accumulated_ms: f32,
@@ -361,21 +362,21 @@ const RenderPassTiming = struct {
     has_sample: bool,
 };
 
-const ColorGradeProfile = struct {
+pub const ColorGradeProfile = struct {
     base_curve: [256]u8,
     tone_add_r: [256]i16,
     tone_add_g: [256]i16,
     tone_add_b: [256]i16,
 };
 
-const BloomScratch = struct {
+pub const BloomScratch = struct {
     width: usize,
     height: usize,
     ping: []u32,
     pong: []u32,
 };
 
-const AOScratch = struct {
+pub const AOScratch = struct {
     width: usize,
     height: usize,
     ping: []u8,
@@ -406,7 +407,7 @@ const DepthOfFieldScratch = struct {
     height: usize,
 };
 
-const SSGIJobContext = struct {
+pub const SSGIJobContext = struct {
     renderer: *Renderer,
     scene_pixels: []u32,
     scratch_pixels: []u32,
@@ -424,7 +425,7 @@ const SSGIJobContext = struct {
     }
 };
 
-const SSRJobContext = struct {
+pub const SSRJobContext = struct {
     renderer: *Renderer,
     scene_pixels: []u32,
     scratch_pixels: []u32,
@@ -465,7 +466,7 @@ const SSRJobContext = struct {
     }
 };
 
-const DepthOfFieldJobContext = struct {
+pub const DepthOfFieldJobContext = struct {
     scene_pixels: []u32,
     scratch_pixels: []u32,
     scene_depth: []f32,
@@ -525,7 +526,7 @@ const DerivedFrameViewState = struct {
     cache_projection: ProjectionParams,
 };
 
-const FrameViewCache = struct {
+pub const FrameViewCache = struct {
     valid: bool = false,
     camera_position: math.Vec3 = math.Vec3.new(0.0, 0.0, 0.0),
     rotation_angle: f32 = 0.0,
@@ -654,7 +655,7 @@ fn approxEqFrameVec3(a: math.Vec3, b: math.Vec3, epsilon: f32) bool {
     return approxEqFrameF32(a.x, b.x, epsilon) and approxEqFrameF32(a.y, b.y, epsilon) and approxEqFrameF32(a.z, b.z, epsilon);
 }
 
-const DepthFogConfig = struct {
+pub const DepthFogConfig = struct {
     near: f32,
     far: f32,
     inv_range: f32,
@@ -664,7 +665,7 @@ const DepthFogConfig = struct {
     color_b: i32,
 };
 
-const ShadowMap = struct {
+pub const ShadowMap = struct {
     width: usize,
     height: usize,
     depth: []f32,
@@ -684,7 +685,7 @@ const ShadowMap = struct {
     active: bool,
 };
 
-const ShadowResolveConfig = struct {
+pub const ShadowResolveConfig = struct {
     camera_position: math.Vec3,
     basis_right: math.Vec3,
     basis_up: math.Vec3,
@@ -734,7 +735,7 @@ pub const TemporalAAViewState = struct {
     projection: ProjectionParams,
 
     /// init initializes Renderer state and returns the configured value.
-    fn init(
+    pub fn init(
         camera_position: math.Vec3,
         basis_right: math.Vec3,
         basis_up: math.Vec3,
@@ -1091,21 +1092,21 @@ const TRANSPARENT = 1;
 // ========== WINDOWS API DECLARATIONS ==========
 // These are external function definitions for the Windows Graphics Device Interface (GDI).
 // JS Analogy: This is like the low-level native browser code that the Canvas API calls.
-extern "gdi32" fn CreateCompatibleDC(hdc: ?windows.HDC) ?windows.HDC;
-extern "gdi32" fn SelectObject(hdc: windows.HDC, hgdiobj: HGDIOBJ) HGDIOBJ;
-extern "gdi32" fn DeleteDC(hdc: windows.HDC) bool;
+pub extern "gdi32" fn CreateCompatibleDC(hdc: ?windows.HDC) ?windows.HDC;
+pub extern "gdi32" fn SelectObject(hdc: windows.HDC, hgdiobj: HGDIOBJ) HGDIOBJ;
+pub extern "gdi32" fn DeleteDC(hdc: windows.HDC) bool;
 extern "gdi32" fn SetBkMode(hdc: windows.HDC, mode: i32) i32;
 extern "gdi32" fn SetTextColor(hdc: windows.HDC, color: u32) u32;
 extern "gdi32" fn TextOutW(hdc: windows.HDC, x: i32, y: i32, lpString: [*]const u16, c: i32) bool;
 extern "user32" fn SetWindowTextW(hWnd: windows.HWND, lpString: [*:0]const u16) bool;
 extern "kernel32" fn Sleep(dwMilliseconds: u32) void;
-extern "kernel32" fn CreateWaitableTimerExW(lpTimerAttributes: ?*anyopaque, lpTimerName: ?[*:0]const u16, dwFlags: u32, dwDesiredAccess: u32) ?windows.HANDLE;
+pub extern "kernel32" fn CreateWaitableTimerExW(lpTimerAttributes: ?*anyopaque, lpTimerName: ?[*:0]const u16, dwFlags: u32, dwDesiredAccess: u32) ?windows.HANDLE;
 extern "kernel32" fn SetWaitableTimerEx(hTimer: windows.HANDLE, lpDueTime: *const i64, lPeriod: i32, pfnCompletionRoutine: ?*const anyopaque, lpArgToCompletionRoutine: ?*anyopaque, wakeContext: ?*const anyopaque, tolerableDelay: u32) windows.BOOL;
 extern "dwmapi" fn DwmFlush() callconv(.winapi) windows.HRESULT;
 
-const TIMER_MODIFY_STATE: u32 = 0x0002;
-const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
-const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION: u32 = 0x0000_0002;
+pub const TIMER_MODIFY_STATE: u32 = 0x0002;
+pub const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+pub const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION: u32 = 0x0000_0002;
 
 // ========== MODULE IMPORTS ==========
 const Bitmap = @import("../assets/bitmap.zig").Bitmap;
@@ -1117,7 +1118,7 @@ const job_system_module = @import("job_system");
 const JobSystem = job_system_module.JobSystem;
 const Job = job_system_module.Job;
 
-const ColorGradeJobContext = struct {
+pub const ColorGradeJobContext = struct {
     pixels: []u32,
     start_index: usize,
     end_index: usize,
@@ -1131,7 +1132,7 @@ const ColorGradeJobContext = struct {
     }
 };
 
-const FogJobContext = struct {
+pub const FogJobContext = struct {
     pixels: []u32,
     depth: []const f32,
     width: usize,
@@ -1188,7 +1189,7 @@ const PostPassExecutionContext = struct {
     shadow_build_elapsed_ns: []const i128,
 };
 
-const AOJobContext = ssao_pass.JobContext(
+pub const AOJobContext = ssao_pass.JobContext(
     Renderer,
     renderAmbientOcclusionRows,
     blurAmbientOcclusionHorizontalRows,
@@ -1196,7 +1197,7 @@ const AOJobContext = ssao_pass.JobContext(
     compositeAmbientOcclusionRows,
 );
 
-const TAAJobContext = struct {
+pub const TAAJobContext = struct {
     renderer: *Renderer,
     mesh: *const Mesh,
     current_view: TemporalAAViewState,
@@ -1222,11 +1223,11 @@ const TAAJobContext = struct {
     }
 };
 
-const ShadowResolveJobContext = shadow_resolve_pass.JobContext(ShadowResolveConfig, ShadowMap);
+pub const ShadowResolveJobContext = shadow_resolve_pass.JobContext(ShadowResolveConfig, ShadowMap);
 
-const ShadowRasterJobContext = shadow_map_pass.RasterJobContext(Mesh, ShadowMap);
+pub const ShadowRasterJobContext = shadow_map_pass.RasterJobContext(Mesh, ShadowMap);
 
-const AdaptiveShadowTileJob = struct {
+pub const AdaptiveShadowTileJob = struct {
     renderer: *Renderer,
     mesh: *const Mesh,
     tile: *const TileRenderer.Tile,
@@ -1252,9 +1253,9 @@ const AdaptiveShadowTileJob = struct {
     }
 };
 
-const BloomJobContext = bloom_pass.JobContext(BloomScratch);
+pub const BloomJobContext = bloom_pass.JobContext(BloomScratch);
 
-const CompositeJobContext = struct {
+pub const CompositeJobContext = struct {
     tile: *const TileRenderer.Tile,
     tile_buffer: *const TileRenderer.TileBuffer,
     bitmap: *Bitmap,
@@ -1302,7 +1303,7 @@ pub const LightInfo = struct {
     shadow_map: ShadowMap,
 };
 
-const LightSoA = struct {
+pub const LightSoA = struct {
     dir_x: []f32,
     dir_y: []f32,
     dir_z: []f32,
@@ -1313,7 +1314,7 @@ const LightSoA = struct {
     shadow_mode: []u8,
 };
 
-const TileLightRange = struct {
+pub const TileLightRange = struct {
     offset: usize = 0,
     count: usize = 0,
 };
@@ -1507,21 +1508,21 @@ pub const Renderer = struct {
 
     /// Initializes the renderer, creating all necessary resources.
     /// JS Analogy: The `constructor` for our main rendering class.
-    fn defaultLightColor(light_idx: usize) math.Vec3 {
+    pub fn defaultLightColor(light_idx: usize) math.Vec3 {
         return if ((light_idx & 1) == 0)
             math.Vec3.new(1.0, 0.9, 0.8)
         else
             math.Vec3.new(0.5, 0.6, 1.0);
     }
 
-    fn defaultLightShadowMode() LightInfo.ShadowMode {
+    pub fn defaultLightShadowMode() LightInfo.ShadowMode {
         if (config.MESHLET_SHADOWS_ENABLED) return .meshlet_ray;
         if (config.POST_SHADOW_ENABLED) return .shadow_map;
         return .none;
     }
 
     /// initLightInfo initializes Renderer state and returns the configured value.
-    fn initLightInfo(allocator: std.mem.Allocator, light_idx: usize) !LightInfo {
+    pub fn initLightInfo(allocator: std.mem.Allocator, light_idx: usize) !LightInfo {
         const sm_depth = try allocator.alloc(f32, config.POST_SHADOW_MAP_SIZE * config.POST_SHADOW_MAP_SIZE);
         return LightInfo{
             .orbit_x = @as(f32, @floatFromInt(light_idx)) * 3.14159,
@@ -1769,451 +1770,7 @@ pub const Renderer = struct {
     }
 
     /// init initializes Renderer state and returns the configured value.
-    pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allocator) !Renderer {
-        var bitmap = try Bitmap.init(width, height);
-        errdefer bitmap.deinit();
-        const hdc_mem = CreateCompatibleDC(null) orelse return error.MemoryDCCreationFailed;
-        errdefer _ = DeleteDC(hdc_mem);
-        const hdc_mem_old_bitmap = SelectObject(hdc_mem, bitmap.hbitmap);
-        var present_backend = try present_d3d11.Backend.init(hwnd, width, height);
-        errdefer present_backend.deinit();
-        const current_time = std.time.nanoTimestamp();
-        const tile_grid = try TileGrid.init(width, height, allocator);
-
-        const tile_buffers = try allocator.alloc(TileBuffer, tile_grid.tiles.len);
-        errdefer allocator.free(tile_buffers);
-        for (tile_buffers, tile_grid.tiles) |*buf, *tile| {
-            buf.* = try TileBuffer.init(tile.width, tile.height, allocator);
-        }
-
-        const tile_count = tile_grid.tiles.len;
-        const shadow_chunk_job_capacity = tile_count * 4;
-        const shadow_tile_jobs_buffer = try allocator.alloc(AdaptiveShadowTileJob, tile_count);
-        errdefer allocator.free(shadow_tile_jobs_buffer);
-        const hybrid_shadow_tile_ranges = try allocator.alloc(HybridShadowTileRange, tile_count);
-        errdefer allocator.free(hybrid_shadow_tile_ranges);
-        const job_buffer = try allocator.alloc(Job, tile_count);
-        errdefer allocator.free(job_buffer);
-        const shadow_job_buffer = try allocator.alloc(Job, shadow_chunk_job_capacity);
-        errdefer allocator.free(shadow_job_buffer);
-        const composite_job_contexts = try allocator.alloc(CompositeJobContext, tile_count);
-        errdefer allocator.free(composite_job_contexts);
-        const job_completion_buffer = try allocator.alloc(bool, tile_count);
-        errdefer allocator.free(job_completion_buffer);
-        @memset(job_completion_buffer, false);
-        const tile_triangle_lists = try BinningStage.createTileTriangleLists(&tile_grid, allocator);
-        errdefer BinningStage.freeTileTriangleLists(tile_triangle_lists, allocator);
-        const active_tile_flags = try allocator.alloc(bool, tile_count);
-        errdefer allocator.free(active_tile_flags);
-        @memset(active_tile_flags, false);
-        const active_tile_indices = try allocator.alloc(usize, tile_count);
-        errdefer allocator.free(active_tile_indices);
-        const tile_light_ranges = try allocator.alloc(TileLightRange, tile_count);
-        errdefer allocator.free(tile_light_ranges);
-        @memset(tile_light_ranges, .{});
-
-        const job_system = try JobSystem.init(allocator);
-        const color_grade_job_count = @max(@as(usize, 1), @as(usize, @intCast(job_system.worker_count * 2)));
-        const color_grade_job_contexts = try allocator.alloc(ColorGradeJobContext, color_grade_job_count);
-        errdefer allocator.free(color_grade_job_contexts);
-        const moblur_job_contexts = try allocator.alloc(post_dispatch.MotionBlurJobContext, color_grade_job_count);
-        errdefer allocator.free(moblur_job_contexts);
-        const moblur_scratch_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
-        errdefer allocator.free(moblur_scratch_pixels);
-
-        const god_rays_job_contexts = try allocator.alloc(post_dispatch.GodRaysJobContext, color_grade_job_count);
-        errdefer allocator.free(god_rays_job_contexts);
-        const god_rays_scratch_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
-        errdefer allocator.free(god_rays_scratch_pixels);
-
-        const chromatic_aberration_job_contexts = try allocator.alloc(post_dispatch.ChromaticAberrationJobContext, color_grade_job_count);
-        errdefer allocator.free(chromatic_aberration_job_contexts);
-
-        const film_grain_job_contexts = try allocator.alloc(post_dispatch.FilmGrainVignetteJobContext, color_grade_job_count);
-        errdefer allocator.free(film_grain_job_contexts);
-
-        const lens_flare_job_contexts = try allocator.alloc(post_dispatch.LensFlareJobContext, color_grade_job_count);
-        errdefer allocator.free(lens_flare_job_contexts);
-        const lens_flare_scratch_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
-        errdefer allocator.free(lens_flare_scratch_pixels);
-        const ao_job_contexts = try allocator.alloc(AOJobContext, color_grade_job_count);
-        errdefer allocator.free(ao_job_contexts);
-        const fog_job_contexts = try allocator.alloc(FogJobContext, color_grade_job_count);
-        errdefer allocator.free(fog_job_contexts);
-        const skybox_job_contexts = try allocator.alloc(SkyboxJobContext, color_grade_job_count);
-        errdefer allocator.free(skybox_job_contexts);
-        const taa_job_contexts = try allocator.alloc(TAAJobContext, color_grade_job_count);
-        errdefer allocator.free(taa_job_contexts);
-        const shadow_resolve_job_contexts = try allocator.alloc(ShadowResolveJobContext, color_grade_job_count);
-        errdefer allocator.free(shadow_resolve_job_contexts);
-        const shadow_raster_job_contexts = try allocator.alloc(ShadowRasterJobContext, color_grade_job_count);
-        errdefer allocator.free(shadow_raster_job_contexts);
-        const bloom_job_contexts = try allocator.alloc(BloomJobContext, color_grade_job_count);
-        errdefer allocator.free(bloom_job_contexts);
-        const fb_pix_count = @as(usize, @intCast(width)) * @as(usize, @intCast(height));
-        const dof_scratch_pixels = try allocator.alloc(u32, fb_pix_count);
-        errdefer allocator.free(dof_scratch_pixels);
-        const ssr_scratch_pixels = try allocator.alloc(u32, fb_pix_count);
-        errdefer allocator.free(ssr_scratch_pixels);
-        const ssgi_scratch_pixels = try allocator.alloc(u32, fb_pix_count);
-        errdefer allocator.free(ssgi_scratch_pixels);
-        const ssgi_job_contexts = try allocator.alloc(SSGIJobContext, color_grade_job_count);
-        errdefer allocator.free(ssgi_job_contexts);
-        const dof_job_contexts = try allocator.alloc(DepthOfFieldJobContext, color_grade_job_count);
-        const ssr_job_contexts = try allocator.alloc(SSRJobContext, color_grade_job_count);
-        errdefer allocator.free(ssr_job_contexts);
-        errdefer allocator.free(dof_job_contexts);
-        const color_grade_jobs = try allocator.alloc(Job, color_grade_job_count);
-        errdefer allocator.free(color_grade_jobs);
-        const scene_depth = try allocator.alignedAlloc(f32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
-        errdefer allocator.free(scene_depth);
-        const scene_camera = try allocator.alignedAlloc(math.Vec3, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
-        errdefer allocator.free(scene_camera);
-        const scene_normal = try allocator.alignedAlloc(math.Vec3, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
-        errdefer allocator.free(scene_normal);
-        const scene_surface = try allocator.alignedAlloc(TileRenderer.SurfaceHandle, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
-        errdefer allocator.free(scene_surface);
-        const taa_history_pixels = try allocator.alignedAlloc(u32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
-        errdefer allocator.free(taa_history_pixels);
-        const taa_resolve_pixels = try allocator.alignedAlloc(u32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
-        errdefer allocator.free(taa_resolve_pixels);
-        const taa_history_depth = try allocator.alignedAlloc(f32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
-        errdefer allocator.free(taa_history_depth);
-        const taa_history_surface_tags = try allocator.alignedAlloc(u64, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
-        errdefer allocator.free(taa_history_surface_tags);
-        const taa_history_normals = try allocator.alignedAlloc(u32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
-        errdefer allocator.free(taa_history_normals);
-        const hybrid_shadow_coarse_downsample = @max(1, config.POST_HYBRID_SHADOW_COARSE_DOWNSAMPLE);
-        const hybrid_shadow_coarse_cache_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + hybrid_shadow_coarse_downsample - 1, hybrid_shadow_coarse_downsample))));
-        const hybrid_shadow_coarse_cache_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + hybrid_shadow_coarse_downsample - 1, hybrid_shadow_coarse_downsample))));
-        const hybrid_shadow_coarse_cache = try allocator.alloc(u8, hybrid_shadow_coarse_cache_width * hybrid_shadow_coarse_cache_height);
-        errdefer allocator.free(hybrid_shadow_coarse_cache);
-        const hybrid_shadow_edge_downsample = @max(1, config.POST_HYBRID_SHADOW_EDGE_DOWNSAMPLE);
-        const hybrid_shadow_edge_cache_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + hybrid_shadow_edge_downsample - 1, hybrid_shadow_edge_downsample))));
-        const hybrid_shadow_edge_cache_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + hybrid_shadow_edge_downsample - 1, hybrid_shadow_edge_downsample))));
-        const hybrid_shadow_edge_cache = try allocator.alloc(u8, hybrid_shadow_edge_cache_width * hybrid_shadow_edge_cache_height);
-        errdefer allocator.free(hybrid_shadow_edge_cache);
-        var lights = std.ArrayList(LightInfo){};
-        for (0..2) |light_idx| {
-            try lights.append(allocator, try initLightInfo(allocator, light_idx));
-        }
-        const light_dir_x = try allocator.alloc(f32, lights.items.len);
-        errdefer allocator.free(light_dir_x);
-        const light_dir_y = try allocator.alloc(f32, lights.items.len);
-        errdefer allocator.free(light_dir_y);
-        const light_dir_z = try allocator.alloc(f32, lights.items.len);
-        errdefer allocator.free(light_dir_z);
-        const light_dir_cam_x = try allocator.alloc(f32, lights.items.len);
-        errdefer allocator.free(light_dir_cam_x);
-        const light_dir_cam_y = try allocator.alloc(f32, lights.items.len);
-        errdefer allocator.free(light_dir_cam_y);
-        const light_dir_cam_z = try allocator.alloc(f32, lights.items.len);
-        errdefer allocator.free(light_dir_cam_z);
-        const light_distance = try allocator.alloc(f32, lights.items.len);
-        errdefer allocator.free(light_distance);
-        const light_shadow_mode = try allocator.alloc(u8, lights.items.len);
-        errdefer allocator.free(light_shadow_mode);
-        for (lights.items, 0..) |light, i| {
-            light_dir_x[i] = light.direction.x;
-            light_dir_y[i] = light.direction.y;
-            light_dir_z[i] = light.direction.z;
-            light_dir_cam_x[i] = light.direction.x;
-            light_dir_cam_y[i] = light.direction.y;
-            light_dir_cam_z[i] = light.direction.z;
-            light_distance[i] = light.distance;
-            light_shadow_mode[i] = @intFromEnum(light.shadow_mode);
-        }
-        const shadow_build_elapsed_ns = try allocator.alloc(i128, lights.items.len);
-        errdefer allocator.free(shadow_build_elapsed_ns);
-        @memset(shadow_build_elapsed_ns, 0);
-        const shadow_resolve_elapsed_ns = try allocator.alloc(i128, lights.items.len);
-        errdefer allocator.free(shadow_resolve_elapsed_ns);
-        @memset(shadow_resolve_elapsed_ns, 0);
-        const tile_light_index_capacity = @max(@as(usize, 1), tile_count * lights.items.len);
-        const tile_light_indices = try allocator.alloc(usize, tile_light_index_capacity);
-        errdefer allocator.free(tile_light_indices);
-        const ao_downsample = @max(1, config.POST_SSAO_DOWNSAMPLE);
-        const ao_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + ao_downsample - 1, ao_downsample))));
-        const ao_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + ao_downsample - 1, ao_downsample))));
-        const ao_pixel_count = ao_width * ao_height;
-        const ao_ping = try allocator.alloc(u8, ao_pixel_count);
-        errdefer allocator.free(ao_ping);
-        const ao_pong = try allocator.alloc(u8, ao_pixel_count);
-        errdefer allocator.free(ao_pong);
-        const ao_depth = try allocator.alloc(f32, ao_pixel_count);
-        errdefer allocator.free(ao_depth);
-        const bloom_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + 3, 4))));
-        const bloom_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + 3, 4))));
-        const bloom_pixel_count = bloom_width * bloom_height;
-        const bloom_ping = try allocator.alloc(u32, bloom_pixel_count);
-        errdefer allocator.free(bloom_ping);
-        const bloom_pong = try allocator.alloc(u32, bloom_pixel_count);
-        errdefer allocator.free(bloom_pong);
-
-        renderer_logger.infoSub(
-            "init",
-            "initialized renderer {d}x{d} tiles={} grid={}x{} workers={}",
-            .{
-                width,
-                height,
-                tile_count,
-                tile_grid.cols,
-                tile_grid.rows,
-                job_system.worker_count,
-            },
-        );
-
-        const profile_capture_frame = try parseProfileCaptureFrame(allocator);
-        const frame_pacing_timer = createFramePacingTimer();
-        const configured_target_frame_time_ns = config.targetFrameTimeNs();
-        const pacing_mode = frame_pacing.resolveMode(config.WINDOW_VSYNC, configured_target_frame_time_ns);
-
-        if (config.WINDOW_VSYNC and configured_target_frame_time_ns > 0) {
-            renderer_logger.warnSub(
-                "pacing",
-                "vsync=true with fps_limit={} keeps compositor pacing active; software cap is disabled",
-                .{config.TARGET_FPS},
-            );
-        } else {
-            renderer_logger.infoSub(
-                "pacing",
-                "mode={s} target_fps={} target_ms={d:.3}",
-                .{
-                    pacing_mode.label(),
-                    config.TARGET_FPS,
-                    if (configured_target_frame_time_ns > 0)
-                        @as(f32, @floatFromInt(configured_target_frame_time_ns)) / 1_000_000.0
-                    else
-                        @as(f32, 0.0),
-                },
-            );
-        }
-
-        return Renderer{
-            .hwnd = hwnd,
-            .bitmap = bitmap,
-            .hdc_mem = hdc_mem,
-            .hdc_mem_old_bitmap = hdc_mem_old_bitmap,
-            .present_backend = present_backend,
-            .allocator = allocator,
-            .rotation_angle = 0,
-            .rotation_x = 0,
-            .camera_position = math.Vec3.new(0.0, 1.5, -5.0),
-            .camera_move_speed = 6.0,
-            .mouse_state = .{
-                .sensitivity = config.CAMERA_MOUSE_SENSITIVITY,
-            },
-            .mouse_input = .{},
-            .fps_body_state = .{},
-            .lights = lights,
-            .light_soa = .{
-                .dir_x = light_dir_x,
-                .dir_y = light_dir_y,
-                .dir_z = light_dir_z,
-                .dir_cam_x = light_dir_cam_x,
-                .dir_cam_y = light_dir_cam_y,
-                .dir_cam_z = light_dir_cam_z,
-                .distance = light_distance,
-                .shadow_mode = light_shadow_mode,
-            },
-            .shadow_build_elapsed_ns = shadow_build_elapsed_ns,
-            .shadow_resolve_elapsed_ns = shadow_resolve_elapsed_ns,
-            .sys_shadows = shadow_system.ShadowSystem.init(allocator),
-            .camera_fov_deg = config.CAMERA_FOV_INITIAL,
-            .keys_pressed = .{},
-            .frame_count = 0,
-            .total_frames_rendered = 0,
-            .last_time = current_time,
-            .last_frame_time = current_time,
-            .next_frame_time = current_time,
-            .last_completed_frame_time = current_time,
-            .current_frame_start_time = current_time,
-            .current_fps = 0,
-            .target_frame_time_ns = configured_target_frame_time_ns,
-            .frame_pacing_timer = frame_pacing_timer,
-            .last_brightness_min = 0,
-            .last_brightness_max = 0,
-            .last_brightness_avg = 0,
-            .last_reported_fov_deg = config.CAMERA_FOV_INITIAL,
-            .light_marker_visible_last_frame = true,
-            .pending_fov_delta = 0.0,
-            .profile_capture_frame = profile_capture_frame,
-            .profile_capture_emitted = false,
-            .tile_grid = tile_grid,
-            .tile_buffers = tile_buffers,
-            .single_texture_binding = .{null},
-            .textures = &.{},
-            .use_tiled_rendering = true,
-            .job_system = job_system,
-            .shadow_tile_jobs_buffer = shadow_tile_jobs_buffer,
-            .job_buffer = job_buffer,
-            .shadow_job_buffer = shadow_job_buffer,
-            .composite_job_contexts = composite_job_contexts,
-            .job_completion_buffer = job_completion_buffer,
-            .tile_triangle_lists = tile_triangle_lists,
-            .active_tile_flags = active_tile_flags,
-            .active_tile_indices = active_tile_indices,
-            .tile_light_ranges = tile_light_ranges,
-            .tile_light_indices = tile_light_indices,
-            .direct_backend = direct_backend.State.init(allocator),
-            .present_state = present_state.State.init(width, height),
-            .render_pass_timings = [_]RenderPassTiming{.{
-                .name = "",
-                .frame_duration_ms = 0.0,
-                .accumulated_ms = 0.0,
-                .sampled_ms_per_frame = 0.0,
-                .has_sample = false,
-            }} ** max_render_passes,
-            .render_pass_count = 0,
-            .color_grade_profile = buildBlockbusterGradeProfile(),
-            .ambient_occlusion_config = .{
-                .downsample = @intCast(ao_downsample),
-                .radius = config.POST_SSAO_RADIUS,
-                .strength = @as(f32, @floatFromInt(config.POST_SSAO_STRENGTH_PERCENT)) / 100.0,
-                .bias = config.POST_SSAO_BIAS,
-                .blur_depth_threshold = config.POST_SSAO_BLUR_DEPTH_THRESHOLD,
-            },
-            .temporal_aa_config = .{
-                .history_weight = @as(f32, @floatFromInt(config.POST_TAA_HISTORY_PERCENT)) / 100.0,
-                .depth_threshold = config.POST_TAA_DEPTH_THRESHOLD,
-            },
-            .depth_fog_config = .{
-                .near = config.POST_DEPTH_FOG_NEAR,
-                .far = config.POST_DEPTH_FOG_FAR,
-                .inv_range = 1.0 / @max(0.001, config.POST_DEPTH_FOG_FAR - config.POST_DEPTH_FOG_NEAR),
-                .strength = @as(f32, @floatFromInt(config.POST_DEPTH_FOG_STRENGTH_PERCENT)) / 100.0,
-                .color_r = config.POST_DEPTH_FOG_COLOR_R,
-                .color_g = config.POST_DEPTH_FOG_COLOR_G,
-                .color_b = config.POST_DEPTH_FOG_COLOR_B,
-            },
-            .scene_depth = scene_depth,
-            .scene_camera = scene_camera,
-            .scene_normal = scene_normal,
-            .scene_surface = scene_surface,
-            .taa_scratch = .{
-                .history_pixels = taa_history_pixels,
-                .resolve_pixels = taa_resolve_pixels,
-                .history_depth = taa_history_depth,
-                .history_surface_tags = taa_history_surface_tags,
-                .history_normals = taa_history_normals,
-                .valid = false,
-            },
-            .taa_previous_view = TemporalAAViewState.init(
-                math.Vec3.new(0.0, 1.5, -5.0),
-                math.Vec3.new(1.0, 0.0, 0.0),
-                math.Vec3.new(0.0, 1.0, 0.0),
-                math.Vec3.new(0.0, 0.0, 1.0),
-                .{
-                    .center_x = 0.0,
-                    .center_y = 0.0,
-                    .x_scale = 1.0,
-                    .y_scale = 1.0,
-                    .near_plane = NEAR_CLIP,
-                    .jitter_x = 0.0,
-                    .jitter_y = 0.0,
-                },
-            ),
-            .taa_previous_mesh_vertices = &[_]math.Vec3{},
-            .taa_previous_mesh_vertex_count = 0,
-            .taa_previous_mesh_triangle_count = 0,
-            .taa_previous_mesh_valid = false,
-            .hybrid_shadow_coarse_cache = hybrid_shadow_coarse_cache,
-            .hybrid_shadow_coarse_cache_width = hybrid_shadow_coarse_cache_width,
-            .hybrid_shadow_coarse_cache_height = hybrid_shadow_coarse_cache_height,
-            .hybrid_shadow_edge_cache = hybrid_shadow_edge_cache,
-            .hybrid_shadow_edge_cache_width = hybrid_shadow_edge_cache_width,
-            .hybrid_shadow_edge_cache_height = hybrid_shadow_edge_cache_height,
-            .hybrid_shadow_caster_indices = &[_]usize{},
-            .hybrid_shadow_caster_bounds = &[_]HybridShadowCasterBounds{},
-            .hybrid_shadow_caster_count = 0,
-            .hybrid_shadow_tile_ranges = hybrid_shadow_tile_ranges,
-            .hybrid_shadow_tile_candidates = &[_]usize{},
-            .hybrid_shadow_grid = .{},
-            .hybrid_shadow_grid_ranges = [_]HybridShadowTileRange{.{}} ** hybrid_shadow_grid_cells,
-            .hybrid_shadow_grid_candidates = &[_]usize{},
-            .hybrid_shadow_candidate_marks = &[_]u32{},
-            .hybrid_shadow_candidate_mark_generation = 0,
-            .hybrid_shadow_accel_valid = false,
-            .hybrid_shadow_cached_light_dir = math.Vec3.new(0.0, 0.0, 0.0),
-            .hybrid_shadow_cached_meshlet_count = 0,
-            .hybrid_shadow_cached_meshlet_vertex_count = 0,
-            .hybrid_shadow_cached_meshlet_primitive_count = 0,
-            .hybrid_shadow_stats = .{},
-            .meshlet_ray_tests_counter = std.atomic.Value(usize).init(0),
-            .meshlet_shadow_chunk_counter = std.atomic.Value(usize).init(0),
-            .meshlet_shadow_chunk_pixels_counter = std.atomic.Value(usize).init(0),
-            .meshlet_shadow_chunk_active_rays_counter = std.atomic.Value(usize).init(0),
-            .meshlet_shadow_packet_counter = std.atomic.Value(usize).init(0),
-            .meshlet_shadow_packet_skipped_counter = std.atomic.Value(usize).init(0),
-            .meshlet_shadow_packet_active_lanes_counter = std.atomic.Value(usize).init(0),
-            .meshlet_shadow_packet_occluded_lanes_counter = std.atomic.Value(usize).init(0),
-            .meshlet_shadow_trace_ns_counter = std.atomic.Value(u64).init(0),
-            .meshlet_shadow_apply_ns_counter = std.atomic.Value(u64).init(0),
-            .triangles_rasterized_counter = std.atomic.Value(usize).init(0),
-            .covered_pixels_counter = std.atomic.Value(usize).init(0),
-            .depth_tests_passed_counter = std.atomic.Value(usize).init(0),
-            .alpha_pixels_counter = std.atomic.Value(usize).init(0),
-            .hybrid_shadow_debug = .{},
-            .ao_scratch = .{
-                .width = ao_width,
-                .height = ao_height,
-                .ping = ao_ping,
-                .pong = ao_pong,
-                .depth = ao_depth,
-            },
-            .bloom_scratch = .{
-                .width = bloom_width,
-                .height = bloom_height,
-                .ping = bloom_ping,
-                .pong = bloom_pong,
-            },
-            .ao_job_contexts = ao_job_contexts,
-            .bloom_threshold_curve = bloom_pass.buildThresholdCurve(config.POST_BLOOM_THRESHOLD),
-            .bloom_intensity_lut = bloom_pass.buildIntensityLut(config.POST_BLOOM_INTENSITY_PERCENT),
-            .fog_job_contexts = fog_job_contexts,
-            .skybox_job_contexts = skybox_job_contexts,
-            .shadow_resolve_job_contexts = shadow_resolve_job_contexts,
-            .shadow_raster_job_contexts = shadow_raster_job_contexts,
-            .bloom_job_contexts = bloom_job_contexts,
-            .dof_scratch = .{ .pixels = dof_scratch_pixels, .width = @intCast(width), .height = @intCast(height) },
-            .dof_job_contexts = dof_job_contexts,
-            .ssr_job_contexts = ssr_job_contexts,
-            .ssr_scratch_pixels = ssr_scratch_pixels,
-            .ssgi_scratch_pixels = ssgi_scratch_pixels,
-            .ssgi_job_contexts = ssgi_job_contexts,
-            .dof_focal_distance = config.POST_DOF_FOCAL_DISTANCE,
-            .dof_target_focal_distance = config.POST_DOF_FOCAL_DISTANCE,
-            .taa_job_contexts = taa_job_contexts,
-            .color_grade_job_contexts = color_grade_job_contexts,
-            .moblur_job_contexts = moblur_job_contexts,
-            .moblur_scratch_pixels = moblur_scratch_pixels,
-            .god_rays_job_contexts = god_rays_job_contexts,
-            .god_rays_scratch_pixels = god_rays_scratch_pixels,
-            .chromatic_aberration_job_contexts = chromatic_aberration_job_contexts,
-            .film_grain_job_contexts = film_grain_job_contexts,
-            .lens_flare_job_contexts = lens_flare_job_contexts,
-            .lens_flare_scratch_pixels = lens_flare_scratch_pixels,
-            .color_grade_jobs = color_grade_jobs,
-        };
-    }
-
-    /// Parses p ar se pr of il ec ap tu re fr am e into typed runtime values.
-    /// Validates inputs and applies fallback/default rules before exposing results to callers.
-    fn parseProfileCaptureFrame(allocator: std.mem.Allocator) !u64 {
-        const raw_value = std.process.getEnvVarOwned(allocator, "ZIG_RENDER_PROFILE_FRAME") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => return 0,
-            else => return err,
-        };
-        defer allocator.free(raw_value);
-        return std.fmt.parseUnsigned(u64, raw_value, 10) catch 0;
-    }
-
-    /// createFramePacingTimer creates a new value used by Renderer.
-    fn createFramePacingTimer() ?windows.HANDLE {
-        const desired_access = TIMER_MODIFY_STATE | SYNCHRONIZE_ACCESS;
-        return CreateWaitableTimerExW(null, null, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, desired_access) orelse
-            CreateWaitableTimerExW(null, null, 0, desired_access);
-    }
+    pub const init = renderer_init.init;
 
     /// Cleans up all renderer resources in the reverse order of creation.
     pub fn deinit(self: *Renderer) void {
@@ -3958,7 +3515,7 @@ pub const Renderer = struct {
         );
     }
 
-    const SkyboxJobContext = skybox_pass.JobContext(Renderer, ProjectionParams, texture.HdrTexture);
+    pub const SkyboxJobContext = skybox_pass.JobContext(Renderer, ProjectionParams, texture.HdrTexture);
 
     /// Applies skybox pass.
     /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
@@ -4697,7 +4254,7 @@ pub const Renderer = struct {
     }
 
     /// buildBlockbusterGradeProfile builds data structures used by Renderer.
-    fn buildBlockbusterGradeProfile() ColorGradeProfile {
+    pub fn buildBlockbusterGradeProfile() ColorGradeProfile {
         var profile: ColorGradeProfile = undefined;
         var i: usize = 0;
         while (i < 256) : (i += 1) {
