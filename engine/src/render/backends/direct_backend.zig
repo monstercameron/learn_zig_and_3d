@@ -1,5 +1,6 @@
 ﻿const std = @import("std");
 const job_system = @import("job_system");
+const app_config = @import("../../core/app_config.zig");
 const obj_loader = @import("../../assets/obj_loader.zig");
 const TileRenderer = @import("../core/tile_renderer.zig");
 const direct_batch = @import("../direct/batch.zig");
@@ -185,7 +186,12 @@ pub const State = struct {
             self.timings.primitive_count = expansion.primitive_count;
 
             const compile_start = std.time.nanoTimestamp();
-            gouraud_kernel.applyBatchLighting(&self.batch, .{ .camera_position = camera.position });
+            // Forward path bakes Gouraud colours into the batch up front.
+            // Deferred path (ROADMAP §H) skips this — lighting moves to a
+            // screen-space stage that consumes the G-buffer after raster.
+            if (!app_config.DEFERRED_SHADING_ENABLED) {
+                gouraud_kernel.applyBatchLighting(&self.batch, .{ .camera_position = camera.position });
+            }
             try direct_batch.compileToDrawList(&self.batch, &self.draw_list, camera, width, height);
             self.timings.compile_draw_list_ns = @max(std.time.nanoTimestamp() - compile_start, @as(i128, 0));
 

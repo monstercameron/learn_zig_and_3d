@@ -197,6 +197,20 @@ pub var POST_COLOR_BRIGHTNESS_BIAS: i32 = 4;
 /// Percentile adjustment of color contrast stretching values relative to midpoint.
 pub var POST_COLOR_CONTRAST_PERCENT: i32 = 112;
 
+// === Deferred-shading migration flag (ROADMAP §H) ===
+//
+// When false (default), the renderer uses the legacy forward path:
+// applyBatchLighting bakes Gouraud colours into the primitive batch
+// before raster, and the rasterizer writes final colour to the
+// backbuffer.
+//
+// When true, lighting is deferred: rasterization emits a G-buffer
+// (depth, normal, base_color, material) and a screen-space shading
+// stage produces the final lit colour. Flipping this on requires H3
+// (raster G-buffer writes) and H4 (lighting stage) to both be in
+// place. Until then, leave it false.
+pub var DEFERRED_SHADING_ENABLED: bool = false;
+
 /// Performs target frame time ns.
 /// Keeps target frame time ns as the single implementation point so call-site behavior stays consistent.
 pub fn targetFrameTimeNs() i128 {
