@@ -235,6 +235,8 @@ pub fn directFrameResources(renderer: *Renderer) frame_resources.FrameResources 
             .scene_camera = renderer.scene_camera,
             .scene_normal = renderer.scene_normal,
             .scene_surface = renderer.scene_surface,
+            .scene_base_color = renderer.scene_base_color,
+            .scene_material = renderer.scene_material,
         },
     };
 }

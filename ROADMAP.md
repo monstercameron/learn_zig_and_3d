@@ -82,9 +82,46 @@ Scope: every hot kernel implemented across every target ISA.
 
 These are supportive, not blocking, but landing them sharpens every measurement.
 
-- [ ] **`renderer.zig` split** (deferred from cleanup) — without it, perf attribution is per-7800-line-blob, not per-subsystem. High priority for clean numbers.
-- [ ] **MeshWork zombie sweep** (deferred from cleanup) — dead code in raster path could distort branch prediction / icache behavior
-- [ ] **`direct/primitives.zig` split** (deferred from cleanup) — sharper hotspot boundaries in profiles
+- [x] **`renderer.zig` split** — done (7886 → 2244 lines across renderer/ submodules)
+- [x] **MeshWork zombie sweep** — done (~2300 dead lines removed)
+- [x] **`direct/primitives.zig` split** — partial (Gouraud extracted to direct/gouraud.zig; 1620 → 936)
+
+## Phase H — Deferred shading migration
+
+The current forward path bakes lighting into vertex colours and writes a
+single u32 colour buffer. That caps both perf (branchy SIMD-hostile inner
+loop) and image quality (no per-pixel PBR, 8-bit banding through the
+post stack). Migration plan (each step is a focused commit, stays green):
+
+- [ ] **H1** define G-buffer surfaces (depth f32 already exists; add
+      normal rgb10/a2 compact, base_color rgba8, material rgba8); wire
+      alloc + deinit; reuse existing `scene_normal` / `scene_surface`
+      slots.
+- [ ] **H2** stop pre-baking lighting in `primitive_expansion`; carry
+      base_color + per-vertex normals + material id through to raster.
+- [ ] **H3** rewrite the rasterizer inner loop to emit G-buffer
+      surfaces (branchless mask writes). Gate behind a feature flag so
+      the forward path stays the default until lighting stage exists.
+- [ ] **H4** shading stage MVP: read G-buffer, reconstruct world
+      position from depth, decode normal, evaluate lights per-pixel with
+      Phong (= current visual quality). Per-tile job decomposition.
+- [ ] **H5** HDR f32x4 scene buffer + tone-map (Reinhard / ACES) at the
+      end. Per-tile parallel tone-map.
+- [ ] **H6** migrate the post stack (bloom, SSAO, SSGI, SSR, TAA,
+      motion blur, god rays, lens flare, DOF, chromatic aberration,
+      film grain, colour grade) to read+write the HDR buffer.
+- [ ] **H7** hi-Z pyramid early reject between visibility_culling and
+      screen_binning; rejects whole packets that lie behind committed
+      depth before binning + raster work.
+- [ ] **H8** swap Phong for PBR (Cook-Torrance + GGX); roughness /
+      metallic in G.material. Test with a sphere grid.
+- [ ] **H9** N-core scaling validation. Run at 1/2/4/8/16/N workers,
+      capture per-stage timings, ensure ~linear scaling; parallelize
+      any single-threaded straggler. Target ≥70% efficiency at N.
+
+The migration's friendly property: the existing 9-stage pipeline
+already has slots for every new piece. What changes is the *data* each
+stage emits, not the stage skeleton.
 
 ## Critical-path ordering
 

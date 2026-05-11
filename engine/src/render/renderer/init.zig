@@ -187,6 +187,10 @@ pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allo
     errdefer allocator.free(scene_normal);
     const scene_surface = try allocator.alignedAlloc(TileRenderer.SurfaceHandle, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
     errdefer allocator.free(scene_surface);
+    const scene_base_color = try allocator.alignedAlloc(u32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+    errdefer allocator.free(scene_base_color);
+    const scene_material = try allocator.alignedAlloc(u32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+    errdefer allocator.free(scene_material);
     const taa_history_pixels = try allocator.alignedAlloc(u32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
     errdefer allocator.free(taa_history_pixels);
     const taa_resolve_pixels = try allocator.alignedAlloc(u32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
@@ -404,6 +408,8 @@ pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allo
         .scene_camera = scene_camera,
         .scene_normal = scene_normal,
         .scene_surface = scene_surface,
+        .scene_base_color = scene_base_color,
+        .scene_material = scene_material,
         .taa_scratch = .{
             .history_pixels = taa_history_pixels,
             .resolve_pixels = taa_resolve_pixels,

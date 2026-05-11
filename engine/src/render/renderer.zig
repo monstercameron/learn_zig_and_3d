@@ -1426,6 +1426,11 @@ pub const Renderer = struct {
     scene_camera: []math.Vec3,
     scene_normal: []math.Vec3,
     scene_surface: []TileRenderer.SurfaceHandle,
+    // G-buffer additions for the deferred-shading migration (ROADMAP H1).
+    // Allocated alongside the other scene_* surfaces; populated starting
+    // in H3 (rasterizer) and consumed starting in H4 (lighting stage).
+    scene_base_color: []u32,
+    scene_material: []u32,
     scene_buffers_initialized: bool = false,
     taa_scratch: TemporalAAScratch,
     taa_previous_view: TemporalAAViewState,
@@ -1609,6 +1614,8 @@ pub const Renderer = struct {
         self.allocator.free(self.scene_camera);
         self.allocator.free(self.scene_normal);
         self.allocator.free(self.scene_surface);
+        self.allocator.free(self.scene_base_color);
+        self.allocator.free(self.scene_material);
         self.scene_item_gizmo.deinit(self.allocator);
         self.allocator.free(self.taa_scratch.history_pixels);
         self.allocator.free(self.taa_scratch.resolve_pixels);
