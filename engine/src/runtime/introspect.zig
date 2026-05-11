@@ -63,6 +63,24 @@ pub const MemorySnapshot = struct {
     peak_bytes: u64 = 0,
 };
 
+/// Per-stage breakdown of the direct-backend pipeline (the 9 stages
+/// inside meshlet_tiled). All durations in nanoseconds. Zero means the
+/// stage was either skipped (e.g. shading disabled) or no work landed
+/// in it on this frame.
+pub const StageTimings = struct {
+    build_batch_ns: i128 = 0,
+    compile_draw_list_ns: i128 = 0,
+    clear_ns: i128 = 0,
+    binning_ns: i128 = 0,
+    raster_ns: i128 = 0,
+    shading_ns: i128 = 0,
+    composition_ns: i128 = 0,
+    post_process_ns: i128 = 0,
+    present_ns: i128 = 0,
+    primitive_count: usize = 0,
+    touched_tiles: usize = 0,
+};
+
 pub const FrameSnapshot = struct {
     frame_index: u64,
     timestamp_ns: i128,
@@ -75,6 +93,7 @@ pub const FrameSnapshot = struct {
     pacing: PacingSnapshot,
     job_system: JobSystemSnapshot,
     memory: MemorySnapshot,
+    stages: StageTimings,
 
     passes: []const PassSample,
 };
@@ -200,8 +219,15 @@ pub fn writeFrameJson(snapshot: *const FrameSnapshot, w: anytype) !void {
     try writePacingJson(snapshot.pacing, w);
     try writeJobsJson(snapshot.job_system, w);
     try writeMemoryJson(snapshot.memory, w);
+    try writeStagesJson(snapshot.stages, w);
     try writePassesJson(snapshot.passes, w);
     try w.print("}}", .{});
+}
+
+fn writeStagesJson(s: StageTimings, w: anytype) !void {
+    try w.print(
+        \\,"stages":{{"build_batch_ns":{},"compile_draw_list_ns":{},"clear_ns":{},"binning_ns":{},"raster_ns":{},"shading_ns":{},"composition_ns":{},"post_process_ns":{},"present_ns":{},"primitives":{},"touched_tiles":{}}}
+    , .{ s.build_batch_ns, s.compile_draw_list_ns, s.clear_ns, s.binning_ns, s.raster_ns, s.shading_ns, s.composition_ns, s.post_process_ns, s.present_ns, s.primitive_count, s.touched_tiles });
 }
 
 fn writeSceneJson(s: SceneSnapshot, w: anytype) !void {

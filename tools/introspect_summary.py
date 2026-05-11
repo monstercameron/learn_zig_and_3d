@@ -71,6 +71,38 @@ def summarise(frames):
             }
         )
 
+    stage_fields = [
+        "build_batch_ns",
+        "compile_draw_list_ns",
+        "clear_ns",
+        "binning_ns",
+        "raster_ns",
+        "shading_ns",
+        "composition_ns",
+        "post_process_ns",
+        "present_ns",
+    ]
+    stage_totals = {k: [] for k in stage_fields}
+    for f in frames:
+        st = f.get("stages", {})
+        for k in stage_fields:
+            stage_totals[k].append(st.get(k, 0) / 1_000_000)
+
+    stage_summary = []
+    for name in sorted(stage_fields, key=lambda k: -statistics.mean(stage_totals[k]) if stage_totals[k] else 0):
+        samples = stage_totals[name]
+        if not samples or max(samples) == 0:
+            continue
+        stage_summary.append(
+            {
+                "stage": name.removesuffix("_ns"),
+                "median_ms": round(statistics.median(samples), 4),
+                "mean_ms": round(statistics.mean(samples), 4),
+                "p95_ms": round(quantile(samples, 0.95), 4),
+                "max_ms": round(max(samples), 4),
+            }
+        )
+
     last_frame = frames[-1]
     first_frame = frames[0]
     mem_delta = last_frame["mem"]["bytes_in_use"] - first_frame["mem"]["bytes_in_use"]
@@ -106,6 +138,7 @@ def summarise(frames):
             "max": round(max(deadline_errors), 4),
         },
         "passes_by_cost": pass_summary,
+        "stages_by_cost": stage_summary,
         "memory": {
             "first_bytes_in_use": first_frame["mem"]["bytes_in_use"],
             "last_bytes_in_use": last_frame["mem"]["bytes_in_use"],

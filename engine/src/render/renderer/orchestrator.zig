@@ -255,6 +255,22 @@ pub fn render3DMeshWithPump(renderer: *Renderer, mesh: *const Mesh, pump: ?*cons
                 .worker_count = if (renderer.job_system) |js| js.worker_count else 0,
             },
             .memory = introspect.sampleMemStats(),
+            .stages = blk: {
+                const t = renderer.direct_backend.lastTimings();
+                break :blk .{
+                    .build_batch_ns = t.build_batch_ns,
+                    .compile_draw_list_ns = t.compile_draw_list_ns,
+                    .clear_ns = t.clear_ns,
+                    .binning_ns = t.binning_ns,
+                    .raster_ns = t.raster_ns,
+                    .shading_ns = t.shading_ns,
+                    .composition_ns = t.composition_ns,
+                    .post_process_ns = t.post_process_ns,
+                    .present_ns = t.present_ns,
+                    .primitive_count = t.primitive_count,
+                    .touched_tiles = t.touched_tiles,
+                };
+            },
             .passes = pass_buf[0..renderer.render_pass_count],
         };
         introspect.emitFrame(&snapshot);
