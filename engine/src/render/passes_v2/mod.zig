@@ -109,9 +109,19 @@ pub const Descriptor = struct {
 // driver iterates this list to enable/dispatch/scan them uniformly.
 
 pub const depth_fog = @import("depth_fog.zig");
+pub const chromatic_aberration = @import("chromatic_aberration.zig");
+pub const color_grade = @import("color_grade.zig");
+pub const lens_flare = @import("lens_flare.zig");
+pub const motion_blur = @import("motion_blur.zig");
+pub const god_rays = @import("god_rays.zig");
 
 /// Compile-time table of every available v2 pass. Drivers iterate it
 /// to look up by name or list available passes via CLI.
 pub const all = [_]Descriptor{
     depth_fog.descriptor,
+    chromatic_aberration.descriptor,
+    color_grade.descriptor,
+    lens_flare.descriptor,
+    motion_blur.descriptor,
+    god_rays.descriptor,
 };

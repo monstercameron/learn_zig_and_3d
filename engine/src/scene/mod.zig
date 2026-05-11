@@ -206,10 +206,16 @@ const ExecutionState = struct {
                     body_interface.setLinearVelocity(binding.body_id, .{ 0.0, 6.5, 0.0 });
                 }
                 self.enter_was_down = self.enter_pressed;
-                physics_world.system.update(delta_seconds, .{ .collision_steps = 1 }) catch {};
+                // Freeze the physics solver while IQ scanning so the
+                // gun pose is identical frame-to-frame. Lets scanner
+                // scores be compared across runs without confounding
+                // from physics-driven motion.
+                if (!std.process.hasEnvVarConstant("ZIG_IQ_SCAN")) {
+                    physics_world.system.update(delta_seconds, .{ .collision_steps = 1 }) catch {};
+                }
             },
             .scene_physics => {
-                if (!self.pause_dynamics) {
+                if (!self.pause_dynamics and !std.process.hasEnvVarConstant("ZIG_IQ_SCAN")) {
                     physics_world.system.update(delta_seconds, .{ .collision_steps = 1 }) catch {};
                 }
             },

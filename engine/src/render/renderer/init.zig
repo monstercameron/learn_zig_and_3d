@@ -49,7 +49,6 @@ const CompositeJobContext = renderer_module.CompositeJobContext;
 const ShadowResolveJobContext = renderer_module.ShadowResolveJobContext;
 const ShadowRasterJobContext = renderer_module.ShadowRasterJobContext;
 const DepthOfFieldJobContext = renderer_module.DepthOfFieldJobContext;
-const ColorGradeJobContext = renderer_module.ColorGradeJobContext;
 const ColorGradeProfile = renderer_module.ColorGradeProfile;
 const ShadowMap = renderer_module.ShadowMap;
 const ShadowResolveConfig = renderer_module.ShadowResolveConfig;
@@ -127,26 +126,14 @@ pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allo
 
     const job_system = try JobSystem.init(allocator);
     const color_grade_job_count = @max(@as(usize, 1), @as(usize, @intCast(job_system.worker_count * 2)));
-    const color_grade_job_contexts = try allocator.alloc(ColorGradeJobContext, color_grade_job_count);
-    errdefer allocator.free(color_grade_job_contexts);
-    const moblur_job_contexts = try allocator.alloc(post_dispatch.MotionBlurJobContext, color_grade_job_count);
-    errdefer allocator.free(moblur_job_contexts);
     const moblur_scratch_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
     errdefer allocator.free(moblur_scratch_pixels);
 
-    const god_rays_job_contexts = try allocator.alloc(post_dispatch.GodRaysJobContext, color_grade_job_count);
-    errdefer allocator.free(god_rays_job_contexts);
     const god_rays_scratch_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
     errdefer allocator.free(god_rays_scratch_pixels);
 
-    const chromatic_aberration_job_contexts = try allocator.alloc(post_dispatch.ChromaticAberrationJobContext, color_grade_job_count);
-    errdefer allocator.free(chromatic_aberration_job_contexts);
 
-    const film_grain_job_contexts = try allocator.alloc(post_dispatch.FilmGrainVignetteJobContext, color_grade_job_count);
-    errdefer allocator.free(film_grain_job_contexts);
 
-    const lens_flare_job_contexts = try allocator.alloc(post_dispatch.LensFlareJobContext, color_grade_job_count);
-    errdefer allocator.free(lens_flare_job_contexts);
     const lens_flare_scratch_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
     errdefer allocator.free(lens_flare_scratch_pixels);
     const ao_job_contexts = try allocator.alloc(AOJobContext, color_grade_job_count);
@@ -527,14 +514,8 @@ pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allo
         .dof_focal_distance = config.POST_DOF_FOCAL_DISTANCE,
         .dof_target_focal_distance = config.POST_DOF_FOCAL_DISTANCE,
         .taa_job_contexts = taa_job_contexts,
-        .color_grade_job_contexts = color_grade_job_contexts,
-        .moblur_job_contexts = moblur_job_contexts,
         .moblur_scratch_pixels = moblur_scratch_pixels,
-        .god_rays_job_contexts = god_rays_job_contexts,
         .god_rays_scratch_pixels = god_rays_scratch_pixels,
-        .chromatic_aberration_job_contexts = chromatic_aberration_job_contexts,
-        .film_grain_job_contexts = film_grain_job_contexts,
-        .lens_flare_job_contexts = lens_flare_job_contexts,
         .lens_flare_scratch_pixels = lens_flare_scratch_pixels,
         .color_grade_jobs = color_grade_jobs,
     };

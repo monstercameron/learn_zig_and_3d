@@ -206,6 +206,12 @@ pub var POST_GOD_RAYS_EXPOSURE: f32 = 0.8;
 // --- Global Color Profile ---
 /// The name of the LUT or graded preset mapped onto the final output color.
 pub var POST_COLOR_PROFILE_NAME: []const u8 = "blockbuster_teal_orange";
+
+// passes_v2/color_grade knobs (deferred-pipeline-native).
+pub var POST_COLOR_GRADE_BRIGHTNESS: f32 = 0.0;
+pub var POST_COLOR_GRADE_CONTRAST: f32 = 0.0;
+pub var POST_COLOR_GRADE_SATURATION: f32 = 1.0;
+pub var POST_COLOR_GRADE_GAMMA: f32 = 1.0;
 /// Overall brightness adjustment scalar added directly to final colors.
 pub var POST_COLOR_BRIGHTNESS_BIAS: i32 = 4;
 /// Percentile adjustment of color contrast stretching values relative to midpoint.

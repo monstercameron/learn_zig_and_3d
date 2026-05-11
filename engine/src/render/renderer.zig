@@ -41,13 +41,7 @@ pub const Meshlet = MeshModule.Meshlet;
 const config = @import("../core/app_config.zig");
 const input = @import("platform_input");
 const skybox_pass = @import("passes/skybox_pass.zig");
-const color_grade_pass = @import("passes/color_grade_pass.zig");
-const chromatic_aberration_pass = @import("passes/chromatic_aberration_pass.zig");
-const lens_flare_pass = @import("passes/lens_flare_pass.zig");
-const film_grain_vignette_pass = @import("passes/film_grain_vignette_pass.zig");
-const god_rays_pass = @import("passes/god_rays_pass.zig");
 const depth_of_field_pass = @import("passes/depth_of_field_pass.zig");
-const motion_blur_pass = @import("passes/motion_blur_pass.zig");
 const ssgi_pass = @import("passes/ssgi_pass.zig");
 const ssr_pass = @import("passes/ssr_pass.zig");
 const ssao_pass = @import("passes/ssao_pass.zig");
@@ -79,7 +73,6 @@ const hybrid_shadow_cache_kernel = @import("kernels/hybrid_shadow_cache_kernel.z
 const hybrid_shadow_resolve_kernel = @import("kernels/hybrid_shadow_resolve_kernel.zig");
 const bloom_blur_h_kernel = @import("kernels/bloom_blur_h_kernel.zig");
 const bloom_blur_v_kernel = @import("kernels/bloom_blur_v_kernel.zig");
-const lighting_pass = @import("passes/lighting_pass.zig");
 const scanline = @import("core/scanline.zig");
 const texture = @import("../assets/texture.zig");
 const direct_primitives = @import("direct/primitives.zig");
@@ -1124,20 +1117,6 @@ const job_system_module = @import("job_system");
 const JobSystem = job_system_module.JobSystem;
 const Job = job_system_module.Job;
 
-pub const ColorGradeJobContext = struct {
-    pixels: []u32,
-    start_index: usize,
-    end_index: usize,
-    profile: *const ColorGradeProfile,
-
-    /// Runs this module step with the currently bound configuration.
-    /// Keeps run as the single implementation point so call-site behavior stays consistent.
-    pub fn run(ctx_ptr: *anyopaque) void {
-        const ctx: *ColorGradeJobContext = @ptrCast(@alignCast(ctx_ptr));
-        color_grade_pass.runRange(ctx.pixels, ctx.start_index, ctx.end_index, ctx.profile);
-    }
-};
-
 pub const ShadowLightDispatchContext = struct {
     renderer: *Renderer,
     camera_position: math.Vec3,
@@ -1492,14 +1471,8 @@ pub const Renderer = struct {
     dof_focal_distance: f32,
     dof_target_focal_distance: f32,
     taa_job_contexts: []TAAJobContext,
-    color_grade_job_contexts: []ColorGradeJobContext,
-    moblur_job_contexts: []post_dispatch.MotionBlurJobContext,
     moblur_scratch_pixels: []u32,
-    god_rays_job_contexts: []post_dispatch.GodRaysJobContext,
     god_rays_scratch_pixels: []u32,
-    chromatic_aberration_job_contexts: []post_dispatch.ChromaticAberrationJobContext,
-    film_grain_job_contexts: []post_dispatch.FilmGrainVignetteJobContext,
-    lens_flare_job_contexts: []post_dispatch.LensFlareJobContext,
     lens_flare_scratch_pixels: []u32,
     color_grade_jobs: []Job,
 
@@ -1663,14 +1636,8 @@ pub const Renderer = struct {
         self.allocator.free(self.ssr_job_contexts);
         self.allocator.free(self.dof_job_contexts);
         self.allocator.free(self.taa_job_contexts);
-        self.allocator.free(self.color_grade_job_contexts);
-        self.allocator.free(self.moblur_job_contexts);
         self.allocator.free(self.moblur_scratch_pixels);
-        self.allocator.free(self.god_rays_job_contexts);
         self.allocator.free(self.god_rays_scratch_pixels);
-        self.allocator.free(self.chromatic_aberration_job_contexts);
-        self.allocator.free(self.film_grain_job_contexts);
-        self.allocator.free(self.lens_flare_job_contexts);
         self.allocator.free(self.lens_flare_scratch_pixels);
         self.allocator.free(self.color_grade_jobs);
         if (self.hdri_map) |*m| m.deinit();
