@@ -40,7 +40,7 @@ fn onEvent(ctx: *script_host.ScriptCallbackContext) void {
             if (state.cycle_remaining_s <= 0.0) {
                 state.recycle_remaining_s = @max(0.0, state.recycle_remaining_s - delta_seconds);
             }
-            if (ctx.input.keyboard.isDown(.k) and state.cycle_remaining_s <= 0.0 and state.recycle_remaining_s <= 0.0) {
+            if (ctx.input.actions.isDown(.secondary_trigger) and state.cycle_remaining_s <= 0.0 and state.recycle_remaining_s <= 0.0) {
                 ctx.commands.queueJump(ctx.entity, jump_velocity) catch {};
                 state.cycle_remaining_s = jump_cycle_seconds;
                 state.recycle_remaining_s = jump_recycle_seconds;

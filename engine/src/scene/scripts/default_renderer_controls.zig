@@ -16,26 +16,26 @@ fn onEvent(ctx: *script_host.ScriptCallbackContext) void {
 }
 
 fn updateControls(ctx: *script_host.ScriptCallbackContext) void {
-    const keyboard = ctx.input.keyboard;
+    const actions = ctx.input.actions;
     const mouse = ctx.input.mouse;
     const editor_pointer_active = mouse.isDown(.left) or mouse.isDown(.right);
     const editor_hotkeys_allowed = !ctx.input.first_person_active and !editor_pointer_active;
 
     if (editor_hotkeys_allowed) {
-        if (keyboard.wasPressed(.m)) ctx.commands.queueToggleSceneItemGizmo() catch {};
-        if (keyboard.wasPressed(.g)) ctx.commands.queueToggleLightGizmo() catch {};
-        if (keyboard.wasPressed(.x)) ctx.commands.queueSetGizmoAxis(.x) catch {};
-        if (keyboard.wasPressed(.y)) ctx.commands.queueSetGizmoAxis(.y) catch {};
-        if (keyboard.wasPressed(.z)) ctx.commands.queueSetGizmoAxis(.z) catch {};
-        if (keyboard.isDown(.ctrl) and keyboard.wasPressed(.j)) {
+        if (actions.wasPressed(.toggle_scene_item_gizmo)) ctx.commands.queueToggleSceneItemGizmo() catch {};
+        if (actions.wasPressed(.toggle_light_gizmo)) ctx.commands.queueToggleLightGizmo() catch {};
+        if (actions.wasPressed(.gizmo_axis_x)) ctx.commands.queueSetGizmoAxis(.x) catch {};
+        if (actions.wasPressed(.gizmo_axis_y)) ctx.commands.queueSetGizmoAxis(.y) catch {};
+        if (actions.wasPressed(.gizmo_axis_z)) ctx.commands.queueSetGizmoAxis(.z) catch {};
+        if (actions.wasPressed(.nudge_negative)) {
             ctx.commands.queueNudgeActiveGizmo(-0.2) catch {};
-        } else if (keyboard.isDown(.ctrl) and keyboard.wasPressed(.l)) {
+        } else if (actions.wasPressed(.nudge_positive)) {
             ctx.commands.queueNudgeActiveGizmo(0.2) catch {};
-        } else if (keyboard.wasPressed(.l)) {
+        } else if (actions.wasPressed(.cycle_light_selection)) {
             ctx.commands.queueCycleLightSelection() catch {};
         }
     }
-    if (keyboard.wasPressed(.p)) ctx.commands.queueToggleRenderOverlay() catch {};
-    if (keyboard.wasPressed(.h)) ctx.commands.queueToggleShadowDebug() catch {};
-    if (keyboard.wasPressed(.n)) ctx.commands.queueAdvanceShadowDebug() catch {};
+    if (actions.wasPressed(.toggle_overlay)) ctx.commands.queueToggleRenderOverlay() catch {};
+    if (actions.wasPressed(.toggle_shadow_debug)) ctx.commands.queueToggleShadowDebug() catch {};
+    if (actions.wasPressed(.advance_shadow_debug)) ctx.commands.queueAdvanceShadowDebug() catch {};
 }

@@ -1,4 +1,4 @@
-//! Build configuration for benchmark binaries and benchmark-only dependencies.
+﻿//! Build configuration for benchmark binaries and benchmark-only dependencies.
 //! Benchmark build/runtime integration module.
 
 const std = @import("std");
@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const engine_bench_module = b.createModule(.{
-        .root_source_file = b.path("../engine/src/bench_exports.zig"),
+        .root_source_file = b.path("../engine/src/bench/exports.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -101,24 +101,4 @@ pub fn build(b: *std.Build) void {
     }
     const run_phase15_step = b.step("run-phase15-microbench", "Run Phase 15 microbench suite");
     run_phase15_step.dependOn(&run_phase15_cmd.step);
-
-    const perf_uplift_module = b.createModule(.{
-        .root_source_file = b.path("perf-uplift-microbench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    perf_uplift_module.addImport("engine_bench", engine_bench_module);
-
-    const perf_uplift_exe = b.addExecutable(.{
-        .name = "perf_uplift_microbench",
-        .root_module = perf_uplift_module,
-    });
-    const run_perf_uplift_cmd = b.addRunArtifact(perf_uplift_exe);
-    if (b.args) |args| {
-        if (args.len > 0) {
-            run_perf_uplift_cmd.addArgs(args);
-        }
-    }
-    const run_perf_uplift_step = b.step("run-perf-uplift-microbench", "Run performance uplift microbench suite");
-    run_perf_uplift_step.dependOn(&run_perf_uplift_cmd.step);
 }

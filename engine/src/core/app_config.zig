@@ -12,14 +12,18 @@ pub var WINDOW_WIDTH: u32 = 640;
 pub var WINDOW_HEIGHT: u32 = 360;
 /// Whether the application starts in fullscreen mode.
 pub var WINDOW_FULLSCREEN: bool = false;
-/// Synchronize frame presentation with monitor refresh rate to prevent screen tearing.
-pub var WINDOW_VSYNC: bool = true;
+/// Synchronize frame presentation with monitor refresh rate to prevent
+/// screen tearing. Default false = uncapped (benchmark mode); the
+/// DXGI Present sync_interval becomes 0 so the GPU presents as fast as
+/// the backbuffer is ready. Enable for tear-free desktop use.
+pub var WINDOW_VSYNC: bool = false;
 
 // --- Rendering & Camera Settings ---
 /// The percentage scale of the window resolution to use for the internal rendering backbuffer (e.g., 50 for 50% width/height). Maintains aspect ratio.
 pub var RENDER_RESOLUTION_SCALE_PERCENT: u32 = 100;
-/// The desired maximum frame rate. Used to calculate targetFrameTimeNs.
-pub var TARGET_FPS: u32 = 120;
+/// The desired maximum frame rate. 0 = uncapped (benchmark mode).
+/// Used to calculate targetFrameTimeNs.
+pub var TARGET_FPS: u32 = 0;
 /// The initial Field of View (FOV) for the camera in degrees.
 pub var CAMERA_FOV_INITIAL: f32 = 60.0;
 /// How much the FOV changes per zoom control step.
@@ -55,9 +59,9 @@ pub var TEXTURE_FILTERING_BILINEAR: bool = true;
 /// Enables a color grading pass on the final image.
 pub var POST_COLOR_CORRECTION_ENABLED: bool = true;
 /// Enables the bloom effect for overly bright pixels simulating glowing lights.
-pub var POST_BLOOM_ENABLED: bool = false;
+pub var POST_BLOOM_ENABLED: bool = true;
 /// Enables depth-aware atmospheric fog to simulate distance.
-pub var POST_DEPTH_FOG_ENABLED: bool = false;
+pub var POST_DEPTH_FOG_ENABLED: bool = true;
 /// Enables HDR skybox rendering
 pub var POST_SKYBOX_ENABLED: bool = true;
 /// Enables the primary generic shadow mapping pass.
@@ -120,7 +124,7 @@ pub var POST_SSR_MAX_DISTANCE: f32 = 100.0;
 pub var POST_SSR_THICKNESS: f32 = 0.5;
 pub var POST_SSR_INTENSITY: f32 = 0.8;
 
-pub var POST_SSAO_ENABLED: bool = false;
+pub var POST_SSAO_ENABLED: bool = true;
 /// SSAO rendering resolution divisor (higher = lower res & faster).
 pub var POST_SSAO_DOWNSAMPLE: i32 = 4;
 /// The sampling spread radius in screen space for SSAO.
@@ -164,23 +168,37 @@ pub var POST_DOF_FOCAL_RANGE: f32 = 2.0;
 pub var POST_DOF_BLUR_RADIUS: i32 = 1;
 
 /// Enables Motion Blur based on pixel velocity from previous frames.
-pub var POST_MOTION_BLUR_ENABLED: bool = false;
+pub var POST_MOTION_BLUR_ENABLED: bool = true;
 /// The number of samples gathered along the velocity vector for motion blur.
 pub var POST_MOTION_BLUR_SAMPLES: i32 = 6;
 /// The intensity multiplier for motion blur trail length. (0.5 simulates a cinematic 180-degree shutter)
 pub var POST_MOTION_BLUR_INTENSITY: f32 = 0.5;
 
 // --- Cinematic Effects ---
-pub var POST_LENS_FLARE_ENABLED: bool = false;
+pub var POST_LENS_FLARE_ENABLED: bool = true;
 pub var POST_LENS_FLARE_THRESHOLD: i32 = 200;
 pub var POST_LENS_FLARE_INTENSITY_PERCENT: i32 = 40;
 
-pub var POST_CHROMATIC_ABERRATION_ENABLED: bool = false;
-pub var POST_CHROMATIC_ABERRATION_STRENGTH: f32 = 1.0;
+pub var POST_CHROMATIC_ABERRATION_ENABLED: bool = true;
+pub var POST_CHROMATIC_ABERRATION_STRENGTH: f32 = 0.0;
 
-pub var POST_FILM_GRAIN_VIGNETTE_ENABLED: bool = false;
-pub var POST_FILM_GRAIN_STRENGTH: f32 = 0.10;
-pub var POST_VIGNETTE_STRENGTH: f32 = 0.10;
+pub var POST_FILM_GRAIN_VIGNETTE_ENABLED: bool = true;
+pub var POST_FILM_GRAIN_STRENGTH: f32 = 0.0; // off until bare-deferred image looks correct
+pub var POST_VIGNETTE_STRENGTH: f32 = 0.0;
+
+// IQ post-stage knobs (silhouette-masked, all per-pixel).
+// Tuned for full-frame scenes (iq_test, cornell). The earlier values
+// were calibrated against gun_physics where the lit area was a small
+// rectangle; applied across a full Cornell box they oversaturate
+// every silhouette edge.
+pub var POST_SATURATION: f32 = 1.0; // neutral — leave color grading to dedicated pass
+pub var POST_CONTRAST: f32 = 0.0;
+pub var POST_RIM_LIGHT_STRENGTH: f32 = 0.0; // off — too noisy at scene-scale
+pub var POST_RIM_LIGHT_R: f32 = 1.0;
+pub var POST_RIM_LIGHT_G: f32 = 0.95;
+pub var POST_RIM_LIGHT_B: f32 = 0.80;
+pub var POST_EDGE_DARKEN: f32 = 0.0; // off — needs a smarter (non-pixel-Laplacian) edge detector
+pub var POST_EDGE_THRESHOLD: f32 = 0.08;
 
 pub var POST_GOD_RAYS_ENABLED: bool = false;
 pub var POST_GOD_RAYS_SAMPLES: i32 = 16;
@@ -192,10 +210,37 @@ pub var POST_GOD_RAYS_EXPOSURE: f32 = 0.8;
 // --- Global Color Profile ---
 /// The name of the LUT or graded preset mapped onto the final output color.
 pub var POST_COLOR_PROFILE_NAME: []const u8 = "blockbuster_teal_orange";
+
+// passes_v2/color_grade knobs (deferred-pipeline-native).
+pub var POST_COLOR_GRADE_BRIGHTNESS: f32 = 0.0;
+pub var POST_COLOR_GRADE_CONTRAST: f32 = 0.0;
+pub var POST_COLOR_GRADE_SATURATION: f32 = 1.0;
+pub var POST_COLOR_GRADE_GAMMA: f32 = 1.0;
 /// Overall brightness adjustment scalar added directly to final colors.
 pub var POST_COLOR_BRIGHTNESS_BIAS: i32 = 4;
 /// Percentile adjustment of color contrast stretching values relative to midpoint.
 pub var POST_COLOR_CONTRAST_PERCENT: i32 = 112;
+
+// === Deferred-shading migration flag (ROADMAP §H) ===
+//
+// When false (default), the renderer uses the legacy forward path:
+// applyBatchLighting bakes Gouraud colours into the primitive batch
+// before raster, and the rasterizer writes final colour to the
+// backbuffer.
+//
+// When true, lighting is deferred: rasterization emits a G-buffer
+// (depth, normal, base_color, material) and a screen-space shading
+// stage produces the final lit colour. Flipping this on requires H3
+// (raster G-buffer writes) and H4 (lighting stage) to both be in
+// place. Until then, leave it false.
+pub var DEFERRED_SHADING_ENABLED: bool = true;
+
+/// HDR bloom prepass (ROADMAP §H6). Off by default — current
+/// implementation produces visible edge artifacts (white border at
+/// lit/unlit boundary) that need to be diagnosed visually before
+/// re-enabling. Telemetry stays wired so we can validate without
+/// the visual.
+pub var HDR_BLOOM_ENABLED: bool = true;
 
 /// Performs target frame time ns.
 /// Keeps target frame time ns as the single implementation point so call-site behavior stays consistent.

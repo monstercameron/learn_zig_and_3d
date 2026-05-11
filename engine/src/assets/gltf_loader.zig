@@ -4,6 +4,8 @@
 const std = @import("std");
 const math = @import("../core/math.zig");
 const MeshModule = @import("../render/core/mesh.zig");
+const meshlet_builder = @import("../render/core/meshlets/meshlet_builder.zig");
+const meshlet_cache = @import("../render/core/meshlets/meshlet_cache.zig");
 
 const Vec2 = math.Vec2;
 const Vec3 = math.Vec3;
@@ -181,6 +183,7 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
         .vertices = vertex_slice,
         .triangles = triangle_slice,
         .normals = try allocator.alloc(Vec3, triangle_slice.len),
+        .vertex_normals = try allocator.alloc(Vec3, vertex_slice.len),
         .tex_coords = texcoord_slice,
         .meshlets = &[_]MeshModule.Meshlet{},
         .meshlet_vertices = &[_]usize{},
@@ -189,6 +192,21 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Mesh {
     };
     errdefer mesh.deinit();
     mesh.recalculateNormals();
+    mesh.recalculateVertexNormals();
+
+    const cache_hit = meshlet_cache.loadCachedMeshlets(allocator, &mesh, path) catch |err| brk: {
+        std.log.warn("Meshlet cache load failed for {s}: {s}", .{ path, @errorName(err) });
+        break :brk false;
+    };
+
+    if (!cache_hit) {
+        try meshlet_builder.buildMeshlets(allocator, &mesh, .{});
+
+        meshlet_cache.storeMeshlets(&mesh, path) catch |err| {
+            std.log.warn("Meshlet cache store failed for {s}: {s}", .{ path, @errorName(err) });
+        };
+    }
+
     return mesh;
 }
 

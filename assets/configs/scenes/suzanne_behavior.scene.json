@@ -1,0 +1,51 @@
+{
+  "key": "suzanne_behavior",
+  "assets": [
+    {
+      "type": "camera",
+      "cameraName": "suzanne_behavior_cam",
+      "cameraPosition": [0.0, 2.6, -12.5],
+      "cameraOrientation": [-8.0, 0.0]
+    },
+    {
+      "type": "runtime",
+      "runtimeName": "static"
+    },
+    {
+      "type": "light",
+      "position": [-2.8, 2.8, -1.2],
+      "lightColor": [1.0, 0.96, 0.9],
+      "lightDistance": 6.0,
+      "lightShadowMode": "meshlet_ray",
+      "lightShadowUpdateInterval": 1,
+      "glowRadius": 20.0,
+      "glowIntensity": 0.45
+    },
+    {
+      "type": "light",
+      "position": [2.6, 2.2, -0.8],
+      "lightColor": [0.78, 0.88, 1.0],
+      "lightDistance": 5.4,
+      "lightShadowMode": "meshlet_ray",
+      "lightShadowUpdateInterval": 1,
+      "glowRadius": 18.0,
+      "glowIntensity": 0.35
+    },
+    {
+      "type": "model",
+      "id": "box_actor",
+      "modelType": "obj",
+      "modelPath": "assets/models/box.obj",
+      "position": [0.0, 1.15, -6.0],
+      "rotationDeg": [16.0, 58.0, -12.0],
+      "scale": [1.15, 1.15, 1.15],
+      "physicsMotion": "static",
+      "scripts": [
+        {
+          "module": "scene.suzanne_behavior.suzanne_spin"
+        }
+      ],
+      "textures": []
+    }
+  ]
+}

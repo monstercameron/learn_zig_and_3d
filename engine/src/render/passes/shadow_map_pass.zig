@@ -158,7 +158,7 @@ pub fn runBuild(
             @ptrCast(&self.shadow_raster_job_contexts[stripe_index]),
             &parent_job,
         );
-        if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+        if (!self.job_system.?.submitJobWithClass(&self.color_grade_jobs[stripe_index], .high)) {
             CtxType.run(@ptrCast(&self.shadow_raster_job_contexts[stripe_index]));
         }
     }
@@ -229,7 +229,7 @@ pub fn runPipeline(
             @ptrCast(&self.shadow_resolve_job_contexts[stripe_index]),
             &parent_job,
         );
-        if (!self.job_system.?.submitJobAuto(&self.color_grade_jobs[stripe_index])) {
+        if (!self.job_system.?.submitJobWithClass(&self.color_grade_jobs[stripe_index], .high)) {
             CtxType.run(@ptrCast(&self.shadow_resolve_job_contexts[stripe_index]));
         }
     }

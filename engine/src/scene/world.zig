@@ -149,6 +149,12 @@ pub const Commands = struct {
         try self.pending.append(self.allocator, .advance_shadow_debug);
     }
 
+    pub fn appendFrom(self: *Commands, other: *Commands) !void {
+        if (other.pending.items.len == 0) return;
+        try self.pending.appendSlice(self.allocator, other.pending.items);
+        other.clear();
+    }
+
     /// Resets clear.
     /// Keeps invariants on `self` centralized so callers do not duplicate state transitions.
     pub fn clear(self: *Commands) void {

@@ -4,6 +4,7 @@
 const std = @import("std");
 const math = @import("math.zig");
 const handles = @import("entity.zig");
+const camera_state = @import("camera_state.zig");
 
 pub const EntityId = handles.EntityId;
 pub const AssetHandle = handles.AssetHandle;
@@ -40,7 +41,7 @@ pub const TextureSlots = struct {
 };
 
 pub const Camera = struct {
-    fov_deg: f32 = 60.0,
+    fov_deg: f32 = camera_state.default_fov_deg,
     pitch: f32 = 0.0,
     yaw: f32 = 0.0,
     active: bool = false,

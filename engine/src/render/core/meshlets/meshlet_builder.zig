@@ -13,9 +13,9 @@ const logger = log.get("meshlet.builder");
 
 pub const BuildConfig = struct {
     /// Upper bound for unique vertices per meshlet.
-    max_vertices_per_meshlet: u32 = 64,
-    /// Upper bound for triangle primitives per meshlet. A value of 126 mirrors common GPU limits.
-    max_triangles_per_meshlet: u32 = 126,
+    max_vertices_per_meshlet: u32 = 255,
+    /// Upper bound for triangle primitives per meshlet.
+    max_triangles_per_meshlet: u32 = 512,
 
     fn validate(self: BuildConfig) void {
         std.debug.assert(self.max_vertices_per_meshlet >= 3);

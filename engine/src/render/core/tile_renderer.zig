@@ -25,6 +25,7 @@ const texture = @import("../../assets/texture.zig");
 const lighting = @import("lighting.zig");
 
 pub const invalid_surface_id: u32 = std.math.maxInt(u32);
+const scene_clear_color = math.Vec4.new(0.043137256, 0.07058824, 0.1254902, 1.0);
 
 pub const SurfaceHandle = packed struct {
     triangle_id: u32,
@@ -160,7 +161,7 @@ pub const TileBuffer = struct {
     /// Clears the tile for a new frame.
     pub fn clear(self: *TileBuffer) void {
         @memset(self.data, .{
-            .color = math.Vec4.new(0.0, 0.0, 0.0, 1.0),
+            .color = scene_clear_color,
             .camera = math.Vec3.new(0, 0, 0),
             .normal = math.Vec3.new(0, 0, 0),
             .surface = SurfaceHandle.invalid(),
