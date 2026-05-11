@@ -1,8 +1,105 @@
 # Changelog
 
-## 2026-05-11
+## 2026-05-11 (afternoon — passes_v2 effort)
 
-### Image-Quality Post-Stage
+### Shader Architecture Overhaul (13/24 passes ported)
+
+Started a sweeping rewrite of the post-process and shading pass family
+into a clean v2 interface designed for the deferred pipeline. The
+legacy `passes/` directory used implicit globals (read
+`renderer.bitmap.pixels`, ping-pong through `moblur_scratch_pixels`,
+fields on the renderer struct); the new `passes_v2/` namespace takes
+explicit `(in_color, out_color, gbuf)` slice arguments per pass and
+exposes a `Descriptor` with `idempotent`, `requires_scratch`,
+`reads_gbuffer` flags so cache-aware drivers can compose them safely.
+
+**Foundation (commit a5d57b3, 252c50f, a279fda)**
+- `iq_scanner.zig`: artifact + adherence detector. Compares before/after
+  framebuffers around a pass and reports saturation introduction,
+  grayscale collapse, geometry bleeding (silhouette violation), discrete
+  Laplacian discontinuity, NaN/Inf scan, pixels changed, mean delta.
+  Composite 0..100 score. 4/4 unit tests pass.
+- `iq_scan_runtime.zig`: ZIG_IQ_SCAN env var triggers per-pass JSON
+  reports to stderr (`IQ_SCAN {...}` lines). Also freezes physics +
+  the iq_demo light animation for deterministic runs.
+- `passes_v2/mod.zig`: canonical Inputs/Result/Descriptor types.
+
+**Ported passes (clean rewrites, not legacy transliterations):**
+- depth_fog — score 98.4 on gun_physics, 98.0 on iq_test
+- chromatic_aberration — requires_scratch (radial gather)
+- color_grade — brightness, contrast, saturation, gamma
+- lens_flare — point-mirrored ghosts (replaces v1's frame-flood)
+- motion_blur — camera-velocity directional blur
+- god_rays — radial accumulation from screen-space light pos
+- ssao — depth-based AO from G-buffer ring sampling
+- bloom — clean single-pass extract+stamp (no separable-blur stride bugs)
+- depth_of_field — variable box blur driven by depth distance
+- ssr — screen-space reflection march
+- ssgi — single-bounce indirect via neighbour-normal sampling
+- taa — history-buffer lowpass blend
+- skybox — vertical gradient for non-finite depth pixels
+
+**Deleted outright** (no v2 needed):
+- `film_grain_vignette_pass` (replaced by `stages/screen_post_stage`)
+- `lighting_pass` (deferred shading replaces forward lighting)
+
+**Legacy infrastructure stripped** (~2k lines deleted):
+- All `*JobContext` structs (`AOJobContext`, `BloomJobContext`,
+  `SSGIJobContext`, `SSRJobContext`, `DepthOfFieldJobContext`,
+  `TAAJobContext`, etc.) and their fields on the Renderer struct
+- `BloomScratch`, `AOScratch` types and their allocator plumbing
+- `bloom_threshold_curve`, `bloom_intensity_lut`, and the row helpers
+  (`renderAmbientOcclusionRows`, `blurAmbientOcclusion*`, etc.)
+- Cache-aware `runPostProcessStage` short-circuits on
+  `direct_backend.lastTimings().scene_was_cached` so post passes
+  don't compound their previous output on cache-hit frames
+
+### IQ Test Scene & Demo Runtime
+
+- `assets/configs/scenes/iq_test.scene.json`: purpose-built scanner
+  scene — Cornell room (red/green/white walls), blue + orange boxes
+  at different depths, magenta Suzanne head (catches grayscale
+  collapse hard), emissive sphere for bloom/lens_flare seeds.
+- New `RuntimeKind.iq_demo` scene runtime: spins the last renderable
+  around Y at 45°/sec without physics, so animation drives motion
+  blur + cache invalidation while staying deterministic under
+  ZIG_IQ_SCAN.
+
+### Multi-Light + Animated Light + Screen-Space Shadows
+
+- `passes_v2/screen_shadows.zig`: contact-shadow ray-march. For each
+  lit pixel, marches N steps toward the light direction in
+  camera-space, samples depth, darkens proportional to occluders
+  found. Now multi-light: takes up to 4 light directions, each
+  contributes 1/N of the shadow factor — moving a second light
+  changes shadows without disturbing the first.
+- `SceneMeshConfig.scene_light_dirs_cam` plumbed through
+  `scene_tiled_backend` so screen_shadows sees every scene light.
+- `Renderer.demo_light_time` accumulator + orchestrator hook orbits
+  `lights[1]` horizontally with a vertical bob (~4 sec/orbit) when
+  `>= 2` lights and `ZIG_IQ_SCAN` unset.
+
+### Other
+
+- ZIG_IQ_SCAN now freezes physics (gun_physics, scene_physics) and
+  the iq_demo runtime so scanner readings are reproducible.
+- DeferredConfig default ambient 0.18 → 0.35 (vertical faces under
+  Lambert N·L no longer fall to near-black).
+
+### Status & Remaining
+
+**13 / 24 legacy passes ported. Wave 5 (shadows pillar) still open:**
+shadow_map_pass + shadow_raster_rows + shadow_resolve_pass +
+adaptive_shadow_tile_pass + hybrid_shadow_pass + hdr_bloom_pass.
+
+The proper shadow-map pipeline (light-POV depth rasterization +
+projection during deferred lighting) is needed for shadows from
+off-screen occluders, real spotlight cones, and contact-correct
+moving-light effects. Screen-space contact shadows in screen_shadows
+are a working stopgap but visually limited — they only darken pixels
+whose occluders are *also* on screen and close.
+
+## 2026-05-11
 
 - new `screen_post_stage.zig` runs vignette + film-grain in a single
   scalar pass over the LDR `target.color` buffer
