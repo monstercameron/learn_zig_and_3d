@@ -298,7 +298,21 @@ pub const JobSystem = struct {
 
     pub fn init(allocator: std.mem.Allocator) !*JobSystem {
         const cpu_count = std.Thread.getCpuCount() catch 4;
-        const worker_count: u32 = if (cpu_count > 1) @as(u32, @intCast(cpu_count - 1)) else 1;
+        const auto_worker_count: u32 = if (cpu_count > 1) @as(u32, @intCast(cpu_count - 1)) else 1;
+
+        // Env override for benchmark / scaling tests (ROADMAP §H9).
+        // Set ZIG_WORKER_COUNT=N to pin the worker count to N (clamped
+        // to [1, auto]). 0 or unset means use the auto value.
+        var worker_count: u32 = auto_worker_count;
+        if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZIG_WORKER_COUNT")) |raw| {
+            defer std.heap.page_allocator.free(raw);
+            if (std.fmt.parseUnsigned(u32, raw, 10)) |override_count| {
+                if (override_count > 0) {
+                    worker_count = @min(override_count, auto_worker_count);
+                    job_logger.info("ZIG_WORKER_COUNT override: pinning to {} workers (auto would be {})", .{ worker_count, auto_worker_count });
+                }
+            } else |_| {}
+        } else |_| {}
 
         job_logger.info("detected {} cpu(s), creating {} worker thread(s)", .{ cpu_count, worker_count });
 

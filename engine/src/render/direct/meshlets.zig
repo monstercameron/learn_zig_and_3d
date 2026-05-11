@@ -50,11 +50,173 @@ pub fn cullVisibleMeshlets(
 ) !void {
     out_visible.clearRetainingCapacity();
     try out_visible.ensureCapacity(mesh.meshlets.len);
+    const basis = @import("../camera/controller.zig").computeViewBasis(camera.yaw, camera.pitch);
+    const tan_v = std.math.tan(std.math.degreesToRadians(camera.fov_deg) * 0.5);
+    const tan_h = camera.aspect * tan_v;
+    const sec_v = @sqrt(1.0 + tan_v * tan_v);
+    const sec_h = @sqrt(1.0 + tan_h * tan_h);
+    const frustum = FrustumScalars{
+        .basis = basis,
+        .tan_v = tan_v,
+        .tan_h = tan_h,
+        .sec_v = sec_v,
+        .sec_h = sec_h,
+    };
+    out_visible.indices.items.len = mesh.meshlets.len;
+    var write_index: usize = 0;
     for (mesh.meshlets, 0..) |*meshlet, meshlet_index| {
-        if (meshletVisible(meshlet, instance.transform, camera)) {
-            try out_visible.indices.append(out_visible.allocator, meshlet_index);
+        if (meshletVisibleFast(meshlet, instance.transform, camera.position, frustum)) {
+            out_visible.indices.items[write_index] = meshlet_index;
+            write_index += 1;
         }
     }
+    out_visible.indices.items.len = write_index;
+}
+
+/// Parallel variant — splits the meshlet array across worker chunks,
+/// each chunk produces its own visible-index list, merged via
+/// appendSlice. Used when the job_system is available and there are
+/// enough meshlets to amortise the overhead (~256 meshlets).
+pub fn cullVisibleMeshletsParallel(
+    out_visible: *VisibleMeshlets,
+    mesh: *const Mesh,
+    instance: MeshletInstance,
+    camera: direct_batch.Camera,
+    job_sys: ?*JobSystem,
+) !void {
+    const PARALLEL_THRESHOLD: usize = 256;
+    if (job_sys == null or mesh.meshlets.len < PARALLEL_THRESHOLD or job_sys.?.worker_count <= 1) {
+        return cullVisibleMeshlets(out_visible, mesh, instance, camera);
+    }
+    out_visible.clearRetainingCapacity();
+    try out_visible.ensureCapacity(mesh.meshlets.len);
+
+    const basis = @import("../camera/controller.zig").computeViewBasis(camera.yaw, camera.pitch);
+    const tan_v = std.math.tan(std.math.degreesToRadians(camera.fov_deg) * 0.5);
+    const tan_h = camera.aspect * tan_v;
+    const sec_v = @sqrt(1.0 + tan_v * tan_v);
+    const sec_h = @sqrt(1.0 + tan_h * tan_h);
+    const frustum = FrustumScalars{
+        .basis = basis,
+        .tan_v = tan_v,
+        .tan_h = tan_h,
+        .sec_v = sec_v,
+        .sec_h = sec_h,
+    };
+
+    const js = job_sys.?;
+    const worker_count = @as(usize, js.worker_count);
+    const chunk_count = @min(@min(worker_count + 1, 32), mesh.meshlets.len);
+    const base_size = mesh.meshlets.len / chunk_count;
+    const remainder = mesh.meshlets.len % chunk_count;
+
+    // Each worker writes to its own scratch slice; merge at end.
+    var scratch: [32 * 1024]usize = undefined;
+    var scratch_offsets: [33]usize = undefined; // chunk_count + 1
+    scratch_offsets[0] = 0;
+    var contexts: [32]MeshletCullCtx = undefined;
+    var jobs: [32]Job = undefined;
+
+    var cursor: usize = 0;
+    for (0..chunk_count) |chunk_index| {
+        const size = base_size + (if (chunk_index < remainder) @as(usize, 1) else 0);
+        const end = cursor + size;
+        // Reserve scratch range; max indices we can produce equals size.
+        const out_start = scratch_offsets[chunk_index];
+        // We over-reserve by `size`; will compact later when we know
+        // the actual valid count per chunk.
+        scratch_offsets[chunk_index + 1] = out_start + size;
+        if (scratch_offsets[chunk_index + 1] > scratch.len) {
+            // Bail to serial path if the mesh has more meshlets than
+            // our stack scratch can hold.
+            return cullVisibleMeshlets(out_visible, mesh, instance, camera);
+        }
+        contexts[chunk_index] = .{
+            .meshlets = mesh.meshlets[cursor..end],
+            .index_offset = cursor,
+            .transform = instance.transform,
+            .camera_pos = camera.position,
+            .frustum = frustum,
+            .out_slice = scratch[out_start..scratch_offsets[chunk_index + 1]],
+            .written = 0,
+        };
+        cursor = end;
+    }
+
+    var parent = Job.init(noopMeshletJob, @ptrFromInt(1), null);
+    var main_chunk: usize = 0;
+    var dispatched: usize = 0;
+    for (0..chunk_count) |chunk_index| {
+        if (dispatched == 0) {
+            main_chunk = chunk_index;
+        } else {
+            jobs[dispatched - 1] = Job.init(meshletCullJob, @ptrCast(&contexts[chunk_index]), &parent);
+            if (!js.submitJobWithClass(&jobs[dispatched - 1], .high)) {
+                meshletCullJob(@ptrCast(&contexts[chunk_index]));
+            }
+        }
+        dispatched += 1;
+    }
+    meshletCullJob(@ptrCast(&contexts[main_chunk]));
+    parent.complete();
+    js.waitFor(&parent);
+
+    // Compact: append each chunk's written prefix into the output.
+    out_visible.indices.items.len = 0;
+    for (0..chunk_count) |chunk_index| {
+        const ctx = &contexts[chunk_index];
+        try out_visible.indices.appendSlice(out_visible.allocator, ctx.out_slice[0..ctx.written]);
+    }
+}
+
+const MeshletCullCtx = struct {
+    meshlets: []const Meshlet align(64),
+    index_offset: usize,
+    transform: math.Mat4,
+    camera_pos: math.Vec3,
+    frustum: FrustumScalars,
+    out_slice: []usize,
+    written: usize,
+};
+
+fn meshletCullJob(ctx_ptr: *anyopaque) void {
+    const ctx: *MeshletCullCtx = @ptrCast(@alignCast(ctx_ptr));
+    var w: usize = 0;
+    for (ctx.meshlets, 0..) |*meshlet, local_index| {
+        if (meshletVisibleFast(meshlet, ctx.transform, ctx.camera_pos, ctx.frustum)) {
+            ctx.out_slice[w] = ctx.index_offset + local_index;
+            w += 1;
+        }
+    }
+    ctx.written = w;
+}
+
+const FrustumScalars = struct {
+    basis: @import("../camera/controller.zig").ViewBasis,
+    tan_v: f32,
+    tan_h: f32,
+    sec_v: f32,
+    sec_h: f32,
+};
+
+inline fn meshletVisibleFast(
+    meshlet: *const Meshlet,
+    transform: math.Mat4,
+    camera_pos: math.Vec3,
+    frustum: FrustumScalars,
+) bool {
+    const center_world = transform.mulVec3(meshlet.bounds_center);
+    const relative = math.Vec3.sub(center_world, camera_pos);
+    const cx = math.Vec3.dot(relative, frustum.basis.right);
+    const cy = math.Vec3.dot(relative, frustum.basis.up);
+    const cz = math.Vec3.dot(relative, frustum.basis.forward);
+    const r = meshlet.bounds_radius;
+    if (cz + r <= direct_batch.near_plane) return false;
+    if (cx - frustum.tan_h * cz > r * frustum.sec_h) return false;
+    if (-cx - frustum.tan_h * cz > r * frustum.sec_h) return false;
+    if (cy - frustum.tan_v * cz > r * frustum.sec_v) return false;
+    if (-cy - frustum.tan_v * cz > r * frustum.sec_v) return false;
+    return true;
 }
 
 pub fn appendVisibleMeshletsToBatch(
@@ -80,56 +242,132 @@ pub fn appendVisibleMeshletsToBatchParallel(
         return appendVisibleMeshletsToBatch(batch, mesh, visible, instance);
     }
 
+    // Direct-write parallel scheme: workers fill pre-reserved slots in
+    // the main batch instead of producing per-chunk batches that need
+    // a 300 MB serial memcpy merge. Each chunk owns a contiguous range
+    // [start_index .. start_index+chunk_total_tris) in batch.commands.
     const chunk_count = @min(visible.indices.items.len, @as(usize, @intCast(job_sys.?.worker_count + 1)));
-    const chunk_batches = try allocator.alloc(direct_batch.PrimitiveBatch, chunk_count);
-    defer {
-        for (chunk_batches) |*chunk_batch| chunk_batch.deinit();
-        allocator.free(chunk_batches);
+    const chunk_size = std.math.divCeil(usize, visible.indices.items.len, chunk_count) catch 1;
+
+    // Per-chunk triangle counts (prefix-summed to give write offsets).
+    var chunk_tri_counts: [128]usize = undefined;
+    if (chunk_count > chunk_tri_counts.len) return appendVisibleMeshletsToBatch(batch, mesh, visible, instance);
+
+    var total_tris: usize = 0;
+    for (0..chunk_count) |chunk_index| {
+        const start = chunk_index * chunk_size;
+        if (start >= visible.indices.items.len) {
+            chunk_tri_counts[chunk_index] = 0;
+            continue;
+        }
+        const end = @min(start + chunk_size, visible.indices.items.len);
+        const tris = estimateVisiblePrimitiveCount(mesh, visible.indices.items[start..end]);
+        chunk_tri_counts[chunk_index] = tris;
+        total_tris += tris;
     }
-    const chunk_contexts = try allocator.alloc(MeshletChunkContext, chunk_count);
+
+    // Pre-reserve the destination and bump items.len up-front; each
+    // worker writes by index, never touching `len` (which we know
+    // exactly).
+    const base_index = batch.commands.items.len;
+    try batch.commands.ensureUnusedCapacity(batch.allocator, total_tris);
+    batch.commands.items.len = base_index + total_tris;
+
+    const chunk_contexts = try allocator.alloc(DirectMeshletChunkContext, chunk_count);
     defer allocator.free(chunk_contexts);
     const jobs = try allocator.alloc(Job, if (chunk_count > 0) chunk_count - 1 else 0);
     defer allocator.free(jobs);
 
-    for (chunk_batches) |*chunk_batch| chunk_batch.* = direct_batch.PrimitiveBatch.init(allocator);
-
-    const chunk_size = std.math.divCeil(usize, visible.indices.items.len, chunk_count) catch 1;
     var parent = Job.init(noopMeshletJob, @ptrFromInt(1), null);
     var main_chunk: usize = 0;
     var active_chunks: usize = 0;
+    var write_cursor = base_index;
+    const identity_transform = isIdentityTransformLocal(instance.transform);
 
     for (0..chunk_count) |chunk_index| {
         const start = chunk_index * chunk_size;
         if (start >= visible.indices.items.len) break;
         const end = @min(start + chunk_size, visible.indices.items.len);
+        const tris = chunk_tri_counts[chunk_index];
         chunk_contexts[chunk_index] = .{
-            .batch = &chunk_batches[chunk_index],
+            .out_slice = batch.commands.items[write_cursor .. write_cursor + tris],
             .mesh = mesh,
             .visible_indices = visible.indices.items[start..end],
             .instance = instance,
+            .identity_transform = identity_transform,
         };
-        try chunk_batches[chunk_index].ensureCommandCapacity(estimateVisiblePrimitiveCount(mesh, visible.indices.items[start..end]));
+        write_cursor += tris;
         if (active_chunks == 0) {
             main_chunk = chunk_index;
             active_chunks += 1;
             continue;
         }
-        jobs[active_chunks - 1] = Job.init(meshletChunkJob, @ptrCast(&chunk_contexts[chunk_index]), &parent);
+        jobs[active_chunks - 1] = Job.init(meshletChunkDirectJob, @ptrCast(&chunk_contexts[chunk_index]), &parent);
         if (!job_sys.?.submitJobWithClass(&jobs[active_chunks - 1], .high)) {
-            meshletChunkJob(@ptrCast(&chunk_contexts[chunk_index]));
+            meshletChunkDirectJob(@ptrCast(&chunk_contexts[chunk_index]));
         }
         active_chunks += 1;
     }
 
-    meshletChunkJob(@ptrCast(&chunk_contexts[main_chunk]));
+    meshletChunkDirectJob(@ptrCast(&chunk_contexts[main_chunk]));
     parent.complete();
     job_sys.?.waitFor(&parent);
+}
 
-    for (chunk_batches[0..active_chunks]) |*chunk_batch| {
-        for (chunk_batch.items()) |packet| {
-            try batch.append(packet);
-        }
+const DirectMeshletChunkContext = struct {
+    out_slice: []direct_batch.DrawPacket align(64),
+    mesh: *const Mesh,
+    visible_indices: []const usize,
+    instance: MeshletInstance,
+    identity_transform: bool,
+};
+
+fn meshletChunkDirectJob(ctx_ptr: *anyopaque) void {
+    const ctx: *DirectMeshletChunkContext = @ptrCast(@alignCast(ctx_ptr));
+    var write_index: usize = 0;
+    for (ctx.visible_indices) |meshlet_index| {
+        appendMeshletDirect(
+            ctx.out_slice,
+            &write_index,
+            ctx.mesh,
+            &ctx.mesh.meshlets[meshlet_index],
+            ctx.instance,
+            ctx.identity_transform,
+        );
     }
+}
+
+fn appendMeshletDirect(
+    out_slice: []direct_batch.DrawPacket,
+    write_index: *usize,
+    mesh: *const Mesh,
+    meshlet: *const Meshlet,
+    instance: MeshletInstance,
+    identity: bool,
+) void {
+    for (mesh.meshletPrimitiveSlice(meshlet)) |primitive| {
+        const va = mesh.vertices[mesh.meshletGlobalVertexIndex(meshlet, primitive.local_v0)];
+        const vb = mesh.vertices[mesh.meshletGlobalVertexIndex(meshlet, primitive.local_v1)];
+        const vc = mesh.vertices[mesh.meshletGlobalVertexIndex(meshlet, primitive.local_v2)];
+        const a = if (identity) va else instance.transform.mulVec3(va);
+        const b = if (identity) vb else instance.transform.mulVec3(vb);
+        const c = if (identity) vc else instance.transform.mulVec3(vc);
+        const tri = mesh.triangles[primitive.triangle_index];
+        const material = instance.material_override orelse direct_batch.SurfaceMaterial{
+            .fill_color = tri.base_color,
+            .outline_color = 0xFF101820,
+            .depth = 1.0,
+        };
+        out_slice[write_index.*] = .{ .triangle = .{
+            .triangle = .{ .a = a, .b = b, .c = c },
+            .material = material,
+        } };
+        write_index.* += 1;
+    }
+}
+
+inline fn isIdentityTransformLocal(transform: math.Mat4) bool {
+    return std.mem.eql(f32, transform.data[0..], math.Mat4.identity().data[0..]);
 }
 
 fn estimateVisiblePrimitiveCount(mesh: *const Mesh, visible_indices: []const usize) usize {
@@ -141,11 +379,37 @@ fn estimateVisiblePrimitiveCount(mesh: *const Mesh, visible_indices: []const usi
 }
 
 fn meshletVisible(meshlet: *const Meshlet, transform: math.Mat4, camera: direct_batch.Camera) bool {
-    const center = transform.mulVec3(meshlet.bounds_center);
-    const relative = math.Vec3.sub(center, camera.position);
+    // 6-plane view-frustum sphere reject. Reduces the per-frame
+    // projection cost from "every triangle" to "every triangle whose
+    // meshlet bounding sphere actually intersects the view volume" —
+    // huge for million-triangle scenes (acura/wolf) where most
+    // meshlets are off-screen on any given frame (ROADMAP §H7 next
+    // step). We work in camera space so plane tests are cheap.
+    const center_world = transform.mulVec3(meshlet.bounds_center);
+    const relative = math.Vec3.sub(center_world, camera.position);
     const basis = @import("../camera/controller.zig").computeViewBasis(camera.yaw, camera.pitch);
-    const camera_z = math.Vec3.dot(relative, basis.forward);
-    if (camera_z + meshlet.bounds_radius <= direct_batch.near_plane) return false;
+    const cx = math.Vec3.dot(relative, basis.right);
+    const cy = math.Vec3.dot(relative, basis.up);
+    const cz = math.Vec3.dot(relative, basis.forward);
+    const r = meshlet.bounds_radius;
+
+    // Near plane reject (only the near-side test bounds depth; we don't
+    // reject for "too far" since the project pipeline already handles
+    // perspective-clipped depths).
+    if (cz + r <= direct_batch.near_plane) return false;
+
+    const tan_v = std.math.tan(std.math.degreesToRadians(camera.fov_deg) * 0.5);
+    const tan_h = camera.aspect * tan_v;
+    // For each side plane, signed distance from point to plane (plane
+    // passing through origin, normal pointing into the frustum) is
+    // (tan * cz ± component) / sqrt(1 + tan²). Sphere is fully outside
+    // when that distance is more negative than -r.
+    const sec_v = @sqrt(1.0 + tan_v * tan_v);
+    const sec_h = @sqrt(1.0 + tan_h * tan_h);
+    if (cx - tan_h * cz > r * sec_h) return false; // right side
+    if (-cx - tan_h * cz > r * sec_h) return false; // left side
+    if (cy - tan_v * cz > r * sec_v) return false; // top
+    if (-cy - tan_v * cz > r * sec_v) return false; // bottom
     return true;
 }
 

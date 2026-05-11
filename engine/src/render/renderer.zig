@@ -1431,6 +1431,21 @@ pub const Renderer = struct {
     // in H3 (rasterizer) and consumed starting in H4 (lighting stage).
     scene_base_color: []u32,
     scene_material: []u32,
+    // HDR scene buffer (ROADMAP H5). Lighting writes f32x4 (RGB + lum)
+    // into this surface; the tonemap stage reads it back and writes
+    // packed u32 to target.color. Only used when DEFERRED_SHADING_ENABLED.
+    scene_hdr: []math.Vec4,
+    // 1/4-resolution ping/pong scratch for HDR bloom (ROADMAP §H6).
+    bloom_hdr_ping: []math.Vec4,
+    bloom_hdr_pong: []math.Vec4,
+    bloom_hdr_width: i32,
+    bloom_hdr_height: i32,
+    /// Hi-Z pyramid (ROADMAP §H7): per-tile MAX depth from the previous
+    /// frame's depth buffer. Used by screen binning to early-reject
+    /// primitives whose closest point is behind every covered surface
+    /// in a tile. Length equals tile_grid.tiles.len. Initialised to
+    /// +inf so the first frame culls nothing.
+    hiz_pyramid: []f32,
     scene_buffers_initialized: bool = false,
     taa_scratch: TemporalAAScratch,
     taa_previous_view: TemporalAAViewState,
@@ -1616,6 +1631,10 @@ pub const Renderer = struct {
         self.allocator.free(self.scene_surface);
         self.allocator.free(self.scene_base_color);
         self.allocator.free(self.scene_material);
+        self.allocator.free(self.scene_hdr);
+        self.allocator.free(self.bloom_hdr_ping);
+        self.allocator.free(self.bloom_hdr_pong);
+        self.allocator.free(self.hiz_pyramid);
         self.scene_item_gizmo.deinit(self.allocator);
         self.allocator.free(self.taa_scratch.history_pixels);
         self.allocator.free(self.taa_scratch.resolve_pixels);

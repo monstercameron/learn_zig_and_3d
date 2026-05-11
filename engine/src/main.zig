@@ -543,6 +543,11 @@ pub fn main() !void {
             @tagName(isa_support.preferredVectorBackend()),
         },
     );
+    app_logger.infoSub(
+        "cpu",
+        "compile-time SIMD backend={s} f32_lanes={} (set -mcpu=native or target a higher ISA for wider vectors)",
+        .{ cpu_features.SIMD_BACKEND_NAME, cpu_features.SIMD_F32_LANES },
+    );
     if (renderer_ttl_ns) |ttl_ns| {
         app_logger.infoSub("bootstrap", "renderer TTL active {d:.3}s", .{@as(f64, @floatFromInt(ttl_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s))});
     }

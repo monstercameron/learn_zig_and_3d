@@ -440,6 +440,13 @@ inline fn makeClippedTarget(ctx: *const RasterTileJobContext) direct_primitives.
         .height = ctx.resources.target.height,
         .color = ctx.resources.target.color,
         .depth = ctx.resources.target.depth,
+        // Propagate G-buffer surfaces; without this the rasterizer's
+        // deferred path sees gbuf_base_color == null and falls back to
+        // the forward write-color-only specialisation, leaving the
+        // G-buffer stale (ROADMAP §H3).
+        .gbuf_base_color = ctx.resources.target.gbuf_base_color,
+        .gbuf_normal = ctx.resources.target.gbuf_normal,
+        .gbuf_material = ctx.resources.target.gbuf_material,
         .clip = .{
             .min_x = min_x,
             .min_y = min_y,

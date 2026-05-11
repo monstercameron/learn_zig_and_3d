@@ -25,6 +25,18 @@ pub const AuxiliaryBuffers = struct {
     scene_surface: []TileRenderer.SurfaceHandle,
     scene_base_color: []u32,
     scene_material: []u32,
+    /// HDR scene buffer (ROADMAP H5). Lighting writes f32x4 here, the
+    /// tone-map stage reads it back into target.color as packed u32.
+    scene_hdr: []math.Vec4,
+    /// 1/4-res ping/pong scratch for HDR bloom (ROADMAP §H6). Empty
+    /// slices when bloom is disabled or not allocated.
+    bloom_hdr_ping: []math.Vec4 = &.{},
+    bloom_hdr_pong: []math.Vec4 = &.{},
+    bloom_hdr_width: i32 = 0,
+    bloom_hdr_height: i32 = 0,
+    /// Hi-Z pyramid (per-tile MAX depth) from the previous frame.
+    /// Used by future cull stages; rebuilt each frame after raster.
+    hiz_pyramid: []f32 = &.{},
 };
 
 pub const FrameResources = struct {

@@ -2,6 +2,7 @@ const std = @import("std");
 const math = @import("../../core/math.zig");
 const direct_batch = @import("../direct/batch.zig");
 const direct_backend = @import("direct_backend.zig");
+const shading_stage = @import("../stages/shading_stage.zig");
 
 pub fn execute(
     renderer: anytype,
@@ -23,7 +24,29 @@ pub fn execute(
         .yaw = renderer.rotation_angle,
         .pitch = renderer.rotation_x,
         .fov_deg = renderer.camera_fov_deg,
+        .aspect = @as(f32, @floatFromInt(renderer.bitmap.width)) / @as(f32, @floatFromInt(renderer.bitmap.height)),
     };
+
+    // Build the deferred lighting config from the scene's primary light
+    // so the rendered shading actually matches the visible light source.
+    // light_soa.dir_cam_* is already "direction toward light source" in
+    // camera space (the existing forward shading uses it that way), so
+    // no negation is needed.
+    const fov_y_tan_half = std.math.tan(std.math.degreesToRadians(renderer.camera_fov_deg) * 0.5);
+    const aspect = @as(f32, @floatFromInt(renderer.bitmap.width)) / @as(f32, @floatFromInt(renderer.bitmap.height));
+    const deferred_cfg: ?shading_stage.DeferredConfig = if (renderer.lights.items.len > 0) blk: {
+        const primary = renderer.lights.items[0];
+        break :blk .{
+            .light_dir_camera = math.Vec3.new(
+                renderer.light_soa.dir_cam_x[0],
+                renderer.light_soa.dir_cam_y[0],
+                renderer.light_soa.dir_cam_z[0],
+            ),
+            .light_color = primary.color,
+            .fov_y_tan_half = fov_y_tan_half,
+            .aspect = aspect,
+        };
+    } else null;
 
     try renderer.direct_backend.renderSceneMesh(
         renderer.directFrameResources(),
@@ -36,6 +59,7 @@ pub fn execute(
             .material_override = null,
             .clear_color = 0xFF0B1220,
             .enable_shading = false,
+            .deferred_lighting = deferred_cfg,
         },
     );
 

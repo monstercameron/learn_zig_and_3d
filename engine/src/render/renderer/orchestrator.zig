@@ -9,6 +9,7 @@ const renderer_lights = @import("lights.zig");
 const renderer_hud = @import("hud.zig");
 const post_dispatch = @import("post_dispatch.zig");
 const introspect = @import("../../runtime/introspect.zig");
+const screenshot = @import("../../runtime/screenshot.zig");
 const direct_backend = @import("../backends/direct_backend.zig");
 const direct_primitives = @import("../direct/primitives.zig");
 const frame_pipeline = @import("../frame/pipeline.zig");
@@ -273,16 +274,32 @@ pub fn render3DMeshWithPump(renderer: *Renderer, mesh: *const Mesh, pump: ?*cons
                     .binning_ns = t.binning_ns,
                     .raster_ns = t.raster_ns,
                     .shading_ns = t.shading_ns,
+                    .lighting_ns = t.lighting_ns,
+                    .hdr_post_ns = t.hdr_post_ns,
+                    .tonemap_ns = t.tonemap_ns,
                     .composition_ns = t.composition_ns,
                     .post_process_ns = t.post_process_ns,
                     .present_ns = t.present_ns,
                     .primitive_count = t.primitive_count,
                     .touched_tiles = t.touched_tiles,
+                    .lit_pixel_count = t.lit_pixel_count,
+                    .tonemapped_pixel_count = t.tonemapped_pixel_count,
+                    .hdr_avg_luminance = t.hdr_avg_luminance,
+                    .hdr_max_luminance = t.hdr_max_luminance,
+                    .tonemap_exposure = t.tonemap_exposure,
+                    .bloom_ns = t.bloom_ns,
+                    .bloom_bright_pixels = t.bloom_bright_pixels,
+                    .hiz_build_ns = t.hiz_build_ns,
+                    .hiz_tile_count = t.hiz_tile_count,
                 };
             },
             .passes = pass_buf[0..renderer.render_pass_count],
         };
         introspect.emitFrame(&snapshot);
+    }
+
+    if (screenshot.shouldCapture(renderer.frame_count)) {
+        screenshot.capture(renderer.bitmap.pixels, renderer.bitmap.width, renderer.bitmap.height);
     }
 
     renderer_logger.debugSub(

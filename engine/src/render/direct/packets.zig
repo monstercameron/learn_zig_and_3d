@@ -1,3 +1,5 @@
+const math = @import("../../core/math.zig");
+const texture_mod = @import("../../assets/texture.zig");
 const direct_primitives = @import("primitives.zig");
 
 pub const RenderLayer = enum(u8) {
@@ -42,7 +44,13 @@ pub const Payload = union(enum) {
         // mode; ignored by the forward dispatcher. Stored as Vec3 for
         // now; can promote to packed RGB10/A2 once the lighting stage
         // is in place and we're ready to compact the G-buffer.
-        face_normal: ?@import("../../core/math.zig").Vec3 = null,
+        face_normal: ?math.Vec3 = null,
+        /// Texture + per-vertex UVs for deferred texture sampling.
+        /// When `texture` is non-null and `uvs` is filled, the rasterizer
+        /// samples the texture per pixel and writes the result to
+        /// gbuf_base_color instead of the constant fill color.
+        texture: ?*const texture_mod.Texture = null,
+        uvs: ?[3]math.Vec2 = null,
     },
     polygon: direct_primitives.Polygon2i,
     circle: direct_primitives.Circle2i,

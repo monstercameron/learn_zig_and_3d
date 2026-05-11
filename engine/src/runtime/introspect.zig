@@ -74,11 +74,23 @@ pub const StageTimings = struct {
     binning_ns: i128 = 0,
     raster_ns: i128 = 0,
     shading_ns: i128 = 0,
+    lighting_ns: i128 = 0,
+    hdr_post_ns: i128 = 0,
+    tonemap_ns: i128 = 0,
     composition_ns: i128 = 0,
     post_process_ns: i128 = 0,
     present_ns: i128 = 0,
     primitive_count: usize = 0,
     touched_tiles: usize = 0,
+    lit_pixel_count: usize = 0,
+    tonemapped_pixel_count: usize = 0,
+    hdr_avg_luminance: f32 = 0.0,
+    hdr_max_luminance: f32 = 0.0,
+    tonemap_exposure: f32 = 1.0,
+    bloom_ns: i128 = 0,
+    bloom_bright_pixels: usize = 0,
+    hiz_build_ns: i128 = 0,
+    hiz_tile_count: usize = 0,
 };
 
 /// Which lighting/shading pipeline is active. Forward bakes lighting
@@ -242,8 +254,8 @@ pub fn writeFrameJson(snapshot: *const FrameSnapshot, w: anytype) !void {
 
 fn writeStagesJson(s: StageTimings, w: anytype) !void {
     try w.print(
-        \\,"stages":{{"build_batch_ns":{},"compile_draw_list_ns":{},"clear_ns":{},"binning_ns":{},"raster_ns":{},"shading_ns":{},"composition_ns":{},"post_process_ns":{},"present_ns":{},"primitives":{},"touched_tiles":{}}}
-    , .{ s.build_batch_ns, s.compile_draw_list_ns, s.clear_ns, s.binning_ns, s.raster_ns, s.shading_ns, s.composition_ns, s.post_process_ns, s.present_ns, s.primitive_count, s.touched_tiles });
+        \\,"stages":{{"build_batch_ns":{},"compile_draw_list_ns":{},"clear_ns":{},"binning_ns":{},"raster_ns":{},"hiz_build_ns":{},"shading_ns":{},"lighting_ns":{},"hdr_post_ns":{},"bloom_ns":{},"tonemap_ns":{},"composition_ns":{},"post_process_ns":{},"present_ns":{},"primitives":{},"touched_tiles":{},"lit_pixels":{},"tonemapped_pixels":{},"hdr_avg_lum":{d:.4},"hdr_max_lum":{d:.4},"exposure":{d:.4},"bloom_pixels":{},"hiz_tiles":{}}}
+    , .{ s.build_batch_ns, s.compile_draw_list_ns, s.clear_ns, s.binning_ns, s.raster_ns, s.hiz_build_ns, s.shading_ns, s.lighting_ns, s.hdr_post_ns, s.bloom_ns, s.tonemap_ns, s.composition_ns, s.post_process_ns, s.present_ns, s.primitive_count, s.touched_tiles, s.lit_pixel_count, s.tonemapped_pixel_count, s.hdr_avg_luminance, s.hdr_max_luminance, s.tonemap_exposure, s.bloom_bright_pixels, s.hiz_tile_count });
 }
 
 fn writeSceneJson(s: SceneSnapshot, w: anytype) !void {

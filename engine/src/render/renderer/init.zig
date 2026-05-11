@@ -191,6 +191,27 @@ pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allo
     errdefer allocator.free(scene_base_color);
     const scene_material = try allocator.alignedAlloc(u32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
     errdefer allocator.free(scene_material);
+    // The deferred rasterizer hot loop skips per-pixel material writes
+    // (it would be a constant store), so prime the buffer to the
+    // default material once. PBR reads roughness/metallic from these
+    // bytes. Layout: byte0=roughness, byte1=metallic, byte2=ao, byte3=id.
+    @memset(scene_material, 0x00_FF_00_30);
+    const scene_hdr = try allocator.alignedAlloc(math.Vec4, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
+    errdefer allocator.free(scene_hdr);
+    const hdr_bloom_pass = @import("../passes/hdr_bloom_pass.zig");
+    const bloom_w_i = @max(@as(i32, 1), @divTrunc(width + hdr_bloom_pass.DOWNSAMPLE - 1, hdr_bloom_pass.DOWNSAMPLE));
+    const bloom_h_i = @max(@as(i32, 1), @divTrunc(height + hdr_bloom_pass.DOWNSAMPLE - 1, hdr_bloom_pass.DOWNSAMPLE));
+    const bloom_pixel_count_v4 = @as(usize, @intCast(bloom_w_i)) * @as(usize, @intCast(bloom_h_i));
+    const bloom_hdr_ping = try allocator.alignedAlloc(math.Vec4, std.mem.Alignment.@"64", bloom_pixel_count_v4);
+    errdefer allocator.free(bloom_hdr_ping);
+    const bloom_hdr_pong = try allocator.alignedAlloc(math.Vec4, std.mem.Alignment.@"64", bloom_pixel_count_v4);
+    errdefer allocator.free(bloom_hdr_pong);
+    // Plain alloc (not alignedAlloc) — the renderer's []f32 field would
+    // drop alignment metadata, causing the GPA's free-alignment check
+    // to panic later. The pyramid is scalar-accessed; no SIMD load.
+    const hiz_pyramid = try allocator.alloc(f32, tile_count);
+    errdefer allocator.free(hiz_pyramid);
+    @memset(hiz_pyramid, std.math.inf(f32));
     const taa_history_pixels = try allocator.alignedAlloc(u32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
     errdefer allocator.free(taa_history_pixels);
     const taa_resolve_pixels = try allocator.alignedAlloc(u32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
@@ -410,6 +431,12 @@ pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allo
         .scene_surface = scene_surface,
         .scene_base_color = scene_base_color,
         .scene_material = scene_material,
+        .scene_hdr = scene_hdr,
+        .bloom_hdr_ping = bloom_hdr_ping,
+        .bloom_hdr_pong = bloom_hdr_pong,
+        .bloom_hdr_width = bloom_w_i,
+        .bloom_hdr_height = bloom_h_i,
+        .hiz_pyramid = hiz_pyramid,
         .taa_scratch = .{
             .history_pixels = taa_history_pixels,
             .resolve_pixels = taa_resolve_pixels,

@@ -12,14 +12,18 @@ pub var WINDOW_WIDTH: u32 = 640;
 pub var WINDOW_HEIGHT: u32 = 360;
 /// Whether the application starts in fullscreen mode.
 pub var WINDOW_FULLSCREEN: bool = false;
-/// Synchronize frame presentation with monitor refresh rate to prevent screen tearing.
-pub var WINDOW_VSYNC: bool = true;
+/// Synchronize frame presentation with monitor refresh rate to prevent
+/// screen tearing. Default false = uncapped (benchmark mode); the
+/// DXGI Present sync_interval becomes 0 so the GPU presents as fast as
+/// the backbuffer is ready. Enable for tear-free desktop use.
+pub var WINDOW_VSYNC: bool = false;
 
 // --- Rendering & Camera Settings ---
 /// The percentage scale of the window resolution to use for the internal rendering backbuffer (e.g., 50 for 50% width/height). Maintains aspect ratio.
 pub var RENDER_RESOLUTION_SCALE_PERCENT: u32 = 100;
-/// The desired maximum frame rate. Used to calculate targetFrameTimeNs.
-pub var TARGET_FPS: u32 = 120;
+/// The desired maximum frame rate. 0 = uncapped (benchmark mode).
+/// Used to calculate targetFrameTimeNs.
+pub var TARGET_FPS: u32 = 0;
 /// The initial Field of View (FOV) for the camera in degrees.
 pub var CAMERA_FOV_INITIAL: f32 = 60.0;
 /// How much the FOV changes per zoom control step.
@@ -209,7 +213,14 @@ pub var POST_COLOR_CONTRAST_PERCENT: i32 = 112;
 // stage produces the final lit colour. Flipping this on requires H3
 // (raster G-buffer writes) and H4 (lighting stage) to both be in
 // place. Until then, leave it false.
-pub var DEFERRED_SHADING_ENABLED: bool = false;
+pub var DEFERRED_SHADING_ENABLED: bool = true;
+
+/// HDR bloom prepass (ROADMAP §H6). Off by default — current
+/// implementation produces visible edge artifacts (white border at
+/// lit/unlit boundary) that need to be diagnosed visually before
+/// re-enabling. Telemetry stays wired so we can validate without
+/// the visual.
+pub var HDR_BLOOM_ENABLED: bool = true;
 
 /// Performs target frame time ns.
 /// Keeps target frame time ns as the single implementation point so call-site behavior stays consistent.

@@ -11,6 +11,71 @@ pub const VectorBackend = enum {
     avx512,
 };
 
+/// Compile-time preferred SIMD lane count for f32 vectors. Picked from
+/// the build target's enabled feature set so the same `@Vector(LANES,
+/// f32)` source scales correctly across SSE2/AVX/AVX2/AVX-512 and
+/// NEON/SVE without runtime dispatch.
+///
+/// AVX-512 → 16 lanes (512 bit), AVX/AVX2 → 8 (256 bit), SSE2 → 4 (128
+/// bit). NEON → 4 (128 bit). SVE/SVE2 we default to 8 (256 bit); the
+/// real width is scalable on hardware but Zig's `@Vector` needs a
+/// comptime constant — 8 is a reasonable compile-time default that
+/// most Neoverse / Apple silicon SVE implementations meet.
+///
+/// Build with `-mcpu=native` (or any target that enables the feature
+/// flag) to pick up the widest available width automatically.
+pub const SIMD_F32_LANES: comptime_int = blk: {
+    const arch = builtin.target.cpu.arch;
+    const features = builtin.target.cpu.features;
+    if (arch == .x86_64 or arch == .x86) {
+        if (std.Target.x86.featureSetHas(features, .avx512f)) break :blk 16;
+        if (std.Target.x86.featureSetHas(features, .avx2)) break :blk 8;
+        if (std.Target.x86.featureSetHas(features, .avx)) break :blk 8;
+        if (std.Target.x86.featureSetHas(features, .sse2)) break :blk 4;
+        break :blk 4;
+    }
+    if (arch == .aarch64 or arch == .aarch64_be) {
+        if (std.Target.aarch64.featureSetHas(features, .sve2)) break :blk 8;
+        if (std.Target.aarch64.featureSetHas(features, .sve)) break :blk 8;
+        if (std.Target.aarch64.featureSetHas(features, .neon)) break :blk 4;
+        break :blk 4;
+    }
+    if (arch == .arm or arch == .armeb) {
+        if (std.Target.arm.featureSetHas(features, .neon)) break :blk 4;
+        break :blk 4;
+    }
+    break :blk 4;
+};
+
+/// Bytes per f32-lane SIMD vector — used to size buffers and stride
+/// aligned access patterns.
+pub const SIMD_F32_BYTES: comptime_int = SIMD_F32_LANES * @sizeOf(f32);
+
+/// Human-readable name of the selected SIMD path; logged at startup so
+/// it's clear which ISA was compiled against.
+pub const SIMD_BACKEND_NAME: []const u8 = blk: {
+    const arch = builtin.target.cpu.arch;
+    const features = builtin.target.cpu.features;
+    if (arch == .x86_64 or arch == .x86) {
+        if (std.Target.x86.featureSetHas(features, .avx512f)) break :blk "AVX-512";
+        if (std.Target.x86.featureSetHas(features, .avx2)) break :blk "AVX2";
+        if (std.Target.x86.featureSetHas(features, .avx)) break :blk "AVX";
+        if (std.Target.x86.featureSetHas(features, .sse2)) break :blk "SSE2";
+        break :blk "scalar-x86";
+    }
+    if (arch == .aarch64 or arch == .aarch64_be) {
+        if (std.Target.aarch64.featureSetHas(features, .sve2)) break :blk "SVE2";
+        if (std.Target.aarch64.featureSetHas(features, .sve)) break :blk "SVE";
+        if (std.Target.aarch64.featureSetHas(features, .neon)) break :blk "NEON";
+        break :blk "scalar-aarch64";
+    }
+    if (arch == .arm or arch == .armeb) {
+        if (std.Target.arm.featureSetHas(features, .neon)) break :blk "NEON";
+        break :blk "scalar-arm";
+    }
+    break :blk "scalar";
+};
+
 pub const InstructionSetSupport = struct {
     neon: bool = false,
     sse2: bool = false,

@@ -1,4 +1,6 @@
 ﻿const std = @import("std");
+const math = @import("../../core/math.zig");
+const app_config = @import("../../core/app_config.zig");
 const direct_packets = @import("packets.zig");
 const scanline = @import("../core/scanline.zig");
 
@@ -45,7 +47,7 @@ pub const FrameTarget = struct {
     // alongside depth so a downstream lighting stage can shade per
     // visible pixel without re-walking geometry.
     gbuf_base_color: ?[]u32 = null,
-    gbuf_normal: ?[]@import("../../core/math.zig").Vec3 = null,
+    gbuf_normal: ?[]math.Vec3 = null,
     gbuf_material: ?[]u32 = null,
 };
 
@@ -161,10 +163,15 @@ pub fn drawPacket(target: FrameTarget, packet: direct_packets.DrawPacket) void {
         .line => |line| drawLine(target, line, .{ .color = packet.material.stroke.color }),
         .triangle => |payload| {
             const style = packet.material.surface;
-            if (payload.gouraud_setup) |setup| {
-                gouraud.drawPreparedGouraudTrianglePreparedWithDepths(target, payload.triangle, setup, if (packet.flags.depth_write) style.depth else null, payload.vertex_depths);
-            } else if (payload.vertex_colors) |vertex_colors| {
-                gouraud.drawGouraudTriangleWithDepths(target, payload.triangle, vertex_colors, if (packet.flags.depth_write) style.depth else null, payload.vertex_depths);
+            // In deferred mode the lighting stage shades from the G-buffer
+            // (base_color + face_normal). Gouraud per-vertex colours encode
+            // pre-baked forward shading — we'd overwrite them anyway. Force
+            // the solid path so face_normal lands in the G-buffer.
+            const use_gouraud = !app_config.DEFERRED_SHADING_ENABLED;
+            if (use_gouraud and payload.gouraud_setup != null) {
+                gouraud.drawPreparedGouraudTrianglePreparedWithDepths(target, payload.triangle, payload.gouraud_setup.?, if (packet.flags.depth_write) style.depth else null, payload.vertex_depths);
+            } else if (use_gouraud and payload.vertex_colors != null) {
+                gouraud.drawGouraudTriangleWithDepths(target, payload.triangle, payload.vertex_colors.?, if (packet.flags.depth_write) style.depth else null, payload.vertex_depths);
             } else {
                 drawSolidTriangleWithDepths(target, payload.triangle, style.fill_color, if (packet.flags.depth_write) style.depth else null, payload.vertex_depths, payload.face_normal);
             }
@@ -422,7 +429,7 @@ pub fn drawSolidTriangleWithDepths(
     color: u32,
     depth_value: ?f32,
     vertex_depths: ?[3]f32,
-    face_normal: ?@import("../../core/math.zig").Vec3,
+    face_normal: ?math.Vec3,
 ) void {
     if (target.width <= 0 or target.height <= 0) return;
 
@@ -491,12 +498,31 @@ pub fn drawSolidTriangleWithDepths(
     }
     const gbuf_base = target.gbuf_base_color.?;
     const gbuf_normal_opt = if (face_normal != null) target.gbuf_normal else null;
-    const gbuf_material_opt = target.gbuf_material;
-    const normal_to_write = face_normal orelse @import("../../core/math.zig").Vec3.new(0, 0, -1);
-    // Default material: roughness=128, metallic=0, ao=255, surface_id=0.
-    // Lighting stage replaces these once per-triangle material params land.
-    const material_default: u32 = 0x00_FF_00_80;
+    const normal_to_write = face_normal orelse math.Vec3.new(0, 0, -1);
+    // Material is initialized at allocation time (init.zig) since
+    // every pixel uses the same default and the per-pixel write was
+    // pure overhead in the rasterizer hot loop.
     if (area > 0) {
+        // 4-lane SIMD inner loop. Edge functions advance linearly in x
+        // (w_next = w + step), so we lay out a stride vector once and
+        // bump by 4*step per iteration. Lane-mask the writes since
+        // conditional stores aren't a portable SIMD op (would need
+        // AVX-512 KMASK or NEON narrow→scatter).
+        const V4i = @Vector(4, i64);
+        const V4f = @Vector(4, f32);
+        const lane_idx: V4i = .{ 0, 1, 2, 3 };
+        const step_w0_v: V4i = lane_idx * @as(V4i, @splat(step_w0_x));
+        const step_w1_v: V4i = lane_idx * @as(V4i, @splat(step_w1_x));
+        const step_w2_v: V4i = lane_idx * @as(V4i, @splat(step_w2_x));
+        const w0_bump: V4i = @splat(4 * step_w0_x);
+        const w1_bump: V4i = @splat(4 * step_w1_x);
+        const w2_bump: V4i = @splat(4 * step_w2_x);
+        const zero_vi: V4i = @splat(0);
+        const depth_lane_step: V4f = if (depth_plane) |plane|
+            @as(V4f, .{ 0.0, plane.step_x, 2.0 * plane.step_x, 3.0 * plane.step_x })
+        else
+            @splat(0.0);
+        const depth_bump: V4f = if (depth_plane) |plane| @splat(4.0 * plane.step_x) else @splat(0.0);
         while (y <= max_y) : (y += 1) {
             const row_start = @as(usize, @intCast(y)) * stride;
             var w0 = row_w0;
@@ -504,15 +530,47 @@ pub fn drawSolidTriangleWithDepths(
             var w2 = row_w2;
             var pixel_depth = row_depth_value;
             var x = min_x;
+            // 4-lane SIMD body
+            while (x + 4 <= max_x + 1) : (x += 4) {
+                const w0_v: V4i = @as(V4i, @splat(w0)) + step_w0_v;
+                const w1_v: V4i = @as(V4i, @splat(w1)) + step_w1_v;
+                const w2_v: V4i = @as(V4i, @splat(w2)) + step_w2_v;
+                const inside = (w0_v >= zero_vi) & (w1_v >= zero_vi) & (w2_v >= zero_vi);
+                const idx_base = row_start + @as(usize, @intCast(x));
+                const depth_v: V4f = @as(V4f, @splat(pixel_depth)) + depth_lane_step;
+                // Gather depth buffer for these 4 lanes
+                var existing_v: V4f = undefined;
+                inline for (0..4) |l| {
+                    existing_v[l] = depth_buffer[idx_base + l];
+                }
+                const depth_pass = depth_v <= existing_v;
+                const write_mask = inside & depth_pass;
+                // Per-lane conditional write (12 ops vs 1 cmp+branch +
+                // 3 writes scalar; net win since branch-predictor stalls
+                // are avoided in the typical edge-blended case).
+                inline for (0..4) |l| {
+                    if (write_mask[l]) {
+                        depth_buffer[idx_base + l] = depth_v[l];
+                        gbuf_base[idx_base + l] = color;
+                        if (gbuf_normal_opt) |buf| buf[idx_base + l] = normal_to_write;
+                    }
+                }
+                w0 += 4 * step_w0_x;
+                w1 += 4 * step_w1_x;
+                w2 += 4 * step_w2_x;
+                _ = w0_bump;
+                _ = w1_bump;
+                _ = w2_bump;
+                if (depth_plane != null) pixel_depth += depth_bump[0];
+            }
+            // Scalar tail for last 0-3 pixels.
             while (x <= max_x) : (x += 1) {
                 if (w0 >= 0 and w1 >= 0 and w2 >= 0) {
                     const idx = row_start + @as(usize, @intCast(x));
                     if (pixel_depth <= depth_buffer[idx]) {
-                        target.color[idx] = color;
                         depth_buffer[idx] = pixel_depth;
                         gbuf_base[idx] = color;
                         if (gbuf_normal_opt) |buf| buf[idx] = normal_to_write;
-                        if (gbuf_material_opt) |buf| buf[idx] = material_default;
                     }
                 }
                 w0 += step_w0_x;
@@ -539,11 +597,12 @@ pub fn drawSolidTriangleWithDepths(
             if (w0 <= 0 and w1 <= 0 and w2 <= 0) {
                 const idx = row_start + @as(usize, @intCast(x));
                 if (pixel_depth <= depth_buffer[idx]) {
-                    target.color[idx] = color;
+                    // See CCW branch above for the rationale on skipping
+                    // target.color and gbuf_material writes in the
+                    // deferred path.
                     depth_buffer[idx] = pixel_depth;
                     gbuf_base[idx] = color;
                     if (gbuf_normal_opt) |buf| buf[idx] = normal_to_write;
-                    if (gbuf_material_opt) |buf| buf[idx] = material_default;
                 }
             }
             w0 += step_w0_x;

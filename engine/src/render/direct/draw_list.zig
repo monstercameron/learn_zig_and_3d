@@ -80,6 +80,7 @@ pub const DrawList = struct {
         vertex_colors: ?[3]u32,
         vertex_depths: ?[3]f32,
         gouraud_setup: ?direct_primitives.PreparedGouraudTriangle,
+        face_normal: ?@import("../../core/math.zig").Vec3,
     ) !void {
         const packet: direct_packets.DrawPacket = .{
             .sort_key = sort_key,
@@ -91,6 +92,7 @@ pub const DrawList = struct {
                 .vertex_colors = vertex_colors,
                 .vertex_depths = vertex_depths,
                 .gouraud_setup = gouraud_setup,
+                .face_normal = face_normal,
             } },
         };
         try self.commands.append(self.allocator, packet);
@@ -119,6 +121,7 @@ pub const DrawList = struct {
         vertex_colors: ?[3]u32,
         vertex_depths: ?[3]f32,
         gouraud_setup: ?direct_primitives.PreparedGouraudTriangle,
+        face_normal: ?@import("../../core/math.zig").Vec3,
     ) void {
         const packet: direct_packets.DrawPacket = .{
             .sort_key = sort_key,
@@ -130,6 +133,7 @@ pub const DrawList = struct {
                 .vertex_colors = vertex_colors,
                 .vertex_depths = vertex_depths,
                 .gouraud_setup = gouraud_setup,
+                .face_normal = face_normal,
             } },
         };
         self.commands.appendAssumeCapacity(packet);
@@ -196,6 +200,11 @@ pub const DrawList = struct {
 };
 
 inline fn cachePreparedGouraud(packet: direct_packets.DrawPacket) ?DrawList.PreparedGouraudEntry {
+    // Deferred shading shades from the G-buffer in a screen-space stage,
+    // so we skip the prepared Gouraud fast path entirely. drawPacket will
+    // route to drawSolidTriangleWithDepths which writes the face normal
+    // into gbuf_normal (essential for correct deferred lighting).
+    if (@import("../../core/app_config.zig").DEFERRED_SHADING_ENABLED) return null;
     if (packet.payload != .triangle or packet.material != .surface) return null;
     const payload = packet.payload.triangle;
     const surface = packet.material.surface;

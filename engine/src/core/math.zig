@@ -300,11 +300,23 @@ pub const Mat4 = struct {
     /// Multiplies a matrix by a 4D vector, applying the transformation.
     // TODO(SIMD): This operation can be vectorized using 4-wide dot products.
     pub fn mulVec4(m: Mat4, v: Vec4) Vec4 {
+        // 4-wide SIMD: dot4(row_i, v) for each of the 4 rows in a
+        // single multiply-add chain. The compiler emits VFMADD on
+        // x86-AVX/FMA and equivalent FMLA on aarch64. Same source
+        // compiles to NEON 128-bit, AVX 128/256-bit, AVX-512 128-bit
+        // (only 4 lanes are needed regardless of widest available
+        // vector — this is a 4-element fixed dot, not a stream).
+        const V4 = @Vector(4, f32);
+        const v_vec: V4 = .{ v.x, v.y, v.z, v.w };
+        const r0: V4 = .{ m.data[0], m.data[1], m.data[2], m.data[3] };
+        const r1: V4 = .{ m.data[4], m.data[5], m.data[6], m.data[7] };
+        const r2: V4 = .{ m.data[8], m.data[9], m.data[10], m.data[11] };
+        const r3: V4 = .{ m.data[12], m.data[13], m.data[14], m.data[15] };
         return Vec4.new(
-            m.data[0] * v.x + m.data[1] * v.y + m.data[2] * v.z + m.data[3] * v.w,
-            m.data[4] * v.x + m.data[5] * v.y + m.data[6] * v.z + m.data[7] * v.w,
-            m.data[8] * v.x + m.data[9] * v.y + m.data[10] * v.z + m.data[11] * v.w,
-            m.data[12] * v.x + m.data[13] * v.y + m.data[14] * v.z + m.data[15] * v.w,
+            @reduce(.Add, r0 * v_vec),
+            @reduce(.Add, r1 * v_vec),
+            @reduce(.Add, r2 * v_vec),
+            @reduce(.Add, r3 * v_vec),
         );
     }
 

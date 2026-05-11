@@ -79,8 +79,17 @@ inline fn resolveTriangleNormals(
     tri_index: usize,
     vertex_normals: []const math.Vec3,
 ) [3]math.Vec3 {
+    // Defensive fallback: some load paths (notably certain glTF assets)
+    // end up with vertex_normals shorter than the highest vertex index
+    // referenced by triangles. Rather than crashing, fall back to the
+    // per-face normal so rendering proceeds. The underlying mesh build
+    // bug is tracked separately.
     if (triangle.flat_shaded and tri_index < mesh.normals.len) {
         const face_normal = mesh.normals[tri_index];
+        return .{ face_normal, face_normal, face_normal };
+    }
+    if (triangle.v0 >= vertex_normals.len or triangle.v1 >= vertex_normals.len or triangle.v2 >= vertex_normals.len) {
+        const face_normal = if (tri_index < mesh.normals.len) mesh.normals[tri_index] else math.Vec3.new(0.0, 0.0, 1.0);
         return .{ face_normal, face_normal, face_normal };
     }
     return .{

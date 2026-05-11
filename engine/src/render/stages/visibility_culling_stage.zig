@@ -14,6 +14,7 @@ pub fn execute(
     out_visible: *visible_scene.VisibleScene,
     scratch_visible_meshlets: *direct_meshlets.VisibleMeshlets,
     camera: direct_batch.Camera,
+    job_sys: ?*@import("job_system").JobSystem,
 ) !Result {
     out_visible.clearRetainingCapacity();
     if (packets.items().len == 0) {
@@ -99,10 +100,10 @@ pub fn execute(
             .meshlets => |payload| {
                 try direct_meshlets.ensureMeshlets(payload.mesh, out_visible.allocator);
                 try scratch_visible_meshlets.ensureCapacity(payload.mesh.meshlets.len);
-                try direct_meshlets.cullVisibleMeshlets(scratch_visible_meshlets, payload.mesh, .{
+                try direct_meshlets.cullVisibleMeshletsParallel(scratch_visible_meshlets, payload.mesh, .{
                     .transform = packet.transform,
                     .material_override = payload.material_override,
-                }, camera);
+                }, camera, job_sys);
                 const start = out_visible.meshlet_indices.items.len;
                 try out_visible.meshlet_indices.appendSlice(out_visible.allocator, scratch_visible_meshlets.indices.items);
                 try out_visible.append(.{ .meshlets = .{

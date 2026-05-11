@@ -246,6 +246,12 @@ pub fn directFrameResources(renderer: *Renderer) frame_resources.FrameResources 
             .scene_surface = renderer.scene_surface,
             .scene_base_color = renderer.scene_base_color,
             .scene_material = renderer.scene_material,
+            .scene_hdr = renderer.scene_hdr,
+            .bloom_hdr_ping = renderer.bloom_hdr_ping,
+            .bloom_hdr_pong = renderer.bloom_hdr_pong,
+            .bloom_hdr_width = renderer.bloom_hdr_width,
+            .bloom_hdr_height = renderer.bloom_hdr_height,
+            .hiz_pyramid = renderer.hiz_pyramid,
         },
     };
 }
