@@ -44,10 +44,6 @@ const skybox_pass = @import("passes/skybox_pass.zig");
 const depth_of_field_pass = @import("passes/depth_of_field_pass.zig");
 const ssgi_pass = @import("passes/ssgi_pass.zig");
 const ssr_pass = @import("passes/ssr_pass.zig");
-const ssao_pass = @import("passes/ssao_pass.zig");
-const ssao_rows = @import("passes/ssao_rows.zig");
-const bloom_pass = @import("passes/bloom_pass.zig");
-const bloom_rows = @import("passes/bloom_rows.zig");
 const taa_pass = @import("passes/taa_pass.zig");
 const taa_helpers = @import("passes/taa_helpers.zig");
 const taa_meshlet_batch = @import("passes/taa_meshlet_batch.zig");
@@ -71,8 +67,6 @@ const shadow_raster_kernel = @import("kernels/shadow_raster_kernel.zig");
 const shadow_sample_kernel = @import("kernels/shadow_sample_kernel.zig");
 const hybrid_shadow_cache_kernel = @import("kernels/hybrid_shadow_cache_kernel.zig");
 const hybrid_shadow_resolve_kernel = @import("kernels/hybrid_shadow_resolve_kernel.zig");
-const bloom_blur_h_kernel = @import("kernels/bloom_blur_h_kernel.zig");
-const bloom_blur_v_kernel = @import("kernels/bloom_blur_v_kernel.zig");
 const scanline = @import("core/scanline.zig");
 const texture = @import("../assets/texture.zig");
 const direct_primitives = @import("direct/primitives.zig");
@@ -366,21 +360,6 @@ pub const ColorGradeProfile = struct {
     tone_add_r: [256]i16,
     tone_add_g: [256]i16,
     tone_add_b: [256]i16,
-};
-
-pub const BloomScratch = struct {
-    width: usize,
-    height: usize,
-    ping: []u32,
-    pong: []u32,
-};
-
-pub const AOScratch = struct {
-    width: usize,
-    height: usize,
-    ping: []u8,
-    pong: []u8,
-    depth: []f32,
 };
 
 const TemporalAAScratch = struct {
@@ -1026,39 +1005,6 @@ pub fn tryApplyTemporalAAMeshletBatch(
     );
 }
 
-/// renderAmbientOcclusionRows renders Renderer output.
-pub fn renderAmbientOcclusionRows(
-    scene_camera: []const math.Vec3,
-    scene_width: usize,
-    scene_height: usize,
-    ao: *AOScratch,
-    config_value: AmbientOcclusionConfig,
-    start_row: usize,
-    end_row: usize,
-) void {
-    ssao_rows.renderRows(scene_camera, scene_width, scene_height, ao, config_value, start_row, end_row);
-}
-
-pub fn blurAmbientOcclusionHorizontalRows(ao: *AOScratch, depth_threshold: f32, start_row: usize, end_row: usize) void {
-    ssao_rows.blurHorizontalRows(ao, depth_threshold, start_row, end_row);
-}
-
-pub fn blurAmbientOcclusionVerticalRows(ao: *AOScratch, depth_threshold: f32, start_row: usize, end_row: usize) void {
-    ssao_rows.blurVerticalRows(ao, depth_threshold, start_row, end_row);
-}
-
-pub fn compositeAmbientOcclusionRows(
-    dst: []u32,
-    scene_camera: []const math.Vec3,
-    dst_width: usize,
-    dst_height: usize,
-    ao: *const AOScratch,
-    start_row: usize,
-    end_row: usize,
-) void {
-    ssao_rows.compositeRows(dst, scene_camera, dst_width, dst_height, ao, start_row, end_row);
-}
-
 fn colorGradeSimdLanes() comptime_int {
     return switch (builtin.target.cpu.arch) {
         .x86_64 => blk: {
@@ -1158,14 +1104,6 @@ pub const PostPassExecutionContext = struct {
     shadow_build_elapsed_ns: []const i128,
 };
 
-pub const AOJobContext = ssao_pass.JobContext(
-    Renderer,
-    renderAmbientOcclusionRows,
-    blurAmbientOcclusionHorizontalRows,
-    blurAmbientOcclusionVerticalRows,
-    compositeAmbientOcclusionRows,
-);
-
 pub const TAAJobContext = struct {
     renderer: *Renderer,
     mesh: *const Mesh,
@@ -1221,8 +1159,6 @@ pub const AdaptiveShadowTileJob = struct {
         adaptive_shadow_tile_pass.run(ctx);
     }
 };
-
-pub const BloomJobContext = bloom_pass.JobContext(BloomScratch);
 
 pub const CompositeJobContext = struct {
     tile: *const TileRenderer.Tile,
@@ -1453,15 +1389,9 @@ pub const Renderer = struct {
     depth_tests_passed_counter: std.atomic.Value(usize),
     alpha_pixels_counter: std.atomic.Value(usize),
     hybrid_shadow_debug: HybridShadowDebugState = .{},
-    ao_scratch: AOScratch,
-    bloom_scratch: BloomScratch,
-    ao_job_contexts: []AOJobContext,
-    bloom_threshold_curve: [256]u8,
-    bloom_intensity_lut: [256]u8,
     skybox_job_contexts: []renderer_scene_dispatch.SkyboxJobContext,
     shadow_resolve_job_contexts: []ShadowResolveJobContext,
     shadow_raster_job_contexts: []ShadowRasterJobContext,
-    bloom_job_contexts: []BloomJobContext,
     dof_scratch: DepthOfFieldScratch,
     ssr_job_contexts: []SSRJobContext,
     ssr_scratch_pixels: []u32,
@@ -1619,16 +1549,9 @@ pub const Renderer = struct {
         self.allocator.free(self.light_soa.shadow_mode);
         self.allocator.free(self.shadow_build_elapsed_ns);
         self.allocator.free(self.shadow_resolve_elapsed_ns);
-        self.allocator.free(self.ao_scratch.ping);
-        self.allocator.free(self.ao_scratch.pong);
-        self.allocator.free(self.ao_scratch.depth);
-        self.allocator.free(self.bloom_scratch.ping);
-        self.allocator.free(self.bloom_scratch.pong);
-        self.allocator.free(self.ao_job_contexts);
         self.allocator.free(self.skybox_job_contexts);
         self.allocator.free(self.shadow_resolve_job_contexts);
         self.allocator.free(self.shadow_raster_job_contexts);
-        self.allocator.free(self.bloom_job_contexts);
         self.allocator.free(self.dof_scratch.pixels);
         self.allocator.free(self.ssr_scratch_pixels);
         self.allocator.free(self.ssgi_scratch_pixels);

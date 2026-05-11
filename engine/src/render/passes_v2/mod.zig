@@ -114,6 +114,8 @@ pub const color_grade = @import("color_grade.zig");
 pub const lens_flare = @import("lens_flare.zig");
 pub const motion_blur = @import("motion_blur.zig");
 pub const god_rays = @import("god_rays.zig");
+pub const ssao = @import("ssao.zig");
+pub const bloom = @import("bloom.zig");
 
 /// Compile-time table of every available v2 pass. Drivers iterate it
 /// to look up by name or list available passes via CLI.
@@ -124,4 +126,6 @@ pub const all = [_]Descriptor{
     lens_flare.descriptor,
     motion_blur.descriptor,
     god_rays.descriptor,
+    ssao.descriptor,
+    bloom.descriptor,
 };

@@ -7,7 +7,6 @@ const log = @import("../../core/log.zig");
 const job_system_module = @import("job_system");
 const post_dispatch = @import("post_dispatch.zig");
 const present_state = @import("../present/state.zig");
-const bloom_pass = @import("../passes/bloom_pass.zig");
 const max_render_passes = renderer_module.max_render_passes;
 const buildBlockbusterGradeProfile = Renderer.buildBlockbusterGradeProfile;
 const TemporalAAViewState = renderer_module.TemporalAAViewState;
@@ -40,9 +39,6 @@ const LoadingOverlayState = renderer_module.LoadingOverlayState;
 const LightGizmoState = renderer_module.LightGizmoState;
 const SSGIJobContext = renderer_module.SSGIJobContext;
 const SSRJobContext = renderer_module.SSRJobContext;
-const AOJobContext = renderer_module.AOJobContext;
-const AOScratch = renderer_module.AOScratch;
-const BloomJobContext = renderer_module.BloomJobContext;
 const SkyboxJobContext = @import("scene_dispatch.zig").SkyboxJobContext;
 const TAAJobContext = renderer_module.TAAJobContext;
 const CompositeJobContext = renderer_module.CompositeJobContext;
@@ -136,8 +132,6 @@ pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allo
 
     const lens_flare_scratch_pixels = try allocator.alloc(u32, @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
     errdefer allocator.free(lens_flare_scratch_pixels);
-    const ao_job_contexts = try allocator.alloc(AOJobContext, color_grade_job_count);
-    errdefer allocator.free(ao_job_contexts);
     const skybox_job_contexts = try allocator.alloc(SkyboxJobContext, color_grade_job_count);
     errdefer allocator.free(skybox_job_contexts);
     const taa_job_contexts = try allocator.alloc(TAAJobContext, color_grade_job_count);
@@ -146,8 +140,6 @@ pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allo
     errdefer allocator.free(shadow_resolve_job_contexts);
     const shadow_raster_job_contexts = try allocator.alloc(ShadowRasterJobContext, color_grade_job_count);
     errdefer allocator.free(shadow_raster_job_contexts);
-    const bloom_job_contexts = try allocator.alloc(BloomJobContext, color_grade_job_count);
-    errdefer allocator.free(bloom_job_contexts);
     const fb_pix_count = @as(usize, @intCast(width)) * @as(usize, @intCast(height));
     const dof_scratch_pixels = try allocator.alloc(u32, fb_pix_count);
     errdefer allocator.free(dof_scratch_pixels);
@@ -255,23 +247,6 @@ pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allo
     const tile_light_index_capacity = @max(@as(usize, 1), tile_count * lights.items.len);
     const tile_light_indices = try allocator.alloc(usize, tile_light_index_capacity);
     errdefer allocator.free(tile_light_indices);
-    const ao_downsample = @max(1, config.POST_SSAO_DOWNSAMPLE);
-    const ao_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + ao_downsample - 1, ao_downsample))));
-    const ao_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + ao_downsample - 1, ao_downsample))));
-    const ao_pixel_count = ao_width * ao_height;
-    const ao_ping = try allocator.alloc(u8, ao_pixel_count);
-    errdefer allocator.free(ao_ping);
-    const ao_pong = try allocator.alloc(u8, ao_pixel_count);
-    errdefer allocator.free(ao_pong);
-    const ao_depth = try allocator.alloc(f32, ao_pixel_count);
-    errdefer allocator.free(ao_depth);
-    const bloom_width = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(width + 3, 4))));
-    const bloom_height = @max(@as(usize, 1), @as(usize, @intCast(@divTrunc(height + 3, 4))));
-    const bloom_pixel_count = bloom_width * bloom_height;
-    const bloom_ping = try allocator.alloc(u32, bloom_pixel_count);
-    errdefer allocator.free(bloom_ping);
-    const bloom_pong = try allocator.alloc(u32, bloom_pixel_count);
-    errdefer allocator.free(bloom_pong);
 
     renderer_logger.infoSub(
         "init",
@@ -390,7 +365,7 @@ pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allo
         .render_pass_count = 0,
         .color_grade_profile = buildBlockbusterGradeProfile(),
         .ambient_occlusion_config = .{
-            .downsample = @intCast(ao_downsample),
+            .downsample = 1,
             .radius = config.POST_SSAO_RADIUS,
             .strength = @as(f32, @floatFromInt(config.POST_SSAO_STRENGTH_PERCENT)) / 100.0,
             .bias = config.POST_SSAO_BIAS,
@@ -485,26 +460,9 @@ pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allo
         .depth_tests_passed_counter = std.atomic.Value(usize).init(0),
         .alpha_pixels_counter = std.atomic.Value(usize).init(0),
         .hybrid_shadow_debug = .{},
-        .ao_scratch = .{
-            .width = ao_width,
-            .height = ao_height,
-            .ping = ao_ping,
-            .pong = ao_pong,
-            .depth = ao_depth,
-        },
-        .bloom_scratch = .{
-            .width = bloom_width,
-            .height = bloom_height,
-            .ping = bloom_ping,
-            .pong = bloom_pong,
-        },
-        .ao_job_contexts = ao_job_contexts,
-        .bloom_threshold_curve = bloom_pass.buildThresholdCurve(config.POST_BLOOM_THRESHOLD),
-        .bloom_intensity_lut = bloom_pass.buildIntensityLut(config.POST_BLOOM_INTENSITY_PERCENT),
         .skybox_job_contexts = skybox_job_contexts,
         .shadow_resolve_job_contexts = shadow_resolve_job_contexts,
         .shadow_raster_job_contexts = shadow_raster_job_contexts,
-        .bloom_job_contexts = bloom_job_contexts,
         .dof_scratch = .{ .pixels = dof_scratch_pixels, .width = @intCast(width), .height = @intCast(height) },
         .dof_job_contexts = dof_job_contexts,
         .ssr_job_contexts = ssr_job_contexts,

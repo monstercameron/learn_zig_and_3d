@@ -10,27 +10,19 @@ const Mesh = renderer_module.Mesh;
 
 const skybox_pass = @import("../passes/skybox_pass.zig");
 const ssgi_pass = @import("../passes/ssgi_pass.zig");
-const ssao_pass = @import("../passes/ssao_pass.zig");
-const ssao_rows = @import("../passes/ssao_rows.zig");
 const depth_fog_v2 = @import("../passes_v2/depth_fog.zig");
 const passes_v2 = @import("../passes_v2/mod.zig");
 const iq_scan_runtime = @import("../iq_scan_runtime.zig");
 const taa_pass = @import("../passes/taa_pass.zig");
 const taa_helpers = @import("../passes/taa_helpers.zig");
-const bloom_pass = @import("../passes/bloom_pass.zig");
-const bloom_rows = @import("../passes/bloom_rows.zig");
 const depth_of_field_pass = @import("../passes/depth_of_field_pass.zig");
 const ssr_pass = @import("../passes/ssr_pass.zig");
 
 const noopRenderPassJob = renderer_module.noopRenderPassJob;
 const projectCameraPositionFloat = renderer_module.projectCameraPositionFloat;
 const tryApplyTemporalAAMeshletBatch = renderer_module.tryApplyTemporalAAMeshletBatch;
-const renderAmbientOcclusionRows = renderer_module.renderAmbientOcclusionRows;
 const validSceneCameraSample = renderer_module.validSceneCameraSample;
-const blurAmbientOcclusionHorizontalRows = renderer_module.blurAmbientOcclusionHorizontalRows;
-const blurAmbientOcclusionVerticalRows = renderer_module.blurAmbientOcclusionVerticalRows;
 const cameraToWorldPosition = renderer_module.cameraToWorldPosition;
-const compositeAmbientOcclusionRows = renderer_module.compositeAmbientOcclusionRows;
 const NEAR_EPSILON = renderer_module.NEAR_EPSILON;
 
 /// Applies ssgi pass.
@@ -44,20 +36,42 @@ pub fn applySSGIPass(renderer: *Renderer) void {
 /// Applies ambient occlusion pass.
 /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
 pub fn applyAmbientOcclusionPass(renderer: *Renderer) void {
-    if (renderer.bitmap.pixels.len == 0 or renderer.scene_camera.len != renderer.bitmap.pixels.len) return;
+    if (renderer.bitmap.pixels.len == 0 or renderer.scene_depth.len != renderer.bitmap.pixels.len) return;
     const pass_start = std.time.nanoTimestamp();
-    const scene_width: usize = @intCast(renderer.bitmap.width);
-    const scene_height: usize = @intCast(renderer.bitmap.height);
-    ssao_pass.runPipeline(
-        renderer,
-        scene_width,
-        scene_height,
-        noopRenderPassJob,
-        renderAmbientOcclusionRows,
-        blurAmbientOcclusionHorizontalRows,
-        blurAmbientOcclusionVerticalRows,
-        compositeAmbientOcclusionRows,
-    );
+    const before_snapshot = if (iq_scan_runtime.isEnabled())
+        iq_scan_runtime.snapshot(renderer.allocator, renderer.bitmap.pixels) catch null
+    else
+        null;
+    const ssao_v2 = @import("../passes_v2/ssao.zig");
+    const gbuf: passes_v2.GBufferView = .{
+        .width = renderer.bitmap.width,
+        .height = renderer.bitmap.height,
+        .depth = renderer.scene_depth,
+        .normal = @ptrCast(renderer.scene_normal),
+        .base_color = renderer.scene_base_color,
+        .material = renderer.scene_material,
+    };
+    const inputs: passes_v2.Inputs = .{
+        .width = renderer.bitmap.width,
+        .height = renderer.bitmap.height,
+        .in_color = renderer.bitmap.pixels,
+        .out_color = renderer.bitmap.pixels,
+        .gbuf = gbuf,
+    };
+    _ = ssao_v2.execute(inputs, .{
+        .radius_px = 4,
+        .strength = @as(f32, @floatFromInt(config.POST_SSAO_STRENGTH_PERCENT)) / 100.0,
+    });
+    if (before_snapshot) |before| {
+        iq_scan_runtime.reportPass(
+            "ssao",
+            renderer.bitmap.width,
+            renderer.bitmap.height,
+            before,
+            renderer.bitmap.pixels,
+            renderer.scene_depth,
+        );
+    }
     renderer.recordRenderPassTiming("ssao", pass_start);
 }
 
@@ -377,20 +391,34 @@ pub fn applyDepthOfFieldPass(renderer: *Renderer) void {
 pub fn applyBloomPass(renderer: *Renderer) void {
     if (renderer.bitmap.pixels.len == 0) return;
     const pass_start = std.time.nanoTimestamp();
-    const scene_width: usize = @intCast(renderer.bitmap.width);
-    const scene_height: usize = @intCast(renderer.bitmap.height);
-    bloom_pass.runPipeline(
-        renderer,
-        scene_width,
-        scene_height,
-        config.POST_BLOOM_THRESHOLD,
-        config.POST_BLOOM_INTENSITY_PERCENT,
-        noopRenderPassJob,
-        bloom_rows.extractDownsampleRows,
-        bloom_rows.blurHorizontalRows,
-        bloom_rows.blurVerticalRows,
-        bloom_rows.compositeRows,
-    );
+    const before_snapshot = if (iq_scan_runtime.isEnabled())
+        iq_scan_runtime.snapshot(renderer.allocator, renderer.bitmap.pixels) catch null
+    else
+        null;
+    const bloom_v2 = @import("../passes_v2/bloom.zig");
+    const inputs: passes_v2.Inputs = .{
+        .width = renderer.bitmap.width,
+        .height = renderer.bitmap.height,
+        .in_color = renderer.bitmap.pixels,
+        .out_color = renderer.moblur_scratch_pixels,
+    };
+    _ = bloom_v2.execute(inputs, .{
+        .threshold = @intCast(@max(0, @min(255, config.POST_BLOOM_THRESHOLD))),
+        .intensity = @as(f32, @floatFromInt(config.POST_BLOOM_INTENSITY_PERCENT)) / 100.0,
+    });
+    const tmp = renderer.bitmap.pixels;
+    renderer.bitmap.pixels = renderer.moblur_scratch_pixels;
+    renderer.moblur_scratch_pixels = tmp;
+    if (before_snapshot) |before| {
+        iq_scan_runtime.reportPass(
+            "bloom",
+            renderer.bitmap.width,
+            renderer.bitmap.height,
+            before,
+            renderer.bitmap.pixels,
+            renderer.scene_depth,
+        );
+    }
     renderer.recordRenderPassTiming("bloom", pass_start);
 }
 
