@@ -36,6 +36,13 @@ pub const Payload = union(enum) {
         vertex_colors: ?[3]u32 = null,
         vertex_depths: ?[3]f32 = null,
         gouraud_setup: ?direct_primitives.PreparedGouraudTriangle = null,
+        // Camera-space face normal. The deferred rasterizer copies this
+        // into gbuf_normal per covered pixel so the lighting stage has
+        // surface orientation. None on triangles built before deferred
+        // mode; ignored by the forward dispatcher. Stored as Vec3 for
+        // now; can promote to packed RGB10/A2 once the lighting stage
+        // is in place and we're ready to compact the G-buffer.
+        face_normal: ?@import("../../core/math.zig").Vec3 = null,
     },
     polygon: direct_primitives.Polygon2i,
     circle: direct_primitives.Circle2i,

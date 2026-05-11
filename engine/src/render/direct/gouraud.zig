@@ -126,7 +126,7 @@ pub fn drawGouraudTriangleWithDepths(
     vertex_depths: ?[3]f32,
 ) void {
     if (vertex_colors[0] == vertex_colors[1] and vertex_colors[1] == vertex_colors[2]) {
-        primitives.drawSolidTriangleWithDepths(target, triangle, vertex_colors[0], depth_value, vertex_depths);
+        primitives.drawSolidTriangleWithDepths(target, triangle, vertex_colors[0], depth_value, vertex_depths, null);
         return;
     }
     drawPreparedGouraudTrianglePreparedWithDepths(target, triangle, prepareGouraudTriangle(triangle, vertex_colors), depth_value, vertex_depths);

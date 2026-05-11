@@ -432,6 +432,16 @@ pub fn compileToDrawList(
                         null
                 else
                     null;
+                // Camera-space face normal for the G-buffer normal target.
+                // Lit triangles get the average of vertex_normals (already
+                // smooth-shaded); unlit ones get the geometric face normal
+                // from the world triangle, both transformed into camera
+                // space via the projector basis.
+                const face_normal_camera = computeCameraSpaceFaceNormal(
+                    payload.triangle,
+                    payload.vertex_normals,
+                    &projector.basis,
+                );
                 try draw_list.append(.{
                     .sort_key = makeTriangleSortKey(resolved_depth, packet_index),
                     .layer = .geometry,
@@ -442,6 +452,7 @@ pub fn compileToDrawList(
                         .vertex_colors = payload.gouraud_colors,
                         .vertex_depths = resolved_vertex_depths,
                         .gouraud_setup = gouraud_setup,
+                        .face_normal = face_normal_camera,
                     } },
                 });
             },
@@ -545,6 +556,37 @@ inline fn makeLineSortKey(depth: ?f32, packet_index: usize) u64 {
 
 inline fn makeSurfaceSortKey(depth: ?f32, packet_index: usize) u64 {
     return (@as(u64, encodeDepth(depth)) << 32) | @as(u64, @intCast(packet_index));
+}
+
+inline fn computeCameraSpaceFaceNormal(
+    triangle: WorldTriangle,
+    vertex_normals: ?[3]math.Vec3,
+    basis: *const camera_controller.ViewBasis,
+) math.Vec3 {
+    const world_normal = if (vertex_normals) |vn| blk: {
+        // Use the average vertex normal so the G-buffer carries the
+        // shading-time direction (smooth-shaded surfaces).
+        const sum = math.Vec3.add(math.Vec3.add(vn[0], vn[1]), vn[2]);
+        const len_sq = math.Vec3.dot(sum, sum);
+        if (len_sq <= 1e-8) break :blk geometricFaceNormal(triangle);
+        break :blk math.Vec3.scale(sum, 1.0 / @sqrt(len_sq));
+    } else geometricFaceNormal(triangle);
+    // basis is right/up/forward in world space; produce camera-space
+    // normal as (n·right, n·up, n·forward).
+    return .{
+        .x = math.Vec3.dot(world_normal, basis.right),
+        .y = math.Vec3.dot(world_normal, basis.up),
+        .z = math.Vec3.dot(world_normal, basis.forward),
+    };
+}
+
+inline fn geometricFaceNormal(triangle: WorldTriangle) math.Vec3 {
+    const edge_ab = math.Vec3.sub(triangle.b, triangle.a);
+    const edge_ac = math.Vec3.sub(triangle.c, triangle.a);
+    const n = math.Vec3.cross(edge_ab, edge_ac);
+    const len_sq = math.Vec3.dot(n, n);
+    if (len_sq <= 1e-8) return math.Vec3.new(0.0, 0.0, 1.0);
+    return math.Vec3.scale(n, 1.0 / @sqrt(len_sq));
 }
 
 inline fn worldTriangleFrontFacing(triangle: WorldTriangle, camera_position: math.Vec3) bool {
