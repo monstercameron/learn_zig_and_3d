@@ -13,6 +13,7 @@
     { "key": "suzanne_behavior", "file": "assets/configs/scenes/suzanne_behavior.scene.json" },
     { "key": "wolf", "file": "assets/configs/scenes/wolf.scene.json" },
     { "key": "shadow_tuning", "file": "assets/configs/scenes/shadow_tuning.scene.json" },
-    { "key": "shadow_single_model", "file": "assets/configs/scenes/shadow_single_model.scene.json" }
+    { "key": "shadow_single_model", "file": "assets/configs/scenes/shadow_single_model.scene.json" },
+    { "key": "iq_test", "file": "assets/configs/scenes/iq_test.scene.json" }
   ]
 }
