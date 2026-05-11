@@ -22,6 +22,7 @@ const hdr_post_stage = @import("../stages/hdr_post_stage.zig");
 const hdr_bloom_pass = @import("../passes/hdr_bloom_pass.zig");
 const hiz_stage = @import("../stages/hiz_stage.zig");
 const screen_post_stage = @import("../stages/screen_post_stage.zig");
+const iq_scan_runtime = @import("../iq_scan_runtime.zig");
 const composition_stage = @import("../stages/composition_stage.zig");
 const post_process_stage = @import("../stages/post_process_stage.zig");
 const visible_scene = @import("../scene/visible.zig");
@@ -737,6 +738,13 @@ pub const State = struct {
             // the config values; gating via the legacy [passes] toggles
             // is bypassed deliberately so we don't double-disable this
             // alongside the unrelated legacy CA/vignette path.
+            //
+            // When ZIG_IQ_SCAN=1 we snapshot target.color before/after
+            // and emit a JSON artifact report on stderr.
+            const before_snapshot = if (iq_scan_runtime.isEnabled())
+                iq_scan_runtime.snapshot(self.allocator, resources.target.color) catch null
+            else
+                null;
             _ = screen_post_stage.execute(resources, post_full_rect, .{
                 .vignette = app_config.POST_VIGNETTE_STRENGTH,
                 .film_grain = app_config.POST_FILM_GRAIN_STRENGTH,
@@ -752,6 +760,16 @@ pub const State = struct {
                 .edge_threshold = app_config.POST_EDGE_THRESHOLD,
                 .seed = @as(u32, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())))),
             }, job_sys);
+            if (before_snapshot) |before| {
+                iq_scan_runtime.reportPass(
+                    "screen_post",
+                    resources.target.width,
+                    resources.target.height,
+                    before,
+                    resources.target.color,
+                    resources.target.depth,
+                );
+            }
 
             // Present rect stays bound to the dirty rect we actually
             // wrote to this frame — preserving the cache invariant that

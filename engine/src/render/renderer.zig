@@ -80,7 +80,6 @@ const hybrid_shadow_resolve_kernel = @import("kernels/hybrid_shadow_resolve_kern
 const bloom_blur_h_kernel = @import("kernels/bloom_blur_h_kernel.zig");
 const bloom_blur_v_kernel = @import("kernels/bloom_blur_v_kernel.zig");
 const lighting_pass = @import("passes/lighting_pass.zig");
-const depth_fog_pass = @import("passes/depth_fog_pass.zig");
 const scanline = @import("core/scanline.zig");
 const texture = @import("../assets/texture.zig");
 const direct_primitives = @import("direct/primitives.zig");
@@ -1139,22 +1138,6 @@ pub const ColorGradeJobContext = struct {
     }
 };
 
-pub const FogJobContext = struct {
-    pixels: []u32,
-    depth: []const f32,
-    width: usize,
-    start_row: usize,
-    end_row: usize,
-    config: DepthFogConfig,
-
-    /// Runs this module step with the currently bound configuration.
-    /// Keeps run as the single implementation point so call-site behavior stays consistent.
-    pub fn run(ctx_ptr: *anyopaque) void {
-        const ctx: *FogJobContext = @ptrCast(@alignCast(ctx_ptr));
-        depth_fog_pass.runRows(ctx.pixels, ctx.depth, ctx.width, ctx.start_row, ctx.end_row, ctx.config);
-    }
-};
-
 pub const ShadowLightDispatchContext = struct {
     renderer: *Renderer,
     camera_position: math.Vec3,
@@ -1496,7 +1479,6 @@ pub const Renderer = struct {
     ao_job_contexts: []AOJobContext,
     bloom_threshold_curve: [256]u8,
     bloom_intensity_lut: [256]u8,
-    fog_job_contexts: []FogJobContext,
     skybox_job_contexts: []renderer_scene_dispatch.SkyboxJobContext,
     shadow_resolve_job_contexts: []ShadowResolveJobContext,
     shadow_raster_job_contexts: []ShadowRasterJobContext,
@@ -1670,7 +1652,6 @@ pub const Renderer = struct {
         self.allocator.free(self.bloom_scratch.ping);
         self.allocator.free(self.bloom_scratch.pong);
         self.allocator.free(self.ao_job_contexts);
-        self.allocator.free(self.fog_job_contexts);
         self.allocator.free(self.skybox_job_contexts);
         self.allocator.free(self.shadow_resolve_job_contexts);
         self.allocator.free(self.shadow_raster_job_contexts);

@@ -50,7 +50,6 @@ const ShadowResolveJobContext = renderer_module.ShadowResolveJobContext;
 const ShadowRasterJobContext = renderer_module.ShadowRasterJobContext;
 const DepthOfFieldJobContext = renderer_module.DepthOfFieldJobContext;
 const ColorGradeJobContext = renderer_module.ColorGradeJobContext;
-const FogJobContext = renderer_module.FogJobContext;
 const ColorGradeProfile = renderer_module.ColorGradeProfile;
 const ShadowMap = renderer_module.ShadowMap;
 const ShadowResolveConfig = renderer_module.ShadowResolveConfig;
@@ -152,8 +151,6 @@ pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allo
     errdefer allocator.free(lens_flare_scratch_pixels);
     const ao_job_contexts = try allocator.alloc(AOJobContext, color_grade_job_count);
     errdefer allocator.free(ao_job_contexts);
-    const fog_job_contexts = try allocator.alloc(FogJobContext, color_grade_job_count);
-    errdefer allocator.free(fog_job_contexts);
     const skybox_job_contexts = try allocator.alloc(SkyboxJobContext, color_grade_job_count);
     errdefer allocator.free(skybox_job_contexts);
     const taa_job_contexts = try allocator.alloc(TAAJobContext, color_grade_job_count);
@@ -517,7 +514,6 @@ pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allo
         .ao_job_contexts = ao_job_contexts,
         .bloom_threshold_curve = bloom_pass.buildThresholdCurve(config.POST_BLOOM_THRESHOLD),
         .bloom_intensity_lut = bloom_pass.buildIntensityLut(config.POST_BLOOM_INTENSITY_PERCENT),
-        .fog_job_contexts = fog_job_contexts,
         .skybox_job_contexts = skybox_job_contexts,
         .shadow_resolve_job_contexts = shadow_resolve_job_contexts,
         .shadow_raster_job_contexts = shadow_raster_job_contexts,

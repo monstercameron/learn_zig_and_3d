@@ -12,7 +12,9 @@ const skybox_pass = @import("../passes/skybox_pass.zig");
 const ssgi_pass = @import("../passes/ssgi_pass.zig");
 const ssao_pass = @import("../passes/ssao_pass.zig");
 const ssao_rows = @import("../passes/ssao_rows.zig");
-const depth_fog_pass = @import("../passes/depth_fog_pass.zig");
+const depth_fog_v2 = @import("../passes_v2/depth_fog.zig");
+const passes_v2 = @import("../passes_v2/mod.zig");
+const iq_scan_runtime = @import("../iq_scan_runtime.zig");
 const taa_pass = @import("../passes/taa_pass.zig");
 const taa_helpers = @import("../passes/taa_helpers.zig");
 const motion_blur_pass = @import("../passes/motion_blur_pass.zig");
@@ -65,14 +67,47 @@ pub fn applyAmbientOcclusionPass(renderer: *Renderer) void {
     renderer.recordRenderPassTiming("ssao", pass_start);
 }
 
-/// Applies depth fog pass.
-/// Mutates owned state and keeps dependent cached values coherent for downstream systems.
+/// Applies depth fog pass via the modern passes_v2 implementation.
+/// In-place safe; reads silhouette mask from the G-buffer depth so
+/// background pixels are never modified.
 pub fn applyDepthFogPass(renderer: *Renderer) void {
     if (renderer.bitmap.pixels.len == 0 or renderer.scene_depth.len != renderer.bitmap.pixels.len) return;
     const pass_start = std.time.nanoTimestamp();
-    const width: usize = @intCast(renderer.bitmap.width);
-    const height: usize = @intCast(renderer.bitmap.height);
-    depth_fog_pass.runPipeline(renderer, width, height, noopRenderPassJob);
+    const before_snapshot = if (iq_scan_runtime.isEnabled())
+        iq_scan_runtime.snapshot(renderer.allocator, renderer.bitmap.pixels) catch null
+    else
+        null;
+    const gbuf: passes_v2.GBufferView = .{
+        .width = renderer.bitmap.width,
+        .height = renderer.bitmap.height,
+        .depth = renderer.scene_depth,
+        .normal = @ptrCast(renderer.scene_normal),
+        .base_color = renderer.scene_base_color,
+        .material = renderer.scene_material,
+    };
+    const inputs: passes_v2.Inputs = .{
+        .width = renderer.bitmap.width,
+        .height = renderer.bitmap.height,
+        .in_color = renderer.bitmap.pixels,
+        .out_color = renderer.bitmap.pixels,
+        .gbuf = gbuf,
+    };
+    _ = depth_fog_v2.execute(inputs, .{
+        .near = config.POST_DEPTH_FOG_NEAR,
+        .far = config.POST_DEPTH_FOG_FAR,
+        .strength = @as(f32, @floatFromInt(config.POST_DEPTH_FOG_STRENGTH_PERCENT)) / 100.0,
+        .color = .{ config.POST_DEPTH_FOG_COLOR_R, config.POST_DEPTH_FOG_COLOR_G, config.POST_DEPTH_FOG_COLOR_B },
+    });
+    if (before_snapshot) |before| {
+        iq_scan_runtime.reportPass(
+            "depth_fog",
+            renderer.bitmap.width,
+            renderer.bitmap.height,
+            before,
+            renderer.bitmap.pixels,
+            renderer.scene_depth,
+        );
+    }
     renderer.recordRenderPassTiming("depth_fog", pass_start);
 }
 
