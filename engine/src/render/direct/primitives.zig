@@ -40,6 +40,13 @@ pub const FrameTarget = struct {
     color: []u32,
     depth: ?[]f32 = null,
     clip: ?Rect2i = null,
+    // Optional G-buffer surfaces. Present when the deferred-shading
+    // pipeline is active (ROADMAP §H). The rasterizer writes these
+    // alongside depth so a downstream lighting stage can shade per
+    // visible pixel without re-walking geometry.
+    gbuf_base_color: ?[]u32 = null,
+    gbuf_normal: ?[]@import("../../core/math.zig").Vec3 = null,
+    gbuf_material: ?[]u32 = null,
 };
 
 pub const ClearConfig = struct {

@@ -227,12 +227,21 @@ pub fn render3DMeshWithPump(renderer: *Renderer, mesh: *const Mesh, pump: ?*cons
                 .sampled_ms_per_frame = pt.sampled_ms_per_frame,
             };
         }
+        const gbuf_t = renderer.direct_backend.lastTimings();
         const snapshot = introspect.FrameSnapshot{
             .frame_index = renderer.total_frames_rendered,
             .timestamp_ns = current_time,
             .frame_ns = @as(i128, @intFromFloat(delta_seconds * 1_000_000_000.0)),
             .backbuffer_width = renderer.bitmap.width,
             .backbuffer_height = renderer.bitmap.height,
+            .pipeline_mode = if (config.DEFERRED_SHADING_ENABLED) .deferred else .forward,
+            // G-buffer footprint: 3 surfaces × 4 bytes (rgba/normal-packed/mat-packed)
+            // × touched_tiles × pixels_per_tile, only when deferred is active.
+            // Conservative upper-bound; refined once raster reports actual writes.
+            .gbuffer_bytes_written = if (config.DEFERRED_SHADING_ENABLED)
+                @as(u64, gbuf_t.touched_tiles) * 16 * 16 * 12
+            else
+                0,
             .scene = .{
                 .triangle_count = mesh.triangles.len,
                 .meshlet_count = mesh.meshlets.len,

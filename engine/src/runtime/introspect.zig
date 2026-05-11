@@ -81,6 +81,16 @@ pub const StageTimings = struct {
     touched_tiles: usize = 0,
 };
 
+/// Which lighting/shading pipeline is active. Forward bakes lighting
+/// at primitive_expansion; deferred writes a G-buffer in raster and
+/// shades in a separate screen-space stage. Surfaced so agents can
+/// correlate timing deltas with mode switches during the H1..H9
+/// migration.
+pub const PipelineMode = enum(u8) {
+    forward = 0,
+    deferred = 1,
+};
+
 pub const FrameSnapshot = struct {
     frame_index: u64,
     timestamp_ns: i128,
@@ -88,6 +98,10 @@ pub const FrameSnapshot = struct {
 
     backbuffer_width: i32,
     backbuffer_height: i32,
+    pipeline_mode: PipelineMode = .forward,
+    /// Bytes written to G-buffer surfaces this frame (base_color +
+    /// normal + material per touched pixel). Zero on the forward path.
+    gbuffer_bytes_written: u64 = 0,
 
     scene: SceneSnapshot,
     pacing: PacingSnapshot,
@@ -207,13 +221,15 @@ pub fn closeOutputFile() void {
 /// output. Keep this lockstep with the FrameSnapshot fields.
 pub fn writeFrameJson(snapshot: *const FrameSnapshot, w: anytype) !void {
     try w.print(
-        \\{{"frame":{},"timestamp_ns":{},"frame_ns":{},"width":{},"height":{}
+        \\{{"frame":{},"timestamp_ns":{},"frame_ns":{},"width":{},"height":{},"mode":"{s}","gbuf_bytes":{}
     , .{
         snapshot.frame_index,
         snapshot.timestamp_ns,
         snapshot.frame_ns,
         snapshot.backbuffer_width,
         snapshot.backbuffer_height,
+        @tagName(snapshot.pipeline_mode),
+        snapshot.gbuffer_bytes_written,
     });
     try writeSceneJson(snapshot.scene, w);
     try writePacingJson(snapshot.pacing, w);
