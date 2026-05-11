@@ -185,7 +185,7 @@ pub fn render3DMeshWithPump(renderer: *Renderer, mesh: *const Mesh, pump: ?*cons
     const compiled_frame_plan = frame_pipeline.compileCachedFramePlan(&renderer.cached_frame_plan, .{
         .has_shadow_map_lights = shadow_map_light_count > 0,
         .backend = if (using_tiled_backend) .tiled else .direct,
-        .include_post_process = false,
+        .include_post_process = true,
         .include_present = true,
     });
     const frame_exec_ctx = FrameExecutionContext{

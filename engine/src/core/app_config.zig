@@ -186,6 +186,16 @@ pub var POST_FILM_GRAIN_VIGNETTE_ENABLED: bool = true;
 pub var POST_FILM_GRAIN_STRENGTH: f32 = 0.04;
 pub var POST_VIGNETTE_STRENGTH: f32 = 0.30;
 
+// IQ post-stage knobs (silhouette-masked, all per-pixel).
+pub var POST_SATURATION: f32 = 1.20; // chroma boost around luminance
+pub var POST_CONTRAST: f32 = 0.12; // 0=flat, positive=S-curve steeper
+pub var POST_RIM_LIGHT_STRENGTH: f32 = 0.18; // dim — bloom carries cinematic glow
+pub var POST_RIM_LIGHT_R: f32 = 1.0;
+pub var POST_RIM_LIGHT_G: f32 = 0.95;
+pub var POST_RIM_LIGHT_B: f32 = 0.80;
+pub var POST_EDGE_DARKEN: f32 = 0.30; // depth-gradient outline
+pub var POST_EDGE_THRESHOLD: f32 = 0.04;
+
 pub var POST_GOD_RAYS_ENABLED: bool = false;
 pub var POST_GOD_RAYS_SAMPLES: i32 = 16;
 pub var POST_GOD_RAYS_DENSITY: f32 = 1.0;

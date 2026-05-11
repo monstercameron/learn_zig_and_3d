@@ -51,6 +51,10 @@ pub const SceneMeshConfig = struct {
 };
 
 pub const FrameTimings = struct {
+    // True when the cache short-circuited this frame's scene raster.
+    // Downstream stages (post-process graph, present) read this to
+    // skip work that would otherwise process stale pixels.
+    scene_was_cached: bool = false,
     clear_ns: i128 = 0,
     build_batch_ns: i128 = 0,
     compile_draw_list_ns: i128 = 0,
@@ -574,6 +578,7 @@ pub const State = struct {
         // Skip clear + raster + lighting + bloom + tonemap entirely
         // and let present re-display the existing target.color.
         // Render budget on cache-hit frames drops from ~7 ms to ~0.
+        self.timings.scene_was_cached = cache_hit;
         if (cache_hit) {
             self.timings.clear_ns = 0;
             self.timings.raster_ns = 0;
@@ -732,13 +737,19 @@ pub const State = struct {
             // the config values; gating via the legacy [passes] toggles
             // is bypassed deliberately so we don't double-disable this
             // alongside the unrelated legacy CA/vignette path.
-            const ca_strength: f32 = app_config.POST_CHROMATIC_ABERRATION_STRENGTH;
-            const vig_strength: f32 = app_config.POST_VIGNETTE_STRENGTH;
-            const grain_strength: f32 = app_config.POST_FILM_GRAIN_STRENGTH;
             _ = screen_post_stage.execute(resources, post_full_rect, .{
-                .chromatic_aberration = ca_strength,
-                .vignette = vig_strength,
-                .film_grain = grain_strength,
+                .vignette = app_config.POST_VIGNETTE_STRENGTH,
+                .film_grain = app_config.POST_FILM_GRAIN_STRENGTH,
+                .saturation = app_config.POST_SATURATION,
+                .contrast = app_config.POST_CONTRAST,
+                .rim_light = app_config.POST_RIM_LIGHT_STRENGTH,
+                .rim_color_rgb = .{
+                    app_config.POST_RIM_LIGHT_R,
+                    app_config.POST_RIM_LIGHT_G,
+                    app_config.POST_RIM_LIGHT_B,
+                },
+                .edge_darken = app_config.POST_EDGE_DARKEN,
+                .edge_threshold = app_config.POST_EDGE_THRESHOLD,
                 .seed = @as(u32, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())))),
             }, job_sys);
 

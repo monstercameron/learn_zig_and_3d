@@ -31,6 +31,12 @@ pub const Config = struct {
     chromatic_aberration: f32 = 0.0, // reserved; not currently applied
     vignette: f32 = 0.0, // 0..1; darkening intensity at corners
     film_grain: f32 = 0.0, // 0..1; noise amplitude
+    saturation: f32 = 1.0, // 1.0 = unchanged; >1 punchier, <1 desaturate
+    contrast: f32 = 0.0, // 0 = unchanged; positive = S-curve steeper
+    rim_light: f32 = 0.0, // 0..1; Fresnel rim boost using G-buffer normal
+    rim_color_rgb: [3]f32 = .{ 1.0, 0.95, 0.85 }, // warm white default
+    edge_darken: f32 = 0.0, // 0..1; depth-gradient edge darkening
+    edge_threshold: f32 = 0.05, // depth delta that counts as an edge
     seed: u32 = 0,
 };
 
@@ -44,9 +50,10 @@ pub fn execute(
     config: Config,
     job_sys: ?*JobSystem,
 ) Result {
-    if (config.vignette == 0.0 and config.film_grain == 0.0) {
-        return .{};
-    }
+    const any_effect = config.vignette != 0.0 or config.film_grain != 0.0 or
+        config.saturation != 1.0 or config.contrast != 0.0 or
+        config.rim_light != 0.0 or config.edge_darken != 0.0;
+    if (!any_effect) return .{};
     const rect = dirty_rect orelse direct_primitives.Rect2i{
         .min_x = 0,
         .min_y = 0,
@@ -144,11 +151,23 @@ fn processRows(
     config: Config,
 ) Result {
     const color = resources.target.color;
+    const depth = resources.target.depth;
+    const normals = resources.aux.scene_normal;
     const stride: usize = @intCast(resources.target.width);
-    const inv_w: f32 = 1.0 / @as(f32, @floatFromInt(resources.target.width));
-    const inv_h: f32 = 1.0 / @as(f32, @floatFromInt(resources.target.height));
+    const width_i = resources.target.width;
+    const height_i = resources.target.height;
+    const inv_w: f32 = 1.0 / @as(f32, @floatFromInt(width_i));
+    const inv_h: f32 = 1.0 / @as(f32, @floatFromInt(height_i));
     const vignette_amount = config.vignette;
     const grain_amount = config.film_grain;
+    const sat = config.saturation;
+    const contrast = config.contrast;
+    const rim_amount = config.rim_light;
+    const rim_r = config.rim_color_rgb[0];
+    const rim_g = config.rim_color_rgb[1];
+    const rim_b = config.rim_color_rgb[2];
+    const edge_amount = config.edge_darken;
+    const edge_threshold = config.edge_threshold;
     const seed: u32 = config.seed;
 
     var processed: usize = 0;
@@ -161,25 +180,114 @@ fn processRows(
         var x: i32 = bounds.min_x;
         while (x <= bounds.max_x) : (x += 1) {
             const idx = row_start + @as(usize, @intCast(x));
+            // Silhouette mask — only modify pixels with real depth.
+            const has_depth: bool = if (depth) |dbuf| std.math.isFinite(dbuf[idx]) else true;
+            if (!has_depth) {
+                processed += 1;
+                continue;
+            }
             const xf: f32 = @floatFromInt(x);
             const ndc_x = (xf + 0.5) * inv_w - 0.5;
             const r2 = ndc_x * ndc_x + ndc_y_sq;
             const orig = color[idx];
-            const r_chan: f32 = @as(f32, @floatFromInt((orig >> 16) & 0xFF));
-            const g_chan: f32 = @as(f32, @floatFromInt((orig >> 8) & 0xFF));
-            const b_chan: f32 = @as(f32, @floatFromInt(orig & 0xFF));
-            const r2_norm: f32 = @min(@as(f32, 1.0), r2 * 2.0);
-            const vig: f32 = 1.0 - vignette_amount * r2_norm;
-            const px: u32 = @bitCast(x);
-            const py: u32 = @bitCast(y);
-            var h: u32 = px *% 374761393 +% py *% 668265263 +% seed *% 2246822519;
-            h ^= h >> 13;
-            h *%= 1274126177;
-            h ^= h >> 16;
-            const grain_f: f32 = (@as(f32, @floatFromInt(h & 0xFFFF)) * (2.0 / 65535.0) - 1.0) * grain_amount * 255.0;
-            const ro: f32 = std.math.clamp(r_chan * vig + grain_f, 0.0, 255.0);
-            const go: f32 = std.math.clamp(g_chan * vig + grain_f, 0.0, 255.0);
-            const bo: f32 = std.math.clamp(b_chan * vig + grain_f, 0.0, 255.0);
+            var rf: f32 = @as(f32, @floatFromInt((orig >> 16) & 0xFF));
+            var gf: f32 = @as(f32, @floatFromInt((orig >> 8) & 0xFF));
+            var bf: f32 = @as(f32, @floatFromInt(orig & 0xFF));
+
+            // ---- Saturation: chroma scale around luminance ----
+            if (sat != 1.0) {
+                const lum = 0.299 * rf + 0.587 * gf + 0.114 * bf;
+                rf = lum + (rf - lum) * sat;
+                gf = lum + (gf - lum) * sat;
+                bf = lum + (bf - lum) * sat;
+            }
+
+            // ---- Contrast: S-curve around 127.5 ----
+            if (contrast != 0.0) {
+                const c = 1.0 + contrast;
+                rf = (rf - 127.5) * c + 127.5;
+                gf = (gf - 127.5) * c + 127.5;
+                bf = (bf - 127.5) * c + 127.5;
+            }
+
+            // ---- Rim light: Fresnel-style boost where the camera-space
+            // normal points perpendicular to the view direction. Uses
+            // G-buffer normal directly; view dir reconstructed from NDC.
+            if (rim_amount > 0.0 and normals.len > 0) {
+                const n = normals[idx];
+                // Camera-space view direction toward the surface; assume
+                // a unit-z forward camera, scaled to NDC.
+                const view_x = ndc_x * 2.0;
+                const view_y = ndc_y * 2.0;
+                const view_z: f32 = 1.0;
+                const v_len = @sqrt(view_x * view_x + view_y * view_y + view_z * view_z);
+                const vx = view_x / v_len;
+                const vy = view_y / v_len;
+                const vz = view_z / v_len;
+                const n_dot_v = @max(0.0, n.x * vx + n.y * vy + n.z * vz);
+                const fresnel = std.math.pow(f32, 1.0 - n_dot_v, 4.0);
+                const rim = fresnel * rim_amount * 255.0;
+                rf += rim * rim_r;
+                gf += rim * rim_g;
+                bf += rim * rim_b;
+            }
+
+            // ---- Edge darken: depth-gradient outline.
+            if (edge_amount > 0.0) {
+                if (depth) |dbuf| {
+                    const dc = dbuf[idx];
+                    var grad: f32 = 0.0;
+                    if (x > 0) {
+                        const dl = dbuf[idx - 1];
+                        if (std.math.isFinite(dl)) grad = @max(grad, @abs(dc - dl));
+                    }
+                    if (x + 1 < width_i) {
+                        const dr = dbuf[idx + 1];
+                        if (std.math.isFinite(dr)) grad = @max(grad, @abs(dc - dr));
+                    }
+                    if (y > 0) {
+                        const du = dbuf[idx - stride];
+                        if (std.math.isFinite(du)) grad = @max(grad, @abs(dc - du));
+                    }
+                    if (y + 1 < height_i) {
+                        const dd = dbuf[idx + stride];
+                        if (std.math.isFinite(dd)) grad = @max(grad, @abs(dc - dd));
+                    }
+                    if (grad > edge_threshold) {
+                        const edge_factor = 1.0 - edge_amount;
+                        rf *= edge_factor;
+                        gf *= edge_factor;
+                        bf *= edge_factor;
+                    }
+                }
+            }
+
+            // ---- Vignette: smoothstep darkening near corners.
+            if (vignette_amount > 0.0) {
+                const r2_norm: f32 = @min(@as(f32, 1.0), r2 * 2.0);
+                const vig: f32 = 1.0 - vignette_amount * r2_norm;
+                rf *= vig;
+                gf *= vig;
+                bf *= vig;
+            }
+
+            // ---- Film grain: integer hash → [-1, 1] noise ----
+            if (grain_amount > 0.0) {
+                const px: u32 = @bitCast(x);
+                const py: u32 = @bitCast(y);
+                var h: u32 = px *% 374761393 +% py *% 668265263 +% seed *% 2246822519;
+                h ^= h >> 13;
+                h *%= 1274126177;
+                h ^= h >> 16;
+                const grain_f: f32 = (@as(f32, @floatFromInt(h & 0xFFFF)) * (2.0 / 65535.0) - 1.0) * grain_amount * 255.0;
+                rf += grain_f;
+                gf += grain_f;
+                bf += grain_f;
+            }
+
+            const ro: f32 = std.math.clamp(rf, 0.0, 255.0);
+            const go: f32 = std.math.clamp(gf, 0.0, 255.0);
+            const bo: f32 = std.math.clamp(bf, 0.0, 255.0);
             color[idx] = 0xFF000000 |
                 (@as(u32, @intFromFloat(ro)) << 16) |
                 (@as(u32, @intFromFloat(go)) << 8) |

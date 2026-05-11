@@ -252,7 +252,14 @@ pub fn runPostProcessStage(
             renderer.scene_surface,
         );
     }
-    applyPostProcessingPasses(renderer, 
+    // Skip the post graph when the scene raster was cache-hit. Post
+    // passes are non-idempotent (read/write target.color in place),
+    // so running them on already-post-processed pixels compounds the
+    // effect and progressively saturates the buffer. The previous
+    // miss frame's post output is already in target.color — present
+    // will blit that directly.
+    if (renderer.direct_backend.lastTimings().scene_was_cached) return;
+    applyPostProcessingPasses(renderer,
         mesh,
         renderer.camera_position,
         basis_right,
