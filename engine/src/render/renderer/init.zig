@@ -309,6 +309,7 @@ pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allo
         .keys_pressed = .{},
         .frame_count = 0,
         .total_frames_rendered = 0,
+        .demo_light_time = 0.0,
         .last_time = current_time,
         .last_frame_time = current_time,
         .next_frame_time = current_time,

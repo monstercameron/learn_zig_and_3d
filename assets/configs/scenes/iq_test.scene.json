@@ -10,16 +10,25 @@
     },
     {
       "type": "runtime",
-      "runtimeName": "static"
+      "runtimeName": "iq_demo"
     },
     {
-      "_comment": "Bright overhead key light. The high distance + glow gives bloom/lens_flare a real seed pixel.",
+      "_comment": "Key light — bright overhead, slight upper-front offset so vertical box faces aren't fully self-shadowed by Lambert N·L. Also drives bloom + lens-flare via the glow.",
       "type": "light",
-      "position": [0.0, 3.9, 0.0],
-      "lightColor": [1.0, 0.98, 0.92],
-      "lightDistance": 6.0,
+      "position": [0.6, 3.9, -1.6],
+      "lightColor": [1.0, 0.97, 0.90],
+      "lightDistance": 7.5,
       "glowRadius": 56.0,
       "glowIntensity": 2.4
+    },
+    {
+      "_comment": "Fill light — cool from the opposite side to lift the shadowed faces (red wall, blue box back) into the visible range.",
+      "type": "light",
+      "position": [-1.8, 2.4, 1.0],
+      "lightColor": [0.55, 0.62, 0.92],
+      "lightDistance": 4.5,
+      "glowRadius": 0.0,
+      "glowIntensity": 0.0
     },
     {
       "_comment": "Cornell room walls — left wall red, right wall green, others white. Drives chromatic-aberration, saturation, and color-grade tests.",
@@ -64,21 +73,7 @@
       "textures": []
     },
     {
-      "_comment": "Suzanne (subdivided mesh) — provides curved/specular-ready surfaces and many crevices for SSAO. Saturated magenta so the grayscale-collapse detector fires hard if a pass desaturates incorrectly.",
-      "type": "model",
-      "modelType": "obj",
-      "modelPath": "assets/models/suzanne.obj",
-      "baseColor": [0.92, 0.18, 0.78],
-      "smoothNormals": true,
-      "lit": false,
-      "position": [0.0, 1.65, -1.30],
-      "rotationDeg": [0.0, 180.0, 0.0],
-      "scale": [0.55, 0.55, 0.55],
-      "physicsMotion": "static",
-      "textures": []
-    },
-    {
-      "_comment": "Small emissive sphere right under the light. Its visible-from-camera bright spot is the bloom + lens-flare seed.",
+      "_comment": "Small emissive sphere right under the light. Its visible-from-camera bright spot is the bloom + lens-flare seed. Placed BEFORE Suzanne so the iq_demo runtime spins Suzanne as the last renderable.",
       "type": "model",
       "modelType": "obj",
       "modelPath": "assets/models/light_sphere.obj",
@@ -88,6 +83,20 @@
       "position": [0.0, 3.55, 0.0],
       "rotationDeg": [0.0, 0.0, 0.0],
       "scale": [0.18, 0.18, 0.18],
+      "physicsMotion": "static",
+      "textures": []
+    },
+    {
+      "_comment": "Suzanne (subdivided mesh). LAST in the scene so the iq_demo runtime picks her as the rotation target. Saturated magenta makes grayscale-collapse detection sharp.",
+      "type": "model",
+      "modelType": "obj",
+      "modelPath": "assets/models/suzanne.obj",
+      "baseColor": [0.92, 0.18, 0.78],
+      "smoothNormals": true,
+      "lit": false,
+      "position": [0.0, 1.65, -1.30],
+      "rotationDeg": [0.0, 180.0, 0.0],
+      "scale": [0.55, 0.55, 0.55],
       "physicsMotion": "static",
       "textures": []
     }

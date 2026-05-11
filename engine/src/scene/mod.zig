@@ -111,6 +111,10 @@ const ExecutionState = struct {
     k_pressed: bool = false,
     k_was_down: bool = false,
     pause_dynamics: bool = false,
+    /// Renderable target for the .iq_demo runtime. Rotated each frame
+    /// around the Y axis to drive motion blur / TAA / cache testing.
+    iq_demo_entity: ?EntityId = null,
+    iq_demo_angle_deg: f32 = 0.0,
 
     fn deinit(self: *ExecutionState, allocator: std.mem.Allocator) void {
         self.reset(allocator);
@@ -126,6 +130,8 @@ const ExecutionState = struct {
         self.k_pressed = false;
         self.k_was_down = false;
         self.pause_dynamics = false;
+        self.iq_demo_entity = null;
+        self.iq_demo_angle_deg = 0.0;
         self.bindings.clearRetainingCapacity();
     }
 
@@ -151,13 +157,23 @@ const ExecutionState = struct {
         self.reset(allocator);
         self.mode = runtime_kind;
         if (runtime_kind == .static) return;
+        if (runtime_kind == .iq_demo) {
+            // No physics — just pick the spinner target from the
+            // renderable list. We rotate the LAST renderable so the
+            // primary "centre of attention" mesh (Suzanne in iq_test)
+            // ends up animating rather than the room walls.
+            if (renderables.len > 0) {
+                self.iq_demo_entity = renderables[renderables.len - 1].entity;
+            }
+            return;
+        }
 
         var physics_world = try physics_utils.PhysicsWorld.init(allocator);
         errdefer physics_world.deinit(allocator);
         const body_interface = physics_world.system.getBodyInterfaceMut();
 
         switch (runtime_kind) {
-            .static => unreachable,
+            .static, .iq_demo => unreachable,
             .gun_physics => {
                 try createGunArena(body_interface);
                 if (renderables.len == 0) return error.SceneHasNoAssets;
@@ -195,9 +211,31 @@ const ExecutionState = struct {
     }
 
     fn step(self: *ExecutionState, component_store: *ComponentStore, delta_seconds: f32, renderables_dirty: *bool) void {
+        // iq_demo runs WITHOUT a physics world — handle it before the
+        // physics-required orelse return below.
+        if (self.mode == .iq_demo) {
+            self.iq_demo_angle_deg += 45.0 * delta_seconds; // 45 deg/sec
+            if (self.iq_demo_angle_deg >= 360.0) self.iq_demo_angle_deg -= 360.0;
+            if (self.iq_demo_entity) |entity| {
+                const index: usize = @intCast(entity.index);
+                if (index < component_store.local_transforms.items.len) {
+                    if (component_store.local_transforms.items[index]) |*t| {
+                        t.rotation_deg = scene_math.Vec3.new(0.0, self.iq_demo_angle_deg, 0.0);
+                    }
+                }
+                if (index < component_store.world_transforms.items.len) {
+                    if (component_store.world_transforms.items[index]) |*t| {
+                        t.rotation_deg = scene_math.Vec3.new(0.0, self.iq_demo_angle_deg, 0.0);
+                    }
+                }
+                renderables_dirty.* = true;
+            }
+            return;
+        }
         const physics_world = self.physics_world orelse return;
         switch (self.mode) {
             .static => return,
+            .iq_demo => unreachable, // handled above
             .gun_physics => {
                 if (self.enter_pressed and !self.enter_was_down and self.bindings.items.len != 0 and !self.bindings.items[0].suspended_for_residency) {
                     const body_interface = physics_world.system.getBodyInterfaceMut();

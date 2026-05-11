@@ -48,6 +48,18 @@ pub fn execute(
         };
     } else null;
 
+    // Build a slice of all scene lights' camera-space directions so
+    // screen_shadows can cast a separate shadow ray-march per light.
+    var light_dirs_buf: [4]math.Vec3 = undefined;
+    var light_dirs_count: usize = 0;
+    const max_lights = @min(renderer.lights.items.len, light_dirs_buf.len);
+    while (light_dirs_count < max_lights) : (light_dirs_count += 1) {
+        light_dirs_buf[light_dirs_count] = math.Vec3.new(
+            renderer.light_soa.dir_cam_x[light_dirs_count],
+            renderer.light_soa.dir_cam_y[light_dirs_count],
+            renderer.light_soa.dir_cam_z[light_dirs_count],
+        );
+    }
     try renderer.direct_backend.renderSceneMesh(
         renderer.directFrameResources(),
         camera,
@@ -60,6 +72,7 @@ pub fn execute(
             .clear_color = 0xFF0B1220,
             .enable_shading = false,
             .deferred_lighting = deferred_cfg,
+            .scene_light_dirs_cam = light_dirs_buf[0..light_dirs_count],
         },
     );
 

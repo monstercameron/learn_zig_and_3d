@@ -49,6 +49,11 @@ pub const SceneMeshConfig = struct {
     /// this from the scene's actual primary light so the deferred shade
     /// matches the visible light source. (ROADMAP §H6.)
     deferred_lighting: ?shading_stage.DeferredConfig = null,
+    /// All scene lights' camera-space directions, in priority order.
+    /// screen_shadows uses every entry so each light casts a separate
+    /// shadow ray-march. Null falls back to a single shadow from
+    /// `deferred_lighting.light_dir_camera`.
+    scene_light_dirs_cam: ?[]const @import("../../core/math.zig").Vec3 = null,
 };
 
 pub const FrameTimings = struct {
@@ -720,6 +725,78 @@ pub const State = struct {
             self.timings.tonemap_ns = @max(std.time.nanoTimestamp() - tonemap_start, @as(i128, 0));
             self.timings.tonemapped_pixel_count = tonemap.mapped_pixels;
             self.timings.tonemap_exposure = exposure;
+
+            // Screen-space contact shadows. Cheap ray-march along the
+            // camera-space light direction; darkens pixels that have an
+            // occluder in front of them. Approximates real shadow-map
+            // shadowing for on-screen geometry. Off-screen occluders
+            // not caught — those need the full shadow_map pipeline
+            // (Wave 5).
+            if (app_config.POST_SHADOW_ENABLED) {
+                const passes_v2 = @import("../passes_v2/mod.zig");
+                const ss_v2 = @import("../passes_v2/screen_shadows.zig");
+                const shadow_before = if (iq_scan_runtime.isEnabled())
+                    iq_scan_runtime.snapshot(self.allocator, resources.target.color) catch null
+                else
+                    null;
+                const gbuf_view: passes_v2.GBufferView = .{
+                    .width = resources.target.width,
+                    .height = resources.target.height,
+                    .depth = resources.target.depth orelse &.{},
+                    .normal = @ptrCast(resources.aux.scene_normal),
+                    .base_color = resources.aux.scene_base_color,
+                    .material = resources.aux.scene_material,
+                };
+                const ss_inputs: passes_v2.Inputs = .{
+                    .width = resources.target.width,
+                    .height = resources.target.height,
+                    .in_color = resources.target.color,
+                    .out_color = resources.target.color,
+                    .gbuf = gbuf_view,
+                };
+                // Multi-light shadows: pass every scene light's
+                // camera-space direction so each casts its own shadow
+                // (averaged into the final shadow factor).
+                const zero_vec: passes_v2.Vec3 = .{ .x = 0.0, .y = 1.0, .z = 0.0 };
+                var ss_dirs: [ss_v2.MAX_LIGHTS]passes_v2.Vec3 = .{ zero_vec, zero_vec, zero_vec, zero_vec };
+                var ss_count: u32 = 0;
+                if (config.scene_light_dirs_cam) |dirs| {
+                    while (ss_count < dirs.len and ss_count < ss_v2.MAX_LIGHTS) : (ss_count += 1) {
+                        ss_dirs[ss_count] = .{
+                            .x = dirs[ss_count].x,
+                            .y = dirs[ss_count].y,
+                            .z = dirs[ss_count].z,
+                        };
+                    }
+                } else {
+                    ss_dirs[0] = .{
+                        .x = lighting_cfg.light_dir_camera.x,
+                        .y = lighting_cfg.light_dir_camera.y,
+                        .z = lighting_cfg.light_dir_camera.z,
+                    };
+                    ss_count = 1;
+                }
+                _ = ss_v2.execute(ss_inputs, .{
+                    .light_dirs = ss_dirs,
+                    .light_count = ss_count,
+                    .strength = @as(f32, @floatFromInt(app_config.POST_SHADOW_STRENGTH_PERCENT)) / 100.0,
+                    .steps = 16,
+                    .step_size = 0.25,
+                    .bias = 0.04,
+                    .fov_y_tan_half = lighting_cfg.fov_y_tan_half,
+                    .aspect = lighting_cfg.aspect,
+                });
+                if (shadow_before) |before| {
+                    iq_scan_runtime.reportPass(
+                        "screen_shadows",
+                        resources.target.width,
+                        resources.target.height,
+                        before,
+                        resources.target.color,
+                        resources.target.depth,
+                    );
+                }
+            }
 
             // Screen-space post: vignette + film grain applied in-place
             // to the LDR target.color buffer. We constrain the bounds to

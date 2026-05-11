@@ -86,6 +86,24 @@ pub fn render3DMeshWithPump(renderer: *Renderer, mesh: *const Mesh, pump: ?*cons
             light.direction = math.Vec3.normalize(light_pos);
         }
     }
+    // Demo: orbit light[1] horizontally around the scene each frame so
+    // screen_shadows can cast a moving second shadow alongside the
+    // static key light. Disabled in headless IQ-scan runs so scanner
+    // output stays deterministic.
+    if (renderer.lights.items.len >= 2 and !std.process.hasEnvVarConstant("ZIG_IQ_SCAN")) {
+        renderer.demo_light_time += simulation_delta_seconds;
+        // ~4 sec per orbit, slight upward bob so the shadow direction
+        // visibly swings rather than just spinning in place.
+        const t = renderer.demo_light_time * 1.6;
+        const radius: f32 = 2.0;
+        const height: f32 = 3.0 + 0.6 * @sin(t * 0.5);
+        const pos = math.Vec3.new(
+            @sin(t) * radius,
+            height,
+            @cos(t) * radius,
+        );
+        renderer.lights.items[1].direction = math.Vec3.normalize(pos);
+    }
     renderer_lights.syncLightSoA(renderer);
     const light_distance_0 = if (renderer.lights.items.len > 0) renderer.light_soa.distance[0] else 10.0;
     const light_dir_world = if (renderer.lights.items.len > 0)

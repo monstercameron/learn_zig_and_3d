@@ -311,7 +311,7 @@ inline fn shadeColorFixed(color: u32, intensity_fixed: i32) u32 {
 // just proves the data flow and the parallel decomposition.
 
 pub const DeferredConfig = struct {
-    ambient: f32 = 0.18,
+    ambient: f32 = 0.35,
     /// Direction TOWARDS the light from the surface (camera space).
     /// Lambert convention: n · l > 0 for surfaces facing the light.
     /// Default is a key light from upper-left-back of the camera.

@@ -388,7 +388,10 @@ fn applyPostProcessingPasses(
 ) void {
     const compiled_graph = frame_pipeline.compileCachedPostGraph(&renderer.cached_post_graph, .{
         .shadow_map_light_count = shadow_map_light_count,
-        .taa_history_valid = renderer.taa_scratch.valid,
+        // Force valid so the graph compile always includes TAA/MotionBlur.
+        // The v2 TAA pass handles the "history not yet populated"
+        // case internally (returns no-op on first frame).
+        .taa_history_valid = true,
     }) catch |err| {
         pipeline_logger.errorSub("graph", "failed to compile post graph: {s}", .{@errorName(err)});
         return;

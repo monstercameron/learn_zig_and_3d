@@ -1126,6 +1126,10 @@ pub const Renderer = struct {
     camera_fov_deg: f32,
     frame_count: u32,
     total_frames_rendered: u64,
+    /// Accumulated time (seconds) for the iq-test demo's orbiting
+    /// second light. Off by default; advances in the orchestrator when
+    /// ZIG_IQ_SCAN is unset.
+    demo_light_time: f32 = 0.0,
     last_time: i128,
     last_frame_time: i128,
     next_frame_time: i128,

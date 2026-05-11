@@ -72,6 +72,9 @@ pub const RuntimeKind = enum {
     static,
     gun_physics,
     scene_physics,
+    /// IQ demo runtime — spins the first renderable around Y so motion
+    /// blur, TAA, and physics-driven cache invalidation all exercise.
+    iq_demo,
 };
 
 pub const ModelType = enum {
@@ -192,6 +195,7 @@ pub fn buildSceneDescription(
             if (asset.runtimeName) |runtime_name| {
                 if (std.ascii.eqlIgnoreCase(runtime_name, "gun_physics")) runtime = .gun_physics;
                 if (std.ascii.eqlIgnoreCase(runtime_name, "scene_physics")) runtime = .scene_physics;
+                if (std.ascii.eqlIgnoreCase(runtime_name, "iq_demo")) runtime = .iq_demo;
             }
         } else if (std.ascii.eqlIgnoreCase(asset.type, "hdri")) {
             hdri_path = asset.path;

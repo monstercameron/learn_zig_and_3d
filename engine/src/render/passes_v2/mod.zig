@@ -121,6 +121,7 @@ pub const ssr = @import("ssr.zig");
 pub const ssgi = @import("ssgi.zig");
 pub const taa = @import("taa.zig");
 pub const skybox = @import("skybox.zig");
+pub const screen_shadows = @import("screen_shadows.zig");
 
 /// Compile-time table of every available v2 pass. Drivers iterate it
 /// to look up by name or list available passes via CLI.
@@ -138,4 +139,5 @@ pub const all = [_]Descriptor{
     ssgi.descriptor,
     taa.descriptor,
     skybox.descriptor,
+    screen_shadows.descriptor,
 };
