@@ -52,6 +52,7 @@ const platform_loop = @import("platform/loop.zig");
 const input = @import("platform_input");
 const input_actions = @import("input_actions");
 const log = @import("core/log.zig");
+const introspect = @import("runtime/introspect.zig");
 const scene_runtime = @import("scene_main");
 const mesh_loaders = @import("loaders/mesh.zig");
 const runtime_env = @import("runtime/env.zig");
@@ -488,6 +489,10 @@ pub fn main() !void {
     log.init(allocator);
     defer log.deinit();
     app_logger.infoSub("bootstrap", "log manager initialized", .{});
+    introspect.installDefaultJsonEmitter();
+    if (introspect.isEnabled()) {
+        app_logger.infoSub("bootstrap", "introspection enabled (ZIG_INTROSPECT=1)", .{});
+    }
     const isa_support = cpu_features.detect();
     app_logger.infoSub(
         "cpu",

@@ -8,6 +8,7 @@ const renderer_module = @import("../renderer.zig");
 const renderer_lights = @import("lights.zig");
 const renderer_hud = @import("hud.zig");
 const post_dispatch = @import("post_dispatch.zig");
+const introspect = @import("../../runtime/introspect.zig");
 const direct_backend = @import("../backends/direct_backend.zig");
 const direct_primitives = @import("../direct/primitives.zig");
 const frame_pipeline = @import("../frame/pipeline.zig");
@@ -216,6 +217,48 @@ pub fn render3DMeshWithPump(renderer: *Renderer, mesh: *const Mesh, pump: ?*cons
     );
     finalizeFrame(renderer, current_time);
     renderer.advanceFrameDeadline(current_time);
+
+    if (introspect.isEnabled()) {
+        var pass_buf: [renderer_module.max_render_passes]introspect.PassSample = undefined;
+        for (renderer.render_pass_timings[0..renderer.render_pass_count], 0..) |pt, idx| {
+            pass_buf[idx] = .{
+                .name = pt.name,
+                .last_ns = @as(i128, @intFromFloat(pt.frame_duration_ms * 1_000_000.0)),
+                .sampled_ms_per_frame = pt.sampled_ms_per_frame,
+            };
+        }
+        const snapshot = introspect.FrameSnapshot{
+            .frame_index = renderer.total_frames_rendered,
+            .timestamp_ns = current_time,
+            .frame_ns = @as(i128, @intFromFloat(delta_seconds * 1_000_000_000.0)),
+            .backbuffer_width = renderer.bitmap.width,
+            .backbuffer_height = renderer.bitmap.height,
+            .scene = .{
+                .triangle_count = mesh.triangles.len,
+                .meshlet_count = mesh.meshlets.len,
+                .vertex_count = mesh.vertices.len,
+                .light_count = renderer.lights.items.len,
+                .shadow_map_lights = renderer.light_work_stats.shadow_map_lights,
+                .touched_tiles = renderer.meshlet_telemetry.touched_tiles,
+                .active_tile_count = renderer.light_work_stats.active_tiles,
+                .triangles_rasterized = renderer.light_work_stats.triangles_rasterized,
+                .covered_pixels = renderer.light_work_stats.covered_pixels,
+            },
+            .pacing = .{
+                .mode = @tagName(renderer.currentPacingMode()),
+                .target_ms = @as(f32, @floatFromInt(renderer.effectiveFramePacingTargetNs())) / 1_000_000.0,
+                .last_frame_ms = delta_seconds * 1000.0,
+                .deadline_error_ms = @as(f32, @floatFromInt(renderer.frame_deadline_error_ns)) / 1_000_000.0,
+                .present_ms = 0.0,
+            },
+            .job_system = .{
+                .worker_count = if (renderer.job_system) |js| js.worker_count else 0,
+            },
+            .memory = .{},
+            .passes = pass_buf[0..renderer.render_pass_count],
+        };
+        introspect.emitFrame(&snapshot);
+    }
 
     renderer_logger.debugSub(
         "frame",
