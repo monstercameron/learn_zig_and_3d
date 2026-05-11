@@ -1,5 +1,146 @@
 # Changelog
 
+## 2026-05-11
+
+### Deferred Shading Pipeline (ROADMAP §H4-H9)
+
+- added explicit deferred lighting MVP in `engine/src/render/stages/shading_stage.zig`:
+  - `executeDeferred` reads the G-buffer (depth + base_color + normal + material)
+    and writes Phong/Lambert lighting to `scene_hdr`
+  - parallel row-strip dispatch via the job system
+  - scene-driven light direction: `scene_tiled_backend.zig` now reads
+    `renderer.light_soa.dir_cam_*` and `lights.items[0].color` and passes them in
+    `SceneMeshConfig.deferred_lighting` so the rendered shading matches the
+    visible scene light
+- HDR f32x4 scene buffer (`scene_hdr: []math.Vec4`) allocated in `init.zig`,
+  freed in `renderer.zig`, plumbed through `frame_resources.AuxiliaryBuffers`
+- Reinhard tone-map stage with auto-exposure feedback loop (low-pass filtered
+  luminance probe → target middle-grey 0.5 → exposure scalar fed back into next
+  frame's tonemap)
+- HDR luminance probe (`hdr_post_stage.executeLuminanceProbe`) surfaces
+  `hdr_avg_lum`, `hdr_max_lum` per frame for telemetry + auto-exposure
+- HDR bloom (`hdr_bloom_pass.zig`): bright-pass at 1/4 resolution, 9-tap
+  separable Gaussian, bilinear upsample-add. Behind `HDR_BLOOM_ENABLED` gate.
+- Cook-Torrance / GGX PBR lighting kernel: D = GGX, G = Smith-Schlick,
+  F = Schlick. Per-pixel view direction reconstructed from screen-space NDC +
+  camera FOV. Roughness/metallic/AO unpacked from `scene_material` byte slots.
+- Hi-Z pyramid build (`hiz_stage.zig`): per-tile MAX depth scan, parallel rows,
+  + `isOccluded` helper for future cull integration. Telemetered as
+  `hiz_build_ns`, `hiz_tile_count`.
+- N-core scaling test infrastructure: `ZIG_WORKER_COUNT` env override in
+  `job_system.zig`. Verified ~92% efficiency at 2 workers, ~84% at 4; raster
+  regresses past N≥8 (memory contention).
+
+### Performance: Full-Frame Cache & Parallel Stages
+
+- frame-to-frame cache in `direct_backend.renderSceneMesh`: when camera and
+  mesh haven't changed, skip submission/visibility/expansion/projection/
+  binning/raster/lighting/bloom/tonemap entirely and re-present the existing
+  backbuffer. Render cost on cache-hit frames drops from ~7 ms to ~0.
+- `cached_scene_mesh`, `cached_scene_camera`, `cached_scene_binning`,
+  `cached_scene_primitive_count` fields on `direct_backend.State`
+- `ZIG_DISABLE_RENDER_CACHE=1` env var for benchmarking cold-frame stage costs
+- parallel `compileToDrawListParallel` with per-worker scratch DrawLists
+  (`compile_chunk_draw_lists` in State) — no merge phase
+- parallel `appendVisibleMeshletsToBatchParallel` rewritten to direct-write
+  into pre-reserved batch slots — eliminated the 300 MB per-frame serial
+  memcpy merge
+- parallel `cullVisibleMeshletsParallel` — splits 6909-meshlet frustum cull
+  across N workers
+- parallel `screen_binning_stage.executeParallel` — two-pass histogram +
+  scatter (per-worker counts → reduce + prefix sum → per-worker offsets →
+  parallel scatter). Plus parallel per-tile sort dispatch via
+  `sortTileRefsParallel`
+- 6-plane sphere frustum cull in `meshletVisibleFast` (was near-plane only);
+  hoisted basis + trig scalars out of the per-meshlet loop
+- backface culling reordered to run before projection (saves projecting ~50%
+  of triangles in closed meshes)
+- skip `applyBatchLighting` (Gouraud bake) when `DEFERRED_SHADING_ENABLED` —
+  was doing 1.5M-triangle work that the deferred path never reads
+- skip per-pixel `target.color` and `gbuf_material` writes in the deferred
+  rasterizer (tonemap rewrites color; material is uniform-init at allocation)
+
+### SIMD: Portable @Vector + AVX-512 / SVE Scaling
+
+- `cpu_features.SIMD_F32_LANES` — comptime constant that picks lane width
+  from the build target's enabled feature set: AVX-512 → 16, AVX/AVX2/SVE
+  → 8, SSE2/NEON → 4. Same `@Vector(SIMD_F32_LANES, f32)` source compiles
+  to the widest available width on each ISA without runtime dispatch.
+- `cpu_features.SIMD_BACKEND_NAME` logged at startup as
+  `compile-time SIMD backend=... f32_lanes=...`
+- explicit SIMD added to hot kernels:
+  - `tonemapRows` — `@Vector(SIMD_F32_LANES, f32)` Reinhard + pack
+  - `probeRows` — `@Vector(SIMD_F32_LANES, f32)` + `@reduce(.Add)`/`@reduce(.Max)`
+  - `lightRowsDeferred` (PBR) — branch-free `@select` mask, gather/scatter
+    around Vec3/Vec4 AoS layout
+  - `hiz_stage.buildRows` — explicit `vmaxps` reduce
+  - `hdr_bloom_pass.brightPassRows`, `blurHorizontalRows`, `blurVerticalRows`,
+    `upsampleAddRows` — all explicit `@Vector` with scalar tails
+  - `Projector.projectPointsMasked` (new) — non-bailing SIMD projection with
+    per-vertex valid mask via `@select`
+  - `compileTrianglesOnlyToDrawListShifted` — batches `SIMD_F32_LANES`
+    triangles per iteration through `projectPointsMasked`
+  - `math.Mat4.mulVec4` — 4-wide `@Vector(4, f32)` FMA per row
+  - `worldTriangleFrontFacing` — `@Vector(4, f32)` cross + dot
+  - `drawSolidTriangleWithDepths` — 4-lane `@Vector(4, i64)` edge tests +
+    `@Vector(4, f32)` depth tests with per-lane masked write
+- replaced `std.math.pow(x, 5.0)` in Fresnel-Schlick with inline `x⁵` — was
+  a function call blocking LLVM auto-vectorization
+
+### Frame Rate Cap Removal
+
+- `WINDOW_VSYNC` default flipped from `true` to `false`
+- `TARGET_FPS` default flipped from `120` to `0` (uncapped)
+- `default.settings.json` `fpsLimit: 120 → 0`, `vsync: true → false`
+- `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING` set on swap-chain creation in
+  `present_d3d11.zig`
+- `DXGI_PRESENT_ALLOW_TEARING` flag passed to `IDXGISwapChain::Present()`
+  when sync_interval is 0
+- Together these two DXGI flags bypass the compositor vsync that was capping
+  windowed-mode frame rate at the monitor refresh (240 Hz on the test
+  machine). Cornell now hits ~660 FPS sustained, ~1000 FPS peak in
+  ReleaseFast.
+
+### Test / Debug Infrastructure
+
+- `runtime/screenshot.zig` — BMP framebuffer dump gated on
+  `ZIG_SCREENSHOT_PATH` env var. Fires once at frame N (default 60, override
+  via `ZIG_SCREENSHOT_FRAME`). Used to verify visual correctness after each
+  optimization pass.
+- defensive fallback in `direct/mesh.zig` `resolveTriangleNormals`: when an
+  asset (e.g. some glTF inputs) produces fewer `vertex_normals` than the
+  highest vertex index, fall back to the per-face normal so rendering
+  proceeds. The underlying glTF mesh-build bug is tracked separately.
+- non-fatal fix in `init.zig`: dropped `alignedAlloc` on `hiz_pyramid` — the
+  pointer was being freed with default alignment, tripping the GPA's
+  alignment-mismatch panic on shutdown.
+- `direct_backend.SceneMeshConfig.deferred_lighting` — new optional field so
+  the scene backend can hand in a per-scene `DeferredConfig` (light dir +
+  colour from `lights.items[0]`, aspect + FOV from camera).
+- introspection JSON schema extended with `mode`, `gbuf_bytes`, all stage
+  timings (lighting/hdr_post/bloom/tonemap/hiz_build), `hdr_avg_lum`,
+  `hdr_max_lum`, `exposure`, `bloom_pixels`, `hiz_tiles`. Auto-emitter
+  writes one line per frame to the path in `ZIG_INTROSPECT_OUTPUT`.
+
+### Telemetry Snapshot
+
+Cornell, ReleaseFast, AVX2, cache off (worst case):
+- frame mean: 4.25 ms = **235 FPS**
+- `raster_ns`: 0.49 ms, `lighting_ns`: 0.14 ms, `bloom_ns`: 0.92 ms,
+  `tonemap_ns`: 0.06 ms
+
+Cornell, windowed, cache on (typical):
+- frame mean: 1.52 ms = **~660 FPS sustained, ~1000 FPS peak**
+- `cpu` 0.05 ms (renderer effectively free), `present` 0.65 ms
+
+Acura (1.56M tris), windowed, cache on:
+- frame ~24 ms = ~41 FPS (runtime-bound, not render-bound)
+- render `cpu` 0.03 ms
+
+Acura cold-frame breakdown (cache off):
+- `build_batch` 22 ms, `compile_draw_list` 18 ms, `binning` 3 ms,
+  `raster` 4-5 ms, `lighting` 0.6 ms, `bloom` 0.9 ms
+
 ## 2026-04-02
 
 ### Cornell Scene Cleanup And Correct Gouraud Scene Path

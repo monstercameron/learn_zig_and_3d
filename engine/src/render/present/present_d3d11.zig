@@ -12,6 +12,12 @@ const DXGI_USAGE_RENDER_TARGET_OUTPUT: UINT = 0x20;
 const DXGI_SWAP_EFFECT_FLIP_DISCARD: UINT = 4;
 const D3D_DRIVER_TYPE_HARDWARE: UINT = 1;
 const D3D11_SDK_VERSION: UINT = 7;
+// Tear-allowed flags: required for >monitor-refresh-rate presentation
+// in windowed mode. Without these, the DXGI compositor blocks Present
+// at the monitor's refresh interval (e.g. 240 Hz on a 240 Hz monitor)
+// even with sync_interval=0.
+const DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING: UINT = 2048;
+const DXGI_PRESENT_ALLOW_TEARING: UINT = 0x200;
 
 const DXGI_RATIONAL = extern struct {
     Numerator: UINT,
@@ -198,7 +204,10 @@ pub const Backend = struct {
             .OutputWindow = hwnd,
             .Windowed = windows.TRUE,
             .SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD,
-            .Flags = 0,
+            // ALLOW_TEARING is required for windowed unlocked frame
+            // rates on high-refresh-rate monitors. Without it DXGI's
+            // compositor still vsyncs to the monitor refresh.
+            .Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING,
         };
 
         const hr = D3D11CreateDeviceAndSwapChain(
@@ -297,7 +306,13 @@ pub const Backend = struct {
             );
         }
         const sc = self.swap_chain orelse return error.D3D11PresentSwapChainMissing;
-        const hr = sc.lpVtbl.Present(sc, if (vsync) 1 else 0, 0);
+        // When vsync is off, pass DXGI_PRESENT_ALLOW_TEARING to skip
+        // the compositor wait. Required alongside the ALLOW_TEARING
+        // swap-chain flag set at creation. Without this the GPU still
+        // gates Present on monitor refresh (e.g. 240 Hz).
+        const present_flags: UINT = if (vsync) 0 else DXGI_PRESENT_ALLOW_TEARING;
+        const sync_interval: UINT = if (vsync) 1 else 0;
+        const hr = sc.lpVtbl.Present(sc, sync_interval, present_flags);
         if (hr < 0) return error.D3D11PresentFailed;
     }
 

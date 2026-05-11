@@ -4,11 +4,11 @@
         "width": 1280,
         "height": 720,
         "fullscreen": false,
-        "vsync": true
+        "vsync": false
     },
     "rendering": {
         "renderResolutionScalePercent": 100,
-        "fpsLimit": 120,
+        "fpsLimit": 0,
         "textureFilteringBilinear": true,
         "lightCountMin": 1,
         "lightCountMax": 16
