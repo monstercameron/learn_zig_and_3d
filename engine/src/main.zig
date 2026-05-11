@@ -104,6 +104,12 @@ const SceneRenderInstance = struct {
     local_vertices: []math.Vec3,
     local_normals: []math.Vec3,
     local_vertex_normals: []math.Vec3,
+    /// Signature (XOR of float bits) of the most recently applied
+    /// world transform. Used in `syncSceneMeshFromRuntime` to detect
+    /// when a physics body actually moved versus a static no-op pass,
+    /// so the mesh version counter only ticks on real changes.
+    last_transform_sig: u64 = 0,
+    has_transform_sig: bool = false,
 };
 
 const AppSession = struct {
@@ -1198,12 +1204,39 @@ fn syncSceneMeshForFrame(renderer: *Renderer, scene_resources: *SceneMeshResourc
 }
 
 fn syncSceneMeshFromRuntime(renderer: ?*Renderer, scene_resources: *SceneMeshResources, runtime: *const scene_runtime.SceneRuntime) void {
+    var any_changed = false;
     for (scene_resources.render_instances, 0..) |*instance, instance_index| {
         const transform = runtime.worldTransform(instance.entity) orelse continue;
         if (instance.vertex_count == 0) continue;
         const position = toRenderVec3(transform.position);
         const rotation = toRenderVec3(transform.rotation_deg);
         const scale = toRenderVec3(transform.scale);
+        // Cheap signature so we can detect actual transform deltas
+        // and only bump the mesh.version (which invalidates the
+        // deferred-backend frame cache) when a body really moved.
+        const px: u64 = @as(u32, @bitCast(position.x));
+        const py: u64 = @as(u32, @bitCast(position.y));
+        const pz: u64 = @as(u32, @bitCast(position.z));
+        const rx: u64 = @as(u32, @bitCast(rotation.x));
+        const ry: u64 = @as(u32, @bitCast(rotation.y));
+        const rz: u64 = @as(u32, @bitCast(rotation.z));
+        const sx: u64 = @as(u32, @bitCast(scale.x));
+        const sy: u64 = @as(u32, @bitCast(scale.y));
+        const sz: u64 = @as(u32, @bitCast(scale.z));
+        const sig: u64 =
+            (px ^ rotateLeft(py, 7) ^ rotateLeft(pz, 13)) ^
+            rotateLeft(rx ^ rotateLeft(ry, 17) ^ rotateLeft(rz, 23), 32) ^
+            (sx ^ rotateLeft(sy, 41) ^ rotateLeft(sz, 47));
+        const transform_changed = !instance.has_transform_sig or instance.last_transform_sig != sig;
+        if (transform_changed) {
+            instance.last_transform_sig = sig;
+            instance.has_transform_sig = true;
+            any_changed = true;
+        } else {
+            // Transform unchanged — vertices already correct, skip the
+            // per-instance rebuild work entirely.
+            continue;
+        }
         var bounds_min = math.Vec3.new(0.0, 0.0, 0.0);
         var bounds_max = math.Vec3.new(0.0, 0.0, 0.0);
         var initialized = false;
@@ -1236,6 +1269,15 @@ fn syncSceneMeshFromRuntime(renderer: ?*Renderer, scene_resources: *SceneMeshRes
             }
         }
     }
+    // Tick the mesh version so the deferred backend's frame cache
+    // notices the vertices were re-written. Static scenes never enter
+    // here (transform sigs match every frame), so cornell etc keep
+    // their zero-cost cache hits.
+    if (any_changed) scene_resources.mesh.version +%= 1;
+}
+
+inline fn rotateLeft(value: u64, comptime shift: u6) u64 {
+    return std.math.rotl(u64, value, shift);
 }
 
 fn assignSceneRenderEntities(scene_resources: *SceneMeshResources, runtime: *const scene_runtime.SceneRuntime) void {

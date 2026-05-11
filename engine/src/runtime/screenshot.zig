@@ -1,15 +1,14 @@
 //! Frame screenshot capture — dumps the presented framebuffer as a
 //! 24-bit BMP for visual verification.
 //!
-//! Env-controlled. Set `ZIG_SCREENSHOT_PATH=path.bmp` to enable; the
-//! renderer will write the framebuffer after frame `ZIG_SCREENSHOT_FRAME`
-//! (default 60, so auto-exposure has time to settle) and then disable
-//! itself so the file is captured exactly once.
-//!
-//! BMP layout chosen specifically because it has no compression / zlib
-//! dependency — just two headers and raw BGR bytes. Bottom-up scan order
-//! is the BMP default (positive height); flip rows here so the saved
-//! image isn't mirrored vertically.
+//! Env-controlled. Set `ZIG_SCREENSHOT_PATH=path.bmp` to enable.
+//! Trigger options:
+//!   - `ZIG_SCREENSHOT_TIME_S=5.0`  — fire after N seconds elapsed
+//!     (preferred; works regardless of frame rate)
+//!   - `ZIG_SCREENSHOT_FRAME=60`    — fire after N monotonic frames
+//!     (legacy; uses renderer.total_frames_rendered)
+//! The first satisfied trigger captures the frame and disables further
+//! writes.
 
 const std = @import("std");
 
@@ -18,6 +17,8 @@ var enabled_cached: bool = false;
 var path_buf: [260]u8 = undefined;
 var path_len: usize = 0;
 var trigger_frame: u64 = 60;
+var trigger_time_s: f64 = -1.0;
+var start_time_ns: ?i128 = null;
 var captured: bool = false;
 
 pub fn isEnabled() bool {
@@ -38,12 +39,23 @@ pub fn isEnabled() bool {
         defer std.heap.page_allocator.free(frame_str);
         trigger_frame = std.fmt.parseUnsigned(u64, frame_str, 10) catch 60;
     } else |_| {}
+    if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZIG_SCREENSHOT_TIME_S")) |time_str| {
+        defer std.heap.page_allocator.free(time_str);
+        trigger_time_s = std.fmt.parseFloat(f64, time_str) catch -1.0;
+    } else |_| {}
     return enabled_cached;
 }
 
 pub fn shouldCapture(frame_index: u64) bool {
     if (captured) return false;
     if (!isEnabled()) return false;
+    const now = std.time.nanoTimestamp();
+    if (start_time_ns == null) start_time_ns = now;
+    if (trigger_time_s > 0.0) {
+        const elapsed_ns = now - start_time_ns.?;
+        const elapsed_s: f64 = @as(f64, @floatFromInt(elapsed_ns)) / 1e9;
+        return elapsed_s >= trigger_time_s;
+    }
     return frame_index >= trigger_frame;
 }
 

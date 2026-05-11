@@ -298,7 +298,7 @@ pub fn render3DMeshWithPump(renderer: *Renderer, mesh: *const Mesh, pump: ?*cons
         introspect.emitFrame(&snapshot);
     }
 
-    if (screenshot.shouldCapture(renderer.frame_count)) {
+    if (screenshot.shouldCapture(renderer.total_frames_rendered)) {
         screenshot.capture(renderer.bitmap.pixels, renderer.bitmap.width, renderer.bitmap.height);
     }
 

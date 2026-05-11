@@ -59,9 +59,9 @@ pub var TEXTURE_FILTERING_BILINEAR: bool = true;
 /// Enables a color grading pass on the final image.
 pub var POST_COLOR_CORRECTION_ENABLED: bool = true;
 /// Enables the bloom effect for overly bright pixels simulating glowing lights.
-pub var POST_BLOOM_ENABLED: bool = false;
+pub var POST_BLOOM_ENABLED: bool = true;
 /// Enables depth-aware atmospheric fog to simulate distance.
-pub var POST_DEPTH_FOG_ENABLED: bool = false;
+pub var POST_DEPTH_FOG_ENABLED: bool = true;
 /// Enables HDR skybox rendering
 pub var POST_SKYBOX_ENABLED: bool = true;
 /// Enables the primary generic shadow mapping pass.
@@ -124,7 +124,7 @@ pub var POST_SSR_MAX_DISTANCE: f32 = 100.0;
 pub var POST_SSR_THICKNESS: f32 = 0.5;
 pub var POST_SSR_INTENSITY: f32 = 0.8;
 
-pub var POST_SSAO_ENABLED: bool = false;
+pub var POST_SSAO_ENABLED: bool = true;
 /// SSAO rendering resolution divisor (higher = lower res & faster).
 pub var POST_SSAO_DOWNSAMPLE: i32 = 4;
 /// The sampling spread radius in screen space for SSAO.
@@ -168,23 +168,23 @@ pub var POST_DOF_FOCAL_RANGE: f32 = 2.0;
 pub var POST_DOF_BLUR_RADIUS: i32 = 1;
 
 /// Enables Motion Blur based on pixel velocity from previous frames.
-pub var POST_MOTION_BLUR_ENABLED: bool = false;
+pub var POST_MOTION_BLUR_ENABLED: bool = true;
 /// The number of samples gathered along the velocity vector for motion blur.
 pub var POST_MOTION_BLUR_SAMPLES: i32 = 6;
 /// The intensity multiplier for motion blur trail length. (0.5 simulates a cinematic 180-degree shutter)
 pub var POST_MOTION_BLUR_INTENSITY: f32 = 0.5;
 
 // --- Cinematic Effects ---
-pub var POST_LENS_FLARE_ENABLED: bool = false;
+pub var POST_LENS_FLARE_ENABLED: bool = true;
 pub var POST_LENS_FLARE_THRESHOLD: i32 = 200;
 pub var POST_LENS_FLARE_INTENSITY_PERCENT: i32 = 40;
 
-pub var POST_CHROMATIC_ABERRATION_ENABLED: bool = false;
-pub var POST_CHROMATIC_ABERRATION_STRENGTH: f32 = 1.0;
+pub var POST_CHROMATIC_ABERRATION_ENABLED: bool = true;
+pub var POST_CHROMATIC_ABERRATION_STRENGTH: f32 = 0.0;
 
-pub var POST_FILM_GRAIN_VIGNETTE_ENABLED: bool = false;
-pub var POST_FILM_GRAIN_STRENGTH: f32 = 0.10;
-pub var POST_VIGNETTE_STRENGTH: f32 = 0.10;
+pub var POST_FILM_GRAIN_VIGNETTE_ENABLED: bool = true;
+pub var POST_FILM_GRAIN_STRENGTH: f32 = 0.04;
+pub var POST_VIGNETTE_STRENGTH: f32 = 0.30;
 
 pub var POST_GOD_RAYS_ENABLED: bool = false;
 pub var POST_GOD_RAYS_SAMPLES: i32 = 16;

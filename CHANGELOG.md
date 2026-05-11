@@ -2,6 +2,26 @@
 
 ## 2026-05-11
 
+### Image-Quality Post-Stage
+
+- new `screen_post_stage.zig` runs vignette + film-grain in a single
+  scalar pass over the LDR `target.color` buffer
+  - vignette: smoothstep darkening with r² normalised over the screen
+    corners; controlled by `POST_VIGNETTE_STRENGTH` (default 0.30)
+  - film grain: integer-hashed per-pixel noise that animates per frame
+    via a `seed: u32` parameter; controlled by `POST_FILM_GRAIN_STRENGTH`
+    (default 0.04)
+  - row-parallel via the job system; ~0.05 ms at 1280×720 on AVX2
+- wired into `direct_backend.renderSceneMesh` immediately after the
+  Reinhard tonemap (within the deferred branch)
+- post bounds intentionally clamped to the lighting dirty rect rather
+  than the full screen — the pass is destructive/non-idempotent, and
+  running it on already-modified pixels (cache-hit frames keep the
+  previous output) would compound the effect across frames
+- chromatic aberration is reserved in the `Config` but not currently
+  applied — it needs a scratch source buffer because the radial
+  gather would read from already-modified pixels in-place
+
 ### Deferred Shading Pipeline (ROADMAP §H4-H9)
 
 - added explicit deferred lighting MVP in `engine/src/render/stages/shading_stage.zig`:

@@ -166,6 +166,12 @@ pub const Mesh = struct {
     meshlet_primitives: []MeshletPrimitive,
     /// The allocator used to manage the memory for the mesh data.
     allocator: std.mem.Allocator,
+    /// Monotonic version counter. Bumped by `syncSceneMeshFromRuntime`
+    /// whenever any instance's world transform actually changes — used
+    /// by the deferred-backend frame cache to detect that vertices were
+    /// re-written by physics so it can invalidate and re-render.
+    /// Static scenes never bump this; static cache hits stay valid.
+    version: u64 = 0,
 
     /// init initializes Mesh state and returns the configured value.
     pub fn init(allocator: std.mem.Allocator) !Mesh {

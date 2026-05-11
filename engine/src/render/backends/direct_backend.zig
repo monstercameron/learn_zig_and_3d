@@ -21,6 +21,7 @@ const shading_stage = @import("../stages/shading_stage.zig");
 const hdr_post_stage = @import("../stages/hdr_post_stage.zig");
 const hdr_bloom_pass = @import("../passes/hdr_bloom_pass.zig");
 const hiz_stage = @import("../stages/hiz_stage.zig");
+const screen_post_stage = @import("../stages/screen_post_stage.zig");
 const composition_stage = @import("../stages/composition_stage.zig");
 const post_process_stage = @import("../stages/post_process_stage.zig");
 const visible_scene = @import("../scene/visible.zig");
@@ -113,6 +114,10 @@ pub const State = struct {
     cached_scene_camera: ?direct_batch.Camera = null,
     cached_scene_binning: ?screen_binning_stage.Result = null,
     cached_scene_primitive_count: usize = 0,
+    /// Last-seen mesh.version. When the mesh was rewritten by physics
+    /// (or any other vertex animation), version is bumped upstream
+    /// and we cache-miss so the new geometry actually renders.
+    cached_scene_mesh_version: u64 = 0,
     present_dirty_rect: ?screen_binning_stage.DirtyRect = null,
     previous_fast_path_bounds: ?direct_primitives.Rect2i = null,
     /// Smoothed average HDR luminance from the previous frame's probe.
@@ -460,6 +465,7 @@ pub const State = struct {
         const cache_hit = !cache_disabled and
             self.cached_scene_mesh != null and
             self.cached_scene_mesh.? == mesh and
+            self.cached_scene_mesh_version == mesh.version and
             self.cached_scene_camera != null and
             sameCamera(self.cached_scene_camera.?, camera) and
             self.draw_list.items().len > 0;
@@ -496,6 +502,7 @@ pub const State = struct {
             self.timings.compile_draw_list_ns = @max(std.time.nanoTimestamp() - compile_start, @as(i128, 0));
 
             self.cached_scene_mesh = mesh;
+            self.cached_scene_mesh_version = mesh.version;
             self.cached_scene_camera = camera;
             self.cached_scene_primitive_count = expansion.primitive_count;
         } else {
@@ -708,12 +715,38 @@ pub const State = struct {
             self.timings.tonemapped_pixel_count = tonemap.mapped_pixels;
             self.timings.tonemap_exposure = exposure;
 
-            self.present_dirty_rect = if (lighting.bounds) |rect| .{
+            // Screen-space post: vignette + film grain applied in-place
+            // to the LDR target.color buffer. We constrain the bounds to
+            // the lighting dirty rect (the area touched by raster +
+            // tonemap this frame) so cached pixels outside the gun area
+            // don't get re-modified each miss frame (the post pass is
+            // not idempotent — running it twice doubles the grain and
+            // squares the vignette).
+            const post_full_rect: ?direct_primitives.Rect2i = if (lighting.bounds) |rect| .{
                 .min_x = rect.min_x,
                 .min_y = rect.min_y,
                 .max_x = rect.max_x,
                 .max_y = rect.max_y,
             } else null;
+            // Always-on inline IQ stage. Strengths come straight from
+            // the config values; gating via the legacy [passes] toggles
+            // is bypassed deliberately so we don't double-disable this
+            // alongside the unrelated legacy CA/vignette path.
+            const ca_strength: f32 = app_config.POST_CHROMATIC_ABERRATION_STRENGTH;
+            const vig_strength: f32 = app_config.POST_VIGNETTE_STRENGTH;
+            const grain_strength: f32 = app_config.POST_FILM_GRAIN_STRENGTH;
+            _ = screen_post_stage.execute(resources, post_full_rect, .{
+                .chromatic_aberration = ca_strength,
+                .vignette = vig_strength,
+                .film_grain = grain_strength,
+                .seed = @as(u32, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())))),
+            }, job_sys);
+
+            // Present rect stays bound to the dirty rect we actually
+            // wrote to this frame — preserving the cache invariant that
+            // pixels outside present_dirty_rect equal last frame's
+            // pixels exactly.
+            self.present_dirty_rect = binning.dirty_rect;
         } else {
             const shading_start = std.time.nanoTimestamp();
             const shading = shading_stage.execute(resources, if (binning.dirty_rect) |rect| .{
