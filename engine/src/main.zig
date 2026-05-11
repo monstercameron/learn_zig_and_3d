@@ -53,6 +53,7 @@ const input = @import("platform_input");
 const input_actions = @import("input_actions");
 const log = @import("core/log.zig");
 const introspect = @import("runtime/introspect.zig");
+const tracking_allocator = @import("runtime/tracking_allocator.zig");
 const scene_runtime = @import("scene_main");
 const mesh_loaders = @import("loaders/mesh.zig");
 const runtime_env = @import("runtime/env.zig");
@@ -471,7 +472,29 @@ pub fn main() !void {
     // `defer` is like a `finally` block for a specific line. This guarantees
     // that `gpa.deinit()` is called at the end of the `main` function, cleaning up the allocator.
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const base_allocator = gpa.allocator();
+    var tracker = tracking_allocator.TrackingAllocator.init(base_allocator);
+    const track_mem = std.process.hasEnvVarConstant("ZIG_INTROSPECT_MEM");
+    const allocator = if (track_mem) tracker.allocator() else base_allocator;
+    if (track_mem) {
+        const Provider = struct {
+            var tracker_ref: ?*tracking_allocator.TrackingAllocator = null;
+            fn sample() introspect.MemorySnapshot {
+                if (tracker_ref) |t| {
+                    const stats = t.snapshot();
+                    return .{
+                        .alloc_count = stats.alloc_count,
+                        .free_count = stats.free_count,
+                        .bytes_in_use = stats.bytes_in_use,
+                        .peak_bytes = stats.peak_bytes,
+                    };
+                }
+                return .{};
+            }
+        };
+        Provider.tracker_ref = &tracker;
+        introspect.setMemStatsProvider(Provider.sample);
+    }
     const requested_renderer_ttl_ns = runtime_env.loadRendererTtlNs(allocator);
     const renderer_ttl_frames = runtime_env.loadRendererTtlFrames(allocator);
     const profile_frame_target = runtime_env.loadProfileFrameTarget(allocator);

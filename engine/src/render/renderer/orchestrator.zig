@@ -254,7 +254,7 @@ pub fn render3DMeshWithPump(renderer: *Renderer, mesh: *const Mesh, pump: ?*cons
             .job_system = .{
                 .worker_count = if (renderer.job_system) |js| js.worker_count else 0,
             },
-            .memory = .{},
+            .memory = introspect.sampleMemStats(),
             .passes = pass_buf[0..renderer.render_pass_count],
         };
         introspect.emitFrame(&snapshot);

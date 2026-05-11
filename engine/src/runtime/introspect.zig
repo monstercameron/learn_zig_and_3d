@@ -81,6 +81,20 @@ pub const FrameSnapshot = struct {
 
 pub const FrameHook = *const fn (snapshot: *const FrameSnapshot) void;
 
+/// Memory stats provider. Engine sets this on bootstrap if a tracking
+/// allocator is wired in; otherwise the mem snapshot fields stay zero.
+pub const MemStatsProvider = *const fn () MemorySnapshot;
+var mem_stats_provider: ?MemStatsProvider = null;
+
+pub fn setMemStatsProvider(provider: MemStatsProvider) void {
+    mem_stats_provider = provider;
+}
+
+pub fn sampleMemStats() MemorySnapshot {
+    if (mem_stats_provider) |p| return p();
+    return .{};
+}
+
 const max_hooks: usize = 8;
 var hook_buffer: [max_hooks]FrameHook = undefined;
 var hook_count: usize = 0;
@@ -125,12 +139,34 @@ pub fn emitFrame(snapshot: *const FrameSnapshot) void {
     }
 }
 
+var output_file: ?std.fs.File = null;
+var output_file_attempted: bool = false;
+
+fn openOutputFileOnce(path: []const u8) ?std.fs.File {
+    if (output_file_attempted) return output_file;
+    output_file_attempted = true;
+    // Truncate on first write so each run produces a clean log.
+    const f = std.fs.cwd().createFile(path, .{ .truncate = true }) catch return null;
+    output_file = f;
+    return output_file;
+}
+
 /// Default hook: emit the snapshot as a single JSON line to stderr (or
 /// the file path from ZIG_INTROSPECT_OUTPUT). Registered when
 /// `installDefaultJsonEmitter()` is called by the runtime bootstrap.
 pub fn jsonLineEmitter(snapshot: *const FrameSnapshot) void {
     if (output_path_len > 0) {
-        writeToFile(output_path_buf[0..output_path_len], snapshot) catch {};
+        const file = openOutputFileOnce(output_path_buf[0..output_path_len]) orelse return;
+        // Marshal JSON into a fixed buffer first, then write the whole
+        // line in one syscall so we avoid Zig 0.15 buffered-writer quirks
+        // around the file position not advancing across emitter calls.
+        var line_buf: [4096]u8 = undefined;
+        var fixed = std.io.Writer.fixed(&line_buf);
+        writeFrameJson(snapshot, &fixed) catch return;
+        fixed.print("\n", .{}) catch return;
+        const written = fixed.buffered();
+        file.seekFromEnd(0) catch return;
+        file.writeAll(written) catch return;
     } else {
         const stderr = std.fs.File.stderr();
         var stderr_writer = stderr.writer(&.{});
@@ -141,14 +177,11 @@ pub fn jsonLineEmitter(snapshot: *const FrameSnapshot) void {
     }
 }
 
-fn writeToFile(path: []const u8, snapshot: *const FrameSnapshot) !void {
-    const file = std.fs.cwd().createFile(path, .{ .truncate = false }) catch return error.OpenFailed;
-    defer file.close();
-    try file.seekFromEnd(0);
-    var file_writer = file.writer(&.{});
-    try writeFrameJson(snapshot, &file_writer.interface);
-    try file_writer.interface.print("\n", .{});
-    try file_writer.interface.flush();
+pub fn closeOutputFile() void {
+    if (output_file) |f| {
+        f.close();
+        output_file = null;
+    }
 }
 
 /// Stable JSON schema. Field order is preserved for diff-friendly
