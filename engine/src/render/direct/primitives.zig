@@ -373,6 +373,11 @@ pub fn drawSolidTriangleWithDepths(
     else
         depth;
     var row_depth_value = depth_row_start;
+    // Hoist the optional unwrap out of the inner loop — Zig won't reorder
+    // an optional-payload check across a memory write, so we materialise
+    // a plain slice here. Cost when deferred is off: one branch outside
+    // the hot loop.
+    const gbuf_base: ?[]u32 = target.gbuf_base_color;
     if (area > 0) {
         while (y <= max_y) : (y += 1) {
             const row_start = @as(usize, @intCast(y)) * stride;
@@ -387,6 +392,7 @@ pub fn drawSolidTriangleWithDepths(
                     if (pixel_depth <= depth_buffer[idx]) {
                         target.color[idx] = color;
                         depth_buffer[idx] = pixel_depth;
+                        if (gbuf_base) |buf| buf[idx] = color;
                     }
                 }
                 w0 += step_w0_x;
@@ -415,6 +421,7 @@ pub fn drawSolidTriangleWithDepths(
                 if (pixel_depth <= depth_buffer[idx]) {
                     target.color[idx] = color;
                     depth_buffer[idx] = pixel_depth;
+                    if (gbuf_base) |buf| buf[idx] = color;
                 }
             }
             w0 += step_w0_x;

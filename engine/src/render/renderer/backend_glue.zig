@@ -224,12 +224,21 @@ fn renderDirectPrimitiveShowcase(renderer: *Renderer) !void {
 }
 
 pub fn directFrameResources(renderer: *Renderer) frame_resources.FrameResources {
+    // Only hand the rasterizer G-buffer slots when deferred is on,
+    // so the forward path stays write-cold to those surfaces and pays
+    // zero perf cost for them (ROADMAP §H3).
+    const gbuf_base: ?[]u32 = if (config.DEFERRED_SHADING_ENABLED) renderer.scene_base_color else null;
+    const gbuf_normal: ?[]math.Vec3 = if (config.DEFERRED_SHADING_ENABLED) renderer.scene_normal else null;
+    const gbuf_material: ?[]u32 = if (config.DEFERRED_SHADING_ENABLED) renderer.scene_material else null;
     return .{
         .target = .{
             .width = renderer.bitmap.width,
             .height = renderer.bitmap.height,
             .color = renderer.bitmap.pixels,
             .depth = renderer.scene_depth,
+            .gbuf_base_color = gbuf_base,
+            .gbuf_normal = gbuf_normal,
+            .gbuf_material = gbuf_material,
         },
         .aux = .{
             .scene_camera = renderer.scene_camera,
