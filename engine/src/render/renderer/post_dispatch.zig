@@ -8,15 +8,9 @@ const ProjectionParams = renderer_module.ProjectionParams;
 const TemporalAAViewState = renderer_module.TemporalAAViewState;
 const Mesh = renderer_module.Mesh;
 
-const skybox_pass = @import("../passes/skybox_pass.zig");
-const ssgi_pass = @import("../passes/ssgi_pass.zig");
 const depth_fog_v2 = @import("../passes_v2/depth_fog.zig");
 const passes_v2 = @import("../passes_v2/mod.zig");
 const iq_scan_runtime = @import("../iq_scan_runtime.zig");
-const taa_pass = @import("../passes/taa_pass.zig");
-const taa_helpers = @import("../passes/taa_helpers.zig");
-const depth_of_field_pass = @import("../passes/depth_of_field_pass.zig");
-const ssr_pass = @import("../passes/ssr_pass.zig");
 
 const noopRenderPassJob = renderer_module.noopRenderPassJob;
 const projectCameraPositionFloat = renderer_module.projectCameraPositionFloat;
@@ -28,9 +22,35 @@ const NEAR_EPSILON = renderer_module.NEAR_EPSILON;
 /// Applies ssgi pass.
 /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
 pub fn applySSGIPass(renderer: *Renderer) void {
+    if (renderer.bitmap.pixels.len == 0) return;
     const pass_start = std.time.nanoTimestamp();
-    const height: usize = @intCast(renderer.bitmap.height);
-    ssgi_pass.runPipeline(renderer, height, noopRenderPassJob);
+    const before_snapshot = if (iq_scan_runtime.isEnabled())
+        iq_scan_runtime.snapshot(renderer.allocator, renderer.bitmap.pixels) catch null
+    else
+        null;
+    const ssgi_v2 = @import("../passes_v2/ssgi.zig");
+    const gbuf: passes_v2.GBufferView = .{
+        .width = renderer.bitmap.width,
+        .height = renderer.bitmap.height,
+        .depth = renderer.scene_depth,
+        .normal = @ptrCast(renderer.scene_normal),
+        .base_color = renderer.scene_base_color,
+        .material = renderer.scene_material,
+    };
+    const inputs: passes_v2.Inputs = .{
+        .width = renderer.bitmap.width,
+        .height = renderer.bitmap.height,
+        .in_color = renderer.bitmap.pixels,
+        .out_color = renderer.moblur_scratch_pixels,
+        .gbuf = gbuf,
+    };
+    _ = ssgi_v2.execute(inputs, .{ .intensity = config.POST_SSGI_INTENSITY });
+    const tmp = renderer.bitmap.pixels;
+    renderer.bitmap.pixels = renderer.moblur_scratch_pixels;
+    renderer.moblur_scratch_pixels = tmp;
+    if (before_snapshot) |before| {
+        iq_scan_runtime.reportPass("ssgi", renderer.bitmap.width, renderer.bitmap.height, before, renderer.bitmap.pixels, renderer.scene_depth);
+    }
     renderer.recordRenderPassTiming("ssgi", pass_start);
 }
 /// Applies ambient occlusion pass.
@@ -119,34 +139,6 @@ pub fn applyDepthFogPass(renderer: *Renderer) void {
     renderer.recordRenderPassTiming("depth_fog", pass_start);
 }
 
-/// Applies temporal aa rows.
-/// Mutates owned state and keeps dependent cached values coherent for downstream systems.
-pub fn applyTemporalAARows(
-    renderer: *Renderer,
-    mesh: *const Mesh,
-    current_view: TemporalAAViewState,
-    previous_view: TemporalAAViewState,
-    start_row: usize,
-    end_row: usize,
-    width: usize,
-    height: usize,
-) void {
-    taa_pass.runRows(
-        renderer,
-        mesh,
-        current_view,
-        previous_view,
-        start_row,
-        end_row,
-        width,
-        height,
-        tryApplyTemporalAAMeshletBatch,
-        validSceneCameraSample,
-        cameraToWorldPosition,
-        projectCameraPositionFloat,
-        NEAR_EPSILON,
-    );
-}
 
 // --- God Rays (v2) ---
 pub fn applyGodRaysPass(renderer: *Renderer, projection: ProjectionParams, light_dir_world: math.Vec3) void {
@@ -343,46 +335,106 @@ pub fn applyMotionBlurPass(renderer: *Renderer, current_view: TemporalAAViewStat
 /// Applies temporal aa pass.
 /// Mutates owned state and keeps dependent cached values coherent for downstream systems.
 pub fn applyTemporalAAPass(renderer: *Renderer, mesh: *const Mesh, current_view: TemporalAAViewState) void {
-    const _zone = profiler.zone("applyTemporalAAPass");
-    defer if (_zone) |z| z.end();
-    if (renderer.bitmap.pixels.len == 0 or renderer.scene_camera.len != renderer.bitmap.pixels.len) return;
+    _ = mesh;
+    _ = current_view;
+    if (renderer.bitmap.pixels.len == 0) return;
     const pass_start = std.time.nanoTimestamp();
-    const width: usize = @intCast(renderer.bitmap.width);
-    const height: usize = @intCast(renderer.bitmap.height);
-    taa_pass.runPipeline(
-        renderer,
-        mesh,
-        current_view,
-        width,
-        height,
-        noopRenderPassJob,
-        taa_helpers.surfaceTagForHandle,
-        taa_helpers.packHistoryNormal,
-    );
+    const before_snapshot = if (iq_scan_runtime.isEnabled())
+        iq_scan_runtime.snapshot(renderer.allocator, renderer.bitmap.pixels) catch null
+    else
+        null;
+    const taa_v2 = @import("../passes_v2/taa.zig");
+    if (renderer.taa_scratch.history_pixels.len != renderer.bitmap.pixels.len) return;
+    const inputs: passes_v2.Inputs = .{
+        .width = renderer.bitmap.width,
+        .height = renderer.bitmap.height,
+        .in_color = renderer.bitmap.pixels,
+        .out_color = renderer.bitmap.pixels,
+    };
+    _ = taa_v2.execute(inputs, renderer.taa_scratch.history_pixels, .{
+        .history_weight = @as(f32, @floatFromInt(config.POST_TAA_HISTORY_PERCENT)) / 100.0,
+        .history_valid = renderer.taa_scratch.valid,
+    });
+    // Write current pixels to history for the next frame.
+    if (renderer.taa_scratch.history_pixels.len == renderer.bitmap.pixels.len) {
+        @memcpy(renderer.taa_scratch.history_pixels, renderer.bitmap.pixels);
+        renderer.taa_scratch.valid = true;
+    }
+    if (before_snapshot) |before| {
+        iq_scan_runtime.reportPass("taa", renderer.bitmap.width, renderer.bitmap.height, before, renderer.bitmap.pixels, renderer.scene_depth);
+    }
     renderer.recordRenderPassTiming("taa", pass_start);
 }
 
-/// Applies ssr pass.
-/// Mutates owned state and keeps dependent cached values coherent for downstream systems.
 pub fn applySSRPass(renderer: *Renderer, projection: ProjectionParams) void {
+    _ = projection;
     if (renderer.bitmap.pixels.len == 0 or renderer.scene_depth.len != renderer.bitmap.pixels.len) return;
     const pass_start = std.time.nanoTimestamp();
-
-    const scene_height: usize = @intCast(renderer.bitmap.height);
-    ssr_pass.runPipeline(renderer, projection, scene_height, noopRenderPassJob);
+    const before_snapshot = if (iq_scan_runtime.isEnabled())
+        iq_scan_runtime.snapshot(renderer.allocator, renderer.bitmap.pixels) catch null
+    else
+        null;
+    const ssr_v2 = @import("../passes_v2/ssr.zig");
+    const gbuf: passes_v2.GBufferView = .{
+        .width = renderer.bitmap.width,
+        .height = renderer.bitmap.height,
+        .depth = renderer.scene_depth,
+        .normal = @ptrCast(renderer.scene_normal),
+        .base_color = renderer.scene_base_color,
+        .material = renderer.scene_material,
+    };
+    const inputs: passes_v2.Inputs = .{
+        .width = renderer.bitmap.width,
+        .height = renderer.bitmap.height,
+        .in_color = renderer.bitmap.pixels,
+        .out_color = renderer.ssr_scratch_pixels,
+        .gbuf = gbuf,
+    };
+    _ = ssr_v2.execute(inputs, .{ .intensity = config.POST_SSR_INTENSITY });
+    const tmp = renderer.bitmap.pixels;
+    renderer.bitmap.pixels = renderer.ssr_scratch_pixels;
+    renderer.ssr_scratch_pixels = tmp;
+    if (before_snapshot) |before| {
+        iq_scan_runtime.reportPass("ssr", renderer.bitmap.width, renderer.bitmap.height, before, renderer.bitmap.pixels, renderer.scene_depth);
+    }
     renderer.recordRenderPassTiming("ssr", pass_start);
 }
 
-/// Applies depth of field pass.
-/// Mutates owned state and keeps dependent cached values coherent for downstream systems.
 pub fn applyDepthOfFieldPass(renderer: *Renderer) void {
     if (renderer.bitmap.pixels.len == 0 or renderer.scene_depth.len != renderer.bitmap.pixels.len) return;
     const pass_start = std.time.nanoTimestamp();
-
-    const scene_width: usize = @intCast(renderer.bitmap.width);
-    const scene_height: usize = @intCast(renderer.bitmap.height);
-    depth_of_field_pass.runPipeline(renderer, scene_width, scene_height, noopRenderPassJob);
-
+    const before_snapshot = if (iq_scan_runtime.isEnabled())
+        iq_scan_runtime.snapshot(renderer.allocator, renderer.bitmap.pixels) catch null
+    else
+        null;
+    const dof_v2 = @import("../passes_v2/depth_of_field.zig");
+    const gbuf: passes_v2.GBufferView = .{
+        .width = renderer.bitmap.width,
+        .height = renderer.bitmap.height,
+        .depth = renderer.scene_depth,
+        .normal = @ptrCast(renderer.scene_normal),
+        .base_color = renderer.scene_base_color,
+        .material = renderer.scene_material,
+    };
+    const inputs: passes_v2.Inputs = .{
+        .width = renderer.bitmap.width,
+        .height = renderer.bitmap.height,
+        .in_color = renderer.bitmap.pixels,
+        .out_color = renderer.dof_scratch.pixels,
+        .gbuf = gbuf,
+    };
+    _ = dof_v2.execute(inputs, .{
+        .focal_distance = config.POST_DOF_FOCAL_DISTANCE,
+        .focal_range = config.POST_DOF_FOCAL_RANGE,
+        .max_blur_px = 4,
+    });
+    // Copy DOF result back to bitmap.
+    if (renderer.dof_scratch.pixels.len == renderer.bitmap.pixels.len) {
+        @memcpy(renderer.bitmap.pixels, renderer.dof_scratch.pixels);
+    }
+    if (before_snapshot) |before| {
+        iq_scan_runtime.reportPass("depth_of_field", renderer.bitmap.width, renderer.bitmap.height, before, renderer.bitmap.pixels, renderer.scene_depth);
+    }
     renderer.recordRenderPassTiming("dof", pass_start);
 }
 

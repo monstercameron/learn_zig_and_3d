@@ -37,14 +37,10 @@ const HybridShadowDebugState = renderer_module.HybridShadowDebugState;
 const HybridShadowGrid = renderer_module.HybridShadowGrid;
 const LoadingOverlayState = renderer_module.LoadingOverlayState;
 const LightGizmoState = renderer_module.LightGizmoState;
-const SSGIJobContext = renderer_module.SSGIJobContext;
-const SSRJobContext = renderer_module.SSRJobContext;
 const SkyboxJobContext = @import("scene_dispatch.zig").SkyboxJobContext;
-const TAAJobContext = renderer_module.TAAJobContext;
 const CompositeJobContext = renderer_module.CompositeJobContext;
 const ShadowResolveJobContext = renderer_module.ShadowResolveJobContext;
 const ShadowRasterJobContext = renderer_module.ShadowRasterJobContext;
-const DepthOfFieldJobContext = renderer_module.DepthOfFieldJobContext;
 const ColorGradeProfile = renderer_module.ColorGradeProfile;
 const ShadowMap = renderer_module.ShadowMap;
 const ShadowResolveConfig = renderer_module.ShadowResolveConfig;
@@ -134,8 +130,6 @@ pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allo
     errdefer allocator.free(lens_flare_scratch_pixels);
     const skybox_job_contexts = try allocator.alloc(SkyboxJobContext, color_grade_job_count);
     errdefer allocator.free(skybox_job_contexts);
-    const taa_job_contexts = try allocator.alloc(TAAJobContext, color_grade_job_count);
-    errdefer allocator.free(taa_job_contexts);
     const shadow_resolve_job_contexts = try allocator.alloc(ShadowResolveJobContext, color_grade_job_count);
     errdefer allocator.free(shadow_resolve_job_contexts);
     const shadow_raster_job_contexts = try allocator.alloc(ShadowRasterJobContext, color_grade_job_count);
@@ -147,12 +141,6 @@ pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allo
     errdefer allocator.free(ssr_scratch_pixels);
     const ssgi_scratch_pixels = try allocator.alloc(u32, fb_pix_count);
     errdefer allocator.free(ssgi_scratch_pixels);
-    const ssgi_job_contexts = try allocator.alloc(SSGIJobContext, color_grade_job_count);
-    errdefer allocator.free(ssgi_job_contexts);
-    const dof_job_contexts = try allocator.alloc(DepthOfFieldJobContext, color_grade_job_count);
-    const ssr_job_contexts = try allocator.alloc(SSRJobContext, color_grade_job_count);
-    errdefer allocator.free(ssr_job_contexts);
-    errdefer allocator.free(dof_job_contexts);
     const color_grade_jobs = try allocator.alloc(Job, color_grade_job_count);
     errdefer allocator.free(color_grade_jobs);
     const scene_depth = try allocator.alignedAlloc(f32, std.mem.Alignment.@"64", @as(usize, @intCast(width)) * @as(usize, @intCast(height)));
@@ -464,14 +452,10 @@ pub fn init(hwnd: windows.HWND, width: i32, height: i32, allocator: std.mem.Allo
         .shadow_resolve_job_contexts = shadow_resolve_job_contexts,
         .shadow_raster_job_contexts = shadow_raster_job_contexts,
         .dof_scratch = .{ .pixels = dof_scratch_pixels, .width = @intCast(width), .height = @intCast(height) },
-        .dof_job_contexts = dof_job_contexts,
-        .ssr_job_contexts = ssr_job_contexts,
         .ssr_scratch_pixels = ssr_scratch_pixels,
         .ssgi_scratch_pixels = ssgi_scratch_pixels,
-        .ssgi_job_contexts = ssgi_job_contexts,
         .dof_focal_distance = config.POST_DOF_FOCAL_DISTANCE,
         .dof_target_focal_distance = config.POST_DOF_FOCAL_DISTANCE,
-        .taa_job_contexts = taa_job_contexts,
         .moblur_scratch_pixels = moblur_scratch_pixels,
         .god_rays_scratch_pixels = god_rays_scratch_pixels,
         .lens_flare_scratch_pixels = lens_flare_scratch_pixels,

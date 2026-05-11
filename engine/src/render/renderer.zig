@@ -40,13 +40,6 @@ pub const Mesh = MeshModule.Mesh;
 pub const Meshlet = MeshModule.Meshlet;
 const config = @import("../core/app_config.zig");
 const input = @import("platform_input");
-const skybox_pass = @import("passes/skybox_pass.zig");
-const depth_of_field_pass = @import("passes/depth_of_field_pass.zig");
-const ssgi_pass = @import("passes/ssgi_pass.zig");
-const ssr_pass = @import("passes/ssr_pass.zig");
-const taa_pass = @import("passes/taa_pass.zig");
-const taa_helpers = @import("passes/taa_helpers.zig");
-const taa_meshlet_batch = @import("passes/taa_meshlet_batch.zig");
 const shadow_map_pass = @import("passes/shadow_map_pass.zig");
 const shadow_resolve_pass = @import("passes/shadow_resolve_pass.zig");
 const hybrid_shadow_pass = @import("passes/hybrid_shadow_pass.zig");
@@ -383,96 +376,6 @@ const DepthOfFieldScratch = struct {
     pixels: []u32,
     width: usize,
     height: usize,
-};
-
-pub const SSGIJobContext = struct {
-    renderer: *Renderer,
-    scene_pixels: []u32,
-    scratch_pixels: []u32,
-    scene_camera: []const math.Vec3,
-    start_row: usize,
-    end_row: usize,
-
-    /// Runs this module step with the currently bound configuration.
-    /// Keeps run as the single implementation point so call-site behavior stays consistent.
-    pub fn run(ctx_ptr: *anyopaque) void {
-        const ctx: *SSGIJobContext = @ptrCast(@alignCast(ctx_ptr));
-        const width: usize = @intCast(ctx.renderer.bitmap.width);
-        const height: usize = @intCast(ctx.renderer.bitmap.height);
-        ssgi_pass.runRows(ctx.scene_pixels, ctx.scratch_pixels, ctx.scene_camera, width, height, ctx.start_row, ctx.end_row);
-    }
-};
-
-pub const SSRJobContext = struct {
-    renderer: *Renderer,
-    scene_pixels: []u32,
-    scratch_pixels: []u32,
-    scene_camera: []math.Vec3,
-    scene_normal: []math.Vec3,
-    scene_depth: []f32,
-    width: usize,
-    height: usize,
-    start_row: usize,
-    end_row: usize,
-    projection: ProjectionParams,
-    max_samples: i32,
-    step_size: f32,
-    max_distance: f32,
-    thickness: f32,
-    intensity: f32,
-
-    /// Runs this module step with the currently bound configuration.
-    /// Keeps run as the single implementation point so call-site behavior stays consistent.
-    pub fn run(ctx_ptr: *anyopaque) void {
-        const ctx: *SSRJobContext = @ptrCast(@alignCast(ctx_ptr));
-        ssr_pass.runRows(
-            ctx.scene_pixels,
-            ctx.scratch_pixels,
-            ctx.scene_camera,
-            ctx.scene_depth,
-            ctx.width,
-            ctx.height,
-            ctx.start_row,
-            ctx.end_row,
-            ctx.projection,
-            ctx.max_samples,
-            ctx.step_size,
-            ctx.max_distance,
-            ctx.thickness,
-            ctx.intensity,
-        );
-    }
-};
-
-pub const DepthOfFieldJobContext = struct {
-    scene_pixels: []u32,
-    scratch_pixels: []u32,
-    scene_depth: []f32,
-    width: usize,
-    height: usize,
-    start_row: usize,
-    end_row: usize,
-    focal_distance: f32,
-    focal_range: f32,
-    max_blur_radius: i32,
-
-    /// Runs this module step with the currently bound configuration.
-    /// Keeps run as the single implementation point so call-site behavior stays consistent.
-    pub fn run(ctx_ptr: *anyopaque) void {
-        const ctx: *DepthOfFieldJobContext = @ptrCast(@alignCast(ctx_ptr));
-        depth_of_field_pass.runRows(
-            ctx.scene_pixels,
-            ctx.scratch_pixels,
-            ctx.scene_depth,
-            ctx.width,
-            ctx.height,
-            ctx.start_row,
-            ctx.end_row,
-            ctx.focal_distance,
-            ctx.focal_range,
-            ctx.max_blur_radius,
-        );
-    }
 };
 
 const TemporalAAConfig = struct {
@@ -812,7 +715,7 @@ const taa_jitter_sequence = [_]math.Vec2{
     .{ .x = -0.4375, .y = 0.38888888 },
 };
 
-const invalid_surface_tag: u64 = taa_helpers.invalid_surface_tag;
+const invalid_surface_tag: u64 = std.math.maxInt(u64);
 
 const ReprojectedHistorySample = struct {
     screen: math.Vec2,
@@ -975,6 +878,8 @@ fn packShiftedColorBatch(
     }
 }
 
+/// Legacy TAA meshlet batch helper — now stubbed. The v2 TAA pass
+/// uses a simple history-buffer blend, not per-meshlet reprojection.
 pub fn tryApplyTemporalAAMeshletBatch(
     self: *Renderer,
     mesh: *const Mesh,
@@ -986,23 +891,16 @@ pub fn tryApplyTemporalAAMeshletBatch(
     width: usize,
     height: usize,
 ) bool {
-    return taa_meshlet_batch.tryApply(
-        self,
-        mesh,
-        current_view,
-        previous_view,
-        row_start,
-        x,
-        y,
-        width,
-        height,
-        runtimeColorGradeSimdLanes(),
-        max_runtime_color_grade_simd_lanes,
-        validSceneCameraSample,
-        cameraToWorldPosition,
-        projectCameraPositionFloat,
-        NEAR_EPSILON,
-    );
+    _ = self;
+    _ = mesh;
+    _ = current_view;
+    _ = previous_view;
+    _ = row_start;
+    _ = x;
+    _ = y;
+    _ = width;
+    _ = height;
+    return false;
 }
 
 fn colorGradeSimdLanes() comptime_int {
@@ -1102,32 +1000,6 @@ pub const PostPassExecutionContext = struct {
     projection: ProjectionParams,
     light_dir_world: math.Vec3,
     shadow_build_elapsed_ns: []const i128,
-};
-
-pub const TAAJobContext = struct {
-    renderer: *Renderer,
-    mesh: *const Mesh,
-    current_view: TemporalAAViewState,
-    previous_view: TemporalAAViewState,
-    start_row: usize,
-    end_row: usize,
-    width: usize,
-    height: usize,
-
-    /// Runs this module step with the currently bound configuration.
-    /// Keeps run as the single implementation point so call-site behavior stays consistent.
-    pub fn run(ctx_ptr: *anyopaque) void {
-        const ctx: *TAAJobContext = @ptrCast(@alignCast(ctx_ptr));
-        ctx.renderer.applyTemporalAARows(
-            ctx.mesh,
-            ctx.current_view,
-            ctx.previous_view,
-            ctx.start_row,
-            ctx.end_row,
-            ctx.width,
-            ctx.height,
-        );
-    }
 };
 
 pub const ShadowResolveJobContext = shadow_resolve_pass.JobContext(ShadowResolveConfig, ShadowMap);
@@ -1393,14 +1265,10 @@ pub const Renderer = struct {
     shadow_resolve_job_contexts: []ShadowResolveJobContext,
     shadow_raster_job_contexts: []ShadowRasterJobContext,
     dof_scratch: DepthOfFieldScratch,
-    ssr_job_contexts: []SSRJobContext,
     ssr_scratch_pixels: []u32,
     ssgi_scratch_pixels: []u32,
-    ssgi_job_contexts: []SSGIJobContext,
-    dof_job_contexts: []DepthOfFieldJobContext,
     dof_focal_distance: f32,
     dof_target_focal_distance: f32,
-    taa_job_contexts: []TAAJobContext,
     moblur_scratch_pixels: []u32,
     god_rays_scratch_pixels: []u32,
     lens_flare_scratch_pixels: []u32,
@@ -1555,10 +1423,6 @@ pub const Renderer = struct {
         self.allocator.free(self.dof_scratch.pixels);
         self.allocator.free(self.ssr_scratch_pixels);
         self.allocator.free(self.ssgi_scratch_pixels);
-        self.allocator.free(self.ssgi_job_contexts);
-        self.allocator.free(self.ssr_job_contexts);
-        self.allocator.free(self.dof_job_contexts);
-        self.allocator.free(self.taa_job_contexts);
         self.allocator.free(self.moblur_scratch_pixels);
         self.allocator.free(self.god_rays_scratch_pixels);
         self.allocator.free(self.lens_flare_scratch_pixels);

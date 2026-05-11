@@ -16,7 +16,6 @@ const shadow_map_pass = @import("../passes/shadow_map_pass.zig");
 const shadow_resolve_pass = @import("../passes/shadow_resolve_pass.zig");
 const adaptive_shadow_tile_pass = @import("../passes/adaptive_shadow_tile_pass.zig");
 const hybrid_shadow_pass = @import("../passes/hybrid_shadow_pass.zig");
-const skybox_pass = @import("../passes/skybox_pass.zig");
 const direct_primitives = @import("../direct/primitives.zig");
 const render_utils = @import("../core/utils.zig");
 
@@ -158,10 +157,12 @@ fn applyAdaptiveShadowPass(
     );
 }
 
-pub const SkyboxJobContext = skybox_pass.JobContext(Renderer, ProjectionParams, texture.HdrTexture);
+// Empty placeholder; SkyboxJobContext was used by the legacy job
+// dispatch which we've now removed. Defined as an opaque to keep the
+// field type stable in the Renderer struct until that field is also
+// stripped.
+pub const SkyboxJobContext = struct {};
 
-/// Applies skybox pass.
-/// Mutates owned state and keeps dependent cached values coherent for downstream systems.
 pub fn applySkyboxPass(
     renderer: *Renderer,
     basis_right: math.Vec3,
@@ -169,20 +170,38 @@ pub fn applySkyboxPass(
     basis_forward: math.Vec3,
     projection: ProjectionParams,
 ) void {
-    const hdri_map = renderer.hdri_map orelse return;
+    _ = basis_right;
+    _ = basis_up;
+    _ = basis_forward;
+    _ = projection;
+    if (renderer.bitmap.pixels.len == 0) return;
     const pass_start = std.time.nanoTimestamp();
-    const height: usize = @intCast(renderer.bitmap.height);
-    skybox_pass.runPipeline(
-        renderer,
-        basis_right,
-        basis_up,
-        basis_forward,
-        projection,
-        &hdri_map,
-        height,
-        noopRenderPassJob,
-        skybox_pass.runJobWrapper(SkyboxJobContext),
-    );
+    const iq_scan_runtime = @import("../iq_scan_runtime.zig");
+    const passes_v2 = @import("../passes_v2/mod.zig");
+    const before_snapshot = if (iq_scan_runtime.isEnabled())
+        iq_scan_runtime.snapshot(renderer.allocator, renderer.bitmap.pixels) catch null
+    else
+        null;
+    const sky_v2 = @import("../passes_v2/skybox.zig");
+    const gbuf: passes_v2.GBufferView = .{
+        .width = renderer.bitmap.width,
+        .height = renderer.bitmap.height,
+        .depth = renderer.scene_depth,
+        .normal = @ptrCast(renderer.scene_normal),
+        .base_color = renderer.scene_base_color,
+        .material = renderer.scene_material,
+    };
+    const inputs: passes_v2.Inputs = .{
+        .width = renderer.bitmap.width,
+        .height = renderer.bitmap.height,
+        .in_color = renderer.bitmap.pixels,
+        .out_color = renderer.bitmap.pixels,
+        .gbuf = gbuf,
+    };
+    _ = sky_v2.execute(inputs, .{});
+    if (before_snapshot) |before| {
+        iq_scan_runtime.reportPass("skybox", renderer.bitmap.width, renderer.bitmap.height, before, renderer.bitmap.pixels, renderer.scene_depth);
+    }
     renderer.recordRenderPassTiming("skybox", pass_start);
 }
 

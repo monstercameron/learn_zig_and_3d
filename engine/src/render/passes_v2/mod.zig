@@ -116,6 +116,11 @@ pub const motion_blur = @import("motion_blur.zig");
 pub const god_rays = @import("god_rays.zig");
 pub const ssao = @import("ssao.zig");
 pub const bloom = @import("bloom.zig");
+pub const depth_of_field = @import("depth_of_field.zig");
+pub const ssr = @import("ssr.zig");
+pub const ssgi = @import("ssgi.zig");
+pub const taa = @import("taa.zig");
+pub const skybox = @import("skybox.zig");
 
 /// Compile-time table of every available v2 pass. Drivers iterate it
 /// to look up by name or list available passes via CLI.
@@ -128,4 +133,9 @@ pub const all = [_]Descriptor{
     god_rays.descriptor,
     ssao.descriptor,
     bloom.descriptor,
+    depth_of_field.descriptor,
+    ssr.descriptor,
+    ssgi.descriptor,
+    taa.descriptor,
+    skybox.descriptor,
 };
